@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+node_modules/
+web/out/
+web/.next/
+.next/
+.DS_Store
+
+# Claude Code / OMC tooling (session-specific, not project source)
+.omc/
+.claude/

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinohelm"
+version = "0.1.0"
+description = "Single-instance quantitative trading platform powered by NautilusTrader"
+requires-python = ">=3.11"
+dependencies = [
+    "nautilus_trader>=1.207.0",
+    "fastapi[standard]>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "redis>=5.0.0",
+    "typer>=0.15.0",
+    "pydantic-settings>=2.7.0",
+    "httpx>=0.28.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+optimize = ["optuna>=3.0.0"]
+visualization = ["plotly>=6.3.1"]
+
+[project.scripts]
+tino = "tinohelm.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

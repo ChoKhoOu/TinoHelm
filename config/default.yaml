@@ -1,0 +1,22 @@
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+database:
+  url: "postgresql+asyncpg://tinohelm:tinohelm@localhost:5432/tinohelm"
+
+redis:
+  url: "redis://localhost:6379"
+
+binance:
+  account_type: "USDT_FUTURES"
+  testnet: true
+
+paths:
+  strategies: "tino/strategies"
+  catalog: "tino/data/catalog"
+  artifacts: "tino/data/artifacts"
+  logs: "tino/logs"
+
+backtest:
+  max_workers: 2
