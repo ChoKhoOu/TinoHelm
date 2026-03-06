@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+:root {
+  /* Background colors */
+  --bg-page: #0A0A0F;
+  --bg-card: #12121A;
+  --bg-elevated: #1A1A2E;
+  --bg-sidebar: #0E0E15;
+  --bg-subtle: #1F1F35;
+
+  /* Border colors */
+  --border-gray: #1F1F35;
+  --border-light: #2A2A3C;
+
+  /* Text colors */
+  --text-primary: #E5E7EB;
+  --text-secondary: #9CA3AF;
+  --text-muted: #6B7280;
+  --text-on-accent: #0A0A0F;
+
+  /* Accent colors */
+  --accent-green: #00C896;
+  --accent-green-10: #00C89610;
+  --accent-green-20: #00C89620;
+  --accent-red: #F6465D;
+  --accent-red-20: #F6465D20;
+  --accent-orange: #F59E0B;
+  --accent-orange-20: #F59E0B20;
+  --accent-blue: #2962FF;
+  --accent-blue-20: #2962FF20;
+}
+
+@layer base {
+  html, body {
+    height: 100%;
+  }
+
+  .font-heading {
+    font-family: "Space Grotesk", sans-serif;
+  }
+
+  .font-mono {
+    font-family: "JetBrains Mono", monospace;
+  }
+
+  /* Motion design tiers */
+  .transition-micro { transition-duration: 150ms; transition-timing-function: ease-out; }
+  .transition-panel { transition-duration: 250ms; transition-timing-function: ease-in-out; }
+  .transition-data { transition-duration: 400ms; transition-timing-function: ease-in-out; }
+}
