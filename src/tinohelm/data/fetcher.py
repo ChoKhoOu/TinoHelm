@@ -10,9 +10,28 @@ import redis.asyncio as aioredis
 from sqlalchemy import select
 
 from tinohelm.data.providers.binance import fetch_klines
-from tinohelm.data.catalog import klines_to_parquet
+from tinohelm.data.catalog import klines_to_bars, write_bars
 
 logger = logging.getLogger(__name__)
+
+
+def _monthly_chunks(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """Split a datetime range into monthly sub-ranges."""
+    chunks = []
+    current = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if current < start:
+        current = start
+    while current < end:
+        if current.month == 12:
+            next_month = current.replace(year=current.year + 1, month=1, day=1,
+                                         hour=0, minute=0, second=0, microsecond=0)
+        else:
+            next_month = current.replace(month=current.month + 1, day=1,
+                                         hour=0, minute=0, second=0, microsecond=0)
+        chunk_end = min(next_month, end)
+        chunks.append((current, chunk_end))
+        current = next_month
+    return chunks
 
 
 async def _query_existing_coverage(
@@ -155,45 +174,60 @@ async def fetch_and_store(
                 symbol, interval, req_start, req_end,
             )
 
-        # --- Fetch missing ranges ------------------------------------
+        # --- Chunked fetch + immediate write (one month at a time) ----------
         if existing_start is None:
             await _publish_progress(5, f"Full fetch {symbol} {interval} [{req_start} .. {req_end}]")
         else:
             await _publish_progress(5, f"Incremental fetch: {len(gaps)} gap(s) for {symbol} {interval} (existing [{existing_start} .. {existing_end}])")
 
-        all_klines: list[dict[str, Any]] = []
-        for idx, (gap_start, gap_end) in enumerate(gaps):
+        # Build a flat list of monthly chunks across all gaps
+        all_chunks: list[tuple[datetime, datetime]] = []
+        for gap_start, gap_end in gaps:
             gap_start_dt = datetime(gap_start.year, gap_start.month, gap_start.day, tzinfo=start.tzinfo)
             gap_end_dt = datetime(gap_end.year, gap_end.month, gap_end.day, tzinfo=end.tzinfo)
+            all_chunks.extend(_monthly_chunks(gap_start_dt, gap_end_dt))
+
+        total_chunks = len(all_chunks)
+        # Accumulate NT Bar objects (compact Cython structs) instead of raw klines dicts.
+        # Each monthly chunk's klines are converted and freed immediately;
+        # only the lean Bar objects are kept. One write_bars() call at the end
+        # satisfies NT's disjoint-interval constraint.
+        all_bars: list = []
+
+        for chunk_idx, (chunk_start, chunk_end) in enumerate(all_chunks):
+            pct = 5 + int(85 * chunk_idx / total_chunks)
+            await _publish_progress(pct, f"Chunk {chunk_idx + 1}/{total_chunks}: {chunk_start.date()} .. {chunk_end.date()}")
 
             logger.info(
-                "Fetching gap %d/%d: %s %s [%s .. %s]",
-                idx + 1, len(gaps), symbol, interval, gap_start, gap_end,
+                "Fetching chunk %d/%d: %s %s [%s .. %s]",
+                chunk_idx + 1, total_chunks, symbol, interval, chunk_start.date(), chunk_end.date(),
             )
             klines = await fetch_klines(
                 symbol=symbol,
                 interval=interval,
-                start=gap_start_dt,
-                end=gap_end_dt,
+                start=chunk_start,
+                end=chunk_end,
                 testnet=testnet,
             )
-            all_klines.extend(klines)
+            if klines:
+                bars = klines_to_bars(klines=klines, symbol=symbol, interval=interval)
+                all_bars.extend(bars)
+                del klines, bars  # free raw klines + intermediate refs immediately
 
-        await _publish_progress(50, f"Fetched {len(all_klines)} bars, writing to Parquet...")
-
-        files = klines_to_parquet(
-            klines=all_klines,
+        await _publish_progress(92, f"Writing {len(all_bars)} bars to catalog...")
+        files = write_bars(
+            bars=all_bars,
             symbol=symbol,
             interval=interval,
             catalog_path=catalog_path,
         )
 
-        await _publish_progress(100, f"Complete: {len(all_klines)} bars in {len(files)} files")
+        await _publish_progress(100, f"Complete: {len(all_bars)} bars in {len(files)} file(s)")
 
         return {
             "symbol": symbol,
             "interval": interval,
-            "bars_count": len(all_klines),
+            "bars_count": len(all_bars),
             "files_written": len(files),
             "file_paths": [str(f) for f in files],
             "start": start.isoformat(),

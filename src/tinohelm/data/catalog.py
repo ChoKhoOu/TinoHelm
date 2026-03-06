@@ -255,6 +255,152 @@ def klines_to_parquet(
     return written
 
 
+def klines_to_bars(
+    klines: list[dict[str, Any]],
+    symbol: str,
+    interval: str,
+) -> list:
+    """Convert raw Binance klines to NT Bar objects without any I/O.
+
+    Use this to process monthly chunks incrementally. Accumulate the returned
+    Bar objects across chunks, then call write_bars() once at the end.
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        logger.error("pandas required: pip install pandas pyarrow")
+        return []
+
+    if not klines:
+        return []
+
+    from nautilus_trader.persistence.wranglers import BarDataWrangler
+
+    instrument = _make_instrument(symbol)
+    bar_type = _make_bar_type(instrument.id, interval)
+
+    df = pd.DataFrame(klines)
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df.index = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df.index.name = "timestamp"
+    df = df[["open", "high", "low", "close", "volume"]].sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.dropna()
+
+    if df.empty:
+        return []
+
+    wrangler = BarDataWrangler(bar_type=bar_type, instrument=instrument)
+    return wrangler.process(df)
+
+
+def write_bars(
+    bars: list,
+    symbol: str,
+    interval: str,
+    catalog_path: str | Path,
+) -> list[Path]:
+    """Write pre-converted NT Bar objects to Parquet catalog.
+
+    Merges with any existing bars (for incremental updates), deletes old
+    parquet files, then writes everything as a single file in one write_data()
+    call — satisfying NT's disjoint-interval constraint.
+
+    Returns list of written file paths.
+    """
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    if not bars:
+        return []
+
+    catalog_path = ensure_catalog_dirs(catalog_path)
+    instrument = _make_instrument(symbol)
+    bar_type = _make_bar_type(instrument.id, interval)
+
+    # Merge with existing bars if present (incremental update case)
+    try:
+        catalog = ParquetDataCatalog(str(catalog_path))
+        existing_bars = catalog.bars(bar_types=[str(bar_type)])
+        if existing_bars:
+            seen: dict[int, Any] = {b.ts_event: b for b in existing_bars}
+            for b in bars:
+                seen[b.ts_event] = b
+            bars = sorted(seen.values(), key=lambda b: b.ts_event)
+            logger.info("Merged %d existing + %d new bars = %d total",
+                        len(existing_bars), len(bars) - len(existing_bars), len(bars))
+
+            # Remove old parquet files (NT requires disjoint intervals)
+            bar_dir = catalog_path / "data" / "bar" / str(bar_type)
+            if bar_dir.exists():
+                for old_file in bar_dir.glob("*.parquet"):
+                    old_file.unlink()
+    except Exception:
+        logger.debug("No existing bars for %s %s, writing fresh", symbol, interval)
+
+    # Write all bars in a single call to satisfy NT's disjoint constraint
+    catalog = ParquetDataCatalog(str(catalog_path))
+    catalog.write_data([instrument])
+    catalog.write_data(bars)
+    logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
+
+    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
+    return list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
+
+
+def write_klines_chunk(
+    klines: list[dict[str, Any]],
+    symbol: str,
+    interval: str,
+    catalog_path: str | Path,
+) -> int:
+    """Write a single chunk of klines to Parquet without loading existing data.
+
+    Unlike klines_to_parquet(), this does NOT read/merge/delete existing bars —
+    it just converts and appends. Call compact_bars() afterward to merge all
+    chunk files into one deduplicated file.
+
+    Returns the number of bars written.
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        logger.error("pandas required: pip install pandas pyarrow")
+        return 0
+
+    if not klines:
+        return 0
+
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+    from nautilus_trader.persistence.wranglers import BarDataWrangler
+
+    catalog_path = ensure_catalog_dirs(catalog_path)
+    instrument = _make_instrument(symbol)
+    bar_type = _make_bar_type(instrument.id, interval)
+
+    df = pd.DataFrame(klines)
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df.index = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df.index.name = "timestamp"
+    df = df[["open", "high", "low", "close", "volume"]].sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.dropna()
+
+    if df.empty:
+        return 0
+
+    wrangler = BarDataWrangler(bar_type=bar_type, instrument=instrument)
+    bars = wrangler.process(df)
+
+    catalog = ParquetDataCatalog(str(catalog_path))
+    catalog.write_data([instrument])
+    catalog.write_data(bars)
+
+    logger.info("Chunk: wrote %d bars for %s %s", len(bars), symbol, interval)
+    return len(bars)
+
+
 def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     """Compact multiple Parquet files for a symbol/interval into a single file.
 
