@@ -6,7 +6,7 @@ hiddenimports += collect_submodules('tinohelm.cli')
 
 
 a = Analysis(
-    ['/Users/ouzhuohao/TinoHelm/src/tinohelm/cli/main.py'],
+    ['src/tinohelm/cli/main.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -14,7 +14,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['nautilus_trader', 'fastapi', 'uvicorn', 'sqlalchemy', 'asyncpg', 'alembic', 'redis', 'pydantic_settings', 'plotly', 'optuna', 'numpy', 'pandas', 'scipy', 'matplotlib', 'PIL', 'cv2', 'torch', 'tensorflow', 'tkinter', 'test', 'unittest'],
+    excludes=['nautilus_trader', 'fastapi', 'uvicorn', 'sqlalchemy', 'asyncpg', 'alembic', 'redis', 'pydantic_settings', 'plotly', 'optuna', 'numpy', 'pandas', 'scipy', 'matplotlib', 'PIL', 'torch', 'tkinter'],
     noarchive=False,
     optimize=0,
 )
