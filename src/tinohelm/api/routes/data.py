@@ -44,6 +44,15 @@ class DataFetchRequest(BaseModel):
     end: date
 
 
+class DataFetchBatchRequest(BaseModel):
+    """Request body for POST /fetch-batch."""
+
+    symbols: list[str]
+    interval: str
+    start: date
+    end: date
+
+
 class CompactRequest(BaseModel):
     """Request body for POST /compact."""
 
@@ -191,6 +200,28 @@ async def _run_compact(symbol: str, interval: str, settings: Settings) -> None:
         )
     except Exception as exc:
         logger.exception("Compaction failed for %s %s: %s", symbol, interval, exc)
+
+
+@router.post("/fetch-batch")
+async def trigger_data_fetch_batch(
+    body: DataFetchBatchRequest,
+    background_tasks: BackgroundTasks,
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    """Trigger background data fetch for multiple symbols in parallel."""
+    if not body.symbols:
+        raise HTTPException(status_code=400, detail="symbols must not be empty")
+    for symbol in body.symbols:
+        background_tasks.add_task(_run_data_fetch, symbol, body.interval, body.start, body.end, settings)
+    return {
+        "status": "accepted",
+        "message": f"Data fetch for {len(body.symbols)} symbol(s) queued",
+        "symbols": body.symbols,
+        "interval": body.interval,
+        "start": body.start.isoformat(),
+        "end": body.end.isoformat(),
+        "count": len(body.symbols),
+    }
 
 
 @router.post("/compact")
