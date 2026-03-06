@@ -48,7 +48,7 @@ class DataFetchBatchRequest(BaseModel):
     """Request body for POST /fetch-batch."""
 
     symbols: list[str]
-    interval: str
+    intervals: list[str]
     start: date
     end: date
 
@@ -211,16 +211,21 @@ async def trigger_data_fetch_batch(
     """Trigger background data fetch for multiple symbols in parallel."""
     if not body.symbols:
         raise HTTPException(status_code=400, detail="symbols must not be empty")
+    if not body.intervals:
+        raise HTTPException(status_code=400, detail="intervals must not be empty")
+    count = 0
     for symbol in body.symbols:
-        background_tasks.add_task(_run_data_fetch, symbol, body.interval, body.start, body.end, settings)
+        for interval in body.intervals:
+            background_tasks.add_task(_run_data_fetch, symbol, interval, body.start, body.end, settings)
+            count += 1
     return {
         "status": "accepted",
-        "message": f"Data fetch for {len(body.symbols)} symbol(s) queued",
+        "message": f"Data fetch for {count} task(s) queued ({len(body.symbols)} symbol(s) × {len(body.intervals)} interval(s))",
         "symbols": body.symbols,
-        "interval": body.interval,
+        "intervals": body.intervals,
         "start": body.start.isoformat(),
         "end": body.end.isoformat(),
-        "count": len(body.symbols),
+        "count": count,
     }
 
 

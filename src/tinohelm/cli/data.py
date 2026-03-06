@@ -59,15 +59,15 @@ def fetch(
 @app.command("fetch-batch")
 def fetch_batch(
     symbols: List[str] = typer.Argument(..., help="Instrument symbols (e.g. BTCUSDT-PERP ETHUSDT-PERP)"),
-    interval: str = typer.Option(..., "-i", "--interval", help="Bar interval (e.g. 1m, 5m, 1h, 1d)"),
+    interval: List[str] = typer.Option(..., "-i", "--interval", help="Bar interval, repeatable (e.g. -i 1m -i 5m -i 1h)"),
     start: str = typer.Option(..., "-s", "--start", help="Start date (YYYY-MM-DD)"),
     end: str = typer.Option(..., "-e", "--end", help="End date (YYYY-MM-DD)"),
 ):
-    """Fetch historical market data for multiple symbols in parallel."""
+    """Fetch historical market data for multiple symbols × intervals in parallel."""
     data = api_call(
         "POST",
         "/api/data/fetch-batch",
-        json={"symbols": symbols, "interval": interval, "start": start, "end": end},
+        json={"symbols": symbols, "intervals": interval, "start": start, "end": end},
     )
     if output_format() == "json":
         typer.echo(json.dumps(data, indent=2, default=str))
@@ -77,9 +77,9 @@ def fetch_batch(
     header("Batch Data Fetch Submitted")
     divider()
     kv("Symbols", accent(", ".join(data.get("symbols", symbols))), 12)
-    kv("Interval", data.get("interval", interval), 12)
+    kv("Intervals", ", ".join(data.get("intervals", interval)), 12)
     kv("Period", f"{data.get('start', start)} ~ {data.get('end', end)}", 12)
-    kv("Queued", bold(str(data.get("count", len(symbols)))), 12)
+    kv("Queued", bold(str(data.get("count", len(symbols) * len(interval)))), 12)
     kv("Status", status_badge(st) + "  " + bold(st), 12)
     typer.echo()
     if data.get("message"):
