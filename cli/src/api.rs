@@ -81,6 +81,57 @@ impl ApiClient {
         Ok(body)
     }
 
+    // ---- Optimization ----
+
+    pub async fn optimize_backtest(&self, req: &OptimizeRequest) -> Result<OptimizeResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/backtest/optimize", self.base_url))
+            .json(req)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn optimize_status(&self, opt_id: u64) -> Result<OptimizeStatus> {
+        let resp = self
+            .client
+            .get(format!("{}/api/backtest/optimize/{}/status", self.base_url, opt_id))
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn optimize_result(&self, opt_id: u64) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!("{}/api/backtest/optimize/{}/result", self.base_url, opt_id))
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn optimize_list(&self, limit: u32, strategy: Option<&str>) -> Result<serde_json::Value> {
+        let mut url = format!("{}/api/backtest/optimize/runs?limit={}", self.base_url, limit);
+        if let Some(s) = strategy {
+            url.push_str(&format!("&strategy={}", s));
+        }
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
     // ---- Strategy ----
 
     pub async fn list_strategies(&self) -> Result<Vec<Strategy>> {
@@ -137,6 +188,18 @@ impl ApiClient {
         Ok(body)
     }
 
+    pub async fn create_strategy(&self, req: &StrategyCreateRequest) -> Result<StrategyCreateResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/strategies/create", self.base_url))
+            .json(req)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
     // ---- Data ----
 
     pub async fn fetch_data(&self, req: &DataFetchRequest) -> Result<serde_json::Value> {
@@ -155,6 +218,41 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!("{}/api/data/catalog", self.base_url))
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn fetch_data_batch(&self, req: &DataFetchBatchRequest) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .post(format!("{}/api/data/fetch-batch", self.base_url))
+            .json(req)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn compact_data(&self, req: &DataCompactRequest) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .post(format!("{}/api/data/compact", self.base_url))
+            .json(req)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn validate_data(&self, symbol: &str, interval: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!("{}/api/data/validate/{}/{}", self.base_url, symbol, interval))
             .send()
             .await
             .context(Self::connect_hint(&self.base_url))?;

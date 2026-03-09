@@ -49,6 +49,8 @@ pub struct BacktestRunRequest {
     pub leverage: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_model: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +99,59 @@ pub struct RescanResult {
     pub strategies: Vec<String>,
 }
 
+// ---- Optimization ----
+
+#[derive(Debug, Serialize)]
+pub struct OptimizeRequest {
+    pub strategy: String,
+    pub symbols: Vec<String>,
+    pub intervals: Vec<String>,
+    pub start_date: String,
+    pub end_date: String,
+    pub n_trials: u32,
+    pub fitness_objective: String,
+    pub train_pct: f64,
+    pub initial_capital: f64,
+    pub leverage: f64,
+    pub n_workers: u32,
+    pub walk_forward_folds: u32,
+    pub pruning: bool,
+    pub sampler: String,
+    pub patience: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param_ranges: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OptimizeResponse {
+    pub optimization_id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OptimizeStatus {
+    pub status: String,
+    pub trials_completed: Option<u32>,
+    pub total_trials: Option<u32>,
+    pub best_value: Option<f64>,
+    pub pruned_trials: Option<u32>,
+}
+
+// ---- Strategy Create ----
+
+#[derive(Debug, Serialize)]
+pub struct StrategyCreateRequest {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub strategy_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StrategyCreateResponse {
+    pub name: String,
+    pub file_path: Option<String>,
+    pub message: Option<String>,
+}
+
 // ---- Data ----
 
 #[derive(Debug, Serialize)]
@@ -105,6 +160,20 @@ pub struct DataFetchRequest {
     pub interval: String,
     pub start: String,
     pub end: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DataFetchBatchRequest {
+    pub symbols: Vec<String>,
+    pub intervals: Vec<String>,
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DataCompactRequest {
+    pub symbol: String,
+    pub interval: String,
 }
 
 // ---- WebSocket events ----
