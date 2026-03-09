@@ -71,7 +71,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(bt.run_id.get(..6).unwrap_or(&bt.run_id).to_string())
                         .style(Style::default().fg(theme::FG_HINT)),
                     Cell::from(bt.strategy_name.as_deref().unwrap_or("-").to_string()),
-                    Cell::from(bt.symbol.get(..8).unwrap_or(&bt.symbol).to_string()),
+                    Cell::from(bt.symbol.clone()),
                     Cell::from(bt.interval.clone()),
                     Cell::from(Span::styled(pct, Style::default().fg(status_color))),
                 ])
@@ -98,7 +98,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(bt.run_id.get(..6).unwrap_or(&bt.run_id).to_string())
                     .style(Style::default().fg(theme::FG_HINT)),
                 Cell::from(bt.strategy_name.as_deref().unwrap_or("-").to_string()),
-                Cell::from(bt.symbol.get(..8).unwrap_or(&bt.symbol).to_string()),
+                Cell::from(bt.symbol.clone()),
                 Cell::from(bt.interval.clone()),
                 Cell::from(Span::styled(status_display, Style::default().fg(status_color))),
             ])
@@ -106,10 +106,18 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
+    let sym_w = app
+        .backtests
+        .iter()
+        .map(|bt| bt.symbol.len() as u16)
+        .max()
+        .unwrap_or(6)
+        .max(6); // at least "Symbol" header width
+
     let widths = [
         Constraint::Length(8),
         Constraint::Min(10),
-        Constraint::Length(10),
+        Constraint::Length(sym_w),
         Constraint::Length(5),
         Constraint::Length(10),
     ];
@@ -154,13 +162,9 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let has_equity = !app.detail_equity.is_empty();
     let constraints = if has_equity {
-        vec![
-            Constraint::Length(12),
-            Constraint::Length(6),
-            Constraint::Min(3),
-        ]
+        vec![Constraint::Min(10), Constraint::Length(6)]
     } else {
-        vec![Constraint::Length(12), Constraint::Min(3)]
+        vec![Constraint::Min(10)]
     };
 
     let chunks = Layout::default()
@@ -168,46 +172,402 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
         .constraints(constraints)
         .split(area);
 
-    // Stats panel
     let id_short = bt.run_id.get(..8).unwrap_or(&bt.run_id);
     let title = format!(" DETAIL: #{} ", id_short);
-
     let status_color = theme::status_color(&bt.status);
-    let mut stat_lines = vec![
-        Line::from(""),
-        kv_line("  Strategy", bt.strategy_name.as_deref().unwrap_or("-")),
-        kv_line("  Symbol  ", &bt.symbol),
-        kv_line("  Interval", &bt.interval),
-        kv_line("  Period  ", &format!("{} \u{2192} {}", bt.start_date, bt.end_date)),
-        Line::from(vec![
-            Span::styled("  Status  ", Style::default().fg(theme::FG_AMBER)),
-            Span::styled(&bt.status, Style::default().fg(status_color)),
-        ]),
-    ];
 
-    // Add stats from result_summary or detail_result
+    // Get statistics from detail_result (full) or result_summary (partial)
     let stats_source = app
         .detail_result
         .as_ref()
         .and_then(|r| r.get("statistics"))
         .or(bt.result_summary.as_ref());
 
+    let mut lines = Vec::new();
+
+    // ── Basic info ──
+    lines.push(Line::from(""));
+    lines.push(kv_line("  Strategy", bt.strategy_name.as_deref().unwrap_or("-")));
+    lines.push(kv_line("  Symbol  ", &bt.symbol));
+    lines.push(kv_line(
+        "  Period  ",
+        &format!("{} \u{2192} {}", bt.start_date, bt.end_date),
+    ));
+    lines.push(Line::from(vec![
+        Span::styled("  Status  ".to_string(), Style::default().fg(theme::FG_AMBER)),
+        Span::raw(" "),
+        Span::styled(bt.status.clone(), Style::default().fg(status_color)),
+    ]));
+
     if let Some(stats) = stats_source.and_then(|s| s.as_object()) {
-        stat_lines.push(Line::from(Span::styled(
-            "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        // Helper closures
+        let get_f = |key: &str| -> Option<f64> {
+            stats.get(key).and_then(|v| v.as_f64())
+        };
+        let get_s = |key: &str| -> Option<String> {
+            stats
+                .get(key)
+                .and_then(|v| {
+                    if v.is_string() {
+                        Some(v.as_str().unwrap().to_string())
+                    } else if v.is_null() {
+                        None
+                    } else {
+                        Some(v.to_string())
+                    }
+                })
+        };
+
+        // ── Hero PnL ──
+        lines.push(divider_line());
+        if let Some(pnl) = get_f("total_pnl") {
+            let ret = get_f("total_return_pct");
+            let mut spans = vec![
+                Span::styled("  PnL     ".to_string(), Style::default().fg(theme::FG_AMBER)),
+                Span::raw(" "),
+                colored_val(pnl, ""),
+            ];
+            if let Some(r) = ret {
+                spans.push(Span::raw("  ("));
+                spans.push(colored_val(r, "%"));
+                spans.push(Span::raw(")"));
+            }
+            lines.push(Line::from(spans));
+        }
+        if let Some(bal) = get_s("final_balance") {
+            lines.push(kv_line("  Balance ", &bal));
+        }
+
+        // ── Risk Metrics ──
+        lines.push(divider_line());
+        lines.push(section_title("  RISK METRICS"));
+        lines.push(stat_pair(
+            "Sharpe",
+            get_f("sharpe_ratio"),
+            "Sortino",
+            get_f("sortino_ratio"),
+        ));
+        lines.push(stat_pair(
+            "MaxDD",
+            get_f("max_drawdown"),
+            "Calmar",
+            get_f("calmar_ratio"),
+        ));
+        lines.push(stat_pair(
+            "Volat.",
+            get_f("returns_volatility"),
+            "CAGR",
+            get_f("annual_return"),
+        ));
+
+        // ── Trade Statistics ──
+        lines.push(divider_line());
+        lines.push(section_title("  TRADE STATISTICS"));
+
+        let total_trades = get_f("total_trades").unwrap_or(0.0) as u32;
+        let winning = get_f("winning_trades").unwrap_or(0.0) as u32;
+        let losing = get_f("losing_trades").unwrap_or(0.0) as u32;
+        let win_rate = get_f("win_rate");
+
+        // Win/Loss visual bar
+        if total_trades > 0 {
+            let wr = win_rate.unwrap_or(0.0);
+            let bar_w = 20_usize;
+            let w_fill = ((bar_w as f64) * wr).round() as usize;
+            let l_fill = bar_w.saturating_sub(w_fill);
+            let wr_str = format!("{:.1}%", wr * 100.0);
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "\u{2588}".repeat(w_fill),
+                    Style::default().fg(theme::FG_POSITIVE),
+                ),
+                Span::styled(
+                    "\u{2588}".repeat(l_fill),
+                    Style::default().fg(theme::FG_NEGATIVE),
+                ),
+                Span::styled(
+                    format!(" {}W {}L  WR: {}", winning, losing, wr_str),
+                    Style::default().fg(theme::FG_SECONDARY),
+                ),
+            ]));
+        }
+
+        lines.push(stat_pair(
+            "PF",
+            get_f("profit_factor"),
+            "Expect.",
+            get_f("expectancy"),
+        ));
+        lines.push(stat_pair(
+            "Lg Win",
+            get_f("largest_win"),
+            "Lg Loss",
+            get_f("largest_loss"),
+        ));
+        lines.push(stat_pair(
+            "Avg W",
+            get_f("avg_win"),
+            "Avg L",
+            get_f("avg_loss"),
+        ));
+
+        let w_streak = get_f("winning_streak").unwrap_or(0.0) as u32;
+        let l_streak = get_f("losing_streak").unwrap_or(0.0) as u32;
+        lines.push(stat_pair(
+            "W/L Rat",
+            get_f("avg_win_loss_ratio"),
+            "Streaks",
+            None, // rendered manually below
+        ));
+        // Override the last line's second value with streak text
+        lines.pop();
+        lines.push(Line::from(vec![
+            Span::styled("  W/L Rat".to_string(), Style::default().fg(theme::FG_AMBER)),
+            Span::raw(" "),
+            match get_f("avg_win_loss_ratio") {
+                Some(v) => colored_val(v, ""),
+                None => Span::styled("-".to_string(), theme::style_dim()),
+            },
+            Span::raw("    "),
+            Span::styled("Streaks".to_string(), Style::default().fg(theme::FG_AMBER)),
+            Span::raw(" "),
+            Span::styled(
+                format!("{}W/{}L", w_streak, l_streak),
+                Style::default().fg(theme::FG_PRIMARY),
+            ),
+        ]));
+
+        // ── Profit/Loss Breakdown ──
+        lines.push(divider_line());
+        lines.push(section_title("  PROFIT / LOSS"));
+        lines.push(stat_pair(
+            "Gross+",
+            get_f("gross_profit"),
+            "Gross-",
+            get_f("gross_loss"),
+        ));
+        lines.push(stat_pair(
+            "Fees",
+            get_f("total_fees"),
+            "Orders",
+            get_f("total_orders"),
+        ));
+        lines.push(stat_pair(
+            "Filled",
+            get_f("filled_orders"),
+            "Open",
+            get_f("open_positions"),
+        ));
+
+        // ── Position & Holding ──
+        lines.push(divider_line());
+        lines.push(section_title("  POSITION & HOLDING"));
+        let long_pct = get_f("long_pct").map(|v| v * 100.0);
+        let short_pct = get_f("short_pct").map(|v| v * 100.0);
+        if let (Some(lp), Some(sp)) = (long_pct, short_pct) {
+            let bar_w = 16_usize;
+            let l_fill = ((bar_w as f64) * lp / 100.0).round() as usize;
+            let s_fill = bar_w.saturating_sub(l_fill);
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "\u{2588}".repeat(l_fill),
+                    Style::default().fg(theme::FG_HINT),
+                ),
+                Span::styled(
+                    "\u{2588}".repeat(s_fill),
+                    Style::default().fg(theme::FG_QUEUED),
+                ),
+                Span::styled(
+                    format!(" Long {:.0}% / Short {:.0}%", lp, sp),
+                    Style::default().fg(theme::FG_SECONDARY),
+                ),
+            ]));
+        }
+        if let Some(ht) = get_s("avg_holding_time") {
+            lines.push(kv_line("  Avg Hold", &ht));
+        }
+        if let Some(wht) = get_s("avg_winning_holding_time") {
+            lines.push(kv_line("  Win Hold", &wht));
+        }
+        if let Some(lht) = get_s("avg_losing_holding_time") {
+            lines.push(kv_line("  Los Hold", &lht));
+        }
+
+        // ── Monthly Returns (from detail_result) ──
+        if let Some(monthly) = app
+            .detail_result
+            .as_ref()
+            .and_then(|r| r.get("monthly_returns"))
+            .and_then(|m| m.as_array())
+        {
+            if !monthly.is_empty() {
+                lines.push(divider_line());
+                lines.push(section_title("  MONTHLY RETURNS"));
+                for m in monthly.iter().rev().take(12) {
+                    let period = m
+                        .get("period")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("?");
+                    let ret = m.get("return_pct").and_then(|r| r.as_f64());
+                    if let Some(r) = ret {
+                        let bar_len = (r.abs() * 3.0).min(15.0) as usize;
+                        let bar_char = if r >= 0.0 { "\u{2588}" } else { "\u{2588}" };
+                        let bar_color = if r >= 0.0 {
+                            theme::FG_POSITIVE
+                        } else {
+                            theme::FG_NEGATIVE
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  {:<8}", period),
+                                Style::default().fg(theme::FG_SECONDARY),
+                            ),
+                            colored_val(r, "%"),
+                            Span::raw(" "),
+                            Span::styled(
+                                bar_char.repeat(bar_len),
+                                Style::default().fg(bar_color),
+                            ),
+                        ]));
+                    }
+                }
+            }
+        }
+
+        // ── Top Trades (from detail_result) ──
+        if let Some(trade_log) = app
+            .detail_result
+            .as_ref()
+            .and_then(|r| r.get("trade_log"))
+            .and_then(|t| t.as_array())
+        {
+            if trade_log.len() > 1 {
+                lines.push(divider_line());
+                lines.push(section_title("  TOP TRADES"));
+
+                let mut trades_with_pnl: Vec<(&serde_json::Value, f64)> = trade_log
+                    .iter()
+                    .filter_map(|t| {
+                        t.get("realized_pnl")
+                            .and_then(|v| v.as_f64())
+                            .map(|pnl| (t, pnl))
+                    })
+                    .collect();
+                trades_with_pnl.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+                // Best 3
+                for (t, pnl) in trades_with_pnl.iter().take(3) {
+                    let side = t
+                        .get("side")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("?");
+                    let dur = t
+                        .get("duration")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("-");
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {:<5}", side),
+                            Style::default().fg(theme::FG_SECONDARY),
+                        ),
+                        colored_val(*pnl, ""),
+                        Span::styled(
+                            format!("  {}", dur),
+                            Style::default().fg(theme::FG_DIM),
+                        ),
+                    ]));
+                }
+                // Worst 3
+                for (t, pnl) in trades_with_pnl.iter().rev().take(3) {
+                    if *pnl < 0.0 {
+                        let side = t
+                            .get("side")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("?");
+                        let dur = t
+                            .get("duration")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("-");
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  {:<5}", side),
+                                Style::default().fg(theme::FG_SECONDARY),
+                            ),
+                            colored_val(*pnl, ""),
+                            Span::styled(
+                                format!("  {}", dur),
+                                Style::default().fg(theme::FG_DIM),
+                            ),
+                        ]));
+                    }
+                }
+            }
+        }
+
+        // ── Drawdown Periods (from detail_result) ──
+        if let Some(drawdowns) = app
+            .detail_result
+            .as_ref()
+            .and_then(|r| r.get("drawdown_periods"))
+            .and_then(|d| d.as_array())
+        {
+            if !drawdowns.is_empty() {
+                lines.push(divider_line());
+                lines.push(section_title("  NOTABLE DRAWDOWNS"));
+                for dd in drawdowns.iter().take(5) {
+                    let dd_pct = dd.get("max_drawdown_pct").and_then(|v| v.as_f64());
+                    let start_d = dd
+                        .get("start")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("?")
+                        .get(..10)
+                        .unwrap_or("?");
+                    let dur = dd
+                        .get("duration_days")
+                        .and_then(|d| d.as_u64())
+                        .map(|d| format!("{}d", d))
+                        .unwrap_or_else(|| "-".to_string());
+                    let rec = dd
+                        .get("recovery_days")
+                        .and_then(|r| r.as_u64())
+                        .map(|r| format!("rec {}d", r))
+                        .unwrap_or_else(|| "no rec".to_string());
+                    if let Some(pct) = dd_pct {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  {} ", start_d),
+                                Style::default().fg(theme::FG_SECONDARY),
+                            ),
+                            colored_val(pct, "%"),
+                            Span::styled(
+                                format!("  {}  {}", dur, rec),
+                                Style::default().fg(theme::FG_DIM),
+                            ),
+                        ]));
+                    }
+                }
+            }
+        }
+
+        // Scroll hint
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  \u{2190} focus list  \u{2193}\u{2191} scroll".to_string(),
+            Style::default().fg(theme::FG_DIM),
+        )));
+    } else if bt.status != "completed" {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Waiting for result data\u{2026}".to_string(),
             theme::style_dim(),
         )));
-        for (key, val) in stats.iter().take(8) {
-            let val_str = if let Some(n) = val.as_f64() {
-                format!("{:.4}", n)
-            } else {
-                val.to_string().trim_matches('"').to_string()
-            };
-            stat_lines.push(kv_line(&format!("  {:<10}", key), &val_str));
-        }
     }
 
-    let stats_para = Paragraph::new(stat_lines).block(
+    let stats_para = Paragraph::new(lines)
+        .scroll((app.detail_scroll, 0))
+        .block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
@@ -215,7 +575,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
     );
     f.render_widget(stats_para, chunks[0]);
 
-    // Equity sparkline
+    // ── Equity sparkline ──
     if has_equity {
         let sparkline = Sparkline::default()
             .block(
@@ -229,44 +589,66 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD);
         f.render_widget(sparkline, chunks[1]);
     }
-
-    // Additional result summary
-    let summary_idx = if has_equity { 2 } else { 1 };
-    let source = app.detail_result.as_ref().and_then(|r| r.get("statistics"));
-    let summary_lines = if let Some(obj) = source.and_then(|s| s.as_object()) {
-        let mut lines = Vec::new();
-        for (key, val) in obj.iter().skip(8).take(12) {
-            let val_str = if let Some(n) = val.as_f64() {
-                format!("{:.4}", n)
-            } else {
-                val.to_string().trim_matches('"').to_string()
-            };
-            lines.push(kv_line(&format!("  {:<10}", key), &val_str));
-        }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled("  \u{2014}", theme::style_dim())));
-        }
-        lines
-    } else {
-        vec![Line::from(Span::styled(
-            "  Waiting for result data\u{2026}",
-            theme::style_dim(),
-        ))]
-    };
-
-    let summary_para = Paragraph::new(summary_lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(Span::styled(" STATS ", theme::style_header())),
-    );
-    f.render_widget(summary_para, chunks[summary_idx]);
 }
+
+// ── Detail panel helpers ─────────────────────────────────────────────────
 
 fn kv_line(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(label.to_string(), Style::default().fg(theme::FG_AMBER)),
         Span::raw(" "),
         Span::styled(value.to_string(), Style::default().fg(theme::FG_PRIMARY)),
+    ])
+}
+
+fn divider_line() -> Line<'static> {
+    Line::from(Span::styled(
+        "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string(),
+        Style::default().fg(theme::FG_BORDER),
+    ))
+}
+
+fn section_title(title: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        title.to_string(),
+        Style::default()
+            .fg(theme::FG_AMBER)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn colored_val(val: f64, suffix: &str) -> Span<'static> {
+    let color = if val > 0.001 {
+        theme::FG_POSITIVE
+    } else if val < -0.001 {
+        theme::FG_NEGATIVE
+    } else {
+        theme::FG_PRIMARY
+    };
+    let prefix = if val > 0.001 { "+" } else { "" };
+    Span::styled(
+        format!("{}{:.2}{}", prefix, val, suffix),
+        Style::default().fg(color),
+    )
+}
+
+/// Render two stats side by side: "  Label1 value1  Label2 value2"
+fn stat_pair(l1: &str, v1: Option<f64>, l2: &str, v2: Option<f64>) -> Line<'static> {
+    let v1_span = match v1 {
+        Some(v) => colored_val(v, ""),
+        None => Span::styled("-".to_string(), theme::style_dim()),
+    };
+    let v2_span = match v2 {
+        Some(v) => colored_val(v, ""),
+        None => Span::styled("-".to_string(), theme::style_dim()),
+    };
+    Line::from(vec![
+        Span::styled(format!("  {:<7}", l1), Style::default().fg(theme::FG_AMBER)),
+        Span::raw(" "),
+        v1_span,
+        Span::raw("    "),
+        Span::styled(format!("{:<7}", l2), Style::default().fg(theme::FG_AMBER)),
+        Span::raw(" "),
+        v2_span,
     ])
 }
