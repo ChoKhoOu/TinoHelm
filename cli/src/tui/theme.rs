@@ -11,7 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 // ── Backgrounds ─────────────────────────────────────────────────────────
 
 pub const BG_PRIMARY: Color = Color::Rgb(0, 0, 0);
-pub const BG_PANEL: Color = Color::Rgb(8, 8, 8);
+pub const BG_PANEL: Color = Color::Rgb(18, 18, 22);
 pub const BG_HEADER: Color = Color::Rgb(15, 15, 15);
 pub const BG_SELECTED: Color = Color::Rgb(20, 30, 50);
 pub const BG_INPUT: Color = Color::Rgb(10, 10, 10);
@@ -32,6 +32,15 @@ pub const FG_HINT: Color = Color::Rgb(0, 180, 220);
 pub const FG_PRIMARY: Color = Color::Rgb(230, 230, 230);
 pub const FG_SECONDARY: Color = Color::Rgb(180, 180, 180);
 pub const FG_BRIGHT: Color = Color::Rgb(255, 255, 255);
+
+// ── Foreground: Data Accent (for column differentiation) ────────────────
+
+/// Soft blue — identifiers, names, tickers.
+pub const FG_IDENTIFIER: Color = Color::Rgb(100, 170, 255);
+/// Soft purple — tags, categories, types.
+pub const FG_TAG: Color = Color::Rgb(190, 140, 255);
+/// Warm gold — key values, highlights (lighter than amber).
+pub const FG_HIGHLIGHT: Color = Color::Rgb(255, 220, 120);
 
 // ── Foreground: Semantic ────────────────────────────────────────────────
 
