@@ -76,15 +76,21 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 let type_display = if stype == "portfolio" {
                     format!("{}", "portfolio".with(POS).bold())
                 } else {
-                    stype.to_string()
+                    format!("{}", stype.magenta())
+                };
+
+                let sym_display = if sym_count > 1 {
+                    format!("{}", sym_count.to_string().with(POS))
+                } else {
+                    format!("{}", "1".magenta())
                 };
 
                 t.row(&[
                     &bold(&accent(&s.name[..20.min(s.name.len())])),
                     &type_display,
-                    &accent(&cls[..22.min(cls.len())]),
-                    &sym_count.to_string(),
-                    &updated,
+                    &format!("{}", cls[..22.min(cls.len())].yellow()),
+                    &sym_display,
+                    &accent(&updated),
                 ]);
             }
 
