@@ -30,7 +30,7 @@ def _infer_type(channel: str) -> str | None:
     """Derive a dot-notation event type from a Redis channel name."""
     for prefix, event_type in _CHANNEL_TYPE_MAP.items():
         if channel.startswith(prefix):
-            suffix = channel[len(prefix):]
+            suffix = channel[len(prefix):].split(":")[0]
             if event_type.endswith("."):
                 return f"{event_type}{suffix}"
             return event_type

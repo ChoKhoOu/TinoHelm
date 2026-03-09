@@ -112,7 +112,17 @@ impl ApiClient {
             .send()
             .await
             .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.json().await?;
+        let status = resp.status();
+        if status.as_u16() == 422 {
+            // FastAPI wraps HTTPException body in {"detail": ...}
+            let wrapper: serde_json::Value = resp.json().await?;
+            if let Some(detail) = wrapper.get("detail") {
+                let result: ValidateResult = serde_json::from_value(detail.clone())?;
+                return Ok(result);
+            }
+            anyhow::bail!("Validation failed with unexpected 422 response");
+        }
+        let body = resp.error_for_status()?.json().await?;
         Ok(body)
     }
 
@@ -168,7 +178,8 @@ impl ApiClient {
     pub async fn node_start(&self, node_type: &str) -> Result<serde_json::Value> {
         let resp = self
             .client
-            .post(format!("{}/api/node/{}/start", self.base_url, node_type))
+            .post(format!("{}/api/node/start", self.base_url))
+            .json(&serde_json::json!({"mode": node_type, "strategies": []}))
             .send()
             .await
             .context(Self::connect_hint(&self.base_url))?;
@@ -179,7 +190,8 @@ impl ApiClient {
     pub async fn node_stop(&self, node_type: &str) -> Result<serde_json::Value> {
         let resp = self
             .client
-            .post(format!("{}/api/node/{}/stop", self.base_url, node_type))
+            .post(format!("{}/api/node/stop", self.base_url))
+            .json(&serde_json::json!({"mode": node_type}))
             .send()
             .await
             .context(Self::connect_hint(&self.base_url))?;

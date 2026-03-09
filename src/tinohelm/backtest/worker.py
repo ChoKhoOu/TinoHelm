@@ -60,6 +60,7 @@ def _publish_completed(
     run_id: str,
     status: str,
     summary: dict | None = None,
+    error: str | None = None,
 ) -> None:
     """Publish a ``backtest.completed`` event to the EventBridge channel."""
     payload: dict = {
@@ -68,6 +69,8 @@ def _publish_completed(
         "status": status,
         "summary": summary or {},
     }
+    if error:
+        payload["error"] = error
     r.publish(
         f"tino:backtest:progress:{run_id}",
         json.dumps(payload, default=str),
@@ -210,7 +213,7 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
             except Exception as e:
                 logger.exception("Backtest %s failed: %s", run_id, e)
                 safe_error = "Internal backtest error. Check server logs for details."
-                _publish_completed(r, run_id, "failed")
+                _publish_completed(r, run_id, "failed", error=safe_error)
 
                 # Update database record on failure
                 _update_db_status(db_url, run_id, "failed", error_msg=safe_error)

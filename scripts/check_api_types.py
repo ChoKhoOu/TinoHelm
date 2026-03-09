@@ -148,7 +148,7 @@ def main() -> int:
         import urllib.request
 
         url = f"{args.url.rstrip('/')}/openapi.json"
-        with urllib.request.urlopen(url) as resp:
+        with urllib.request.urlopen(url, timeout=10) as resp:
             spec = json.loads(resp.read())
     else:
         spec = json.loads(Path(args.file).read_text())
