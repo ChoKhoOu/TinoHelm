@@ -79,6 +79,7 @@ pub struct App {
     pub backtest_loading: bool,
     pub detail_result: Option<serde_json::Value>,
     pub detail_equity: Vec<u64>,
+    pub detail_scroll: u16,
 
     // ── Backtest form state ─────────────────────────────────────────────
     pub form_strategy: String,
@@ -135,6 +136,7 @@ impl App {
             backtest_loading: false,
             detail_result: None,
             detail_equity: Vec::new(),
+            detail_scroll: 0,
 
             form_strategy: String::new(),
             form_symbol: "BTCUSDT-PERP".to_string(),
@@ -238,8 +240,9 @@ impl App {
 
         // Boot animation progression
         if !self.boot_complete {
-            if self.boot_phase < 4 {
-                // Advance boot phase every ~15 frames (1.5s at 100ms)
+            if self.boot_phase < 6 {
+                // Advance boot phase every 5 frames (500ms at 100ms tick)
+                // Total boot: ~3s across 6 phases
                 if self.frame_count % 5 == 0 {
                     self.boot_phase += 1;
                 }

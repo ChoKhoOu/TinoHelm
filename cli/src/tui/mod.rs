@@ -185,64 +185,208 @@ fn render(f: &mut ratatui::Frame, app: &App) {
     }
 }
 
-/// Simple boot animation — progressive panel reveal.
+/// Boot animation — CRT warm-up + pixel logo reveal.
+///
+/// Phase 0: CRT off (black)
+/// Phase 1: CRT warm-up — bright horizontal scanline at center
+/// Phase 2: Scanlines spread from center outward
+/// Phase 3: Pixel logo appears with block-char frame
+/// Phase 4: Subtitle fades in
+/// Phase 5: "SYSTEM ONLINE" ready indicator
 fn render_boot(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
+    use ratatui::layout::{Alignment, Rect};
+    use ratatui::style::Color;
     use ratatui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
 
     let phase = app.boot_phase;
-    let mut lines = Vec::new();
+    let w = area.width as usize;
+    let h = area.height as usize;
+    let mid_y = area.y + area.height / 2;
 
-    // Phase 0: blank
+    // Phase 0: CRT off — pure black
     if phase == 0 {
-        let p = Paragraph::new("").style(Style::default().bg(theme::BG_PRIMARY));
-        f.render_widget(p, area);
         return;
     }
 
-    // Phase 1: pixel noise / scanline
-    if phase >= 1 {
-        let mid_y = area.height / 2;
-        for row in 0..area.height {
-            if row == mid_y.saturating_sub(2) && phase >= 2 {
+    // Phase 1: CRT warm-up — single bright horizontal scanline at center
+    if phase == 1 {
+        if mid_y > area.y {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "\u{2591}".repeat(w),
+                    Style::default().fg(Color::Rgb(80, 55, 0)),
+                ))),
+                Rect::new(area.x, mid_y - 1, area.width, 1),
+            );
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "\u{2501}".repeat(w),
+                Style::default().fg(theme::FG_AMBER),
+            ))),
+            Rect::new(area.x, mid_y, area.width, 1),
+        );
+        if mid_y + 1 < area.y + area.height {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "\u{2591}".repeat(w),
+                    Style::default().fg(Color::Rgb(80, 55, 0)),
+                ))),
+                Rect::new(area.x, mid_y + 1, area.width, 1),
+            );
+        }
+        return;
+    }
+
+    // Phase 2+: CRT scanline ambient background
+    {
+        let spread = if phase == 2 { (h / 3).max(4) } else { h };
+        let center = h / 2;
+        let mut lines = Vec::with_capacity(h);
+        for row in 0..h {
+            let dist = if row >= center { row - center } else { center - row };
+            if dist < spread && row % 2 == 0 {
                 lines.push(Line::from(Span::styled(
-                    "  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}",
-                    Style::default().fg(theme::FG_BORDER),
-                )));
-            } else if row == mid_y && phase >= 2 {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "           [TINO]",
-                        Style::default().fg(theme::FG_LOGO),
-                    ),
-                    Span::styled(
-                        "HELM",
-                        Style::default().fg(theme::FG_AMBER),
-                    ),
-                ]));
-            } else if row == mid_y + 1 && phase >= 3 {
-                lines.push(Line::from(Span::styled(
-                    "       Quantitative Trading Terminal",
-                    theme::style_dim(),
-                )));
-            } else if row == mid_y + 2 && phase >= 2 {
-                lines.push(Line::from(Span::styled(
-                    "  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}",
-                    Style::default().fg(theme::FG_BORDER),
-                )));
-            } else if row % 2 == 0 && phase == 1 {
-                lines.push(Line::from(Span::styled(
-                    "\u{2591}".repeat(area.width as usize),
-                    Style::default().fg(theme::FG_BORDER),
+                    "\u{2591}".repeat(w),
+                    Style::default().fg(Color::Rgb(20, 15, 0)),
                 )));
             } else {
                 lines.push(Line::from(""));
             }
         }
+        f.render_widget(Paragraph::new(lines), area);
     }
 
-    let p = Paragraph::new(lines).style(Style::default().bg(theme::BG_PRIMARY));
-    f.render_widget(p, area);
+    if phase == 2 {
+        return;
+    }
+
+    // Phase 3+: Pixel logo with block-character frame (centered)
+    {
+        // Block-art pixel font: 3 rows, ~42 cols
+        let logo_lines: &[&str] = &[
+            "\u{2580}\u{2580}\u{2588}\u{2580}\u{2580} \u{2580}\u{2588}\u{2580} \u{2588}\u{2584} \u{2588} \u{2584}\u{2580}\u{2580}\u{2584} \u{2588}  \u{2588} \u{2588}\u{2580}\u{2580} \u{2588}   \u{2588}\u{2584}\u{2580}\u{2584}\u{2588}",
+            "  \u{2588}    \u{2588}  \u{2588} \u{2580}\u{2588} \u{2588}  \u{2588} \u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}  \u{2588}   \u{2588} \u{2580} \u{2588}",
+            "  \u{2588}   \u{2580}\u{2588}\u{2580} \u{2588}  \u{2588} \u{2580}\u{2584}\u{2584}\u{2580} \u{2588}  \u{2588} \u{2580}\u{2580}\u{2580} \u{2580}\u{2580}\u{2580} \u{2588}   \u{2588}",
+        ];
+
+        let logo_w = 42_u16;
+        let frame_w = (logo_w + 6).min(area.width); // +6 for "█  " + "  █" padding
+        let frame_h = 7_u16; // top bar + blank + 3 logo rows + blank + bottom bar
+        let frame_y = mid_y.saturating_sub(frame_h / 2 + 2);
+        let frame_x = area.x + area.width.saturating_sub(frame_w) / 2;
+
+        let clamped_y = frame_y.max(area.y);
+        let avail_h = (area.y + area.height).saturating_sub(clamped_y);
+        let frame_rect = Rect::new(frame_x, clamped_y, frame_w, frame_h.min(avail_h));
+
+        // Clear background behind frame
+        f.render_widget(
+            ratatui::widgets::Block::default()
+                .style(Style::default().bg(theme::BG_PRIMARY)),
+            frame_rect,
+        );
+
+        // Build frame lines
+        let fw = frame_w as usize;
+        let mut frame_lines = Vec::new();
+
+        // Top border: gradient ░▒▓████...████▓▒░
+        frame_lines.push(pixel_gradient_line(fw));
+
+        // Blank line inside frame
+        frame_lines.push(pixel_frame_blank(fw));
+
+        // Logo lines (centered inside frame)
+        for logo_row in logo_lines {
+            let logo_len = unicode_width(logo_row);
+            let pad = fw.saturating_sub(logo_len + 4) / 2;
+            frame_lines.push(Line::from(vec![
+                Span::styled("\u{2588} ", Style::default().fg(Color::Rgb(40, 30, 0))),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(logo_row.to_string(), Style::default().fg(theme::FG_AMBER)),
+                Span::raw(" ".repeat(fw.saturating_sub(logo_len + 4 + pad))),
+                Span::styled(" \u{2588}", Style::default().fg(Color::Rgb(40, 30, 0))),
+            ]));
+        }
+
+        // Blank line inside frame
+        frame_lines.push(pixel_frame_blank(fw));
+
+        // Bottom border
+        frame_lines.push(pixel_gradient_line(fw));
+
+        f.render_widget(Paragraph::new(frame_lines), frame_rect);
+    }
+
+    // Phase 4+: Subtitle text
+    if phase >= 4 {
+        let sub_y = mid_y + 2;
+        if sub_y < area.y + area.height {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "Quantitative Trading Terminal",
+                    Style::default().fg(theme::FG_DIM),
+                )))
+                .alignment(Alignment::Center),
+                Rect::new(area.x, sub_y, area.width, 1),
+            );
+        }
+    }
+
+    // Phase 5+: System Online ready indicator
+    if phase >= 5 {
+        let ready_y = mid_y + 4;
+        if ready_y < area.y + area.height {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "\u{25CF} ",
+                        Style::default().fg(theme::FG_POSITIVE),
+                    ),
+                    Span::styled(
+                        "SYSTEM ONLINE",
+                        Style::default().fg(theme::FG_POSITIVE),
+                    ),
+                ]))
+                .alignment(Alignment::Center),
+                Rect::new(area.x, ready_y, area.width, 1),
+            );
+        }
+    }
+}
+
+/// Pixel gradient border line: ░▒▓██████...██████▓▒░
+fn pixel_gradient_line(w: usize) -> ratatui::text::Line<'static> {
+    use ratatui::style::Color;
+    use ratatui::text::Span;
+    let fill = w.saturating_sub(6);
+    ratatui::text::Line::from(vec![
+        Span::styled("\u{2591}\u{2592}\u{2593}", Style::default().fg(Color::Rgb(80, 55, 0))),
+        Span::styled(
+            "\u{2588}".repeat(fill),
+            Style::default().fg(Color::Rgb(40, 30, 0)),
+        ),
+        Span::styled("\u{2593}\u{2592}\u{2591}", Style::default().fg(Color::Rgb(80, 55, 0))),
+    ])
+}
+
+/// Blank line with pixel frame borders: █ ... █
+fn pixel_frame_blank(w: usize) -> ratatui::text::Line<'static> {
+    use ratatui::style::Color;
+    use ratatui::text::Span;
+    let inner = w.saturating_sub(4);
+    ratatui::text::Line::from(vec![
+        Span::styled("\u{2588} ", Style::default().fg(Color::Rgb(40, 30, 0))),
+        Span::raw(" ".repeat(inner)),
+        Span::styled(" \u{2588}", Style::default().fg(Color::Rgb(40, 30, 0))),
+    ])
+}
+
+/// Count display width for ASCII/simple Unicode strings.
+fn unicode_width(s: &str) -> usize {
+    s.chars().count()
 }
 
 /// Render a popup overlay.
@@ -487,14 +631,70 @@ async fn handle_key(
             app.open_popup(PopupKind::Help);
         }
 
-        // Tab — toggle panel focus
+        // Tab — cycle to next workspace
         KeyCode::Tab => {
-            app.toggle_panel_focus();
+            let next = match app.workspace {
+                Workspace::Dashboard => Workspace::Backtest,
+                Workspace::Backtest => Workspace::Strategy,
+                Workspace::Strategy => Workspace::Nodes,
+                Workspace::Nodes => Workspace::Data,
+                Workspace::Data => Workspace::Dashboard,
+            };
+            app.switch_workspace(next);
+            load_workspace_data(client, app).await;
         }
 
-        // Navigation
-        KeyCode::Char('j') | KeyCode::Down => handle_nav_down(app),
-        KeyCode::Char('k') | KeyCode::Up => handle_nav_up(app),
+        // Shift+Tab — cycle to previous workspace
+        KeyCode::BackTab => {
+            let prev = match app.workspace {
+                Workspace::Dashboard => Workspace::Data,
+                Workspace::Backtest => Workspace::Dashboard,
+                Workspace::Strategy => Workspace::Backtest,
+                Workspace::Nodes => Workspace::Strategy,
+                Workspace::Data => Workspace::Nodes,
+            };
+            app.switch_workspace(prev);
+            load_workspace_data(client, app).await;
+        }
+
+        // Left/Right — toggle panel focus in split views
+        KeyCode::Left => {
+            app.panel_focus = app::PanelFocus::Left;
+        }
+        KeyCode::Right => {
+            app.panel_focus = app::PanelFocus::Right;
+        }
+
+        // Navigation — j/k with context-sensitive behavior
+        KeyCode::Char('j') | KeyCode::Down => {
+            // Right panel focused in Backtest → scroll detail
+            if app.workspace == Workspace::Backtest
+                && app.panel_focus == app::PanelFocus::Right
+            {
+                app.detail_scroll = app.detail_scroll.saturating_add(1);
+            } else {
+                let prev_sel = app.backtest_selected;
+                handle_nav_down(app);
+                if app.workspace == Workspace::Backtest && app.backtest_selected != prev_sel {
+                    app.detail_scroll = 0;
+                    load_detail_result(client, app).await;
+                }
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.workspace == Workspace::Backtest
+                && app.panel_focus == app::PanelFocus::Right
+            {
+                app.detail_scroll = app.detail_scroll.saturating_sub(1);
+            } else {
+                let prev_sel = app.backtest_selected;
+                handle_nav_up(app);
+                if app.workspace == Workspace::Backtest && app.backtest_selected != prev_sel {
+                    app.detail_scroll = 0;
+                    load_detail_result(client, app).await;
+                }
+            }
+        }
 
         // Enter — open detail / load detail data
         KeyCode::Enter => {
@@ -534,6 +734,44 @@ async fn handle_key(
                 load_data_catalog(client, app).await;
             }
         },
+
+        // Node start/stop
+        KeyCode::Char('s') => {
+            if app.workspace == Workspace::Nodes {
+                let node_type = match app.panel_focus {
+                    app::PanelFocus::Left => "sandbox",
+                    app::PanelFocus::Right => "live",
+                };
+                match client.node_start(node_type, &[]).await {
+                    Ok(_) => {
+                        app.push_alert(
+                            app::AlertKind::Info,
+                            format!("{} node starting…", node_type),
+                        );
+                        load_node_status(client, app).await;
+                    }
+                    Err(e) => app.set_error(format!("Failed to start {}: {}", node_type, e)),
+                }
+            }
+        }
+        KeyCode::Char('x') => {
+            if app.workspace == Workspace::Nodes {
+                let node_type = match app.panel_focus {
+                    app::PanelFocus::Left => "sandbox",
+                    app::PanelFocus::Right => "live",
+                };
+                match client.node_stop(node_type).await {
+                    Ok(_) => {
+                        app.push_alert(
+                            app::AlertKind::Info,
+                            format!("{} node stopping…", node_type),
+                        );
+                        load_node_status(client, app).await;
+                    }
+                    Err(e) => app.set_error(format!("Failed to stop {}: {}", node_type, e)),
+                }
+            }
+        }
 
         // Strategy validate
         KeyCode::Char('v') => {
@@ -722,6 +960,31 @@ fn handle_nav_up(app: &mut App) {
 }
 
 // ── Data loading helpers ────────────────────────────────────────────────
+
+/// Load appropriate data when switching to a workspace.
+async fn load_workspace_data(client: &ApiClient, app: &mut App) {
+    match app.workspace {
+        Workspace::Dashboard => {
+            load_backtests(client, app).await;
+            load_node_status(client, app).await;
+        }
+        Workspace::Backtest => {
+            load_backtests(client, app).await;
+            if !app.backtests.is_empty() {
+                load_detail_result(client, app).await;
+            }
+        }
+        Workspace::Strategy => {
+            load_strategies(client, app).await;
+        }
+        Workspace::Nodes => {
+            load_node_status(client, app).await;
+        }
+        Workspace::Data => {
+            load_data_catalog(client, app).await;
+        }
+    }
+}
 
 async fn load_backtests(client: &ApiClient, app: &mut App) {
     app.backtest_loading = true;

@@ -119,16 +119,15 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
         (None, Workspace::Backtest) => {
             vec![
                 ("j/k", "nav"),
-                ("Enter", "detail"),
+                ("\u{2190}/\u{2192}", "panel"),
                 ("n", "new"),
-                ("Tab", "panel"),
                 ("r", "refresh"),
             ]
         }
         (None, Workspace::Strategy) => {
             vec![
                 ("j/k", "nav"),
-                ("Tab", "panel"),
+                ("\u{2190}/\u{2192}", "panel"),
                 ("v", "validate"),
                 ("r", "rescan"),
             ]
@@ -160,8 +159,8 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // Global hints
-    spans.push(Span::styled("F1-F5", theme::style_hint_key()));
-    spans.push(Span::styled(" ws ", theme::style_hint_desc()));
+    spans.push(Span::styled("Tab", theme::style_hint_key()));
+    spans.push(Span::styled(" next ws ", theme::style_hint_desc()));
     spans.push(Span::styled("\u{2502}", theme::style_dim()));
     spans.push(Span::raw(" "));
     spans.push(Span::styled("?", theme::style_hint_key()));
