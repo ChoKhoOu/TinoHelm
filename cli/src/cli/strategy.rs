@@ -5,9 +5,18 @@ use crate::cli::style::{POS, NEG};
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
+use crate::types::StrategyCreateRequest;
 
 #[derive(Subcommand)]
 pub enum StrategyCmd {
+    /// Create a new strategy scaffold
+    Create {
+        /// Strategy name
+        name: String,
+        /// Strategy type: bar or tick
+        #[arg(long, short, default_value = "bar")]
+        r#type: String,
+    },
     /// List all strategies
     List,
     /// Show strategy details
@@ -26,6 +35,35 @@ pub enum StrategyCmd {
 
 pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Result<()> {
     match cmd {
+        StrategyCmd::Create { name, r#type } => {
+            let req = StrategyCreateRequest {
+                name: name.clone(),
+                strategy_type: r#type.clone(),
+            };
+            let resp = client.create_strategy(&req).await?;
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "name": resp.name,
+                        "file_path": resp.file_path,
+                        "message": resp.message,
+                    }))?
+                );
+                return Ok(());
+            }
+
+            header("Strategy Created");
+            divider(50);
+            kv("Name", &accent(&resp.name), 12);
+            kv("Type", &r#type, 12);
+            kv("File", &dim(resp.file_path.as_deref().unwrap_or("-")), 12);
+            println!();
+            if let Some(msg) = &resp.message {
+                println!("    {}", muted(msg));
+            }
+            println!();
+        }
         StrategyCmd::List => {
             let strategies = client.list_strategies().await?;
             if format == "json" {
