@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import sys
 
-import httpx
 import typer
 
 from tinohelm.cli._style import C, bold, muted, header, divider, kv
@@ -22,6 +21,8 @@ def output_format() -> str:
 
 def api_call(method: str, path: str, **kwargs) -> dict:
     """Make an API call and return JSON response."""
+    import httpx
+
     url = f"{api_url()}{path}"
     try:
         with httpx.Client(timeout=30.0) as client:

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 
-import httpx
 import typer
 
 from tinohelm.cli._http import api_call, api_url, output, output_format
@@ -101,6 +100,8 @@ def validate(
     name: str = typer.Argument(..., help="Strategy name"),
 ):
     """Validate a strategy."""
+    import httpx
+
     # Validate endpoint returns 422 for invalid strategies with the result
     # in the detail field. We make a raw call to capture both cases.
     url = f"{api_url()}/api/strategies/{name}/validate"
