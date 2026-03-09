@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::App;
+use crate::tui::app::{App, PanelFocus};
 use crate::tui::theme;
 
 const HEARTBEAT_TIMEOUT_SECS: u64 = 30;
@@ -25,8 +25,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[0]);
 
-    render_node_card(f, node_cols[0], "SANDBOX", app.sandbox_last_heartbeat, app);
-    render_node_card(f, node_cols[1], "LIVE", app.live_last_heartbeat, app);
+    render_node_card(f, node_cols[0], "SANDBOX", app.sandbox_last_heartbeat, app, app.panel_focus == PanelFocus::Left);
+    render_node_card(f, node_cols[1], "LIVE", app.live_last_heartbeat, app, app.panel_focus == PanelFocus::Right);
 
     // Bottom: worker status
     render_workers(f, chunks[1], app);
@@ -38,6 +38,7 @@ fn render_node_card(
     name: &str,
     last_hb: Option<std::time::Instant>,
     app: &App,
+    focused: bool,
 ) {
     let now = std::time::Instant::now();
     let (status_text, status_color, dot) = match last_hb {
@@ -102,9 +103,15 @@ fn render_node_card(
         Span::styled(" stop", theme::style_hint_desc()),
     ]));
 
+    let border_style = if focused {
+        theme::style_border_focused()
+    } else {
+        theme::style_border()
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme::style_border())
+        .border_style(border_style)
         .title(Span::styled(
             format!(" {} ", name),
             theme::style_header(),
