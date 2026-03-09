@@ -2,12 +2,16 @@
 # Build the tino CLI into a standalone binary using PyInstaller.
 #
 # Usage:
-#   ./scripts/build_cli.sh              # Build for current platform
-#   ./scripts/build_cli.sh --onedir     # Build as a directory bundle (faster startup)
+#   ./scripts/build_cli.sh              # Build + package as tar.gz (default)
+#   ./scripts/build_cli.sh --onefile    # Build as single binary (slow startup)
 #
 # Output:
-#   dist/tino                           # Standalone binary (--onefile, default)
-#   dist/tino/                          # Directory bundle (--onedir)
+#   dist/tino/tino                      # Executable (onedir)
+#   dist/tino-<os>-<arch>.tar.gz        # Distributable archive
+#
+# Install (end user):
+#   tar xzf tino-darwin-arm64.tar.gz -C ~/.local
+#   # Add to PATH: export PATH="$HOME/.local/tino:$PATH"
 #
 # The CLI is a thin HTTP client — it does NOT bundle NautilusTrader or
 # the server-side code, so the resulting binary is lightweight (~15-30 MB).
@@ -20,7 +24,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # ── Parse args ────────────────────────────────────────────────────────────
-MODE="--onefile"
+MODE="--onedir"
 for arg in "$@"; do
     case "$arg" in
         --onedir)  MODE="--onedir" ;;
@@ -103,6 +107,21 @@ if [ -f "$BINARY" ]; then
     echo "Build successful!"
     echo "  Binary: $BINARY"
     echo "  Size:   $SIZE"
+
+    # Package as tar.gz for distribution (onedir only)
+    if [ "$MODE" = "--onedir" ]; then
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        ARCHIVE="$PROJECT_ROOT/dist/tino-${OS}-${ARCH}.tar.gz"
+        tar czf "$ARCHIVE" -C "$PROJECT_ROOT/dist" tino/
+        ASIZE=$(du -sh "$ARCHIVE" | cut -f1)
+        echo "  Archive: $ARCHIVE ($ASIZE)"
+        echo ""
+        echo "Install:"
+        echo "  tar xzf tino-${OS}-${ARCH}.tar.gz -C ~/.local"
+        echo "  export PATH=\"\$HOME/.local/tino:\$PATH\""
+    fi
+
     echo ""
     echo "Test it:"
     echo "  $BINARY version"

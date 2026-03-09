@@ -16,27 +16,35 @@ a = Analysis(
     runtime_hooks=[],
     excludes=['nautilus_trader', 'fastapi', 'uvicorn', 'sqlalchemy', 'asyncpg', 'alembic', 'redis', 'pydantic_settings', 'plotly', 'optuna', 'numpy', 'pandas', 'scipy', 'matplotlib', 'PIL', 'torch', 'tkinter'],
     noarchive=False,
-    optimize=0,
+    optimize=2,
 )
 pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='tino',
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=True,
+    upx=True,
+    upx_exclude=[],
+    name='tino',
 )
