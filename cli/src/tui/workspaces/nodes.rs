@@ -1,35 +1,41 @@
-//! F4 — Nodes workspace: Sandbox/Live side-by-side + worker table.
+//! F4 — Nodes workspace: compact node cards + worker summary + live event log.
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
 use crate::tui::app::{App, PanelFocus};
 use crate::tui::theme;
+use crate::tui::widgets::{self, titled_block};
 
-const HEARTBEAT_TIMEOUT_SECS: u64 = 30;
+const HEARTBEAT_TIMEOUT_SECS: u64 = widgets::HEARTBEAT_TIMEOUT_SECS;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(5)])
+        .constraints([Constraint::Length(7), Constraint::Min(5)])
         .split(area);
 
-    // Top: side-by-side node cards
-    let node_cols = Layout::default()
+    // Top: side-by-side node cards (compact) + worker summary
+    let top_cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(35),
+            Constraint::Percentage(35),
+            Constraint::Percentage(30),
+        ])
         .split(chunks[0]);
 
-    render_node_card(f, node_cols[0], "SANDBOX", app.sandbox_last_heartbeat, app, app.panel_focus == PanelFocus::Left);
-    render_node_card(f, node_cols[1], "LIVE", app.live_last_heartbeat, app, app.panel_focus == PanelFocus::Right);
+    render_node_card(f, top_cols[0], "SANDBOX", app.sandbox_last_heartbeat, app, app.panel_focus == PanelFocus::Left);
+    render_node_card(f, top_cols[1], "LIVE", app.live_last_heartbeat, app, app.panel_focus == PanelFocus::Right);
+    render_workers(f, top_cols[2], app);
 
-    // Bottom: worker status
-    render_workers(f, chunks[1], app);
+    // Bottom: live event log
+    render_event_log(f, chunks[1], app);
 }
 
 fn render_node_card(
@@ -59,11 +65,15 @@ fn render_node_card(
         .and_then(|s| s.get("nodes"))
         .and_then(|n| n.get(name.to_lowercase().as_str()));
 
-    let mut lines = vec![
-        Line::from(""),
+    let restart_count = extra
+        .and_then(|info| info.get("restart_count"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let lines = vec![
         Line::from(vec![
             Span::styled(
-                format!("  {} ", dot),
+                format!(" {} ", dot),
                 Style::default().fg(status_color),
             ),
             Span::styled(
@@ -74,58 +84,30 @@ fn render_node_card(
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Status  ", Style::default().fg(theme::FG_AMBER)),
+            Span::styled(" Status ", Style::default().fg(theme::FG_AMBER)),
             Span::styled(&status_text, Style::default().fg(status_color)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Restart ", Style::default().fg(theme::FG_AMBER)),
+            Span::styled(format!("{}", restart_count), Style::default().fg(theme::FG_PRIMARY)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" [s]", theme::style_hint_key()),
+            Span::styled(" start ", theme::style_hint_desc()),
+            Span::styled("[x]", theme::style_hint_key()),
+            Span::styled(" stop", theme::style_hint_desc()),
         ]),
     ];
 
-    if let Some(info) = extra {
-        if let Some(pid) = info.get("pid").and_then(|v| v.as_i64()) {
-            lines.push(Line::from(vec![
-                Span::styled("  PID     ", Style::default().fg(theme::FG_AMBER)),
-                Span::styled(format!("{}", pid), Style::default().fg(theme::FG_PRIMARY)),
-            ]));
-        }
-        if let Some(restarts) = info.get("restart_count").and_then(|v| v.as_i64()) {
-            lines.push(Line::from(vec![
-                Span::styled("  Restart ", Style::default().fg(theme::FG_AMBER)),
-                Span::styled(format!("{}", restarts), Style::default().fg(theme::FG_PRIMARY)),
-            ]));
-        }
-    }
+    let block = titled_block(&format!(" {} ", name), focused);
 
-    // Action hints
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  [s]", theme::style_hint_key()),
-        Span::styled(" start  ", theme::style_hint_desc()),
-        Span::styled("[x]", theme::style_hint_key()),
-        Span::styled(" stop", theme::style_hint_desc()),
-    ]));
-
-    let border_style = if focused {
-        theme::style_border_focused()
-    } else {
-        theme::style_border()
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(
-            format!(" {} ", name),
-            theme::style_header(),
-        ));
-
-    let p = Paragraph::new(lines).block(block);
-    f.render_widget(p, area);
+    let card = Paragraph::new(lines).block(block);
+    f.render_widget(card, area);
 }
 
 fn render_workers(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::style_border())
-        .title(Span::styled(" BACKTEST WORKERS ", theme::style_header()));
+    let block = titled_block(" WORKERS ", false);
 
     let mut lines = Vec::new();
 
@@ -142,17 +124,14 @@ fn render_workers(f: &mut Frame, area: Rect, app: &App) {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let (dot, color) = if alive {
-                ("\u{25CF}", theme::FG_POSITIVE) // ●
+                ("\u{25CF}", theme::FG_POSITIVE)
             } else {
-                ("\u{25CB}", theme::FG_NEGATIVE) // ○
+                ("\u{25CB}", theme::FG_NEGATIVE)
             };
-            let status = if alive { "idle" } else { "offline" };
+            let status = if alive { "idle" } else { "off" };
             lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", dot), Style::default().fg(color)),
-                Span::styled(
-                    format!("Worker (pid: {})  ", pid),
-                    Style::default().fg(theme::FG_PRIMARY),
-                ),
+                Span::styled(format!(" {} ", dot), Style::default().fg(color)),
+                Span::styled(format!("w:{} ", pid), Style::default().fg(theme::FG_PRIMARY)),
                 Span::styled(status, Style::default().fg(color)),
             ]));
         }
@@ -161,17 +140,72 @@ fn render_workers(f: &mut Frame, area: Rect, app: &App) {
     if lines.is_empty() {
         if app.node_loading {
             lines.push(Line::from(Span::styled(
-                "  Loading\u{2026}",
+                " Loading\u{2026}",
                 theme::style_dim(),
             )));
         } else {
             lines.push(Line::from(Span::styled(
-                "  Press 'r' to fetch status",
+                " r to refresh",
                 theme::style_dim(),
             )));
         }
     }
 
-    let p = Paragraph::new(lines).block(block);
-    f.render_widget(p, area);
+    let workers_p = Paragraph::new(lines).block(block);
+    f.render_widget(workers_p, area);
+}
+
+fn render_event_log(f: &mut Frame, area: Rect, app: &App) {
+    let count = app.event_log.len();
+    let title = format!(" EVENT LOG ({}) ", count);
+
+    let block = titled_block(&title, false);
+
+    if app.event_log.is_empty() {
+        let lines = vec![Line::from(Span::styled(
+            "  Waiting for events\u{2026}",
+            theme::style_dim(),
+        ))];
+        let empty_p = Paragraph::new(lines).block(block);
+        f.render_widget(empty_p, area);
+        return;
+    }
+
+    // Show most recent events, newest at bottom (auto-scroll)
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let lines: Vec<Line> = app
+        .event_log
+        .iter()
+        .rev()
+        .take(inner_h)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|entry| {
+            let type_color = match entry.event_type.as_str() {
+                "bt.prog" => theme::FG_RUNNING,
+                "bt.stat" => theme::FG_HINT,
+                "bt.done" => theme::FG_POSITIVE,
+                "sys.err" => theme::FG_NEGATIVE,
+                _ => theme::FG_DIM,
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!(" {} ", entry.timestamp),
+                    Style::default().fg(theme::FG_DIM),
+                ),
+                Span::styled(
+                    format!("{:<8}", entry.event_type),
+                    Style::default().fg(type_color),
+                ),
+                Span::styled(
+                    format!(" {}", entry.message),
+                    Style::default().fg(theme::FG_SECONDARY),
+                ),
+            ])
+        })
+        .collect();
+
+    let log_p = Paragraph::new(lines).block(block);
+    f.render_widget(log_p, area);
 }

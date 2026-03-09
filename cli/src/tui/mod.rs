@@ -2,6 +2,7 @@ pub mod app;
 pub mod chrome;
 pub mod theme;
 pub mod views;
+pub mod widgets;
 pub mod workspaces;
 pub mod ws;
 
@@ -98,14 +99,17 @@ async fn run_app(
                 match ws_event {
                     WsClientEvent::Connecting => {
                         app.ws_state = WsState::Connecting;
+                        app.push_log("ws", "connecting\u{2026}".to_string());
                     }
                     WsClientEvent::Connected => {
                         app.ws_state = WsState::Connected;
                         app.ws_reconnect_secs = None;
+                        app.push_log("ws", "connected".to_string());
                     }
                     WsClientEvent::Disconnected { retry_secs } => {
                         app.ws_state = WsState::Disconnected;
                         app.ws_reconnect_secs = Some(retry_secs);
+                        app.push_log("ws", format!("disconnected, retry in {}s", retry_secs));
                     }
                     WsClientEvent::Event(event) => {
                         app.handle_ws_event(event);
@@ -396,8 +400,15 @@ fn render_popup(
     app: &App,
     popup: &PopupKind,
 ) {
-    use ratatui::text::{Line, Span};
+    use ratatui::style::Color;
+    use ratatui::text::Span;
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    // Dim the entire background to create depth
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(0, 0, 0))),
+        area,
+    );
 
     // Determine popup size
     let (width, height) = match popup {
@@ -409,7 +420,7 @@ fn render_popup(
 
     let popup_area = centered_rect(width, height, area);
 
-    // Clear the popup area (removes underlying content)
+    // Clear the popup area
     f.render_widget(Clear, popup_area);
 
     match popup {
