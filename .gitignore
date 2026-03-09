@@ -11,6 +11,9 @@ web/.next/
 .next/
 .DS_Store
 
+# Rust build artifacts
+cli/target/
+
 # Claude Code / OMC tooling (session-specific, not project source)
 .omc/
 .claude/

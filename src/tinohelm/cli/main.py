@@ -27,6 +27,16 @@ def main(
     state["api_url"] = api_url.rstrip("/")
     state["format"] = fmt
 
+    typer.echo(
+        typer.style(
+            "Hint: a faster native CLI is available — "
+            "build from cli/ with `cargo build --release` or download from Releases.",
+            fg=typer.colors.YELLOW,
+            dim=True,
+        ),
+        err=True,
+    )
+
 
 app.add_typer(strategy_app, name="strategy", help="Strategy management")
 app.add_typer(data_app, name="data", help="Data management")

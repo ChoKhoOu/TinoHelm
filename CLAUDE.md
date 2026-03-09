@@ -29,7 +29,15 @@ pip install -e ".[visualization]" # With Plotly tearsheet support
 # Database migrations
 alembic upgrade head
 
-# CLI (thin HTTP client, needs API server running)
+# Rust CLI/TUI (recommended — fast, zero dependencies)
+cd cli && cargo build --release    # Build (~2.5 MB binary)
+cli/target/release/tino --help     # CLI mode
+cli/target/release/tino            # TUI mode (interactive dashboard)
+cli/target/release/tino backtest list
+cli/target/release/tino strategy list
+cli/target/release/tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
+
+# Python CLI (legacy — thin HTTP client, needs API server running)
 .venv/bin/tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
 .venv/bin/tino backtest list
 .venv/bin/tino strategy list
