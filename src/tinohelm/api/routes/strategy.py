@@ -70,6 +70,22 @@ class CreateStrategyResponse(BaseModel):
     message: str
 
 
+class RescanResponse(BaseModel):
+    """Response for POST /rescan."""
+
+    discovered: int
+    strategies: list[str]
+
+
+class ValidateResponse(BaseModel):
+    """Response for POST /{name}/validate."""
+
+    valid: bool
+    issues: list[str] | None = None
+    strategy_class: str | None = None
+    config_class: str | None = None
+
+
 # ---- routes ----
 
 @router.get("", response_model=list[StrategyItem])
@@ -155,11 +171,11 @@ async def create_strategy(
     )
 
 
-@router.post("/rescan")
+@router.post("/rescan", response_model=RescanResponse)
 async def rescan_strategies(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
-) -> dict:
+) -> RescanResponse:
     """Re-scan strategies directory and persist any new or updated strategies.
 
     Use this in production to hot-load new strategies without restarting.
@@ -169,23 +185,21 @@ async def rescan_strategies(
     discovered = scan_strategies(settings.paths.strategies)
     await persist_strategies(db, discovered, rebuild=True)
 
-    return {
-        "discovered": len(discovered),
-        "strategies": [d["name"] for d in discovered],
-    }
+    return RescanResponse(
+        discovered=len(discovered),
+        strategies=[d["name"] for d in discovered],
+    )
 
 
-@router.post("/{name}/validate")
+@router.post("/{name}/validate", response_model=ValidateResponse)
 async def validate_strategy_route(
     name: str,
     settings: Settings = Depends(get_settings_dep),
-) -> dict:
+) -> ValidateResponse:
     """Validate a strategy file for structural correctness."""
     from tinohelm.strategy.validator import validate_strategy
 
     result = validate_strategy(name, settings.paths.strategies)
-    status_code = 200 if result["valid"] else 422
-    # Return 422 for invalid strategies but still return the body
     if not result["valid"]:
         raise HTTPException(status_code=422, detail=result)
-    return result
+    return ValidateResponse(**result)
