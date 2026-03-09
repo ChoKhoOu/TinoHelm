@@ -533,6 +533,61 @@ Our `live.py` and `sandbox.py` nodes use these settings. Factory passes `reconci
 - Implement `on_order_rejected()` to handle venue rejections.
 - **Constructor (`__init__`)**: Do NOT access `self.clock` or `self.log` here — system hasn't initialized them yet. Only set instance attributes.
 
+## Rust CLI/TUI Development
+
+### Architecture
+```
+cli/src/
+├── main.rs          # Entry: CLI (clap) vs TUI (no args) dispatch
+├── api.rs           # HTTP client — all API calls to FastAPI backend
+├── tui/
+│   ├── mod.rs       # Event loop, key handling, render dispatch
+│   ├── app.rs       # App state: workspace, selections, data, boot phase
+│   ├── theme.rs     # Color palette & style presets
+│   ├── chrome.rs    # Top bar (workspace tabs) & bottom bar (key hints)
+│   ├── ws.rs        # WebSocket listener for real-time events
+│   └── workspaces/  # One module per F-key workspace
+│       ├── dashboard.rs  # F1 — overview
+│       ├── backtest.rs   # F2 — master-detail with rich stats
+│       ├── strategy.rs   # F3 — strategy list + detail
+│       ├── nodes.rs      # F4 — sandbox/live node cards
+│       └── data.rs       # F5 — data catalog
+```
+
+### Theme Color Conventions
+Color constants use **semantic names** describing purpose, NEVER literal color names:
+- `FG_IDENTIFIER` (soft blue) — names, tickers, identifiers
+- `FG_TAG` (purple) — categories, types, labels
+- `FG_HIGHLIGHT` (warm gold) — key values
+- `FG_HINT` (cyan) — keyboard shortcut hints
+- `FG_RUNNING` (cyan) — status: in-progress
+- `FG_POSITIVE` / `FG_NEGATIVE` — semantic only (profit/loss, online/offline)
+- `FG_AMBER` — structural elements only (headers, titles, brand)
+
+**Rule**: Green/Red are NEVER decorative — always semantic (positive/negative). When adding a new color, name it by purpose (`FG_IDENTIFIER`), not appearance (`FG_BLUE`).
+
+### Table Design Principle
+All list/table views MUST have a `─` divider line between the header row and data rows. Two implementation patterns:
+- **Table widget** (backtest, strategy): Use 2-line `header_cell()` helper — line 1 is amber header text, line 2 is `─`.repeat(50) in `FG_BORDER`. Set `.height(2)` on the header Row. The `─` auto-truncates to column width.
+- **Paragraph** (data catalog): Manual `format!` header line + full-width `─` divider as a separate Line.
+
+Never render a bare Table header without a divider — it violates the design language.
+
+### Ratatui Version Pinning
+Project uses **ratatui 0.29** + **crossterm 0.28**. The `tui-big-text` crate 0.8.2+ depends on ratatui 0.30 / ratatui-core 0.1.0, causing type incompatibilities (`Style`, `Widget`, `Alignment`). Do NOT upgrade tui-big-text without upgrading ratatui. For styled large text, use hand-crafted block characters (`▀▄█`) instead.
+
+### Navigation Pattern
+- **Tab / Shift+Tab**: cycle workspaces (replaces F1-F5 as primary nav)
+- **←/→**: switch panel focus (left list / right detail)
+- **j/k or ↑/↓**: context-sensitive — navigates list when left panel focused, scrolls detail when right panel focused
+- **Enter**: explicit action (load detail, submit form)
+- Auto-load: moving cursor in backtest list auto-fetches detail results
+
+### Worker Pool (Python backend)
+- Keep-alive worker (`idle_timeout=0`): always running, never auto-exits
+- Ephemeral workers (`idle_timeout=60`): auto-spawned on queue demand, self-terminate after idle
+- `ProcessManager.ensure_capacity()`: called by Watchdog every 10s — prunes dead workers, maintains min count, scales up based on `LLEN tino:backtest:queue`
+
 ## Pitfalls & Lessons Learned
 
 ### msgspec Struct Internals (Critical)
