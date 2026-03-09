@@ -28,6 +28,8 @@ pub struct App {
     pub backtests: Vec<BacktestRunItem>,
     pub backtest_selected: usize,
     pub backtest_loading: bool,
+    pub detail_result: Option<serde_json::Value>,
+    pub detail_equity: Vec<u64>,
 
     // Backtest form state
     pub form_strategy: String,
@@ -67,6 +69,8 @@ impl App {
             backtests: Vec::new(),
             backtest_selected: 0,
             backtest_loading: false,
+            detail_result: None,
+            detail_equity: Vec::new(),
 
             form_strategy: String::new(),
             form_symbol: "BTCUSDT-PERP".to_string(),

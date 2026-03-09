@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Sparkline},
     Frame,
 };
 
@@ -19,9 +19,20 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         }
     };
 
+    let has_equity = !app.detail_equity.is_empty();
+    let constraints = if has_equity {
+        vec![
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Min(5),
+        ]
+    } else {
+        vec![Constraint::Length(10), Constraint::Min(5)]
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(5)])
+        .constraints(constraints)
         .split(area);
 
     // Stats panel
@@ -63,8 +74,35 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(" Backtest Detail "));
     f.render_widget(stats, chunks[0]);
 
-    // Result summary (if available)
-    let summary_text = if let Some(ref summary) = bt.result_summary {
+    // Equity curve sparkline (if available)
+    if has_equity {
+        let sparkline = Sparkline::default()
+            .block(Block::default().borders(Borders::ALL).title(" Equity Curve "))
+            .data(&app.detail_equity)
+            .style(Style::default().fg(Color::Cyan));
+        f.render_widget(sparkline, chunks[1]);
+    }
+
+    // Result summary
+    let summary_idx = if has_equity { 2 } else { 1 };
+    let source = app.detail_result.as_ref().and_then(|r| r.get("statistics"));
+    let summary_text = if let Some(obj) = source.and_then(|s| s.as_object()) {
+        let mut lines = Vec::new();
+        for (key, val) in obj.iter().take(20) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<28} ", key),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(format!("{}", val)),
+            ]));
+        }
+        if lines.is_empty() {
+            lines.push(Line::from("No statistics data"));
+        }
+        lines
+    } else if let Some(ref summary) = bt.result_summary {
+        // Fallback to list-level summary
         let mut lines = Vec::new();
         if let Some(obj) = summary.as_object() {
             for (key, val) in obj.iter().take(15) {
@@ -87,7 +125,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     let summary = Paragraph::new(summary_text)
         .block(Block::default().borders(Borders::ALL).title(" Result Summary "));
-    f.render_widget(summary, chunks[1]);
+    f.render_widget(summary, chunks[summary_idx]);
 }
 
 pub fn hints() -> Vec<(&'static str, &'static str)> {

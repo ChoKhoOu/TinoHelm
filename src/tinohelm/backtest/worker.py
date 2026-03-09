@@ -34,6 +34,27 @@ def _publish_progress(
     )
 
 
+def _publish_stats(
+    r: redis.Redis,
+    run_id: str,
+    trades: int,
+    pnl: float,
+    win_rate: float,
+) -> None:
+    """Publish a ``backtest.stats`` event to the EventBridge channel."""
+    payload: dict = {
+        "type": "backtest.stats",
+        "run_id": run_id,
+        "trades": trades,
+        "pnl": round(pnl, 2),
+        "win_rate": round(win_rate, 4),
+    }
+    r.publish(
+        f"tino:backtest:progress:{run_id}",
+        json.dumps(payload, default=str),
+    )
+
+
 def _publish_completed(
     r: redis.Redis,
     run_id: str,
@@ -144,10 +165,19 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 with open(artifact_path, "w") as f:
                     json.dump(results, f, indent=2, default=str)
 
+                # Publish stats from results
+                stats = results.get("statistics", {})
+                _publish_stats(
+                    r, run_id,
+                    trades=int(stats.get("total_trades", 0)),
+                    pnl=float(stats.get("pnl_total", 0)),
+                    win_rate=float(stats.get("win_rate", 0)),
+                )
+
                 # Publish completion
                 elapsed = round(time.monotonic() - job_start_time, 1)
                 _publish_progress(r, run_id, 100, elapsed_secs=elapsed)
-                _publish_completed(r, run_id, "completed", summary=results.get("statistics", {}))
+                _publish_completed(r, run_id, "completed", summary=stats)
 
                 # Store result summary in a Redis key for quick access
                 r.setex(

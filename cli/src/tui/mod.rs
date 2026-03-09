@@ -185,6 +185,7 @@ async fn handle_key(
         KeyCode::Enter => {
             if app.current_view == View::BacktestList && !app.backtests.is_empty() {
                 app.navigate(View::BacktestDetail);
+                load_detail_result(client, app).await;
             }
         }
 
@@ -333,4 +334,30 @@ async fn load_node_status(client: &ApiClient, app: &mut App) {
         }
     }
     app.node_loading = false;
+}
+
+async fn load_detail_result(client: &ApiClient, app: &mut App) {
+    let run_id = match app.backtests.get(app.backtest_selected) {
+        Some(bt) => bt.run_id.clone(),
+        None => return,
+    };
+    app.detail_result = None;
+    app.detail_equity = Vec::new();
+
+    match client.get_result(&run_id).await {
+        Ok(result) => {
+            // Extract equity curve for sparkline
+            if let Some(curve) = result.get("equity_curve").and_then(|c| c.as_array()) {
+                app.detail_equity = curve
+                    .iter()
+                    .filter_map(|v| v.as_f64())
+                    .map(|v| v.max(0.0) as u64)
+                    .collect();
+            }
+            app.detail_result = Some(result);
+        }
+        Err(_) => {
+            // Result not available (run still in progress or failed) — not an error
+        }
+    }
 }
