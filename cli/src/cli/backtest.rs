@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
-use crate::cli::style::POS;
+use crate::cli::style::{POS, NEG};
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
@@ -141,7 +141,7 @@ fn print_status_card(data: &crate::types::BacktestRunStatus, run_id: &str) {
     }
 
     if let Some(ref err) = data.error {
-        println!("      {} {}", "Error:".red().bold(), err);
+        println!("      {} {}", "Error:".with(NEG).bold(), err);
     }
     println!();
 }
@@ -240,7 +240,7 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
         let bar = format!(
             "{}{}",
             format!("{}", "\u{2588}".repeat(w_fill).with(POS)),
-            format!("{}", "\u{2588}".repeat(l_fill).red()),
+            format!("{}", "\u{2588}".repeat(l_fill).with(NEG)),
         );
         let wr_str = wr
             .map(|w| format!("{:.1}%", w * 100.0))
@@ -372,7 +372,7 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
                 let bar_vis = if ret_m >= 0.0 {
                     format!("{}", "+".repeat(bar_len).with(POS))
                 } else {
-                    format!("{}", "-".repeat(bar_len).red())
+                    format!("{}", "-".repeat(bar_len).with(NEG))
                 };
                 bx.line(&format!(
                     "  {:>10}  {:>8}%  {}",
@@ -449,7 +449,7 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
                 let qty = jstr(t, "quantity");
                 bx.line(&format!(
                     "  {} {:5}  qty={}  pnl={}",
-                    "-".red(),
+                    "-".with(NEG),
                     side,
                     qty,
                     color_value(Some(pnl_t), "+.2f"),
@@ -660,7 +660,7 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             println!();
             eprintln!(
                 "  {} after {}s. Last status: {}",
-                format!("{}", "Timeout".red().bold()),
+                format!("{}", "Timeout".with(NEG).bold()),
                 timeout,
                 last_status,
             );

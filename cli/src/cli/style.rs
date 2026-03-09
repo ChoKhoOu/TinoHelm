@@ -5,8 +5,11 @@
 
 use crossterm::style::{Color, Stylize};
 
-/// Vivid green via 24-bit RGB — works correctly on both light and dark terminals.
-pub const POS: Color = Color::Rgb { r: 0, g: 200, b: 83 };
+/// Balanced green (Tailwind green-500) — visible on both light and dark terminals.
+pub const POS: Color = Color::Rgb { r: 34, g: 197, b: 94 };
+
+/// Balanced red (Tailwind red-500) — vivid but not harsh.
+pub const NEG: Color = Color::Rgb { r: 239, g: 68, b: 68 };
 
 /// Medium grey for muted/dim text — visible on both light and dark backgrounds.
 const MUTED_GREY: Color = Color::Rgb { r: 128, g: 128, b: 128 };
@@ -82,7 +85,7 @@ pub fn color_value(val: Option<f64>, fmt: &str) -> String {
             if v > 0.0 {
                 format!("{}", s.with(POS))
             } else if v < 0.0 {
-                format!("{}", s.red())
+                format!("{}", s.with(NEG))
             } else {
                 s
             }
@@ -112,7 +115,7 @@ pub fn color_status(status: &str) -> String {
         "completed" => format!("{}", status.with(POS).bold()),
         "running" => format!("{}", status.yellow().bold()),
         "queued" => format!("{}", status.cyan().bold()),
-        "failed" | "error" => format!("{}", status.red().bold()),
+        "failed" | "error" => format!("{}", status.with(NEG).bold()),
         "cancelled" => format!("{}", status.magenta().bold()),
         _ => format!("{}", status.white().bold()),
     }
@@ -124,7 +127,7 @@ pub fn status_badge(status: &str) -> String {
         "completed" => format!("{}", "[+]".with(POS)),
         "running" => format!("{}", "[~]".yellow()),
         "queued" => format!("{}", "[.]".cyan()),
-        "failed" | "error" => format!("{}", "[x]".red()),
+        "failed" | "error" => format!("{}", "[x]".with(NEG)),
         "cancelled" => format!("{}", "[!]".magenta()),
         _ => "[?]".to_string(),
     }
@@ -263,8 +266,8 @@ pub fn node_status_color(status: &str) -> String {
     match status {
         "running" => format!("{}", status.with(POS).bold()),
         "starting" => format!("{}", status.yellow().bold()),
-        "stopped" => format!("{}", status.red().bold()),
-        "error" => format!("{}", status.red().bold()),
+        "stopped" => format!("{}", status.with(NEG).bold()),
+        "error" => format!("{}", status.with(NEG).bold()),
         _ => format!("{}", status.white().bold()),
     }
 }
@@ -273,8 +276,8 @@ pub fn node_badge(status: &str) -> String {
     match status {
         "running" => format!("{}", "[+]".with(POS)),
         "starting" => format!("{}", "[~]".yellow()),
-        "stopped" => format!("{}", "[x]".red()),
-        "error" => format!("{}", "[!]".red()),
+        "stopped" => format!("{}", "[x]".with(NEG)),
+        "error" => format!("{}", "[!]".with(NEG)),
         _ => "[?]".to_string(),
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
-use crate::cli::style::POS;
+use crate::cli::style::{POS, NEG};
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
@@ -129,7 +129,7 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: &str) -> Result<
             let level_str = if level < 3 {
                 format!("{}", level.to_string().yellow().bold())
             } else {
-                format!("{}", level.to_string().red().bold())
+                format!("{}", level.to_string().with(NEG).bold())
             };
             kv("Level", &level_str, 14);
             println!();
@@ -221,7 +221,7 @@ fn render_node_card(mode: &str, info: &serde_json::Value, risk: &serde_json::Val
             } else if margin < 80.0 {
                 format!("{}", margin_str.yellow())
             } else {
-                format!("{}", margin_str.red())
+                format!("{}", margin_str.with(NEG))
             };
             kv("Margin Used", &margin_colored, 14);
             kv("Leverage", &format!("{:.4}x", leverage), 14);
@@ -332,7 +332,7 @@ fn render_nodes_table(
             } else if margin < 80.0 {
                 format!("{}", margin_str.yellow())
             } else {
-                format!("{}", margin_str.red())
+                format!("{}", margin_str.with(NEG))
             };
             println!(
                 "    Risk: exposure={}  margin={}  leverage={:.4}x",

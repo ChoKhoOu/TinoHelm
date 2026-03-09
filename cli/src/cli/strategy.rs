@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
-use crate::cli::style::POS;
+use crate::cli::style::{POS, NEG};
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
@@ -181,14 +181,14 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 println!(
                     "    {} {}",
                     status_badge("failed"),
-                    format!("{}", "INVALID".red().bold()),
+                    format!("{}", "INVALID".with(NEG).bold()),
                 );
             }
 
             if let Some(ref issues) = result.issues {
                 println!();
                 for issue in issues {
-                    println!("    {} {}", "*".red(), issue);
+                    println!("    {} {}", "*".with(NEG), issue);
                 }
             }
 
