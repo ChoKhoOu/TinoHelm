@@ -35,8 +35,8 @@
 - [x] 5.2 Replace single `engine.add_strategy()` call with loop: one strategy instance per symbol via portfolio_loader
 - [x] 5.3 Add `engine.add_actor()` call for each actor from portfolio_loader
 - [x] 5.4 Ensure data loading handles all symbols × intervals combinations (already partially supported)
-- [ ] 5.5 Verify `extract_backtest_results()` works correctly with multi-strategy engine (per-instrument breakdown should auto-populate)
-- [ ] 5.6 Write integration test: multi-symbol portfolio backtest end-to-end (BTC + ETH, verify separate positions, combined equity curve)
+- [x] 5.5 Verify `extract_backtest_results()` works correctly with multi-strategy engine (per-instrument breakdown should auto-populate)
+- [x] 5.6 Write integration test: multi-symbol portfolio backtest end-to-end (BTC + ETH, verify separate positions, combined equity curve)
 
 ## 6. Scanner Enhancement
 
@@ -59,14 +59,14 @@
 - [x] 8.2 Wire BridgeActor into sandbox.py via `node.trader.add_actor()`, remove inline command listener and heartbeat threads
 - [x] 8.3 Refactor `live.py` same as sandbox — portfolio_loader + BridgeActor
 - [x] 8.4 Update `node/factory.py` to accept portfolio config for node startup
-- [ ] 8.5 Write integration test: sandbox node starts with portfolio config and BridgeActor
+- [x] 8.5 Write integration test: sandbox node starts with portfolio config and BridgeActor
 
 ## 9. CLI Updates
 
 - [x] 9.1 Update `tino backtest run` to detect portfolio folder vs single file and route accordingly
 - [x] 9.2 Update `tino strategy list` to show `type` column (single/portfolio) and symbol count for portfolios
 - [x] 9.3 Update `tino strategy info` to show portfolio details (symbols, actors) when type is portfolio
-- [ ] 9.4 Verify `tino backtest run single_file --symbol X --interval Y` backward compatibility (zero behavior change)
+- [x] 9.4 Verify `tino backtest run single_file --symbol X --interval Y` backward compatibility (zero behavior change)
 
 ## 10. Strategy Migration (btc_multi_factor)
 
@@ -75,4 +75,4 @@
 - [x] 10.3 Copy strategy code to `strategy.py`, extract factors to `factors.py`
 - [x] 10.4 Add optional msgbus subscription for `risk.guard.state` in strategy's `on_start()`
 - [x] 10.5 Verify old `btc_multi_factor.py` still works as single-file strategy (backward compat)
-- [ ] 10.6 Run end-to-end portfolio backtest: `tino backtest run crypto_momentum --start 2025-01-01 --end 2025-03-01`
+- [x] 10.6 Run end-to-end portfolio backtest: `tino backtest run crypto_momentum --start 2025-01-01 --end 2025-03-01`
