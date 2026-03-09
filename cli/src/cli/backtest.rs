@@ -5,7 +5,7 @@ use crate::cli::style::{POS, NEG, LONG_COLOR, SHORT_COLOR};
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
-use crate::types::BacktestRunRequest;
+use crate::types::{BacktestRunRequest, OptimizeRequest};
 
 #[derive(Subcommand)]
 pub enum BacktestCmd {
@@ -34,6 +34,12 @@ pub enum BacktestCmd {
         /// Strategy parameters (key=value)
         #[arg(long = "param", value_parser = parse_param)]
         params: Vec<(String, String)>,
+        /// Probability of slippage (0.0-1.0)
+        #[arg(long, default_value = "0")]
+        slippage_prob: f64,
+        /// Random seed for FillModel
+        #[arg(long)]
+        random_seed: Option<u64>,
     },
     /// List backtest runs
     List,
@@ -60,6 +66,81 @@ pub enum BacktestCmd {
         /// Run ID (full or short prefix)
         run_id: String,
     },
+    /// Run hyperparameter optimization
+    Optimize {
+        /// Strategy name
+        strategy: String,
+        /// Symbol (e.g., BTCUSDT-PERP), repeatable
+        #[arg(long, short)]
+        symbol: Vec<String>,
+        /// Interval (e.g., 5m), repeatable
+        #[arg(long, short, default_value = "5m")]
+        interval: Vec<String>,
+        /// Start date (YYYY-MM-DD)
+        #[arg(long)]
+        start: String,
+        /// End date (YYYY-MM-DD)
+        #[arg(long)]
+        end: String,
+        /// Number of Optuna trials
+        #[arg(long, short = 'n', default_value = "100")]
+        trials: u32,
+        /// Objective: sharpe/calmar/sortino/profit
+        #[arg(long, default_value = "sharpe")]
+        fitness: String,
+        /// Train percentage (50-99)
+        #[arg(long, default_value = "85")]
+        train_pct: f64,
+        /// Parallel trial workers
+        #[arg(long, short = 'w', default_value = "1")]
+        workers: u32,
+        /// Walk-forward folds (0=disabled)
+        #[arg(long, default_value = "0")]
+        walk_forward: u32,
+        /// Sampler: tpe/cmaes/random
+        #[arg(long, default_value = "tpe")]
+        sampler: String,
+        /// Early stopping patience (0=disabled)
+        #[arg(long, default_value = "0")]
+        patience: u32,
+        /// Disable trial pruning
+        #[arg(long)]
+        no_pruning: bool,
+        /// Param range as name:min:max[:step[:type]]
+        #[arg(long = "param", value_parser = parse_param_range)]
+        params: Vec<(String, serde_json::Value)>,
+        /// Initial capital
+        #[arg(long, short = 'c', default_value = "10000")]
+        capital: f64,
+        /// Leverage
+        #[arg(long, short = 'l', default_value = "1")]
+        leverage: f64,
+        /// Auto-poll progress until done
+        #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+        poll: bool,
+    },
+    /// Check optimization run status
+    #[command(name = "optimize-status")]
+    OptimizeStatus {
+        /// Optimization run ID
+        opt_id: u64,
+    },
+    /// Get full optimization results
+    #[command(name = "optimize-result")]
+    OptimizeResult {
+        /// Optimization run ID
+        opt_id: u64,
+    },
+    /// List optimization runs
+    #[command(name = "optimize-list")]
+    OptimizeList {
+        /// Max results
+        #[arg(long, default_value = "20")]
+        limit: u32,
+        /// Filter by strategy name
+        #[arg(long)]
+        strategy: Option<String>,
+    },
 }
 
 fn parse_param(s: &str) -> std::result::Result<(String, String), String> {
@@ -67,6 +148,30 @@ fn parse_param(s: &str) -> std::result::Result<(String, String), String> {
         .find('=')
         .ok_or_else(|| format!("invalid param: no '=' in '{s}'"))?;
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+}
+
+fn parse_param_range(s: &str) -> std::result::Result<(String, serde_json::Value), String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() < 3 {
+        return Err(format!("invalid param range: expected name:min:max[:step[:type]], got '{s}'"));
+    }
+    let name = parts[0].to_string();
+    let min_val: f64 = parts[1].parse().map_err(|_| format!("invalid min for '{}'", name))?;
+    let max_val: f64 = parts[2].parse().map_err(|_| format!("invalid max for '{}'", name))?;
+    let mut spec = serde_json::json!({
+        "type": "float",
+        "min": min_val,
+        "max": max_val,
+    });
+    if parts.len() >= 4 {
+        if let Ok(step) = parts[3].parse::<f64>() {
+            spec["step"] = serde_json::json!(step);
+        }
+    }
+    if parts.len() >= 5 && (parts[4] == "int" || parts[4] == "float") {
+        spec["type"] = serde_json::json!(parts[4]);
+    }
+    Ok((name, spec))
 }
 
 // ── JSON helpers ─────────────────────────────────────────────────────────
@@ -487,6 +592,8 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             capital,
             leverage,
             params,
+            slippage_prob,
+            random_seed,
         } => {
             let param_json = if params.is_empty() {
                 None
@@ -498,6 +605,16 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 Some(serde_json::Value::Object(map))
             };
 
+            let fill_model = if slippage_prob > 0.0 || random_seed.is_some() {
+                let mut fm = serde_json::json!({"prob_slippage": slippage_prob});
+                if let Some(seed) = random_seed {
+                    fm["random_seed"] = serde_json::json!(seed);
+                }
+                Some(fm)
+            } else {
+                None
+            };
+
             let req = BacktestRunRequest {
                 strategy: strategy.clone(),
                 symbols: vec![symbol.clone()],
@@ -507,6 +624,7 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 initial_capital: capital,
                 leverage,
                 params: param_json,
+                fill_model,
             };
 
             let resp = client.run_backtest(&req).await?;
@@ -688,6 +806,296 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             );
             println!();
         }
+        BacktestCmd::Optimize {
+            strategy,
+            symbol,
+            interval,
+            start,
+            end,
+            trials,
+            fitness,
+            train_pct,
+            workers,
+            walk_forward,
+            sampler,
+            patience,
+            no_pruning,
+            params,
+            capital,
+            leverage,
+            poll,
+        } => {
+            let param_ranges = if params.is_empty() {
+                None
+            } else {
+                let map: serde_json::Map<String, serde_json::Value> =
+                    params.into_iter().collect();
+                Some(serde_json::Value::Object(map))
+            };
+
+            let req = OptimizeRequest {
+                strategy: strategy.clone(),
+                symbols: symbol.clone(),
+                intervals: interval.clone(),
+                start_date: start.clone(),
+                end_date: end.clone(),
+                n_trials: trials,
+                fitness_objective: fitness.clone(),
+                train_pct,
+                initial_capital: capital,
+                leverage,
+                n_workers: workers,
+                walk_forward_folds: walk_forward,
+                pruning: !no_pruning,
+                sampler: sampler.clone(),
+                patience,
+                param_ranges,
+            };
+
+            let resp = client.optimize_backtest(&req).await?;
+            let opt_id = resp.optimization_id;
+
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"optimization_id": opt_id}))?);
+                return Ok(());
+            }
+
+            header("Optimization Started");
+            divider(50);
+            kv("ID", &accent(&opt_id.to_string()), 12);
+            kv("Trials", &trials.to_string(), 12);
+            kv("Fitness", &fitness, 12);
+            kv("Sampler", &sampler, 12);
+            if walk_forward > 0 {
+                kv("Walk-Forward", &format!("{} folds", walk_forward), 12);
+            }
+            println!();
+
+            if !poll {
+                return Ok(());
+            }
+
+            // Poll progress
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let sd = client.optimize_status(opt_id).await?;
+                let st = &sd.status;
+                let done = sd.trials_completed.unwrap_or(0);
+                let total = sd.total_trials.unwrap_or(trials);
+                let best = sd.best_value;
+                let pruned = sd.pruned_trials.unwrap_or(0);
+
+                let pct = if total > 0 { done * 100 / total } else { 0 };
+                let bar_w: u32 = 30;
+                let filled = if total > 0 { bar_w * done / total } else { 0 };
+                let bar = format!(
+                    "{}{}",
+                    "=".repeat(filled as usize),
+                    "-".repeat((bar_w - filled) as usize),
+                );
+
+                let best_s = best
+                    .map(|b| format!("  best={}", color_value(Some(b), ".4f")))
+                    .unwrap_or_default();
+                let pruned_s = if pruned > 0 {
+                    format!("  pruned={}", pruned)
+                } else {
+                    String::new()
+                };
+
+                use std::io::Write;
+                print!("\r  [{}] {}/{} ({}%){}{}  ", bar, done, total, pct, best_s, pruned_s);
+                std::io::stdout().flush()?;
+
+                if matches!(st.as_str(), "completed" | "failed" | "error") {
+                    println!();
+                    if st != "completed" {
+                        println!("  {}", format!("{}", "FAILED".with(NEG).bold()));
+                        let sd_json = serde_json::to_string_pretty(&serde_json::json!({
+                            "status": st, "trials_completed": done,
+                        }))?;
+                        println!("{}", sd_json);
+                        std::process::exit(1);
+                    }
+                    break;
+                }
+            }
+
+            // Fetch and display result
+            let result_data = client.optimize_result(opt_id).await?;
+            print_optimize_result(&result_data);
+        }
+        BacktestCmd::OptimizeStatus { opt_id } => {
+            let sd = client.optimize_status(opt_id).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!(sd))?);
+                return Ok(());
+            }
+            let st = &sd.status;
+            let done = sd.trials_completed.unwrap_or(0);
+            let total = sd.total_trials.unwrap_or(0);
+            let best = sd.best_value;
+
+            println!();
+            println!(
+                "  {} Optimization {}  {}",
+                status_badge(st),
+                accent(&opt_id.to_string()),
+                color_status(st),
+            );
+            println!(
+                "      Trials: {}/{}  Best: {}",
+                done,
+                total,
+                best.map(|b| color_value(Some(b), ".4f")).unwrap_or_else(|| muted("-")),
+            );
+            println!();
+        }
+        BacktestCmd::OptimizeResult { opt_id } => {
+            let data = client.optimize_result(opt_id).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&data)?);
+                return Ok(());
+            }
+            print_optimize_result(&data);
+        }
+        BacktestCmd::OptimizeList { limit, strategy } => {
+            let data = client.optimize_list(limit, strategy.as_deref()).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&data)?);
+                return Ok(());
+            }
+
+            let empty_vec = vec![];
+            let runs = if data.is_array() {
+                data.as_array().unwrap_or(&empty_vec)
+            } else {
+                data.get("runs").and_then(|v| v.as_array()).unwrap_or(&empty_vec)
+            };
+
+            if runs.is_empty() {
+                println!("No optimization runs found.");
+                return Ok(());
+            }
+
+            let t = Table::new(&[
+                ("ID", 6, "right"),
+                ("Strategy", 16, "left"),
+                ("Symbol", 14, "left"),
+                ("Trials", 8, "right"),
+                ("Fitness", 8, "left"),
+                ("Status", 10, "right"),
+                ("Best", 10, "right"),
+                ("Done", 6, "right"),
+            ]);
+            t.header();
+
+            for r in runs {
+                let id = r.get("optimization_id").and_then(|v| v.as_u64()).map(|v| v.to_string()).unwrap_or_default();
+                let strat = jstr(r, "strategy_name");
+                let sym = jstr(r, "symbol");
+                let n_trials = jstr(r, "n_trials");
+                let fit = jstr(r, "fitness_objective");
+                let st = jstr(r, "status");
+                let best = r.get("best_value").and_then(|v| v.as_f64());
+                let done = jstr(r, "trials_completed");
+
+                t.row(&[
+                    &id,
+                    &strat[..16.min(strat.len())],
+                    &sym[..14.min(sym.len())],
+                    n_trials,
+                    fit,
+                    &color_status(st),
+                    &best.map(|b| color_value(Some(b), ".4f")).unwrap_or_else(|| muted("-")),
+                    done,
+                ]);
+            }
+            t.footer();
+        }
     }
     Ok(())
+}
+
+fn print_optimize_result(data: &serde_json::Value) {
+    println!();
+    divider(50);
+    println!("  {}", bold("Optimization Result"));
+    divider(50);
+
+    kv("ID", &jstr(data, "optimization_id").to_string(), 12);
+    kv("Status", &color_status(jstr(data, "status")), 12);
+    kv("Objective", jstr(data, "fitness_objective"), 12);
+
+    let sampler_v = data.get("sampler").and_then(|v| v.as_str());
+    if let Some(s) = sampler_v {
+        kv("Sampler", s, 12);
+    }
+    if let Some(pruned) = data.get("total_pruned").and_then(|v| v.as_u64()) {
+        if pruned > 0 {
+            kv("Pruned", &pruned.to_string(), 12);
+        }
+    }
+
+    if let Some(best) = jf64(data, "best_value") {
+        header("Best Fitness");
+        println!("    {}", color_value(Some(best), ".6f"));
+    }
+
+    if let Some(params) = data.get("best_params").and_then(|v| v.as_object()) {
+        header("Best Parameters");
+        let mut sorted: Vec<_> = params.iter().collect();
+        sorted.sort_by_key(|(k, _)| k.to_string());
+        for (k, v) in &sorted {
+            kv(k, &v.to_string(), 20);
+        }
+    }
+
+    if let Some(imp) = data.get("param_importances").and_then(|v| v.as_object()) {
+        header("Parameter Importances");
+        let mut sorted: Vec<_> = imp.iter().collect();
+        sorted.sort_by(|a, b| {
+            let va = a.1.as_f64().unwrap_or(0.0);
+            let vb = b.1.as_f64().unwrap_or(0.0);
+            vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (k, v) in &sorted {
+            let importance = v.as_f64().unwrap_or(0.0);
+            let bar_len = (importance * 40.0) as usize;
+            let bar = format!("{}", "#".repeat(bar_len).cyan());
+            kv(k, &format!("{:.4} {}", importance, bar), 20);
+        }
+    }
+
+    if let Some(wf) = data.get("walk_forward_results").and_then(|v| v.as_array()) {
+        if !wf.is_empty() {
+            header("Walk-Forward Folds");
+            for (i, fold) in wf.iter().enumerate() {
+                if let Some(obj) = fold.as_object() {
+                    let tv = jf64(fold, "test_value");
+                    let ts = jstr(fold, "test_start");
+                    let te = jstr(fold, "test_end");
+                    println!(
+                        "    Fold {}: {} ~ {}  value={}",
+                        i + 1,
+                        ts,
+                        te,
+                        tv.map(|v| color_value(Some(v), ".4f")).unwrap_or_else(|| muted("-")),
+                    );
+                    let _ = obj; // suppress unused warning
+                }
+            }
+        }
+    }
+
+    if let Some(tm) = data.get("test_metrics").and_then(|v| v.as_object()) {
+        if !tm.is_empty() {
+            header("Validation (Test Period)");
+            for (k, v) in tm {
+                kv(k, &v.to_string(), 20);
+            }
+        }
+    }
+
+    println!();
 }
