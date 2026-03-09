@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
+use crate::cli::style::POS;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
@@ -238,7 +239,7 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
         let l_fill = bar_w.saturating_sub(w_fill);
         let bar = format!(
             "{}{}",
-            format!("{}", "\u{2588}".repeat(w_fill).green()),
+            format!("{}", "\u{2588}".repeat(w_fill).with(POS)),
             format!("{}", "\u{2588}".repeat(l_fill).red()),
         );
         let wr_str = wr
@@ -369,7 +370,7 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
             if let Some(ret_m) = jf64(m, "return_pct") {
                 let bar_len = (ret_m.abs() * 5.0).min(30.0) as usize;
                 let bar_vis = if ret_m >= 0.0 {
-                    format!("{}", "+".repeat(bar_len).green())
+                    format!("{}", "+".repeat(bar_len).with(POS))
                 } else {
                     format!("{}", "-".repeat(bar_len).red())
                 };
@@ -421,16 +422,15 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
 
         // Best trades
         for t in sorted_trades.iter().take(top_n) {
-            let side = if jstr(t, "side") == "1" {
-                "LONG"
-            } else {
-                "SHORT"
+            let side = match jstr(t, "side") {
+                "1" | "BUY" | "LONG" => "LONG",
+                _ => "SHORT",
             };
             let pnl_t = trade_pnl(t);
             let qty = jstr(t, "quantity");
             bx.line(&format!(
                 "  {} {:5}  qty={}  pnl={}",
-                "+".green(),
+                "+".with(POS),
                 side,
                 qty,
                 color_value(Some(pnl_t), "+.2f"),
@@ -463,6 +463,10 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
 }
 
 fn trade_pnl(t: &serde_json::Value) -> f64 {
+    // Try as number first (JSON numeric), then as string ("114.60 USDT")
+    if let Some(v) = t.get("realized_pnl").and_then(|v| v.as_f64()) {
+        return v;
+    }
     jstr(t, "realized_pnl")
         .split_whitespace()
         .next()

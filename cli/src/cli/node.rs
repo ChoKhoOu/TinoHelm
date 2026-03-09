@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
+use crate::cli::style::POS;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
@@ -216,7 +217,7 @@ fn render_node_card(mode: &str, info: &serde_json::Value, risk: &serde_json::Val
             kv("Exposure", &format!("{:.2} USDT", exposure), 14);
             let margin_str = format!("{:.2}%", margin);
             let margin_colored = if margin < 50.0 {
-                format!("{}", margin_str.green())
+                format!("{}", margin_str.with(POS))
             } else if margin < 80.0 {
                 format!("{}", margin_str.yellow())
             } else {
@@ -327,7 +328,7 @@ fn render_nodes_table(
         if exposure > 0.0 {
             let margin_str = format!("{:.2}%", margin);
             let margin_colored = if margin < 50.0 {
-                format!("{}", margin_str.green())
+                format!("{}", margin_str.with(POS))
             } else if margin < 80.0 {
                 format!("{}", margin_str.yellow())
             } else {

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
+use crate::cli::style::POS;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
@@ -174,7 +175,7 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 println!(
                     "    {} {}",
                     status_badge("completed"),
-                    format!("{}", "VALID".green().bold()),
+                    format!("{}", "VALID".with(POS).bold()),
                 );
             } else {
                 println!(
@@ -217,7 +218,7 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
             if !result.strategies.is_empty() {
                 println!();
                 for name in &result.strategies {
-                    println!("    {} {}", "+".green(), name);
+                    println!("    {} {}", "+".with(POS), name);
                 }
             }
 

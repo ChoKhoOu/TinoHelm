@@ -3,7 +3,10 @@
 //! Provides semantic colors, text helpers, table rendering, box-drawn reports,
 //! and progress indicators for consistent terminal output across all commands.
 
-use crossterm::style::Stylize;
+use crossterm::style::{Color, Stylize};
+
+/// Bright green (ANSI 92) — standard ANSI 32 green looks grey on light terminals.
+pub const POS: Color = Color::AnsiValue(10);
 
 // ── ANSI Helpers ─────────────────────────────────────────────────────────
 
@@ -72,7 +75,7 @@ pub fn color_value(val: Option<f64>, fmt: &str) -> String {
                 _ => format!("{:+.2}", v),
             };
             if v > 0.0 {
-                format!("{}", s.green())
+                format!("{}", s.with(POS))
             } else if v < 0.0 {
                 format!("{}", s.red())
             } else {
@@ -101,7 +104,7 @@ pub fn format_value(val: Option<f64>, fmt: &str, suffix: &str) -> String {
 /// Color a status string with status-specific color.
 pub fn color_status(status: &str) -> String {
     match status {
-        "completed" => format!("{}", status.green().bold()),
+        "completed" => format!("{}", status.with(POS).bold()),
         "running" => format!("{}", status.yellow().bold()),
         "queued" => format!("{}", status.cyan().bold()),
         "failed" | "error" => format!("{}", status.red().bold()),
@@ -113,7 +116,7 @@ pub fn color_status(status: &str) -> String {
 /// Render a colored [icon] badge for a status.
 pub fn status_badge(status: &str) -> String {
     match status {
-        "completed" => format!("{}", "[+]".green()),
+        "completed" => format!("{}", "[+]".with(POS)),
         "running" => format!("{}", "[~]".yellow()),
         "queued" => format!("{}", "[.]".cyan()),
         "failed" | "error" => format!("{}", "[x]".red()),
@@ -223,7 +226,7 @@ impl Table {
 pub fn progress_bar(pct: u8, width: usize) -> String {
     let filled = (width as u16 * pct as u16 / 100) as usize;
     let empty = width.saturating_sub(filled);
-    let bar_filled = format!("{}", "=".repeat(filled).green());
+    let bar_filled = format!("{}", "=".repeat(filled).with(POS));
     let bar_empty = dim(&"-".repeat(empty));
     format!("[{}{}] {}%", bar_filled, bar_empty, pct)
 }
@@ -253,7 +256,7 @@ pub fn mode_label(mode: &str) -> String {
 
 pub fn node_status_color(status: &str) -> String {
     match status {
-        "running" => format!("{}", status.green().bold()),
+        "running" => format!("{}", status.with(POS).bold()),
         "starting" => format!("{}", status.yellow().bold()),
         "stopped" => format!("{}", status.red().bold()),
         "error" => format!("{}", status.red().bold()),
@@ -263,7 +266,7 @@ pub fn node_status_color(status: &str) -> String {
 
 pub fn node_badge(status: &str) -> String {
     match status {
-        "running" => format!("{}", "[+]".green()),
+        "running" => format!("{}", "[+]".with(POS)),
         "starting" => format!("{}", "[~]".yellow()),
         "stopped" => format!("{}", "[x]".red()),
         "error" => format!("{}", "[!]".red()),
