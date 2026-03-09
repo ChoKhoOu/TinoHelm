@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
+use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
@@ -137,11 +138,11 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                     .unwrap_or(0);
 
                 t.row(&[
-                    &accent(sym),
-                    ivl,
+                    &bold(&accent(sym)),
+                    &format!("{}", ivl.yellow()),
                     &start_d[..10.min(start_d.len())],
                     &end_d[..10.min(end_d.len())],
-                    &fmt_size(size),
+                    &accent(&fmt_size(size)),
                 ]);
             }
 

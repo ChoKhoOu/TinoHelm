@@ -582,14 +582,15 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                     .map(|v| format!("{:.1}%", v * 100.0))
                     .unwrap_or_else(|| muted("-"));
 
-                let strat_display = &strat[..16.min(strat.len())];
-                let sym_display = &r.symbol[..14.min(r.symbol.len())];
+                let strat_display = bold(&strat[..16.min(strat.len())]);
+                let sym_display = accent(&r.symbol[..14.min(r.symbol.len())]);
+                let ivl_display = format!("{}", r.interval.as_str().yellow());
 
                 t.row(&[
-                    id,
-                    strat_display,
-                    sym_display,
-                    &r.interval,
+                    &accent(id),
+                    &strat_display,
+                    &sym_display,
+                    &ivl_display,
                     &period,
                     &color_status(&r.status),
                     &trades,
