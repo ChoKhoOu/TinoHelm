@@ -4,7 +4,7 @@ use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
-use crate::types::DataFetchRequest;
+use crate::types::{DataFetchRequest, DataFetchBatchRequest, DataCompactRequest};
 
 #[derive(Subcommand)]
 pub enum DataCmd {
@@ -19,12 +19,41 @@ pub enum DataCmd {
         /// End date (YYYY-MM-DD)
         end: String,
     },
+    /// Fetch data for multiple symbols x intervals in parallel
+    #[command(name = "fetch-batch")]
+    FetchBatch {
+        /// Instrument symbols (space-separated)
+        symbols: Vec<String>,
+        /// Bar interval, repeatable (e.g. -i 1m -i 5m)
+        #[arg(short, long)]
+        interval: Vec<String>,
+        /// Start date (YYYY-MM-DD)
+        #[arg(short, long)]
+        start: String,
+        /// End date (YYYY-MM-DD)
+        #[arg(short, long)]
+        end: String,
+    },
     /// List available data catalog
     List,
     /// Show data info for a symbol
     Info {
         /// Symbol
         symbol: String,
+    },
+    /// Compact stored data for a symbol/interval
+    Compact {
+        /// Symbol (e.g., BTCUSDT-PERP)
+        symbol: String,
+        /// Interval (e.g., 1m, 5m)
+        interval: String,
+    },
+    /// Validate data integrity for a symbol/interval
+    Validate {
+        /// Symbol (e.g., BTCUSDT-PERP)
+        symbol: String,
+        /// Interval (e.g., 1m, 5m)
+        interval: String,
     },
 }
 
@@ -213,6 +242,132 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                 }
             }
 
+            println!();
+        }
+        DataCmd::FetchBatch {
+            symbols,
+            interval,
+            start,
+            end,
+        } => {
+            let req = DataFetchBatchRequest {
+                symbols: symbols.clone(),
+                intervals: interval.clone(),
+                start: start.clone(),
+                end: end.clone(),
+            };
+            let result = client.fetch_data_batch(&req).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+
+            let st = result.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(
+                (symbols.len() * interval.len()) as u64,
+            );
+            let msg = result.get("message").and_then(|v| v.as_str());
+
+            header("Batch Data Fetch Submitted");
+            divider(50);
+            kv("Symbols", &accent(&symbols.join(", ")), 12);
+            kv("Intervals", &interval.join(", "), 12);
+            kv("Period", &format!("{} ~ {}", start, end), 12);
+            kv("Queued", &bold(&count.to_string()), 12);
+            kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
+            if let Some(m) = msg {
+                println!();
+                println!("    {}", dim(m));
+            }
+            println!();
+        }
+        DataCmd::Compact { symbol, interval } => {
+            let req = DataCompactRequest {
+                symbol: symbol.clone(),
+                interval: interval.clone(),
+            };
+            let result = client.compact_data(&req).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+
+            let st = result.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let badge = if st == "accepted" {
+                status_badge("completed")
+            } else {
+                status_badge(st)
+            };
+            let msg = result.get("message").and_then(|v| v.as_str());
+
+            header(&format!("Compact: {} {}", symbol, interval));
+            divider(50);
+            kv("Symbol", &accent(&symbol), 12);
+            kv("Interval", &interval, 12);
+            kv("Status", &format!("{}  {}", badge, bold(st)), 12);
+            if let Some(m) = msg {
+                println!("    {}", dim(m));
+            }
+            println!();
+        }
+        DataCmd::Validate { symbol, interval } => {
+            let result = client.validate_data(&symbol, &interval).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+
+            header(&format!("Validate: {} {}", symbol, interval));
+            divider(50);
+
+            if let Some(obj) = result.as_object() {
+                let st = obj.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let issues = obj.get("issues").and_then(|v| v.as_array());
+                let has_issues = issues.map(|a| !a.is_empty()).unwrap_or(false);
+
+                if st == "ok" && !has_issues {
+                    println!(
+                        "    {}  {}",
+                        status_badge("completed"),
+                        format!("{}", "Data is valid".with(crossterm::style::Color::Rgb { r: 34, g: 197, b: 94 })),
+                    );
+                } else {
+                    kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
+                }
+
+                for key in &["bars_count", "start_date", "end_date", "gaps", "duplicates"] {
+                    if let Some(val) = obj.get(*key) {
+                        let label = key.replace('_', " ");
+                        // Capitalize first letter
+                        let label = label
+                            .split_whitespace()
+                            .map(|w| {
+                                let mut c = w.chars();
+                                match c.next() {
+                                    None => String::new(),
+                                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        kv(&label, &val.to_string(), 12);
+                    }
+                }
+
+                if let Some(issues) = issues {
+                    if !issues.is_empty() {
+                        println!();
+                        println!(
+                            "    {}",
+                            bold(&format!("{}", "Issues:".with(crossterm::style::Color::Rgb { r: 248, g: 113, b: 113 }))),
+                        );
+                        for issue in issues {
+                            let text = issue.as_str().unwrap_or("?");
+                            println!("      {} {}", "-".with(crossterm::style::Color::Rgb { r: 248, g: 113, b: 113 }), text);
+                        }
+                    }
+                }
+            }
             println!();
         }
     }
