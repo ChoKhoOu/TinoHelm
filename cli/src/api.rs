@@ -154,7 +154,7 @@ impl ApiClient {
     pub async fn list_data(&self) -> Result<serde_json::Value> {
         let resp = self
             .client
-            .get(format!("{}/api/data", self.base_url))
+            .get(format!("{}/api/data/catalog", self.base_url))
             .send()
             .await
             .context(Self::connect_hint(&self.base_url))?;
@@ -175,11 +175,11 @@ impl ApiClient {
         Ok(body)
     }
 
-    pub async fn node_start(&self, node_type: &str) -> Result<serde_json::Value> {
+    pub async fn node_start(&self, node_type: &str, strategies: &[String]) -> Result<serde_json::Value> {
         let resp = self
             .client
             .post(format!("{}/api/node/start", self.base_url))
-            .json(&serde_json::json!({"mode": node_type, "strategies": []}))
+            .json(&serde_json::json!({"mode": node_type, "strategies": strategies}))
             .send()
             .await
             .context(Self::connect_hint(&self.base_url))?;
@@ -192,6 +192,18 @@ impl ApiClient {
             .client
             .post(format!("{}/api/node/stop", self.base_url))
             .json(&serde_json::json!({"mode": node_type}))
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn node_kill(&self, node_type: &str, level: u8) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .post(format!("{}/api/node/kill", self.base_url))
+            .json(&serde_json::json!({"mode": node_type, "level": level}))
             .send()
             .await
             .context(Self::connect_hint(&self.base_url))?;
