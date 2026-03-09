@@ -8,8 +8,8 @@ use crossterm::style::{Color, Stylize};
 /// Balanced green (Tailwind green-500) — visible on both light and dark terminals.
 pub const POS: Color = Color::Rgb { r: 34, g: 197, b: 94 };
 
-/// Balanced red (Tailwind red-500) — vivid but not harsh.
-pub const NEG: Color = Color::Rgb { r: 239, g: 68, b: 68 };
+/// Softer red (Tailwind red-400) — clear but not harsh.
+pub const NEG: Color = Color::Rgb { r: 248, g: 113, b: 113 };
 
 /// Medium grey for muted/dim text — visible on both light and dark backgrounds.
 const MUTED_GREY: Color = Color::Rgb { r: 128, g: 128, b: 128 };
