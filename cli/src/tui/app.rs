@@ -1,13 +1,31 @@
+use std::collections::VecDeque;
+
 use crate::types::{BacktestRunItem, Strategy, WsEvent};
 
-/// Which TUI view is currently active.
+/// Bloomberg-style workspace model — each F-key opens a dedicated workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
-    BacktestList,
-    BacktestDetail,
+pub enum Workspace {
+    Dashboard,  // F1
+    Backtest,   // F2
+    Strategy,   // F3
+    Nodes,      // F4
+    Data,       // F5
+}
+
+/// Which panel is focused in a split-panel workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelFocus {
+    Left,
+    Right,
+}
+
+/// Active popup/modal overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PopupKind {
     BacktestForm,
-    StrategyList,
-    NodeStatus,
+    DataFetchForm,
+    Help,
+    Confirm { message: String },
 }
 
 /// WebSocket connection state.
@@ -18,20 +36,51 @@ pub enum WsState {
     Connected,
 }
 
+/// An alert for the scrolling ticker.
+#[derive(Debug, Clone)]
+pub struct Alert {
+    pub timestamp: String,
+    pub message: String,
+    pub kind: AlertKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AlertKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
 /// Central application state — Elm architecture model.
 pub struct App {
-    pub current_view: View,
-    pub previous_view: Option<View>,
+    // ── Workspace ───────────────────────────────────────────────────────
+    pub workspace: Workspace,
     pub running: bool,
 
-    // Backtest state
+    // ── Panel focus (for split-panel workspaces) ────────────────────────
+    pub panel_focus: PanelFocus,
+
+    // ── Popup/Modal ─────────────────────────────────────────────────────
+    pub popup: Option<PopupKind>,
+
+    // ── Animation state ─────────────────────────────────────────────────
+    pub frame_count: u64,
+    pub boot_complete: bool,
+    pub boot_phase: u8,
+
+    // ── Alert ticker ────────────────────────────────────────────────────
+    pub alerts: VecDeque<Alert>,
+    pub ticker_offset: usize,
+
+    // ── Backtest state ──────────────────────────────────────────────────
     pub backtests: Vec<BacktestRunItem>,
     pub backtest_selected: usize,
     pub backtest_loading: bool,
     pub detail_result: Option<serde_json::Value>,
     pub detail_equity: Vec<u64>,
 
-    // Backtest form state
+    // ── Backtest form state ─────────────────────────────────────────────
     pub form_strategy: String,
     pub form_symbol: String,
     pub form_interval: String,
@@ -39,22 +88,27 @@ pub struct App {
     pub form_end: String,
     pub form_focus: usize,
 
-    // Strategy state
+    // ── Strategy state ──────────────────────────────────────────────────
     pub strategies: Vec<Strategy>,
     pub strategy_selected: usize,
     pub strategy_loading: bool,
 
-    // Node state
+    // ── Node state ──────────────────────────────────────────────────────
     pub node_status: Option<serde_json::Value>,
     pub node_loading: bool,
     pub sandbox_last_heartbeat: Option<std::time::Instant>,
     pub live_last_heartbeat: Option<std::time::Instant>,
 
-    // WebSocket
+    // ── Data catalog state ──────────────────────────────────────────────
+    pub data_catalog: Option<serde_json::Value>,
+    pub data_selected: usize,
+    pub data_loading: bool,
+
+    // ── WebSocket ───────────────────────────────────────────────────────
     pub ws_state: WsState,
     pub ws_reconnect_secs: Option<u64>,
 
-    // Error banner
+    // ── Error banner ────────────────────────────────────────────────────
     pub error_banner: Option<String>,
     pub error_dismiss_at: Option<std::time::Instant>,
 }
@@ -62,9 +116,19 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         Self {
-            current_view: View::BacktestList,
-            previous_view: None,
+            workspace: Workspace::Dashboard,
             running: true,
+
+            panel_focus: PanelFocus::Left,
+
+            popup: None,
+
+            frame_count: 0,
+            boot_complete: false,
+            boot_phase: 0,
+
+            alerts: VecDeque::with_capacity(50),
+            ticker_offset: 0,
 
             backtests: Vec::new(),
             backtest_selected: 0,
@@ -88,6 +152,10 @@ impl App {
             sandbox_last_heartbeat: None,
             live_last_heartbeat: None,
 
+            data_catalog: None,
+            data_selected: 0,
+            data_loading: false,
+
             ws_state: WsState::Disconnected,
             ws_reconnect_secs: None,
 
@@ -96,15 +164,29 @@ impl App {
         }
     }
 
-    pub fn navigate(&mut self, view: View) {
-        self.previous_view = Some(self.current_view);
-        self.current_view = view;
+    /// Switch to a workspace.
+    pub fn switch_workspace(&mut self, ws: Workspace) {
+        self.workspace = ws;
+        self.panel_focus = PanelFocus::Left;
+        self.popup = None;
     }
 
-    pub fn go_back(&mut self) {
-        if let Some(prev) = self.previous_view.take() {
-            self.current_view = prev;
-        }
+    /// Toggle panel focus between left and right.
+    pub fn toggle_panel_focus(&mut self) {
+        self.panel_focus = match self.panel_focus {
+            PanelFocus::Left => PanelFocus::Right,
+            PanelFocus::Right => PanelFocus::Left,
+        };
+    }
+
+    /// Open a popup overlay.
+    pub fn open_popup(&mut self, kind: PopupKind) {
+        self.popup = Some(kind);
+    }
+
+    /// Close the active popup.
+    pub fn close_popup(&mut self) {
+        self.popup = None;
     }
 
     pub fn set_error(&mut self, msg: String) {
@@ -113,7 +195,64 @@ impl App {
             Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
     }
 
+    /// Push an alert to the ticker.
+    pub fn push_alert(&mut self, kind: AlertKind, message: String) {
+        let ts = chrono_lite_now();
+        self.alerts.push_back(Alert {
+            timestamp: ts,
+            message,
+            kind,
+        });
+        // Keep last 50 alerts
+        while self.alerts.len() > 50 {
+            self.alerts.pop_front();
+        }
+    }
+
+    /// Adaptive tick rate in milliseconds.
+    pub fn tick_rate_ms(&self) -> u64 {
+        if !self.boot_complete {
+            100 // Fast during boot animation
+        } else if self.has_active_animations() {
+            100 // 10 FPS during animations
+        } else if self.has_running_backtests() {
+            250 // 4 FPS when monitoring
+        } else {
+            500 // 2 FPS when idle
+        }
+    }
+
+    pub fn has_running_backtests(&self) -> bool {
+        self.backtests
+            .iter()
+            .any(|b| b.status.starts_with("running") || b.status == "queued")
+    }
+
+    pub fn has_active_animations(&self) -> bool {
+        // For now, just check if ticker is scrolling
+        !self.alerts.is_empty()
+    }
+
     pub fn tick(&mut self) {
+        self.frame_count = self.frame_count.wrapping_add(1);
+
+        // Boot animation progression
+        if !self.boot_complete {
+            if self.boot_phase < 4 {
+                // Advance boot phase every ~15 frames (1.5s at 100ms)
+                if self.frame_count % 5 == 0 {
+                    self.boot_phase += 1;
+                }
+            } else {
+                self.boot_complete = true;
+            }
+        }
+
+        // Scroll ticker
+        if !self.alerts.is_empty() {
+            self.ticker_offset = self.ticker_offset.wrapping_add(1);
+        }
+
         // Auto-dismiss error banner
         if let Some(dismiss_at) = self.error_dismiss_at {
             if std::time::Instant::now() >= dismiss_at {
@@ -134,13 +273,19 @@ impl App {
             WsEvent::BacktestCompleted {
                 run_id, status, ..
             } => {
+                let id_short = run_id.get(..8).unwrap_or(&run_id).to_string();
+                let msg = format!("Backtest #{} {}", id_short, &status);
+                let kind = if status == "completed" {
+                    AlertKind::Success
+                } else {
+                    AlertKind::Error
+                };
+                self.push_alert(kind, msg);
                 if let Some(bt) = self.backtests.iter_mut().find(|b| b.run_id == run_id) {
                     bt.status = status;
                 }
             }
-            WsEvent::BacktestStats { .. } => {
-                // Stats updates can be used for detail view in the future
-            }
+            WsEvent::BacktestStats { .. } => {}
             WsEvent::NodeHeartbeat { node_type, .. } => {
                 let now = std::time::Instant::now();
                 match node_type.as_str() {
@@ -150,8 +295,34 @@ impl App {
                 }
             }
             WsEvent::SystemError { message } => {
+                self.push_alert(AlertKind::Error, message.clone());
                 self.set_error(message);
             }
         }
     }
+}
+
+/// Lightweight UTC time string (HH:MM:SS) without pulling in chrono.
+fn chrono_lite_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+/// Get current UTC time as HH:MM for display.
+pub fn utc_clock() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    format!("{:02}:{:02} UTC", h, m)
 }
