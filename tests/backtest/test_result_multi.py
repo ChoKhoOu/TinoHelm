@@ -5,8 +5,9 @@ when multiple strategy instances (one per symbol) are used.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, PropertyMock, patch
-import pytest
+from unittest.mock import MagicMock
+
+import pandas as pd
 
 
 def _make_mock_position(instrument_id: str, pnl: float, side: str = "BUY"):
@@ -14,6 +15,8 @@ def _make_mock_position(instrument_id: str, pnl: float, side: str = "BUY"):
     pos = MagicMock()
     pos.instrument_id = MagicMock()
     pos.instrument_id.__str__ = MagicMock(return_value=instrument_id)
+    pos.is_closed = True
+    pos.is_open = False
     pos.entry = MagicMock()
     pos.entry.name = side
     pos.side = MagicMock()
@@ -36,11 +39,12 @@ def _make_mock_position(instrument_id: str, pnl: float, side: str = "BUY"):
     return pos
 
 
-def _make_mock_engine(positions_by_instrument: dict[str, list[float]]):
+def _make_mock_engine(positions_by_instrument: dict[str, list[float]], use_real_returns=False):
     """Build a mock BacktestEngine with positions across multiple instruments.
 
     Args:
         positions_by_instrument: {instrument_id: [pnl1, pnl2, ...]}
+        use_real_returns: If True, use a real pd.Series for analyzer.returns()
     """
     engine = MagicMock()
 
@@ -59,13 +63,20 @@ def _make_mock_engine(positions_by_instrument: dict[str, list[float]]):
 
     # Portfolio analyzer
     analyzer = MagicMock()
-    analyzer.returns.return_value = MagicMock(
-        tolist=MagicMock(return_value=[0.01, -0.005, 0.02]),
-        empty=False,
-        cumsum=MagicMock(return_value=MagicMock(tolist=MagicMock(return_value=[0.01, 0.005, 0.025]))),
-        mean=MagicMock(return_value=0.008),
-        std=MagicMock(return_value=0.01),
-    )
+    if use_real_returns:
+        returns = pd.Series(
+            [0.01, -0.005, 0.02],
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+        analyzer.returns.return_value = returns
+    else:
+        analyzer.returns.return_value = MagicMock(
+            tolist=MagicMock(return_value=[0.01, -0.005, 0.02]),
+            empty=False,
+            cumsum=MagicMock(return_value=MagicMock(tolist=MagicMock(return_value=[0.01, 0.005, 0.025]))),
+            mean=MagicMock(return_value=0.008),
+            std=MagicMock(return_value=0.01),
+        )
     analyzer.get_performance_stats_pnls.return_value = {}
     analyzer.get_performance_stats_returns.return_value = {}
     analyzer.get_performance_stats_general.return_value = {}
@@ -159,14 +170,50 @@ class TestExtractMultiInstrument:
         stats = result.get("statistics", {})
         assert stats.get("total_trades") == 3
 
-    def test_equity_curve_present(self):
-        """Result should include an equity_curve list."""
+    def test_equity_curve_with_real_returns(self):
+        """Equity curve should be populated when analyzer returns real pd.Series."""
         from tinohelm.backtest.result import extract_backtest_results
 
-        engine = _make_mock_engine({
-            "BTCUSDT-PERP.BINANCE": [100.0],
-        })
+        engine = _make_mock_engine(
+            {"BTCUSDT-PERP.BINANCE": [100.0]},
+            use_real_returns=True,
+        )
 
         result = extract_backtest_results(engine, starting_balance=10000)
         assert "equity_curve" in result
         assert isinstance(result["equity_curve"], list)
+        assert len(result["equity_curve"]) > 0
+
+    def test_zero_pnl_counted_as_neither_win_nor_loss(self):
+        """Zero-PnL trades should not count as wins or losses in top-level stats."""
+        from tinohelm.backtest.result import extract_backtest_results
+
+        engine = _make_mock_engine({
+            "BTCUSDT-PERP.BINANCE": [100.0, 0.0, -50.0],  # 1W, 1 zero, 1L
+        })
+
+        result = extract_backtest_results(engine, starting_balance=10000)
+        stats = result["statistics"]
+        assert stats["total_trades"] == 3
+        assert stats["winning_trades"] == 1
+        assert stats["losing_trades"] == 1
+
+    def test_open_positions_excluded_from_trade_count(self):
+        """Only closed positions should be counted in total_trades."""
+        from tinohelm.backtest.result import extract_backtest_results
+
+        engine = _make_mock_engine({
+            "BTCUSDT-PERP.BINANCE": [100.0, -30.0],
+        })
+
+        # Add an open position
+        open_pos = _make_mock_position("BTCUSDT-PERP.BINANCE", 0.0)
+        open_pos.is_closed = False
+        open_pos.is_open = True
+        all_pos = engine.cache.positions.return_value + [open_pos]
+        engine.cache.positions.return_value = all_pos
+
+        result = extract_backtest_results(engine, starting_balance=10000)
+        stats = result["statistics"]
+        # Only the 2 closed positions should count
+        assert stats["total_trades"] == 2

@@ -6,55 +6,55 @@ startup requires a NautilusTrader runtime.
 """
 from __future__ import annotations
 
-import pytest
+
+def _read_source(module) -> str:
+    """Read the source code of a module."""
+    with open(module.__file__) as f:
+        return f.read()
 
 
 class TestSandboxPortfolioIntegration:
     """Verify sandbox.py uses portfolio_loader for strategy/actor creation."""
 
-    def _read_source(self, module):
-        with open(module.__file__) as f:
-            return f.read()
-
     def test_sandbox_imports_portfolio_loader(self):
         """Sandbox should import from portfolio.loader."""
         from tinohelm.node import sandbox
-        source = self._read_source(sandbox)
+        source = _read_source(sandbox)
         assert "create_strategies" in source, "sandbox.py should call create_strategies"
         assert "create_actors" in source, "sandbox.py should call create_actors"
 
     def test_sandbox_imports_bridge_actor(self):
         """Sandbox should import BridgeActor."""
         from tinohelm.node import sandbox
-        source = self._read_source(sandbox)
+        source = _read_source(sandbox)
         assert "BridgeActor" in source, "sandbox.py should reference BridgeActor"
         assert "BridgeActorConfig" in source, "sandbox.py should reference BridgeActorConfig"
 
     def test_sandbox_adds_bridge_to_trader(self):
         """Sandbox should add BridgeActor via node.trader.add_actor."""
         from tinohelm.node import sandbox
-        source = self._read_source(sandbox)
+        source = _read_source(sandbox)
         assert "add_actor(bridge_actor)" in source or "add_actor(bridge" in source, \
             "sandbox.py should add bridge_actor to the trader"
 
     def test_live_imports_portfolio_loader(self):
         """Live node should import from portfolio.loader."""
         from tinohelm.node import live
-        source = self._read_source(live)
+        source = _read_source(live)
         assert "create_strategies" in source or "load_portfolio_config" in source, \
             "live.py should import portfolio loader functions"
 
     def test_live_imports_bridge_actor(self):
         """Live node should import BridgeActor."""
         from tinohelm.node import live
-        source = self._read_source(live)
+        source = _read_source(live)
         assert "BridgeActor" in source, "live.py should reference BridgeActor"
         assert "BridgeActorConfig" in source, "live.py should reference BridgeActorConfig"
 
     def test_live_adds_bridge_to_trader(self):
         """Live node should add BridgeActor via node.trader.add_actor."""
         from tinohelm.node import live
-        source = self._read_source(live)
+        source = _read_source(live)
         assert "add_actor(bridge_actor)" in source or "add_actor(bridge" in source, \
             "live.py should add bridge_actor to the trader"
 
@@ -71,6 +71,6 @@ class TestFactoryAcceptsPortfolioConfig:
     def test_factory_supports_portfolio_config_param(self):
         """Factory config builder should accept portfolio_config in input dict."""
         from tinohelm.node import factory
-        source = open(factory.__file__).read()
+        source = _read_source(factory)
         assert "portfolio" in source.lower(), \
             "factory.py should reference portfolio config"
