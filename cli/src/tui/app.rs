@@ -44,6 +44,14 @@ pub struct Alert {
     pub kind: AlertKind,
 }
 
+/// A single entry in the real-time event log.
+#[derive(Debug, Clone)]
+pub struct EventLogEntry {
+    pub timestamp: String,
+    pub event_type: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum AlertKind {
     Info,
@@ -105,6 +113,10 @@ pub struct App {
     pub data_selected: usize,
     pub data_loading: bool,
 
+    // ── Event log ─────────────────────────────────────────────────────
+    pub event_log: VecDeque<EventLogEntry>,
+    pub log_scroll: u16,
+
     // ── WebSocket ───────────────────────────────────────────────────────
     pub ws_state: WsState,
     pub ws_reconnect_secs: Option<u64>,
@@ -157,6 +169,9 @@ impl App {
             data_catalog: None,
             data_selected: 0,
             data_loading: false,
+
+            event_log: VecDeque::with_capacity(200),
+            log_scroll: 0,
 
             ws_state: WsState::Disconnected,
             ws_reconnect_secs: None,
@@ -265,13 +280,41 @@ impl App {
         }
     }
 
+    /// Push an entry to the event log.
+    pub fn push_log(&mut self, event_type: &str, message: String) {
+        let ts = chrono_lite_now();
+        self.event_log.push_back(EventLogEntry {
+            timestamp: ts,
+            event_type: event_type.to_string(),
+            message,
+        });
+        while self.event_log.len() > 200 {
+            self.event_log.pop_front();
+        }
+    }
+
     /// Handle an incoming WebSocket event.
     pub fn handle_ws_event(&mut self, event: WsEvent) {
         match event {
             WsEvent::BacktestProgress { run_id, pct, .. } => {
+                let id_short = run_id.get(..6).unwrap_or(&run_id).to_string();
+                self.push_log("bt.prog", format!("#{} {}%", id_short, pct));
                 if let Some(bt) = self.backtests.iter_mut().find(|b| b.run_id == run_id) {
                     bt.status = format!("running ({}%)", pct);
                 }
+            }
+            WsEvent::BacktestStats { run_id, trades, pnl, win_rate } => {
+                let id_short = run_id.get(..6).unwrap_or(&run_id).to_string();
+                self.push_log(
+                    "bt.stat",
+                    format!(
+                        "#{} trades={} pnl={:.2} wr={:.1}%",
+                        id_short,
+                        trades.unwrap_or(0),
+                        pnl.unwrap_or(0.0),
+                        win_rate.unwrap_or(0.0) * 100.0,
+                    ),
+                );
             }
             WsEvent::BacktestCompleted {
                 run_id, status, ..
@@ -283,12 +326,12 @@ impl App {
                 } else {
                     AlertKind::Error
                 };
+                self.push_log("bt.done", msg.clone());
                 self.push_alert(kind, msg);
                 if let Some(bt) = self.backtests.iter_mut().find(|b| b.run_id == run_id) {
                     bt.status = status;
                 }
             }
-            WsEvent::BacktestStats { .. } => {}
             WsEvent::NodeHeartbeat { node_type, .. } => {
                 let now = std::time::Instant::now();
                 match node_type.as_str() {
@@ -296,10 +339,15 @@ impl App {
                     "live" => self.live_last_heartbeat = Some(now),
                     _ => {}
                 }
+                // Heartbeats are too frequent for the log — skip
             }
             WsEvent::SystemError { message } => {
+                self.push_log("sys.err", message.clone());
                 self.push_alert(AlertKind::Error, message.clone());
                 self.set_error(message);
+            }
+            WsEvent::Unknown => {
+                self.push_log("unknown", "unrecognized event".to_string());
             }
         }
     }

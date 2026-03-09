@@ -139,4 +139,7 @@ pub enum WsEvent {
     },
     #[serde(rename = "system.error")]
     SystemError { message: String },
+
+    #[serde(other)]
+    Unknown,
 }
