@@ -176,8 +176,15 @@ async def persist_strategies(
             (not FK), so it is unaffected by rebuilds.
     """
     if rebuild:
-        # Full rebuild: clear strategies and versions, then re-insert
-        from sqlalchemy import delete
+        # Full rebuild: clear strategies and versions, then re-insert.
+        # Must nullify backtest_runs FK first to avoid constraint violations.
+        from sqlalchemy import delete, update
+        from tinohelm.db.models import BacktestRun
+        await db.execute(
+            update(BacktestRun)
+            .where(BacktestRun.strategy_version_id.isnot(None))
+            .values(strategy_version_id=None)
+        )
         await db.execute(delete(StrategyVersion))
         await db.execute(delete(Strategy))
         await db.flush()

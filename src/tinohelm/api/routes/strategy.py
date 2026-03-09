@@ -26,6 +26,7 @@ class StrategyItem(BaseModel):
 
     id: int
     name: str
+    type: str = "single"
     file_path: str
     strategy_class: str
     config_class: str
@@ -47,6 +48,7 @@ class StrategyDetail(BaseModel):
 
     id: int
     name: str
+    type: str = "single"
     file_path: str
     strategy_class: str
     config_class: str
@@ -99,6 +101,7 @@ async def list_strategies(
         StrategyItem(
             id=s.id,
             name=s.name,
+            type=s.type.value if s.type else "single",
             file_path=s.file_path,
             strategy_class=s.strategy_class,
             config_class=s.config_class,
@@ -127,6 +130,7 @@ async def get_strategy(
     return StrategyDetail(
         id=strategy.id,
         name=strategy.name,
+        type=strategy.type.value if strategy.type else "single",
         file_path=strategy.file_path,
         strategy_class=strategy.strategy_class,
         config_class=strategy.config_class,
