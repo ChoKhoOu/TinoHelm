@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
-use crate::cli::style::{POS, NEG};
+use crate::cli::style::{POS, NEG, LONG_COLOR, SHORT_COLOR};
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
@@ -293,8 +293,8 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
         let s_fill = bar_w.saturating_sub(l_fill);
         let dir_bar = format!(
             "{}{}",
-            format!("{}", "\u{2588}".repeat(l_fill).cyan()),
-            format!("{}", "\u{2588}".repeat(s_fill).yellow()),
+            format!("{}", "\u{2588}".repeat(l_fill).with(LONG_COLOR)),
+            format!("{}", "\u{2588}".repeat(s_fill).with(SHORT_COLOR)),
         );
         bx.line(&format!(
             "  [{}]  Long {:.0}% / Short {:.0}%",

@@ -14,6 +14,12 @@ pub const NEG: Color = Color::Rgb { r: 248, g: 113, b: 113 };
 /// Medium grey for muted/dim text — visible on both light and dark backgrounds.
 const MUTED_GREY: Color = Color::Rgb { r: 128, g: 128, b: 128 };
 
+/// Long position blue (Tailwind blue-400) — distinct from PnL green.
+pub const LONG_COLOR: Color = Color::Rgb { r: 96, g: 165, b: 250 };
+
+/// Short position orange (Tailwind orange-400) — distinct from PnL red.
+pub const SHORT_COLOR: Color = Color::Rgb { r: 251, g: 146, b: 60 };
+
 // ── ANSI Helpers ─────────────────────────────────────────────────────────
 
 /// Strip ANSI escape sequences from a string.
