@@ -41,9 +41,9 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
             let t = Table::new(&[
                 ("Name", 20, "left"),
                 ("Type", 10, "left"),
-                ("Class", 20, "left"),
-                ("Symbols", 8, "right"),
-                ("Updated", 19, "left"),
+                ("Class", 22, "left"),
+                ("Sym", 4, "right"),
+                ("Updated", 8, "left"),
             ]);
             t.header();
 
@@ -54,7 +54,23 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 let updated = s
                     .updated_at
                     .as_deref()
-                    .map(|t| t[..19.min(t.len())].replace('T', " "))
+                    .map(|t| {
+                        // Compact date: "Mar 05" from "2026-03-05T..."
+                        let clean = t[..10.min(t.len())].to_string();
+                        let parts: Vec<&str> = clean.split('-').collect();
+                        if parts.len() == 3 {
+                            let month = match parts[1] {
+                                "01" => "Jan", "02" => "Feb", "03" => "Mar",
+                                "04" => "Apr", "05" => "May", "06" => "Jun",
+                                "07" => "Jul", "08" => "Aug", "09" => "Sep",
+                                "10" => "Oct", "11" => "Nov", "12" => "Dec",
+                                _ => parts[1],
+                            };
+                            format!("{} {}", month, parts[2])
+                        } else {
+                            clean
+                        }
+                    })
                     .unwrap_or_else(|| "-".to_string());
 
                 let type_display = if stype == "portfolio" {
@@ -64,9 +80,9 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 };
 
                 t.row(&[
-                    &bold(&s.name[..20.min(s.name.len())]),
+                    &bold(&accent(&s.name[..20.min(s.name.len())])),
                     &type_display,
-                    &cls[..20.min(cls.len())],
+                    &accent(&cls[..22.min(cls.len())]),
                     &sym_count.to_string(),
                     &updated,
                 ]);
