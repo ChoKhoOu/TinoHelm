@@ -2,20 +2,17 @@
 
 use ratatui::{
     layout::Rect,
-    style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
 use crate::tui::app::App;
 use crate::tui::theme;
+use crate::tui::widgets::titled_block;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::style_border())
-        .title(Span::styled(" DATA CATALOG ", theme::style_header()));
+    let block = titled_block(" DATA CATALOG ", false);
 
     let mut lines = Vec::new();
 

@@ -5,12 +5,13 @@ use ratatui::{
     prelude::Stylize,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table},
+    widgets::{Cell, Paragraph, Row, Sparkline, Table},
     Frame,
 };
 
 use crate::tui::app::{App, PanelFocus};
 use crate::tui::theme;
+use crate::tui::widgets::{colored_val, divider_line, header_cell, kv_line, section_title, stat_pair, titled_block};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::default()
@@ -24,12 +25,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_list(f: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.panel_focus == PanelFocus::Left;
-    let border_style = if is_focused {
-        theme::style_border_focused()
-    } else {
-        theme::style_border()
-    };
-
     let title = if app.backtest_loading {
         " BACKTEST RUNS (loading\u{2026}) "
     } else {
@@ -37,13 +32,13 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let header = Row::new(vec![
-        Cell::from("ID"),
-        Cell::from("Strategy"),
-        Cell::from("Symbol"),
-        Cell::from("Intv"),
-        Cell::from("Status"),
+        header_cell("ID"),
+        header_cell("Strategy"),
+        header_cell("Symbol"),
+        header_cell("Intv"),
+        header_cell("Status"),
     ])
-    .style(theme::style_header());
+    .height(2);
 
     let rows: Vec<Row> = app
         .backtests
@@ -124,23 +119,13 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(Span::styled(title, theme::style_header())),
-        );
+        .block(titled_block(title, is_focused));
 
     f.render_widget(table, area);
 }
 
 fn render_detail(f: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.panel_focus == PanelFocus::Right;
-    let border_style = if is_focused {
-        theme::style_border_focused()
-    } else {
-        theme::style_border()
-    };
 
     let bt = match app.backtests.get(app.backtest_selected) {
         Some(bt) => bt,
@@ -149,12 +134,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                 "  No backtest selected",
                 theme::style_dim(),
             ))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(Span::styled(" DETAIL ", theme::style_header())),
-            );
+            .block(titled_block(" DETAIL ", is_focused));
             f.render_widget(p, area);
             return;
         }
@@ -567,23 +547,13 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let stats_para = Paragraph::new(lines)
         .scroll((app.detail_scroll, 0))
-        .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(Span::styled(title, theme::style_header())),
-    );
+        .block(titled_block(&title, is_focused));
     f.render_widget(stats_para, chunks[0]);
 
     // ── Equity sparkline ──
     if has_equity {
         let sparkline = Sparkline::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(Span::styled(" EQUITY ", theme::style_header())),
-            )
+            .block(titled_block(" EQUITY ", is_focused))
             .data(&app.detail_equity)
             .style(Style::default().fg(theme::FG_RUNNING))
             .add_modifier(Modifier::BOLD);
@@ -591,64 +561,3 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-// ── Detail panel helpers ─────────────────────────────────────────────────
-
-fn kv_line(label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(label.to_string(), Style::default().fg(theme::FG_AMBER)),
-        Span::raw(" "),
-        Span::styled(value.to_string(), Style::default().fg(theme::FG_PRIMARY)),
-    ])
-}
-
-fn divider_line() -> Line<'static> {
-    Line::from(Span::styled(
-        "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string(),
-        Style::default().fg(theme::FG_BORDER),
-    ))
-}
-
-fn section_title(title: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        title.to_string(),
-        Style::default()
-            .fg(theme::FG_AMBER)
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn colored_val(val: f64, suffix: &str) -> Span<'static> {
-    let color = if val > 0.001 {
-        theme::FG_POSITIVE
-    } else if val < -0.001 {
-        theme::FG_NEGATIVE
-    } else {
-        theme::FG_PRIMARY
-    };
-    let prefix = if val > 0.001 { "+" } else { "" };
-    Span::styled(
-        format!("{}{:.2}{}", prefix, val, suffix),
-        Style::default().fg(color),
-    )
-}
-
-/// Render two stats side by side: "  Label1 value1  Label2 value2"
-fn stat_pair(l1: &str, v1: Option<f64>, l2: &str, v2: Option<f64>) -> Line<'static> {
-    let v1_span = match v1 {
-        Some(v) => colored_val(v, ""),
-        None => Span::styled("-".to_string(), theme::style_dim()),
-    };
-    let v2_span = match v2 {
-        Some(v) => colored_val(v, ""),
-        None => Span::styled("-".to_string(), theme::style_dim()),
-    };
-    Line::from(vec![
-        Span::styled(format!("  {:<7}", l1), Style::default().fg(theme::FG_AMBER)),
-        Span::raw(" "),
-        v1_span,
-        Span::raw("    "),
-        Span::styled(format!("{:<7}", l2), Style::default().fg(theme::FG_AMBER)),
-        Span::raw(" "),
-        v2_span,
-    ])
-}

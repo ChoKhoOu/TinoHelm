@@ -5,14 +5,15 @@ use ratatui::{
     prelude::Stylize,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Sparkline},
+    widgets::{Paragraph, Sparkline},
     Frame,
 };
 
 use crate::tui::app::App;
 use crate::tui::theme;
+use crate::tui::widgets::{self, titled_block};
 
-const HEARTBEAT_TIMEOUT_SECS: u64 = 30;
+const HEARTBEAT_TIMEOUT_SECS: u64 = widgets::HEARTBEAT_TIMEOUT_SECS;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // Split into top half + active jobs + equity curve
@@ -38,10 +39,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_system_status(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::style_border())
-        .title(Span::styled(" SYSTEM STATUS ", theme::style_header()));
+    let block = titled_block(" SYSTEM STATUS ", false);
 
     let now = std::time::Instant::now();
 
@@ -105,10 +103,7 @@ fn status_line<'a>(label: &'a str, value: &'a str, color: ratatui::style::Color)
 }
 
 fn render_recent_backtests(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::style_border())
-        .title(Span::styled(" RECENT BACKTESTS ", theme::style_header()));
+    let block = titled_block(" RECENT BACKTESTS ", false);
 
     let mut lines = vec![Line::from("")];
     let display_count = (area.height as usize).saturating_sub(3).min(app.backtests.len());
@@ -170,10 +165,7 @@ fn render_recent_backtests(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_active_jobs(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::style_border())
-        .title(Span::styled(" ACTIVE JOBS ", theme::style_header()));
+    let block = titled_block(" ACTIVE JOBS ", false);
 
     let running: Vec<&BacktestRunItem> = app
         .backtests
@@ -224,10 +216,7 @@ fn render_active_jobs(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_equity_curve(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::style_border())
-        .title(Span::styled(" EQUITY CURVE ", theme::style_header()));
+    let block = titled_block(" EQUITY CURVE ", false);
 
     if app.detail_equity.is_empty() {
         let p = Paragraph::new(Line::from(Span::styled(

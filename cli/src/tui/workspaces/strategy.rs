@@ -4,12 +4,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Cell, Paragraph, Row, Table},
     Frame,
 };
 
 use crate::tui::app::{App, PanelFocus};
 use crate::tui::theme;
+use crate::tui::widgets::{header_cell, kv_line, titled_block};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::default()
@@ -23,12 +24,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_list(f: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.panel_focus == PanelFocus::Left;
-    let border_style = if is_focused {
-        theme::style_border_focused()
-    } else {
-        theme::style_border()
-    };
-
     let title = if app.strategy_loading {
         " STRATEGIES (loading\u{2026}) "
     } else {
@@ -36,11 +31,11 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let header = Row::new(vec![
-        Cell::from("Name"),
-        Cell::from("Type"),
-        Cell::from("Class"),
+        header_cell("Name"),
+        header_cell("Type"),
+        header_cell("Class"),
     ])
-    .style(theme::style_header());
+    .height(2);
 
     let rows: Vec<Row> = app
         .strategies
@@ -55,12 +50,12 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
             };
 
             let type_color = match s.strategy_type.as_deref() {
-                Some("portfolio") => theme::FG_RUNNING,
+                Some("portfolio") => theme::FG_TAG,
                 _ => theme::FG_SECONDARY,
             };
 
             Row::new(vec![
-                Cell::from(s.name.clone()).style(Style::default().fg(theme::FG_HINT)),
+                Cell::from(s.name.clone()).style(Style::default().fg(theme::FG_IDENTIFIER)),
                 Cell::from(s.strategy_type.as_deref().unwrap_or("single").to_string())
                     .style(Style::default().fg(type_color)),
                 Cell::from(s.strategy_class.clone().unwrap_or_default()),
@@ -77,23 +72,13 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(Span::styled(title, theme::style_header())),
-        );
+        .block(titled_block(title, is_focused));
 
     f.render_widget(table, area);
 }
 
 fn render_detail(f: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.panel_focus == PanelFocus::Right;
-    let border_style = if is_focused {
-        theme::style_border_focused()
-    } else {
-        theme::style_border()
-    };
 
     let strat = match app.strategies.get(app.strategy_selected) {
         Some(s) => s,
@@ -102,12 +87,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                 "  No strategy selected",
                 theme::style_dim(),
             ))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(Span::styled(" DETAIL ", theme::style_header())),
-            );
+            .block(titled_block(" DETAIL ", is_focused));
             f.render_widget(p, area);
             return;
         }
@@ -198,19 +178,6 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    let p = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(Span::styled(title, theme::style_header())),
-    );
+    let p = Paragraph::new(lines).block(titled_block(&title, is_focused));
     f.render_widget(p, area);
-}
-
-fn kv_line(label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(label.to_string(), Style::default().fg(theme::FG_AMBER)),
-        Span::raw(" "),
-        Span::styled(value.to_string(), Style::default().fg(theme::FG_PRIMARY)),
-    ])
 }
