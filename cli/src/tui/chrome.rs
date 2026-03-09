@@ -29,6 +29,12 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD),
     ));
 
+    // Separator between brand and nav
+    spans.push(Span::styled(
+        " \u{2502} ",
+        Style::default().fg(theme::FG_BORDER),
+    ));
+
     // Workspace tabs
     let tabs = [
         ("F1", "DASH", Workspace::Dashboard),
@@ -38,7 +44,7 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
         ("F5", "DATA", Workspace::Data),
     ];
 
-    for (key, label, ws) in &tabs {
+    for (i, (key, label, ws)) in tabs.iter().enumerate() {
         let is_active = app.workspace == *ws;
         if is_active {
             spans.push(Span::styled(
@@ -49,19 +55,26 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
-                format!("{} ", label),
+                format!(" {} ", label),
                 Style::default()
                     .fg(theme::FG_AMBER)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
             spans.push(Span::styled(
-                format!(" {} ", key),
+                format!(" {}", key),
                 Style::default().fg(theme::FG_DIM),
             ));
             spans.push(Span::styled(
-                format!("{} ", label),
-                Style::default().fg(theme::FG_DIM),
+                format!(" {} ", label),
+                Style::default().fg(theme::FG_SECONDARY),
+            ));
+        }
+        // Dim separator between tabs (except after last)
+        if i < tabs.len() - 1 {
+            spans.push(Span::styled(
+                "\u{2502}",
+                Style::default().fg(theme::FG_BORDER),
             ));
         }
     }

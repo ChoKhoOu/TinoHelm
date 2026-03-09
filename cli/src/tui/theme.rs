@@ -23,7 +23,7 @@ pub const BG_WARN: Color = Color::Rgb(180, 150, 0);
 pub const FG_AMBER: Color = Color::Rgb(255, 176, 0);
 pub const FG_LOGO: Color = Color::Rgb(255, 140, 0);
 pub const FG_BORDER: Color = Color::Rgb(60, 60, 60);
-pub const FG_BORDER_ACTIVE: Color = Color::Rgb(120, 120, 120);
+pub const FG_BORDER_ACTIVE: Color = Color::Rgb(0, 180, 220);
 pub const FG_DIM: Color = Color::Rgb(100, 100, 100);
 pub const FG_HINT: Color = Color::Rgb(0, 180, 220);
 
