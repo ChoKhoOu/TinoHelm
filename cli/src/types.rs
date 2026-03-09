@@ -19,6 +19,7 @@ pub struct BacktestRunItem {
 #[derive(Debug, Deserialize)]
 pub struct BacktestRunList {
     pub runs: Vec<BacktestRunItem>,
+    #[allow(dead_code)]
     pub total: u64,
 }
 
@@ -106,19 +107,11 @@ pub struct DataFetchRequest {
     pub end: String,
 }
 
-// ---- Node ----
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct NodeStatus {
-    pub node_type: String,
-    pub running: bool,
-    pub last_heartbeat: Option<String>,
-}
-
 // ---- WebSocket events ----
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type")]
+#[allow(dead_code)]
 pub enum WsEvent {
     #[serde(rename = "backtest.progress")]
     BacktestProgress {

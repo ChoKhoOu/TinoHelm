@@ -333,7 +333,4 @@ impl BoxReport {
         self.line(&combined);
     }
 
-    pub fn empty(&self) {
-        self.line("");
-    }
 }
