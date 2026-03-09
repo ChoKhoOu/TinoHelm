@@ -76,7 +76,7 @@ fn jf64(v: &serde_json::Value, key: &str) -> Option<f64> {
 }
 
 fn ju64(v: &serde_json::Value, key: &str) -> Option<u64> {
-    v.get(key).and_then(|x| x.as_u64())
+    v.get(key).and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
 }
 
 fn jstr<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {

@@ -5,8 +5,11 @@
 
 use crossterm::style::{Color, Stylize};
 
-/// Bright green (ANSI 92) — standard ANSI 32 green looks grey on light terminals.
-pub const POS: Color = Color::AnsiValue(10);
+/// Vivid green via 24-bit RGB — works correctly on both light and dark terminals.
+pub const POS: Color = Color::Rgb { r: 0, g: 200, b: 83 };
+
+/// Medium grey for muted/dim text — visible on both light and dark backgrounds.
+const MUTED_GREY: Color = Color::Rgb { r: 128, g: 128, b: 128 };
 
 // ── ANSI Helpers ─────────────────────────────────────────────────────────
 
@@ -30,9 +33,11 @@ pub fn strip_ansi(s: &str) -> String {
     result
 }
 
-/// Get the visual (non-ANSI) length of a string.
+/// Get the visual (non-ANSI) character count of a string.
+/// Uses `.chars().count()` instead of `.len()` to handle multi-byte UTF-8
+/// characters like █ (3 bytes) correctly as 1 display column.
 pub fn ansi_len(s: &str) -> usize {
-    strip_ansi(s).len()
+    strip_ansi(s).chars().count()
 }
 
 /// Right-pad a string to a given visual width (ANSI-aware).
@@ -57,7 +62,7 @@ pub fn accent(text: &str) -> String {
 }
 
 pub fn muted(text: &str) -> String {
-    format!("{}", text.dark_grey())
+    format!("{}", text.with(MUTED_GREY))
 }
 
 /// Format and color a numeric value: green if positive, red if negative.
@@ -332,5 +337,4 @@ impl BoxReport {
         let combined = format!("{}  {}", left, right);
         self.line(&combined);
     }
-
 }
