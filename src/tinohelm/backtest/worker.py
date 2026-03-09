@@ -5,6 +5,7 @@ import json
 import logging
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import redis
@@ -17,19 +18,35 @@ from tinohelm.db.sync_engine import get_sync_engine
 def _publish_progress(
     r: redis.Redis,
     run_id: str,
-    progress_pct: int,
-    status: str,
-    extra: dict | None = None,
+    pct: int,
+    elapsed_secs: float | None = None,
 ) -> None:
-    """Publish a progress event to the EventBridge channel."""
+    """Publish a ``backtest.progress`` event to the EventBridge channel."""
     payload: dict = {
         "type": "backtest.progress",
         "run_id": run_id,
-        "progress_pct": progress_pct,
-        "status": status,
+        "pct": pct,
+        "elapsed_secs": elapsed_secs,
     }
-    if extra:
-        payload.update(extra)
+    r.publish(
+        f"tino:backtest:progress:{run_id}",
+        json.dumps(payload, default=str),
+    )
+
+
+def _publish_completed(
+    r: redis.Redis,
+    run_id: str,
+    status: str,
+    summary: dict | None = None,
+) -> None:
+    """Publish a ``backtest.completed`` event to the EventBridge channel."""
+    payload: dict = {
+        "type": "backtest.completed",
+        "run_id": run_id,
+        "status": status,
+        "summary": summary or {},
+    }
     r.publish(
         f"tino:backtest:progress:{run_id}",
         json.dumps(payload, default=str),
@@ -51,7 +68,7 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
         if current_run_id is not None:
             try:
                 _update_db_status(db_url, current_run_id, "cancelled")
-                _publish_progress(r, current_run_id, 0, "cancelled")
+                _publish_completed(r, current_run_id, "cancelled")
             except Exception:
                 logger.exception("Failed to mark run %s as cancelled on SIGTERM", current_run_id)
 
@@ -81,12 +98,13 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 logger.info(f"Backtest {run_id} was cancelled before execution")
                 r.delete(cancel_key)
                 _update_db_status(db_url, run_id, "cancelled")
-                _publish_progress(r, run_id, 0, "cancelled")
+                _publish_completed(r, run_id, "cancelled")
                 current_run_id = None
                 continue
 
             # Publish running status
-            _publish_progress(r, run_id, 0, "running")
+            job_start_time = time.monotonic()
+            _publish_progress(r, run_id, 0)
             # Store progress for status polling
             r.setex(f"tino:backtest:progress:{run_id}", 86400, "0")
 
@@ -110,7 +128,8 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 )
 
                 # Publish progress: engine setup done
-                _publish_progress(r, run_id, 10, "running")
+                elapsed = round(time.monotonic() - job_start_time, 1)
+                _publish_progress(r, run_id, 10, elapsed_secs=elapsed)
                 r.setex(f"tino:backtest:progress:{run_id}", 86400, "10")
 
                 # Create artifact directory and set on runner for report export
@@ -126,9 +145,9 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                     json.dump(results, f, indent=2, default=str)
 
                 # Publish completion
-                _publish_progress(r, run_id, 100, "completed", extra={
-                    "summary": results.get("statistics", {}),
-                })
+                elapsed = round(time.monotonic() - job_start_time, 1)
+                _publish_progress(r, run_id, 100, elapsed_secs=elapsed)
+                _publish_completed(r, run_id, "completed", summary=results.get("statistics", {}))
 
                 # Store result summary in a Redis key for quick access
                 r.setex(
@@ -154,14 +173,14 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                     logger.info("Backtest %s cancelled after execution", run_id)
                     r.delete(cancel_key)
                     _update_db_status(db_url, run_id, "cancelled")
-                    _publish_progress(r, run_id, 0, "cancelled")
+                    _publish_completed(r, run_id, "cancelled")
                 else:
                     logger.info("Backtest %s completed successfully", run_id)
 
             except Exception as e:
                 logger.exception("Backtest %s failed: %s", run_id, e)
                 safe_error = "Internal backtest error. Check server logs for details."
-                _publish_progress(r, run_id, 0, "failed", extra={"error": safe_error})
+                _publish_completed(r, run_id, "failed")
 
                 # Update database record on failure
                 _update_db_status(db_url, run_id, "failed", error_msg=safe_error)
