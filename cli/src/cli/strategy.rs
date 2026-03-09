@@ -58,26 +58,28 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                     .unwrap_or_else(|| "-".to_string());
 
                 let type_display = if stype == "portfolio" {
-                    accent(stype)
+                    format!("{}", "portfolio".with(POS).bold())
                 } else {
-                    muted(stype)
+                    dim(stype)
+                };
+
+                let sym_display = if sym_count > 1 {
+                    accent(&sym_count.to_string())
+                } else {
+                    "1".to_string()
                 };
 
                 t.row(&[
-                    &accent(&s.name[..20.min(s.name.len())]),
+                    &bold(&accent(&s.name[..20.min(s.name.len())])),
                     &type_display,
-                    &cls[..20.min(cls.len())],
-                    &if sym_count > 1 {
-                        sym_count.to_string()
-                    } else {
-                        muted("1")
-                    },
-                    &muted(&updated),
+                    cls[..20.min(cls.len())].to_string().as_str(),
+                    &sym_display,
+                    &dim(&updated),
                 ]);
             }
 
             t.footer();
-            println!("    {}", muted(&format!("{} strategies", strategies.len())));
+            println!("    {}", dim(&format!("{} strategies", strategies.len())));
             println!();
         }
         StrategyCmd::Info { name } => {
