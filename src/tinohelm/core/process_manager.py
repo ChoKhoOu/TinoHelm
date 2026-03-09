@@ -50,6 +50,9 @@ class ProcessManager:
         self._db_url = db_url
         self._nodes: dict[str, NodeInfo] = {}
         self._backtest_workers: list[Process] = []
+        self._min_workers: int = 1
+        self._max_workers: int = 4
+        self._ephemeral_idle_timeout: int = 60
 
     # ------------------------------------------------------------------
     # Node lifecycle
@@ -260,15 +263,83 @@ class ProcessManager:
     # ------------------------------------------------------------------
 
     def start_workers(self, n: int) -> None:
-        """Start *n* backtest worker processes."""
-        from tinohelm.backtest.worker import run_worker
+        """Start backtest worker pool with dynamic scaling.
 
-        worker_args = (self._redis_url, self._catalog_path, self._artifacts_path, self._db_url)
-        for i in range(n):
-            proc = Process(target=run_worker, args=worker_args, name=f"tino-bt-worker-{i}", daemon=True)
-            proc.start()
-            self._backtest_workers.append(proc)
-            logger.info("Started backtest worker %d (pid=%s)", i, proc.pid)
+        Starts ``min(n, min_workers)`` keep-alive workers that never
+        auto-exit, plus any extra as ephemeral workers that self-terminate
+        after ``ephemeral_idle_timeout`` seconds of idleness.
+        """
+        self._min_workers = max(1, min(n, self._min_workers))
+        self._max_workers = max(n, self._max_workers)
+
+        # Start keep-alive workers (idle_timeout=0)
+        for i in range(self._min_workers):
+            self._spawn_worker(idle_timeout=0, label=f"tino-bt-worker-{i}")
+
+        # Start additional ephemeral workers if n > min
+        for i in range(self._min_workers, n):
+            self._spawn_worker(
+                idle_timeout=self._ephemeral_idle_timeout,
+                label=f"tino-bt-ephemeral-{i}",
+            )
+
+    def _spawn_worker(self, idle_timeout: int = 0, label: str = "tino-bt-worker") -> Process:
+        """Spawn a single backtest worker process."""
+        from tinohelm.backtest.worker import backtest_worker
+
+        worker_args = (
+            self._redis_url,
+            self._catalog_path,
+            self._artifacts_path,
+            self._db_url,
+            idle_timeout,
+        )
+        proc = Process(target=backtest_worker, args=worker_args, name=label, daemon=True)
+        proc.start()
+        self._backtest_workers.append(proc)
+        kind = "keep-alive" if idle_timeout == 0 else f"ephemeral({idle_timeout}s)"
+        logger.info("Started %s backtest worker (pid=%s, %s)", label, proc.pid, kind)
+        return proc
+
+    def ensure_capacity(self) -> None:
+        """Auto-scale workers based on queue depth.
+
+        Called periodically by the Watchdog.  Spawns ephemeral workers
+        when the queue has pending jobs and current alive count is below
+        ``max_workers``.  Dead ephemeral workers are cleaned up automatically.
+        """
+        # Prune dead workers from the list
+        alive_before = len(self._backtest_workers)
+        self._backtest_workers = [w for w in self._backtest_workers if w.is_alive()]
+        pruned = alive_before - len(self._backtest_workers)
+        if pruned > 0:
+            logger.info("Pruned %d dead worker(s), %d alive", pruned, len(self._backtest_workers))
+
+        # Ensure minimum keep-alive workers
+        alive = len(self._backtest_workers)
+        if alive < self._min_workers:
+            for _ in range(self._min_workers - alive):
+                self._spawn_worker(idle_timeout=0, label="tino-bt-worker-ka")
+
+        # Scale up if queue has pending jobs
+        try:
+            queue_len = self._redis.llen("tino:backtest:queue")
+        except Exception:
+            return
+
+        if queue_len > 0:
+            alive = len(self._backtest_workers)
+            if alive < self._max_workers:
+                needed = min(queue_len, self._max_workers - alive)
+                for i in range(needed):
+                    self._spawn_worker(
+                        idle_timeout=self._ephemeral_idle_timeout,
+                        label=f"tino-bt-ephemeral-auto-{alive + i}",
+                    )
+                logger.info(
+                    "Auto-scaled: +%d worker(s) for %d queued job(s) (total: %d)",
+                    needed, queue_len, len(self._backtest_workers),
+                )
 
     def stop_workers(self) -> None:
         """Stop all running backtest worker processes."""

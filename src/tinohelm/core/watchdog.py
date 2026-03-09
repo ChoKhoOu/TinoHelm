@@ -130,25 +130,14 @@ class Watchdog:
                 info.status = "error"
 
     async def _check_backtest_workers(self) -> None:
-        """Restart any dead backtest worker processes."""
-        for i, proc in enumerate(self._pm.get_backtest_workers()):
-            if proc.is_alive():
-                continue
+        """Auto-scale backtest worker pool.
 
-            logger.warning("Backtest worker %d (pid=%s) is dead; restarting", i, proc.pid)
-            try:
-                from tinohelm.backtest.worker import run_worker
-                from multiprocessing import Process as _Process
-
-                worker_args = (
-                    self._pm.redis_url,
-                    self._pm.catalog_path,
-                    self._pm.artifacts_path,
-                    self._pm.db_url,
-                )
-                new_proc = _Process(target=run_worker, args=worker_args, name=f"tino-bt-worker-{i}", daemon=True)
-                new_proc.start()
-                self._pm.replace_backtest_worker(i, new_proc)
-                logger.info("Backtest worker %d restarted (pid=%s)", i, new_proc.pid)
-            except Exception:
-                logger.exception("Failed to restart backtest worker %d", i)
+        Calls ``ensure_capacity`` which handles:
+        - Pruning dead ephemeral workers
+        - Maintaining minimum keep-alive workers
+        - Spawning ephemeral workers when queue has pending jobs
+        """
+        try:
+            await asyncio.to_thread(self._pm.ensure_capacity)
+        except Exception:
+            logger.exception("Failed to ensure worker capacity")

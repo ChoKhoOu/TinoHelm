@@ -77,10 +77,15 @@ def _publish_completed(
     )
 
 
-def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_url: str) -> None:
+def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_url: str, idle_timeout: int = 0) -> None:
     """Worker process: dequeue backtest jobs from Redis and execute them.
 
     Runs in an infinite loop until terminated.
+
+    Args:
+        idle_timeout: Seconds of idle time before self-terminating.
+            0 = keep-alive (never auto-exit). Used for the minimum
+            resident worker.  Ephemeral workers use e.g. 60.
     """
     running = True
     current_run_id: str | None = None
@@ -100,14 +105,24 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
     signal.signal(signal.SIGINT, _signal_handler)
 
     r = redis.from_url(redis_url)
-    logger.info("Backtest worker started, waiting for jobs...")
+    kind = "keep-alive" if idle_timeout == 0 else f"ephemeral({idle_timeout}s)"
+    logger.info("Backtest worker started (%s), waiting for jobs...", kind)
+
+    idle_since = time.monotonic()
 
     while running:
         try:
             # Block-wait for a job (timeout 5s to check running flag)
             result = r.brpop("tino:backtest:queue", timeout=5)
             if result is None:
+                # No job — check idle timeout for ephemeral workers
+                if idle_timeout > 0 and (time.monotonic() - idle_since) > idle_timeout:
+                    logger.info("Ephemeral worker idle for %ds, shutting down (pid=%s)", idle_timeout, sys.argv[0] if sys.argv else "?")
+                    break
                 continue
+
+            # Got a job — reset idle timer
+            idle_since = time.monotonic()
 
             _, job_data = result
             job = json.loads(job_data)
@@ -231,7 +246,9 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
 
 
 # Alias used by process_manager and watchdog
-run_worker = backtest_worker
+def run_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_url: str, idle_timeout: int = 0) -> None:
+    """Entry-point alias for backtest_worker (used by ProcessManager)."""
+    backtest_worker(redis_url, catalog_path, artifacts_path, db_url, idle_timeout)
 
 
 def _update_db_status(
