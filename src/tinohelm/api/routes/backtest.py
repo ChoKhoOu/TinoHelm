@@ -107,6 +107,48 @@ class BacktestCancelResponse(BaseModel):
     status: str
 
 
+# ---- helpers ----
+
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+_HEX_RE = re.compile(r'^[0-9a-f]+$')
+
+
+async def resolve_run_id(prefix: str, db: AsyncSession) -> str:
+    """Resolve a short run_id prefix to a full UUID, git-style.
+
+    - Full UUID → returned as-is (fast path).
+    - Short hex prefix → LIKE query; unique match required.
+    """
+    prefix = prefix.strip().lower()
+
+    # Full UUID — skip prefix search
+    if _UUID_RE.match(prefix):
+        return prefix
+
+    # Must be hex-only to prevent injection via LIKE wildcards
+    if not _HEX_RE.match(prefix) or len(prefix) < 4:
+        raise HTTPException(
+            status_code=400,
+            detail="run_id prefix must be at least 4 hex characters",
+        )
+
+    stmt = (
+        select(BacktestRun.run_id)
+        .where(BacktestRun.run_id.like(f"{prefix}%"))
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+
+    if len(rows) == 0:
+        raise HTTPException(status_code=404, detail=f"No backtest run matching prefix '{prefix}'")
+    if len(rows) > 1:
+        matches = ", ".join(r[:8] for r in rows[:5])
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ambiguous prefix '{prefix}' matches {len(rows)} runs: {matches}",
+        )
+    return rows[0]
+
+
 # ---- routes ----
 
 @router.post("/run", response_model=BacktestRunResponse)
@@ -233,6 +275,7 @@ async def get_backtest_status(
     settings: Settings = Depends(get_settings_dep),
 ) -> BacktestRunStatus:
     """Get the status of a backtest run."""
+    run_id = await resolve_run_id(run_id, db)
     stmt = select(BacktestRun).where(BacktestRun.run_id == run_id)
     run = (await db.execute(stmt)).scalar_one_or_none()
     if run is None:
@@ -277,9 +320,7 @@ async def get_backtest_result(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Get the full result from the artifact file."""
-    # Validate run_id is a UUID to prevent path traversal
-    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
-        raise HTTPException(status_code=400, detail="Invalid run_id format")
+    run_id = await resolve_run_id(run_id, db)
 
     stmt = select(BacktestRun).where(BacktestRun.run_id == run_id)
     run = (await db.execute(stmt)).scalar_one_or_none()
@@ -305,6 +346,7 @@ async def cancel_backtest_run(
     rds: aioredis.Redis = Depends(get_redis),
 ) -> BacktestCancelResponse:
     """Cancel a queued or running backtest run."""
+    run_id = await resolve_run_id(run_id, db)
     stmt = select(BacktestRun).where(BacktestRun.run_id == run_id)
     run = (await db.execute(stmt)).scalar_one_or_none()
     if run is None:
