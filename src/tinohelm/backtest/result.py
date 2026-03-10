@@ -375,6 +375,123 @@ def extract_backtest_results(
         logger.warning("Failed to compute per-instrument breakdown", exc_info=True)
 
     # ------------------------------------------------------------------
+    # 9b. Advanced per-instrument analytics
+    # ------------------------------------------------------------------
+    instrument_cumulative_pnl: dict[str, list] = {}
+    instrument_correlation: dict[str, dict[str, float]] = {}
+    monthly_pnl_heatmap: list[dict[str, Any]] = []
+    portfolio_analytics: dict[str, Any] = {}
+
+    try:
+        if len(per_instrument) > 1:
+            import numpy as np
+            from collections import defaultdict as _defaultdict
+            from datetime import datetime as _dt, timezone as _tz
+
+            # Build per-instrument daily PnL matrix (grouped by close date)
+            daily_pnl_map: dict[str, dict[str, float]] = _defaultdict(lambda: _defaultdict(float))
+            all_dates: set[str] = set()
+            for p in closed_positions:
+                inst = str(p.instrument_id)
+                close_date = _dt.fromtimestamp(p.ts_closed / 1e9, tz=_tz.utc).strftime("%Y-%m-%d")
+                daily_pnl_map[inst][close_date] += _parse_realized_pnl(p.realized_pnl)
+                all_dates.add(close_date)
+
+            sorted_dates = sorted(all_dates)
+            instruments = sorted(per_instrument.keys())
+            n_dates = len(sorted_dates)
+            n_inst = len(instruments)
+
+            # Cumulative PnL per instrument (for stacked area chart)
+            for inst in instruments:
+                cum = 0.0
+                curve = []
+                for d in sorted_dates:
+                    cum += daily_pnl_map[inst].get(d, 0.0)
+                    curve.append({"date": d, "cum_pnl": round(cum, 2)})
+                instrument_cumulative_pnl[inst] = curve
+
+            # Daily returns matrix (n_dates x n_inst) for correlation & risk
+            returns_matrix = np.zeros((n_dates, n_inst))
+            for j, inst in enumerate(instruments):
+                for i, d in enumerate(sorted_dates):
+                    returns_matrix[i, j] = daily_pnl_map[inst].get(d, 0.0) / starting_balance
+
+            # Correlation matrix (pairwise Pearson)
+            if n_dates >= 10:
+                corr = np.corrcoef(returns_matrix.T)
+                for i, inst_i in enumerate(instruments):
+                    instrument_correlation[inst_i] = {}
+                    for j, inst_j in enumerate(instruments):
+                        if i != j:
+                            val = corr[i, j]
+                            if not (np.isnan(val) or np.isinf(val)):
+                                instrument_correlation[inst_i][inst_j] = round(float(val), 4)
+
+            # Per-instrument Sharpe, Sortino, MaxDD, Recovery Factor
+            for idx, inst in enumerate(instruments):
+                arr = returns_matrix[:, idx]
+                mean_ret = float(arr.mean())
+                std_ret = float(arr.std(ddof=1)) if n_dates > 1 else 0.0
+
+                # Sharpe (annualized 365 for crypto)
+                inst_sharpe = (mean_ret / std_ret * np.sqrt(365)) if std_ret > 1e-12 else None
+
+                # Sortino (downside deviation only)
+                downside = arr[arr < 0]
+                ds_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+                inst_sortino = (mean_ret / ds_std * np.sqrt(365)) if ds_std > 1e-12 else None
+
+                # Max drawdown from cumulative PnL
+                cum_pnl = np.cumsum([daily_pnl_map[inst].get(d, 0.0) for d in sorted_dates])
+                running_max = np.maximum.accumulate(cum_pnl)
+                dd = cum_pnl - running_max
+                max_dd = float(dd.min()) if len(dd) > 0 else 0.0
+                max_dd_pct = max_dd / starting_balance if starting_balance > 0 else 0.0
+
+                # Recovery factor = |total_pnl / max_drawdown|
+                inst_total_pnl = per_instrument[inst]["total_pnl"]
+                recovery = abs(inst_total_pnl / max_dd) if max_dd < -0.01 else None
+
+                def _safe_round(v, n=4):
+                    return round(v, n) if v is not None and not (np.isnan(v) or np.isinf(v)) else None
+
+                per_instrument[inst]["sharpe_ratio"] = _safe_round(inst_sharpe)
+                per_instrument[inst]["sortino_ratio"] = _safe_round(inst_sortino)
+                per_instrument[inst]["max_drawdown"] = _safe_round(max_dd_pct)
+                per_instrument[inst]["recovery_factor"] = _safe_round(recovery)
+
+            # Monthly PnL heatmap (instrument x month)
+            monthly_map: dict[str, dict[str, float]] = _defaultdict(lambda: _defaultdict(float))
+            for p in closed_positions:
+                inst = str(p.instrument_id)
+                close_month = _dt.fromtimestamp(p.ts_closed / 1e9, tz=_tz.utc).strftime("%Y-%m")
+                monthly_map[inst][close_month] += _parse_realized_pnl(p.realized_pnl)
+
+            all_months = sorted({m for mm in monthly_map.values() for m in mm})
+            for inst in instruments:
+                for month in all_months:
+                    monthly_pnl_heatmap.append({
+                        "instrument": inst,
+                        "month": month,
+                        "pnl": round(monthly_map[inst].get(month, 0.0), 2),
+                    })
+
+            # Diversification ratio (equal-weight assumption)
+            if n_dates >= 10 and n_inst >= 2:
+                weights = np.ones(n_inst) / n_inst
+                inst_vols = np.array([returns_matrix[:, j].std(ddof=1) for j in range(n_inst)])
+                cov = np.cov(returns_matrix.T)
+                port_vol = float(np.sqrt(weights @ cov @ weights))
+                wav = float(np.dot(weights, inst_vols))
+                if port_vol > 1e-12 and wav > 1e-12:
+                    portfolio_analytics["diversification_ratio"] = round(wav / port_vol, 4)
+                    portfolio_analytics["diversification_benefit_pct"] = round((1.0 - port_vol / wav) * 100, 2)
+
+    except Exception:
+        logger.warning("Failed to compute advanced per-instrument analytics", exc_info=True)
+
+    # ------------------------------------------------------------------
     # 10. Monthly & weekly returns
     # ------------------------------------------------------------------
     monthly_returns: list[dict[str, Any]] = []
@@ -544,4 +661,8 @@ def extract_backtest_results(
         "weekly_returns": weekly_returns,
         "drawdown_periods": drawdown_periods,
         "slippage_stats": slippage_stats,
+        "instrument_cumulative_pnl": instrument_cumulative_pnl,
+        "instrument_correlation": instrument_correlation,
+        "monthly_pnl_heatmap": monthly_pnl_heatmap,
+        "portfolio_analytics": portfolio_analytics,
     }
