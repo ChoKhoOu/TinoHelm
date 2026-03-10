@@ -532,7 +532,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                     }
                 }
             }
-            if pairs.len() >= 2 {
+            if !pairs.is_empty() {
                 pairs.sort_by(|a, b| {
                     b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
                 });
