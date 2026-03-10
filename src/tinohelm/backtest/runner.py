@@ -92,10 +92,32 @@ class BacktestRunner:
         if self._portfolio_config is not None:
             return self._portfolio_config
 
-        from tinohelm.portfolio.config import PortfolioConfig, AccountSettings
+        from tinohelm.portfolio.config import PortfolioConfig, AccountSettings, load_portfolio_config
 
         starting_balance = self.strategy_params.get("starting_balance", 10000)
         leverage = self.strategy_params.get("leverage", 1)
+
+        # Detect portfolio strategy (strategy_path points to portfolio.yaml)
+        file_part = self.strategy_path.rsplit(":", 1)[0] if self.strategy_path else ""
+        if file_part.endswith("portfolio.yaml"):
+            folder = Path(file_part).parent
+            config = load_portfolio_config(str(folder))
+            # Override account settings from job params
+            config.account = AccountSettings(
+                starting_balance=starting_balance,
+                currency=config.account.currency,
+                leverage=leverage,
+            )
+            # Merge additional strategy params from the job (override yaml defaults)
+            for k, v in self.strategy_params.items():
+                if k not in ("starting_balance", "leverage"):
+                    config.params[k] = v
+            # Override symbols/interval from job if provided
+            if self.symbols:
+                config.symbols = self.symbols
+            if self.intervals:
+                config.interval = self.intervals[0]
+            return config
 
         # For legacy mode, strategy_path is "file:ClassName", config_path is "file:ConfigName"
         return PortfolioConfig(
@@ -274,7 +296,11 @@ class BacktestRunner:
                 method = getattr(engine.trader, method_name, None)
                 if method is None:
                     continue
-                df = method()
+                if method_name == "generate_account_report":
+                    from nautilus_trader.model.identifiers import Venue
+                    df = method(Venue("BINANCE"))
+                else:
+                    df = method()
                 if df is not None and not df.empty:
                     csv_path = self.artifacts_dir / f"{filename}.csv"
                     df.to_csv(csv_path, index=True)
@@ -287,19 +313,15 @@ class BacktestRunner:
 
         Requires ``plotly>=6.3.1``. Silently skips if plotly is not installed.
         """
-        try:
-            from nautilus_trader.analysis import (
-                create_tearsheet,
-                TearsheetConfig,
-                TearsheetBarsWithFillsChart,
-                TearsheetDrawdownChart,
-                TearsheetEquityChart,
-                TearsheetRunInfoChart,
-                TearsheetStatsTableChart,
-            )
-        except ImportError:
-            logger.info("Tearsheet skipped: plotly not installed (pip install plotly>=6.3.1)")
-            return
+        from nautilus_trader.analysis import (
+            create_tearsheet,
+            TearsheetConfig,
+            TearsheetBarsWithFillsChart,
+            TearsheetDrawdownChart,
+            TearsheetEquityChart,
+            TearsheetRunInfoChart,
+            TearsheetStatsTableChart,
+        )
 
         try:
             # Build chart list: standard charts + bars_with_fills per bar type

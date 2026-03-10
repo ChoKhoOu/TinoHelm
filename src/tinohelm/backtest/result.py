@@ -209,7 +209,7 @@ def extract_backtest_results(
     try:
         fills_report = engine.trader.generate_fills_report()
         if fills_report is not None and not fills_report.empty and "commission" in fills_report.columns:
-            total_fees = float(fills_report["commission"].astype(float).sum())
+            total_fees = float(fills_report["commission"].map(_parse_realized_pnl).sum())
     except Exception:
         logger.warning("Failed to extract total fees from fills report", exc_info=True)
 
@@ -230,7 +230,7 @@ def extract_backtest_results(
 
             # Split by realized_pnl if available
             if "realized_pnl" in pos_report.columns:
-                pnl_col = pos_report["realized_pnl"].astype(float)
+                pnl_col = pos_report["realized_pnl"].map(_parse_realized_pnl)
                 win_mask = (pnl_col > 0) & (durations > 0)
                 lose_mask = (pnl_col <= 0) & (durations > 0)
                 if win_mask.any():
