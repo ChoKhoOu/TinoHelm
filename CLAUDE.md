@@ -16,9 +16,8 @@ docker compose logs api --tail 50 # Check API logs
 
 # Local dev (Python)
 python -m venv .venv && source .venv/bin/activate
-pip install -e "."                # Install package
+pip install -e "."                # Install package (includes plotly for tearsheets)
 pip install -e ".[optimize]"      # With Optuna support
-pip install -e ".[visualization]" # With Plotly tearsheet support
 
 # Tests (must use venv python, system python has PEP 668 restrictions)
 .venv/bin/pip install pytest      # Install pytest in venv
@@ -469,7 +468,7 @@ self.clock.set_timer("my_timer", interval=pd.Timedelta(minutes=1))
 
 ### Visualization (Tearsheet)
 
-NT provides interactive HTML tearsheets via Plotly. Requires `pip install "nautilus_trader[visualization]"` or `pip install plotly>=6.3.1`. Docs: https://nautilustrader.io/docs/latest/concepts/visualization/
+NT provides interactive HTML tearsheets via Plotly. `plotly>=6.3.1` is a base dependency of TinoHelm. Docs: https://nautilustrader.io/docs/latest/concepts/visualization/
 
 ```python
 from nautilus_trader.analysis import create_tearsheet, TearsheetConfig
@@ -493,7 +492,7 @@ Our `BacktestRunner._generate_tearsheet()` generates a full tearsheet as a backt
 Each backtest run produces artifacts at `~/.tino/data/artifacts/{run_id}/`:
 - `results.json` — Full result dict (statistics, equity_curve, trade_log, per_instrument, etc.)
 - `fills_report.csv`, `orders_report.csv`, `order_fills_report.csv`, `positions_report.csv`, `account_report.csv` — NT raw reports
-- `tearsheet.html` — Interactive Plotly tearsheet (requires `plotly>=6.3.1`)
+- `tearsheet.html` — Interactive Plotly tearsheet (always generated)
 
 ### Live Trading Configuration
 
@@ -541,17 +540,19 @@ cli/src/
 ├── main.rs          # Entry: CLI (clap) vs TUI (no args) dispatch
 ├── api.rs           # HTTP client — all API calls to FastAPI backend
 ├── tui/
-│   ├── mod.rs       # Event loop, key handling, render dispatch
-│   ├── app.rs       # App state: workspace, selections, data, boot phase
-│   ├── theme.rs     # Color palette & style presets
-│   ├── chrome.rs    # Top bar (workspace tabs) & bottom bar (key hints)
+│   ├── mod.rs       # Event loop, key handling, render dispatch, DataCmd channel
+│   ├── app.rs       # App state, adaptive tick rate, animation flags
+│   ├── theme.rs     # Color palette & style presets (semantic names only)
+│   ├── chrome.rs    # Top bar (workspace tabs, WS dot, clock) & bottom bar (key hints)
+│   ├── widgets.rs   # Shared primitives: spinner, pulse_color, header_cell, kv_line
 │   ├── ws.rs        # WebSocket listener for real-time events
-│   └── workspaces/  # One module per F-key workspace
-│       ├── dashboard.rs  # F1 — overview
-│       ├── backtest.rs   # F2 — master-detail with rich stats
-│       ├── strategy.rs   # F3 — strategy list + detail
-│       ├── nodes.rs      # F4 — sandbox/live node cards
-│       └── data.rs       # F5 — data catalog
+│   ├── workspaces/  # One module per F-key workspace
+│   │   ├── dashboard.rs  # F1 — overview
+│   │   ├── backtest.rs   # F2 — master-detail with rich stats
+│   │   ├── strategy.rs   # F3 — strategy list + detail
+│   │   ├── nodes.rs      # F4 — sandbox/live node cards
+│   │   └── data.rs       # F5 — data catalog
+│   └── views/       # (legacy) older view implementations, being migrated to workspaces/
 ```
 
 ### Theme Color Conventions
@@ -574,7 +575,27 @@ All list/table views MUST have a `─` divider line between the header row and d
 Never render a bare Table header without a divider — it violates the design language.
 
 ### Ratatui Version Pinning
-Project uses **ratatui 0.29** + **crossterm 0.28**. The `tui-big-text` crate 0.8.2+ depends on ratatui 0.30 / ratatui-core 0.1.0, causing type incompatibilities (`Style`, `Widget`, `Alignment`). Do NOT upgrade tui-big-text without upgrading ratatui. For styled large text, use hand-crafted block characters (`▀▄█`) instead.
+Project uses **ratatui 0.30** + **crossterm 0.28** + **ratatui-macros 0.7**. Use `line![]` / `span!()` macros from `ratatui-macros` to construct styled text instead of verbose `Line::from(vec![Span::styled(...)])` patterns. See `widgets.rs` and workspace files for examples.
+
+### Adaptive Tick Rate & Animation System
+The TUI uses an adaptive refresh rate (`app.tick_rate_ms()`) to balance animation smoothness vs CPU usage:
+- **100ms (10 FPS)**: boot animation, loading spinners, pulse animations, WS connected/connecting
+- **250ms (4 FPS)**: running backtests (progress monitoring)
+- **500ms (2 FPS)**: fully idle
+
+**Key rule**: Any visual element with animation (spinner, pulse, etc.) MUST be covered by `has_active_animations()` in `app.rs`, otherwise the tick rate drops to 500ms and the animation looks choppy/broken.
+
+Animation primitives in `widgets.rs`:
+- `spinner(frame)` — Braille character spinner (`⠋⠙⠹…`), cycles every 2 frames. Used in title bars during loading.
+- `pulse_color(bright, dim, frame)` — Smooth sine-wave color interpolation between two `Color::Rgb` values, 20-frame cycle (~1.3s). Used for status indicator dots (WS connection, node heartbeat).
+
+Both take `app.frame_count` (incremented every tick) as the `frame` parameter.
+
+### Non-Blocking Data Loading
+All API calls use a `DataCmd` channel pattern to avoid blocking the event loop:
+- `fire_load_*(&client, &mut app, &data_tx)` — spawns a `tokio::spawn` task that sends results back via `mpsc::unbounded_channel`
+- `handle_data_cmd(&mut app, cmd)` — receives results in the main loop and updates `App` state
+- Loading state flags (`backtest_loading`, `strategy_loading`, etc.) control spinner display AND tick rate
 
 ### Navigation Pattern
 - **Tab / Shift+Tab**: cycle workspaces (replaces F1-F5 as primary nav)
