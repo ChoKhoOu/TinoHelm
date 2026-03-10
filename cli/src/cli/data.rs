@@ -55,6 +55,8 @@ pub enum DataCmd {
         /// Interval (e.g., 1m, 5m)
         interval: String,
     },
+    /// Scan Parquet files on disk and sync missing entries into DB catalog
+    Scan,
 }
 
 fn fmt_size(size_bytes: u64) -> String {
@@ -368,6 +370,24 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                     }
                 }
             }
+            println!();
+        }
+        DataCmd::Scan => {
+            let result = client.scan_data().await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+
+            let scanned = result.get("scanned").and_then(|v| v.as_u64()).unwrap_or(0);
+            let created = result.get("created").and_then(|v| v.as_u64()).unwrap_or(0);
+            let updated = result.get("updated").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            header("Data Catalog Scan");
+            divider(50);
+            kv("Scanned", &scanned.to_string(), 12);
+            kv("Created", &bold(&created.to_string()), 12);
+            kv("Updated", &updated.to_string(), 12);
             println!();
         }
     }

@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+import re
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -60,6 +61,50 @@ class CompactRequest(BaseModel):
     interval: str
 
 
+# ---- helpers ----
+
+_UNIT_MAP = {"m": "MINUTE", "h": "HOUR", "d": "DAY"}
+_UNIT_REVERSE = {v: k for k, v in _UNIT_MAP.items()}
+
+
+def _interval_to_nt(interval: str) -> str:
+    """Convert interval like '7m' to NT dir suffix like '7-MINUTE'.
+
+    Raises ValueError if format is invalid.
+    """
+    m = re.fullmatch(r"(\d+)([mhd])", interval)
+    if not m:
+        raise ValueError(f"Invalid interval '{interval}': expected <number><m|h|d> (e.g. 5m, 4h, 1d)")
+    step, unit = m.group(1), m.group(2)
+    return f"{step}-{_UNIT_MAP[unit]}"
+
+
+def _nt_to_interval(nt_suffix: str) -> str | None:
+    """Convert NT dir suffix like '7-MINUTE' back to '7m'.
+
+    Returns None if format is unrecognized.
+    """
+    m = re.fullmatch(r"(\d+)-(\w+)", nt_suffix)
+    if not m:
+        return None
+    step, agg = m.group(1), m.group(2)
+    unit = _UNIT_REVERSE.get(agg)
+    if unit is None:
+        return None
+    return f"{step}{unit}"
+
+
+def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
+    """Calculate total Parquet size on disk for a specific symbol/interval."""
+    from tinohelm.portfolio.loader import _normalize_symbol
+    nt_sym = _normalize_symbol(symbol)
+    nt_interval = _interval_to_nt(interval)
+    bar_type_dir = Path(catalog_path) / "data" / "bar" / f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
+    if not bar_type_dir.exists():
+        return 0
+    return sum(f.stat().st_size for f in bar_type_dir.glob("*.parquet"))
+
+
 # ---- background task ----
 
 async def _run_data_fetch(symbol: str, interval: str, start: date, end: date, settings: Settings | None = None) -> None:
@@ -88,11 +133,8 @@ async def _run_data_fetch(symbol: str, interval: str, start: date, end: date, se
         )
 
         # Always upsert DB catalog (even if skipped — to expand date range)
-        # Calculate total size from actual parquet files on disk
-        bar_dir = Path(catalog_path) / "data" / "bar"
-        total_size = sum(
-            f.stat().st_size for f in bar_dir.rglob("*.parquet")
-        ) if bar_dir.exists() else 0
+        # Calculate size for THIS symbol/interval only
+        total_size = _parquet_size_for(catalog_path, symbol, interval)
 
         factory = get_session_factory()
         async with factory() as db:
@@ -176,11 +218,8 @@ async def _run_compact(symbol: str, interval: str, settings: Settings) -> None:
         catalog_path = str(settings.paths.catalog) if settings else "data/catalog"
         result = compact_bars(symbol=symbol, interval=interval, catalog_path=catalog_path)
 
-        # Update DB catalog size_bytes with the new total
-        bar_dir = Path(catalog_path) / "data" / "bar"
-        total_size = sum(
-            f.stat().st_size for f in bar_dir.rglob("*.parquet")
-        ) if bar_dir.exists() else 0
+        # Update DB catalog size_bytes
+        total_size = _parquet_size_for(catalog_path, symbol, interval)
 
         factory = get_session_factory()
         async with factory() as db:
@@ -265,3 +304,98 @@ async def validate_data(
         raise HTTPException(status_code=500, detail=f"Validation failed: {exc}")
 
     return result
+
+
+@router.post("/scan")
+async def scan_data_catalog(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    """Scan Parquet files on disk and sync missing entries into DB catalog.
+
+    Discovers bar data directories, reads date ranges from the actual
+    Parquet data, and upserts DataCatalog rows for any that are missing.
+    """
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    catalog_path = str(settings.paths.catalog)
+    bar_dir = Path(catalog_path) / "data" / "bar"
+    if not bar_dir.exists():
+        return {"status": "ok", "scanned": 0, "created": 0, "updated": 0}
+
+    # Parse bar_type directory names:
+    #   BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL
+    pattern = re.compile(r"^(.+\.BINANCE)-(\d+-\w+)-LAST-EXTERNAL$")
+
+    created = 0
+    updated = 0
+    scanned = 0
+
+    for entry in sorted(bar_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        m = pattern.match(entry.name)
+        if not m:
+            continue
+
+        nt_sym = m.group(1)          # e.g. BTCUSDT-PERP.BINANCE
+        nt_interval = m.group(2)     # e.g. 1-MINUTE
+        interval = _nt_to_interval(nt_interval)
+        if interval is None:
+            logger.warning("Scan: unknown interval %s in %s, skipping", nt_interval, entry.name)
+            continue
+
+        # Strip .BINANCE suffix for user-facing symbol
+        symbol = nt_sym.removesuffix(".BINANCE")
+
+        parquet_files = list(entry.glob("*.parquet"))
+        if not parquet_files:
+            continue
+
+        scanned += 1
+        size_bytes = sum(f.stat().st_size for f in parquet_files)
+
+        # Read actual date range from Parquet data
+        bar_type_str = f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
+        try:
+            catalog = ParquetDataCatalog(catalog_path)
+            bars = catalog.bars(bar_types=[bar_type_str])
+            if not bars:
+                logger.warning("Scan: no bars readable for %s, skipping", bar_type_str)
+                continue
+            ts_min = min(b.ts_event for b in bars)
+            ts_max = max(b.ts_event for b in bars)
+            start_date = datetime.fromtimestamp(ts_min / 1_000_000_000, tz=timezone.utc).date()
+            end_date = datetime.fromtimestamp(ts_max / 1_000_000_000, tz=timezone.utc).date()
+        except Exception:
+            logger.warning("Scan: failed to read bars for %s", bar_type_str, exc_info=True)
+            continue
+
+        # Upsert DB
+        stmt = select(DataCatalog).where(
+            DataCatalog.symbol == symbol,
+            DataCatalog.data_type == "bar",
+            DataCatalog.interval == interval,
+        )
+        existing = (await db.execute(stmt)).scalar_one_or_none()
+        if existing:
+            existing.start_date = min(existing.start_date, start_date)
+            existing.end_date = max(existing.end_date, end_date)
+            existing.size_bytes = size_bytes
+            updated += 1
+        else:
+            db.add(DataCatalog(
+                symbol=symbol,
+                data_type="bar",
+                interval=interval,
+                start_date=start_date,
+                end_date=end_date,
+                file_path=catalog_path,
+                size_bytes=size_bytes,
+            ))
+            created += 1
+
+        logger.info("Scan: %s %s [%s..%s] %d bytes", symbol, interval, start_date, end_date, size_bytes)
+
+    await db.commit()
+    return {"status": "ok", "scanned": scanned, "created": created, "updated": updated}

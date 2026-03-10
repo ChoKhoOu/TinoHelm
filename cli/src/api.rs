@@ -260,6 +260,17 @@ impl ApiClient {
         Ok(body)
     }
 
+    pub async fn scan_data(&self) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .post(format!("{}/api/data/scan", self.base_url))
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
     // ---- Node ----
 
     pub async fn node_status(&self) -> Result<serde_json::Value> {
