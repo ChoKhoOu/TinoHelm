@@ -254,16 +254,23 @@ class BacktestRunner:
             logger.info("Added %d actor(s) to engine", len(actor_instances))
 
         # Register additional statistics BEFORE running
+        # NT 1.224.0 defaults include Sharpe/Sortino/Volatility etc. but NOT
+        # MaxDrawdown, CalmarRatio, CAGR — register them from the Rust builtins.
         try:
-            from nautilus_trader.analysis.statistics.max_drawdown import MaxDrawdown
-            from nautilus_trader.analysis.statistics.calmar_ratio import CalmarRatio
-            from nautilus_trader.analysis.statistics.cagr import CAGR
-
+            from nautilus_trader.analysis import MaxDrawdown, CalmarRatio, CAGR
             engine.portfolio.analyzer.register_statistic(MaxDrawdown())
             engine.portfolio.analyzer.register_statistic(CalmarRatio())
             engine.portfolio.analyzer.register_statistic(CAGR())
         except Exception:
-            logger.warning("Failed to register extra analyzer statistics", exc_info=True)
+            logger.warning("Failed to register MaxDrawdown/Calmar/CAGR statistics", exc_info=True)
+
+        # Register custom Python statistics for richer tearsheet reports
+        try:
+            from tinohelm.backtest.custom_statistics import register_custom_statistics
+            n = register_custom_statistics(engine.portfolio.analyzer)
+            logger.info("Registered %d custom statistics with analyzer", n)
+        except Exception:
+            logger.warning("Failed to register custom statistics", exc_info=True)
 
         # Run
         engine.run()

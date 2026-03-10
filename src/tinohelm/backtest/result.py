@@ -155,6 +155,27 @@ def extract_backtest_results(
     cagr = _safe_float(returns_stats.get("CAGR (252 days)"))
     returns_volatility = _safe_float(returns_stats.get("Returns Volatility (252 days)"))
 
+    # Fallback: compute max_drawdown / CAGR / Calmar from returns series
+    # when NT custom statistics registration fails or key names mismatch.
+    try:
+        returns_series_fb: pd.Series = analyzer.returns()
+        if returns_series_fb is not None and len(returns_series_fb) > 0:
+            if max_drawdown is None:
+                cum = (1 + returns_series_fb).cumprod()
+                peak = cum.cummax()
+                dd = (cum - peak) / peak
+                max_drawdown = _safe_float(dd.min())
+            if cagr is None:
+                cum_all = (1 + returns_series_fb).cumprod()
+                total_ret = float(cum_all.iloc[-1])
+                n_days = len(returns_series_fb)
+                if n_days > 0 and total_ret > 0:
+                    cagr = _safe_float(total_ret ** (252.0 / n_days) - 1.0)
+            if calmar is None and cagr is not None and max_drawdown is not None and max_drawdown != 0:
+                calmar = _safe_float(cagr / abs(max_drawdown))
+    except Exception:
+        logger.warning("Failed to compute fallback risk metrics", exc_info=True)
+
     win_rate = _safe_float(pnl_stats.get("Win Rate"), 0.0)
     # general_stats may also have Win Rate; prefer pnl_stats
     if win_rate == 0.0:
