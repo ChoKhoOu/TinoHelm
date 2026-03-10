@@ -1,5 +1,5 @@
 # TinoHelm API Server
-FROM python:3.11-slim AS base
+FROM python:3.12-slim AS base
 
 # System dependencies for nautilus_trader
 RUN apt-get update && apt-get install -y --no-install-recommends \

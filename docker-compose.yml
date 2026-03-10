@@ -39,6 +39,7 @@ services:
       - "8000:8000"
     volumes:
       - ~/.tino/strategies:/app/tino/strategies
+      - ~/.tino/actors:/app/tino/actors
       - ~/.tino/data/catalog:/app/tino/data/catalog
       - ~/.tino/data/artifacts:/app/tino/data/artifacts
       - ~/.tino/logs:/app/tino/logs

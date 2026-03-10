@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 # Default actors directory
 _DEFAULT_ACTORS_DIR = Path.home() / ".tino" / "actors"
+# Built-in actors shipped with the package
+_BUILTIN_ACTORS_DIR = Path(__file__).resolve().parent.parent / "actors"
 
 
 def create_strategies(config: PortfolioConfig) -> list[Any]:
@@ -44,11 +46,13 @@ def create_strategies(config: PortfolioConfig) -> list[Any]:
     for i, symbol in enumerate(config.symbols):
         # Build per-symbol params
         nt_symbol = _normalize_symbol(symbol)
-        bar_type_str = _make_bar_type_str(symbol, config.interval)
 
         per_symbol_params = dict(config.params)
         per_symbol_params["instrument_id"] = nt_symbol
-        per_symbol_params["bar_type"] = bar_type_str
+        # Use bar_type from params (may be composite) if already set by runner,
+        # otherwise build from symbol + interval
+        if "bar_type" not in per_symbol_params:
+            per_symbol_params["bar_type"] = _make_bar_type_str(symbol, config.interval)
 
         # Unique order_id_tag per instance — required for multi-strategy portfolios
         if "order_id_tag" not in per_symbol_params:
@@ -113,10 +117,14 @@ def _load_single_actor(
     """Load and instantiate a single actor from an ActorRef."""
     if ref.name:
         # Load from global actors directory: ~/.tino/actors/<name>.py
+        # Falls back to built-in actors shipped with the package
         actor_file = actors_dir / f"{ref.name}.py"
         if not actor_file.exists():
+            actor_file = _BUILTIN_ACTORS_DIR / f"{ref.name}.py"
+        if not actor_file.exists():
             raise FileNotFoundError(
-                f"Actor '{ref.name}' not found at {actor_file}. "
+                f"Actor '{ref.name}' not found at {actors_dir / f'{ref.name}.py'} "
+                f"or built-in {_BUILTIN_ACTORS_DIR / f'{ref.name}.py'}. "
                 f"Create the file or use 'class' to specify a local path."
             )
         actor_cls, actor_config_cls = _discover_actor_classes(actor_file)
