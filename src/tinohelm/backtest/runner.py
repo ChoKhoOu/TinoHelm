@@ -757,6 +757,35 @@ class BacktestRunner:
                 f'<script>Plotly.newPlot("th-monthly-heat",{heat_trace},{heat_layout},{{responsive:true}})</script>'
             )
 
+        # Chart 5: PnL Treemap (proportional boxes by contribution)
+        treemap_html = ""
+        if len(sorted_items) >= 2:
+            tm_labels = [k.replace(".BINANCE", "") for k, _ in sorted_items]
+            tm_pnls = [round(v.get("total_pnl", 0), 2) for _, v in sorted_items]
+            tm_abs = [abs(p) for p in tm_pnls]
+            tm_parents = ["Portfolio"] * len(tm_labels)
+            tm_text = [f"{p:+.2f}" for p in tm_pnls]
+            tm_colors = ["#00963c" if p >= 0 else "#c62828" for p in tm_pnls]
+            treemap_trace = json.dumps([{
+                "type": "treemap",
+                "labels": tm_labels,
+                "parents": tm_parents,
+                "values": tm_abs,
+                "text": tm_text,
+                "texttemplate": "<b>%{label}</b><br>%{text} USDT",
+                "marker": {"colors": tm_colors},
+                "hovertemplate": "%{label}: %{text} USDT<extra></extra>",
+            }])
+            treemap_layout = json.dumps({
+                "title": {"text": "PnL Contribution Treemap", "font": {"size": 16}},
+                "template": "plotly_white", "height": 400,
+                "margin": {"l": 10, "r": 10, "t": 50, "b": 10},
+            })
+            treemap_html = (
+                f'<div id="th-treemap" style="width:100%;height:400px;margin-top:30px"></div>'
+                f'<script>Plotly.newPlot("th-treemap",{treemap_trace},{treemap_layout},{{responsive:true}})</script>'
+            )
+
         # Portfolio analytics summary
         pa = results.get("portfolio_analytics", {})
         analytics_html = ""
@@ -803,6 +832,7 @@ class BacktestRunner:
 <th>Best</th><th>Worst</th><th>Avg PnL</th>
 </tr></thead><tbody>{"".join(rows)}</tbody></table>
 {cum_chart_html}
+{treemap_html}
 {corr_chart_html}
 {heat_chart_html}
 </div>
