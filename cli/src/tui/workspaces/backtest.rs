@@ -508,6 +508,79 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
             }
         }
 
+        // ── Correlation Highlights (from detail_result) ──
+        if let Some(corr) = app
+            .detail_result
+            .as_ref()
+            .and_then(|r| r.get("instrument_correlation"))
+            .and_then(|c| c.as_object())
+        {
+            // Collect unique pairs (a < b to avoid duplicates)
+            let mut pairs: Vec<(String, String, f64)> = Vec::new();
+            for (inst_a, corrs) in corr {
+                if let Some(map) = corrs.as_object() {
+                    for (inst_b, val) in map {
+                        if inst_a < inst_b {
+                            if let Some(v) = val.as_f64() {
+                                pairs.push((
+                                    inst_a.trim_end_matches(".BINANCE").to_string(),
+                                    inst_b.trim_end_matches(".BINANCE").to_string(),
+                                    v,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            if pairs.len() >= 2 {
+                pairs.sort_by(|a, b| {
+                    b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                lines.push(divider_line());
+                lines.push(section_title("  CORRELATIONS"));
+                // Top 2 (most correlated)
+                for (a, b, v) in pairs.iter().take(2) {
+                    let color = if *v > 0.7 {
+                        theme::FG_NEGATIVE
+                    } else if *v > 0.3 {
+                        theme::FG_QUEUED
+                    } else {
+                        theme::FG_SECONDARY
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  \u{25B2} {}/{}", a, b),
+                            Style::default().fg(theme::FG_IDENTIFIER),
+                        ),
+                        Span::styled(
+                            format!(" {:>+.3}", v),
+                            Style::default().fg(color),
+                        ),
+                    ]));
+                }
+                // Bottom 2 (least correlated = best diversification)
+                for (a, b, v) in pairs.iter().rev().take(2) {
+                    let color = if *v < 0.0 {
+                        theme::FG_POSITIVE
+                    } else if *v < 0.3 {
+                        theme::FG_HINT
+                    } else {
+                        theme::FG_SECONDARY
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  \u{25BC} {}/{}", a, b),
+                            Style::default().fg(theme::FG_IDENTIFIER),
+                        ),
+                        Span::styled(
+                            format!(" {:>+.3}", v),
+                            Style::default().fg(color),
+                        ),
+                    ]));
+                }
+            }
+        }
+
         // ── Monthly Returns (from detail_result) ──
         if let Some(monthly) = app
             .detail_result
