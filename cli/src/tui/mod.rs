@@ -138,6 +138,13 @@ async fn run_app(
             }
         }
 
+        // Refresh positions/fills when dirty flag set by WS events
+        if app.trading_dirty && app.workspace == Workspace::Nodes {
+            app.trading_dirty = false;
+            workspaces::nodes::fire_load_positions(&client, &mut app, &data_tx);
+            workspaces::nodes::fire_load_fills(&client, &mut app, &data_tx);
+        }
+
         app.tick();
 
         if !app.running {
@@ -730,6 +737,8 @@ async fn handle_key(
         KeyCode::F(4) | KeyCode::Char('4') => {
             app.switch_workspace(Workspace::Nodes);
             fire_load_node_status(client, app, tx);
+            workspaces::nodes::fire_load_positions(client, app, tx);
+            workspaces::nodes::fire_load_fills(client, app, tx);
         }
         KeyCode::F(5) | KeyCode::Char('5') => {
             app.switch_workspace(Workspace::Data);
@@ -841,6 +850,8 @@ async fn handle_key(
             }
             Workspace::Nodes => {
                 fire_load_node_status(client, app, tx);
+                workspaces::nodes::fire_load_positions(client, app, tx);
+                workspaces::nodes::fire_load_fills(client, app, tx);
             }
             Workspace::Data => {
                 fire_load_data_catalog(client, app, tx);
@@ -1238,7 +1249,11 @@ fn fire_load_workspace_data(
         }
         Workspace::Backtest => fire_load_backtests(client, app, tx),
         Workspace::Strategy => fire_load_strategies(client, app, tx),
-        Workspace::Nodes => fire_load_node_status(client, app, tx),
+        Workspace::Nodes => {
+            fire_load_node_status(client, app, tx);
+            workspaces::nodes::fire_load_positions(client, app, tx);
+            workspaces::nodes::fire_load_fills(client, app, tx);
+        }
         Workspace::Data => fire_load_data_catalog(client, app, tx),
     }
 }

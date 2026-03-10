@@ -120,6 +120,7 @@ pub struct App {
     pub fills: Vec<TradingFill>,
     pub trading_summary: Option<TradingSummary>,
     pub trading_loading: bool,
+    pub trading_dirty: bool,      // set by WS events to trigger data refresh
     pub trading_selected: usize,  // selected position index
     pub trading_fill_scroll: u16, // scroll offset for fills panel
 
@@ -186,6 +187,7 @@ impl App {
             fills: Vec::new(),
             trading_summary: None,
             trading_loading: false,
+            trading_dirty: false,
             trading_selected: 0,
             trading_fill_scroll: 0,
 
@@ -415,10 +417,12 @@ impl App {
             WsEvent::PositionUpdate(val) => {
                 let id = val.get("position_id").and_then(|v| v.as_str()).unwrap_or("?");
                 self.push_log("pos.upd", format!("Position {} updated", id));
+                self.trading_dirty = true;
             }
             WsEvent::FillNew(val) => {
                 let id = val.get("trade_id").and_then(|v| v.as_str()).unwrap_or("?");
                 self.push_log("fill.new", format!("Fill {}", id));
+                self.trading_dirty = true;
             }
             WsEvent::Unknown => {
                 self.push_log("unknown", "unrecognized event".to_string());
