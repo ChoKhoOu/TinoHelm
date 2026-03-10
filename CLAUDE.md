@@ -63,7 +63,8 @@ cd web && npm run build            # Static export to web/out/
 │  API Container         │                        │
 │  ┌─────────────────────┴──────────────────────┐ │
 │  │  FastAPI (uvicorn :8000)                   │ │
-│  │  Routes: /api/backtest, /strategies, /data │ │
+│  │  Routes: /api/backtest, /strategies, /data,│ │
+│  │          /api/trading (positions, fills)   │ │
 │  │  WebSocket: /ws/events, /ws/equity         │ │
 │  └──────┬──────────────┬──────────────────────┘ │
 │         │              │                        │
@@ -81,6 +82,8 @@ cd web && npm run build            # Static export to web/out/
 ```
 
 **Data flow for backtests**: CLI → POST /api/backtest/run → Redis queue `tino:backtest:queue` → Worker subprocess dequeues → BacktestRunner (NT BacktestEngine) → Result extraction → DB + Redis progress → CLI polls status
+
+**Data flow for live/sandbox trading**: TradingNode subprocess → BridgeActor listens to NT position/order events → Persists to PostgreSQL (`positions` table via UPSERT, `fills` table via INSERT ON CONFLICT DO NOTHING) → Publishes JSON to Redis PubSub (`tino:{node_type}:positions`, `tino:{node_type}:fills`) → EventBridge relays to WebSocket clients → TUI receives `position.update`/`fill.new` events and refreshes display. Dedup keys: `position_id` for positions, `trade_id` for fills. TUI boots by GET-loading historical data, then switches to WS real-time stream.
 
 **Data pipeline** (instrument + bars): `data/instruments.py` fetches real instrument definitions from Binance `/fapi/v1/exchangeInfo` API (24h file cache), `data/providers/binance.py` fetches klines from `/fapi/v1/klines`, `data/catalog.py` wraps both into NT-native Parquet format. Instruments are always built from real exchange parameters — never hardcoded.
 
@@ -105,7 +108,7 @@ Everything is a portfolio. Single `.py` strategies are auto-wrapped as implicit 
 
 **BridgeActor** (`node/bridge_actor.py`) bridges NT internal msgbus events to Redis PubSub for cross-process communication. Used by both sandbox and live nodes.
 
-**DB design**: The `strategies` table is ephemeral (rebuilt on `tino strategy rescan`). `backtest_runs` uses `strategy_name` (string column) instead of FK for decoupling.
+**DB design**: The `strategies` table is ephemeral (rebuilt on `tino strategy rescan`). `backtest_runs` uses `strategy_name` (string column) instead of FK for decoupling. `positions` stores live/sandbox position snapshots (upserted by `position_id`). `fills` stores immutable fill records (deduped by `trade_id`). Both written by BridgeActor in the TradingNode subprocess via sync DB engine.
 
 ## Key Conventions
 
@@ -142,6 +145,8 @@ Priority: ENV vars (`TINO_` prefix, `__` nested delimiter) > `config/user.yaml` 
 - `tino:backtest:cancel:{run_id}` — Cancel flag
 - `tino:backtest:progress:{run_id}` — Progress percentage
 - `tino:heartbeat:{node_type}` — Node heartbeat (15s TTL)
+- `tino:{node_type}:positions` — Position update events (PubSub)
+- `tino:{node_type}:fills` — Fill/trade events (PubSub)
 
 ## 用户规则
 - **MUST**: 涉及 NT API 的任何开发，必须先浏览 https://nautilustrader.io/docs/latest/ 对应文档页面，确认 API 签名和行为后再写代码。不要凭记忆或猜测调用 NT API。
@@ -618,7 +623,7 @@ All API calls use a `DataCmd` channel pattern to avoid blocking the event loop:
 
 ### Alembic Migrations
 - The `revision` value is an **arbitrary string ID** (e.g., `"add_watchlist"`), NOT the filename. When writing `down_revision`, use the actual `revision` string from the parent migration, not the filename.
-- Existing migration chain: `None → "add_watchlist" → "002"`.
+- Existing migration chain: `None → "add_watchlist" → "002" → "003"` (003 adds `positions` + `fills` tables).
 - DB `DateTime` columns are `TIMESTAMP WITHOUT TIME ZONE` (naive). **Never** assign `datetime.now(timezone.utc)` (aware) to them — this causes `asyncpg.DataError`. Use `datetime.utcnow()` or rely on column-level `server_default`/`onupdate=func.now()`.
 
 ### NautilusTrader API Mismatches
