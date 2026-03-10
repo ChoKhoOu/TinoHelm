@@ -380,6 +380,99 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
             lines.push(kv_line("  Los Hold", &lht));
         }
 
+        // ── Instrument Breakdown (from detail_result) ──
+        if let Some(per_inst) = app
+            .detail_result
+            .as_ref()
+            .and_then(|r| r.get("per_instrument"))
+            .and_then(|p| p.as_object())
+        {
+            if per_inst.len() > 1 {
+                lines.push(divider_line());
+                lines.push(section_title("  INSTRUMENT BREAKDOWN"));
+
+                let mut instruments: Vec<(&String, &serde_json::Value)> =
+                    per_inst.iter().collect();
+                instruments.sort_by(|a, b| {
+                    let pa = a
+                        .1
+                        .get("total_pnl")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let pb = b
+                        .1
+                        .get("total_pnl")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let max_abs = instruments
+                    .iter()
+                    .map(|(_, v)| {
+                        v.get("total_pnl")
+                            .and_then(|p| p.as_f64())
+                            .unwrap_or(0.0)
+                            .abs()
+                    })
+                    .fold(0.0_f64, f64::max)
+                    .max(1.0);
+
+                for (name, data) in &instruments {
+                    let pnl = data
+                        .get("total_pnl")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let trades = data
+                        .get("total_trades")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let wr = data
+                        .get("win_rate")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let short = name.trim_end_matches(".BINANCE");
+
+                    let bar_max = 12_usize;
+                    let bar_len = ((pnl.abs() / max_abs) * bar_max as f64).round() as usize;
+                    let bar_len =
+                        bar_len.min(bar_max).max(if pnl.abs() > 0.01 { 1 } else { 0 });
+                    let bar_color = if pnl >= 0.0 {
+                        theme::FG_POSITIVE
+                    } else {
+                        theme::FG_NEGATIVE
+                    };
+                    let pnl_color = if pnl > 0.001 {
+                        theme::FG_POSITIVE
+                    } else if pnl < -0.001 {
+                        theme::FG_NEGATIVE
+                    } else {
+                        theme::FG_PRIMARY
+                    };
+
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {:<13}", short),
+                            Style::default().fg(theme::FG_IDENTIFIER),
+                        ),
+                        Span::styled(
+                            format!("{:>+10.2}", pnl),
+                            Style::default().fg(pnl_color),
+                        ),
+                        Span::styled(
+                            format!(" {:>3}T {:>3.0}%", trades, wr * 100.0),
+                            Style::default().fg(theme::FG_SECONDARY),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            "\u{2588}".repeat(bar_len),
+                            Style::default().fg(bar_color),
+                        ),
+                    ]));
+                }
+            }
+        }
+
         // ── Monthly Returns (from detail_result) ──
         if let Some(monthly) = app
             .detail_result
@@ -444,6 +537,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
 
                 // Best 3
                 for (t, pnl) in trades_with_pnl.iter().take(3) {
+                    let inst = t
+                        .get("instrument")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("?")
+                        .trim_end_matches(".BINANCE");
                     let side = t
                         .get("side")
                         .and_then(|s| s.as_str())
@@ -454,7 +552,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                         .unwrap_or("-");
                     lines.push(Line::from(vec![
                         Span::styled(
-                            format!("  {:<5}", side),
+                            format!("  {:<13} ", inst),
+                            Style::default().fg(theme::FG_IDENTIFIER),
+                        ),
+                        Span::styled(
+                            format!("{:<4} ", side),
                             Style::default().fg(theme::FG_SECONDARY),
                         ),
                         colored_val(*pnl, ""),
@@ -467,6 +569,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                 // Worst 3
                 for (t, pnl) in trades_with_pnl.iter().rev().take(3) {
                     if *pnl < 0.0 {
+                        let inst = t
+                            .get("instrument")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("?")
+                            .trim_end_matches(".BINANCE");
                         let side = t
                             .get("side")
                             .and_then(|s| s.as_str())
@@ -477,7 +584,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                             .unwrap_or("-");
                         lines.push(Line::from(vec![
                             Span::styled(
-                                format!("  {:<5}", side),
+                                format!("  {:<13} ", inst),
+                                Style::default().fg(theme::FG_IDENTIFIER),
+                            ),
+                            Span::styled(
+                                format!("{:<4} ", side),
                                 Style::default().fg(theme::FG_SECONDARY),
                             ),
                             colored_val(*pnl, ""),
