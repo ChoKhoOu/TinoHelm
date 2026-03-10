@@ -429,6 +429,9 @@ def extract_backtest_results(
                                 instrument_correlation[inst_i][inst_j] = round(float(val), 4)
 
             # Per-instrument Sharpe, Sortino, MaxDD, Recovery Factor
+            def _safe_round(v, n=4):
+                return round(v, n) if v is not None and not (np.isnan(v) or np.isinf(v)) else None
+
             for idx, inst in enumerate(instruments):
                 arr = returns_matrix[:, idx]
                 mean_ret = float(arr.mean())
@@ -452,9 +455,6 @@ def extract_backtest_results(
                 # Recovery factor = |total_pnl / max_drawdown|
                 inst_total_pnl = per_instrument[inst]["total_pnl"]
                 recovery = abs(inst_total_pnl / max_dd) if max_dd < -0.01 else None
-
-                def _safe_round(v, n=4):
-                    return round(v, n) if v is not None and not (np.isnan(v) or np.isinf(v)) else None
 
                 per_instrument[inst]["sharpe_ratio"] = _safe_round(inst_sharpe)
                 per_instrument[inst]["sortino_ratio"] = _safe_round(inst_sortino)
