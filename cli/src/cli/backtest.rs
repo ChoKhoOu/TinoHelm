@@ -16,9 +16,9 @@ pub enum BacktestCmd {
         /// Symbol (e.g., BTCUSDT-PERP). Optional for portfolio strategies.
         #[arg(long)]
         symbol: Option<String>,
-        /// Interval (e.g., 5m, 1h)
-        #[arg(long, default_value = "1m")]
-        interval: String,
+        /// Interval (e.g., 5m, 1h). Optional for portfolio strategies.
+        #[arg(long)]
+        interval: Option<String>,
         /// Start date (YYYY-MM-DD)
         #[arg(long)]
         start: String,
@@ -619,11 +619,15 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 Some(s) => vec![s.clone()],
                 None => vec![],
             };
+            let intervals = match &interval {
+                Some(i) => vec![i.clone()],
+                None => vec![],
+            };
 
             let req = BacktestRunRequest {
                 strategy: strategy.clone(),
                 symbols: symbols.clone(),
-                intervals: vec![interval.clone()],
+                intervals: intervals.clone(),
                 start_date: start.clone(),
                 end_date: end.clone(),
                 initial_capital: capital,
@@ -655,8 +659,9 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             divider(50);
             kv("Run ID", &accent(rid), 12);
             kv("Strategy", &strategy, 12);
+            let ivl_display = interval.as_deref().unwrap_or("(portfolio)");
             kv("Symbol", &sym_display, 12);
-            kv("Interval", &interval, 12);
+            kv("Interval", ivl_display, 12);
             kv("Period", &format!("{} ~ {}", start, end), 12);
             println!();
             println!("    Track: {}", dim(&format!("tino backtest wait {}", rid)));
