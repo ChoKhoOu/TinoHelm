@@ -271,6 +271,38 @@ impl ApiClient {
         Ok(body)
     }
 
+    // ---- Trading ----
+
+    pub async fn list_positions(&self, node_type: Option<&str>, is_open: Option<bool>) -> Result<Vec<TradingPosition>> {
+        let mut url = format!("{}/api/trading/positions?", self.base_url);
+        if let Some(nt) = node_type {
+            url.push_str(&format!("node_type={}&", nt));
+        }
+        if let Some(open) = is_open {
+            url.push_str(&format!("is_open={}&", open));
+        }
+        let resp = self.client.get(&url).send().await.context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn list_fills(&self, node_type: Option<&str>, limit: u32) -> Result<Vec<TradingFill>> {
+        let mut url = format!("{}/api/trading/fills?limit={}", self.base_url, limit);
+        if let Some(nt) = node_type {
+            url.push_str(&format!("&node_type={}", nt));
+        }
+        let resp = self.client.get(&url).send().await.context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn trading_summary(&self, node_type: &str) -> Result<TradingSummary> {
+        let resp = self.client.get(format!("{}/api/trading/summary?node_type={}", self.base_url, node_type))
+            .send().await.context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
     // ---- Node ----
 
     pub async fn node_status(&self) -> Result<serde_json::Value> {

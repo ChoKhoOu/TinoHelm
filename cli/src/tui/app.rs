@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::types::{BacktestRunItem, Strategy, WsEvent};
+use crate::types::{BacktestRunItem, Strategy, TradingFill, TradingPosition, TradingSummary, WsEvent};
 
 /// Bloomberg-style workspace model — each F-key opens a dedicated workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +115,14 @@ pub struct App {
     pub data_selected: usize,
     pub data_loading: bool,
 
+    // ── Trading (positions & fills) ───────────────────────────────────
+    pub positions: Vec<TradingPosition>,
+    pub fills: Vec<TradingFill>,
+    pub trading_summary: Option<TradingSummary>,
+    pub trading_loading: bool,
+    pub trading_selected: usize,  // selected position index
+    pub trading_fill_scroll: u16, // scroll offset for fills panel
+
     // ── Event log ─────────────────────────────────────────────────────
     pub event_log: VecDeque<EventLogEntry>,
     pub log_scroll: u16,
@@ -173,6 +181,13 @@ impl App {
             data_catalog: None,
             data_selected: 0,
             data_loading: false,
+
+            positions: Vec::new(),
+            fills: Vec::new(),
+            trading_summary: None,
+            trading_loading: false,
+            trading_selected: 0,
+            trading_fill_scroll: 0,
 
             event_log: VecDeque::with_capacity(200),
             log_scroll: 0,
@@ -284,7 +299,7 @@ impl App {
     pub fn has_running_backtests(&self) -> bool {
         self.backtests
             .iter()
-            .any(|b| b.status.starts_with("running") || b.status == "queued")
+            .any(|b| b.status == "running" || b.status == "queued" || b.progress_pct.is_some())
     }
 
     pub fn has_active_animations(&self) -> bool {
@@ -293,6 +308,7 @@ impl App {
             || self.strategy_loading
             || self.node_loading
             || self.data_loading
+            || self.trading_loading
             || self.sandbox_last_heartbeat.is_some()
             || self.live_last_heartbeat.is_some()
             || matches!(self.ws_state, WsState::Connected | WsState::Connecting)
@@ -348,7 +364,8 @@ impl App {
                 let id_short = run_id.get(..6).unwrap_or(&run_id).to_string();
                 self.push_log("bt.prog", format!("#{} {}%", id_short, pct));
                 if let Some(bt) = self.backtests.iter_mut().find(|b| b.run_id == run_id) {
-                    bt.status = format!("running ({}%)", pct);
+                    bt.status = "running".to_string();
+                    bt.progress_pct = Some(pct);
                 }
             }
             WsEvent::BacktestStats { run_id, trades, pnl, win_rate } => {
@@ -378,6 +395,7 @@ impl App {
                 self.push_alert(kind, msg);
                 if let Some(bt) = self.backtests.iter_mut().find(|b| b.run_id == run_id) {
                     bt.status = status;
+                    bt.progress_pct = None; // Clear progress on completion
                 }
             }
             WsEvent::NodeHeartbeat { node_type, .. } => {
@@ -393,6 +411,14 @@ impl App {
                 self.push_log("sys.err", message.clone());
                 self.push_alert(AlertKind::Error, message.clone());
                 self.set_error(message);
+            }
+            WsEvent::PositionUpdate(val) => {
+                let id = val.get("position_id").and_then(|v| v.as_str()).unwrap_or("?");
+                self.push_log("pos.upd", format!("Position {} updated", id));
+            }
+            WsEvent::FillNew(val) => {
+                let id = val.get("trade_id").and_then(|v| v.as_str()).unwrap_or("?");
+                self.push_log("fill.new", format!("Fill {}", id));
             }
             WsEvent::Unknown => {
                 self.push_log("unknown", "unrecognized event".to_string());

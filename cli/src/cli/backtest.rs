@@ -13,9 +13,9 @@ pub enum BacktestCmd {
     Run {
         /// Strategy name
         strategy: String,
-        /// Symbol (e.g., BTCUSDT-PERP)
+        /// Symbol (e.g., BTCUSDT-PERP). Optional for portfolio strategies.
         #[arg(long)]
-        symbol: String,
+        symbol: Option<String>,
         /// Interval (e.g., 5m, 1h)
         #[arg(long, default_value = "1m")]
         interval: String,
@@ -615,9 +615,14 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 None
             };
 
+            let symbols = match &symbol {
+                Some(s) => vec![s.clone()],
+                None => vec![],
+            };
+
             let req = BacktestRunRequest {
                 strategy: strategy.clone(),
-                symbols: vec![symbol.clone()],
+                symbols: symbols.clone(),
                 intervals: vec![interval.clone()],
                 start_date: start.clone(),
                 end_date: end.clone(),
@@ -639,12 +644,18 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 return Ok(());
             }
 
+            let sym_display = if symbols.is_empty() {
+                "(portfolio)".to_string()
+            } else {
+                symbols.join(", ")
+            };
+
             let rid = &resp.run_id;
             header("Backtest Submitted");
             divider(50);
             kv("Run ID", &accent(rid), 12);
             kv("Strategy", &strategy, 12);
-            kv("Symbol", &symbol, 12);
+            kv("Symbol", &sym_display, 12);
             kv("Interval", &interval, 12);
             kv("Period", &format!("{} ~ {}", start, end), 12);
             println!();
@@ -704,13 +715,19 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 let sym_display = accent(&r.symbol[..14.min(r.symbol.len())]);
                 let ivl_display = format!("{}", r.interval.as_str().yellow());
 
+                let status_display = if let Some(pct) = r.progress_pct {
+                    format!("{}", format!("{}%", pct).cyan())
+                } else {
+                    color_status(&r.status)
+                };
+
                 t.row(&[
                     &accent(id),
                     &strat_display,
                     &sym_display,
                     &ivl_display,
                     &period,
-                    &color_status(&r.status),
+                    &status_display,
                     &trades,
                     &pnl,
                     &ret_pct,

@@ -52,14 +52,19 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
                 theme::style_data()
             };
 
-            let status_color = theme::status_color(&bt.status);
+            let effective_status = if bt.status == "running" || bt.progress_pct.is_some() {
+                "running"
+            } else {
+                bt.status.as_str()
+            };
+            let status_color = theme::status_color(effective_status);
+
             let status_short = if bt.status == "completed" {
                 "\u{2713}"
             } else if bt.status == "failed" {
                 "\u{2717}"
-            } else if bt.status.starts_with("running") {
-                let pct = bt.status.split('(').nth(1)
-                    .and_then(|s| s.trim_end_matches("%)").parse::<u8>().ok())
+            } else if bt.status == "running" || bt.progress_pct.is_some() {
+                let pct_str = bt.progress_pct
                     .map(|p| format!("{}%", p))
                     .unwrap_or_else(|| "run".to_string());
                 return Row::new(vec![
@@ -68,7 +73,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(bt.strategy_name.as_deref().unwrap_or("-").to_string()),
                     Cell::from(bt.symbol.clone()),
                     Cell::from(bt.interval.clone()),
-                    Cell::from(Span::styled(pct, Style::default().fg(status_color))),
+                    Cell::from(Span::styled(pct_str, Style::default().fg(status_color))),
                 ])
                 .style(row_style);
             } else if bt.status == "queued" {
@@ -144,7 +149,12 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let id_short = bt.run_id.get(..8).unwrap_or(&bt.run_id);
     let title = format!(" DETAIL: #{} ", id_short);
-    let status_color = theme::status_color(&bt.status);
+    let detail_effective_status = if bt.status == "running" || bt.progress_pct.is_some() {
+        "running"
+    } else {
+        bt.status.as_str()
+    };
+    let status_color = theme::status_color(detail_effective_status);
 
     // Get statistics from detail_result (full) or result_summary (partial)
     let stats_source = app
@@ -163,10 +173,15 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
         "  Period  ",
         &format!("{} \u{2192} {}", bt.start_date, bt.end_date),
     ));
+    let status_display = if let Some(pct) = bt.progress_pct {
+        format!("running ({}%)", pct)
+    } else {
+        bt.status.clone()
+    };
     lines.push(Line::from(vec![
         Span::styled("  Status  ".to_string(), Style::default().fg(theme::FG_AMBER)),
         Span::raw(" "),
-        Span::styled(bt.status.clone(), Style::default().fg(status_color)),
+        Span::styled(status_display, Style::default().fg(status_color)),
     ]));
 
     if let Some(stats) = stats_source.and_then(|s| s.as_object()) {

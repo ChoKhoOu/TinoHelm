@@ -11,6 +11,7 @@ pub struct BacktestRunItem {
     pub start_date: String,
     pub end_date: String,
     pub status: String,
+    pub progress_pct: Option<u8>,
     pub created_at: Option<String>,
     pub completed_at: Option<String>,
     pub result_summary: Option<serde_json::Value>,
@@ -176,6 +177,59 @@ pub struct DataCompactRequest {
     pub interval: String,
 }
 
+// ---- Trading (positions & fills) ----
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TradingPosition {
+    pub id: u64,
+    pub node_type: String,
+    pub position_id: String,
+    pub strategy_id_tag: String,
+    pub instrument_id: String,
+    pub side: String,           // "LONG", "SHORT", "FLAT"
+    pub quantity: String,
+    pub signed_qty: f64,
+    pub avg_px_open: Option<f64>,
+    pub avg_px_close: Option<f64>,
+    pub realized_pnl: Option<f64>,
+    pub unrealized_pnl: Option<f64>,
+    pub currency: Option<String>,
+    pub entry_side: Option<String>,
+    pub peak_qty: Option<String>,
+    pub ts_opened: Option<String>,
+    pub ts_closed: Option<String>,
+    pub duration: Option<String>,
+    pub is_open: bool,
+    pub event_count: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TradingFill {
+    pub id: u64,
+    pub node_type: String,
+    pub trade_id: String,
+    pub position_id: Option<String>,
+    pub client_order_id: String,
+    pub venue_order_id: Option<String>,
+    pub strategy_id_tag: Option<String>,
+    pub instrument_id: String,
+    pub order_side: String,     // "BUY", "SELL"
+    pub last_qty: String,
+    pub last_px: String,
+    pub commission: Option<String>,
+    pub liquidity_side: Option<String>,
+    pub ts_event: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TradingSummary {
+    pub open_positions: u32,
+    pub total_positions: u32,
+    pub total_fills: u32,
+    pub total_realized_pnl: f64,
+    pub open_instruments: Vec<String>,
+}
+
 // ---- WebSocket events ----
 
 #[derive(Debug, Deserialize, Clone)]
@@ -208,6 +262,11 @@ pub enum WsEvent {
     },
     #[serde(rename = "system.error")]
     SystemError { message: String },
+
+    #[serde(rename = "position.update")]
+    PositionUpdate(serde_json::Value),
+    #[serde(rename = "fill.new")]
+    FillNew(serde_json::Value),
 
     #[serde(other)]
     Unknown,

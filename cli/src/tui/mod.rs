@@ -24,17 +24,20 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::api::ApiClient;
-use crate::types::{BacktestRunList, Strategy};
+use crate::types::{BacktestRunList, Strategy, TradingFill, TradingPosition, TradingSummary};
 use app::{App, PopupKind, Workspace, WsState};
 use ws::WsClientEvent;
 
 /// Async data command — results from background API calls.
-enum DataCmd {
+pub(crate) enum DataCmd {
     Backtests(anyhow::Result<BacktestRunList>),
     Strategies(anyhow::Result<Vec<Strategy>>),
     NodeStatus(anyhow::Result<serde_json::Value>),
     DataCatalog(anyhow::Result<serde_json::Value>),
     DetailResult(anyhow::Result<serde_json::Value>),
+    Positions(anyhow::Result<Vec<TradingPosition>>),
+    Fills(anyhow::Result<Vec<TradingFill>>),
+    TradingSummary(anyhow::Result<TradingSummary>),
 }
 
 /// Run the interactive TUI dashboard.
@@ -1293,6 +1296,31 @@ fn handle_data_cmd(app: &mut App, cmd: DataCmd) {
                     app.detail_result = Some(detail);
                 }
                 Err(_) => {}
+            }
+        }
+        DataCmd::Positions(result) => {
+            app.trading_loading = false;
+            match result {
+                Ok(list) => {
+                    app.positions = list;
+                    if app.trading_selected >= app.positions.len() && !app.positions.is_empty() {
+                        app.trading_selected = app.positions.len() - 1;
+                    }
+                }
+                Err(e) => app.set_error(format!("Failed to load positions: {}", e)),
+            }
+        }
+        DataCmd::Fills(result) => {
+            app.trading_loading = false;
+            match result {
+                Ok(list) => app.fills = list,
+                Err(e) => app.set_error(format!("Failed to load fills: {}", e)),
+            }
+        }
+        DataCmd::TradingSummary(result) => {
+            match result {
+                Ok(summary) => app.trading_summary = Some(summary),
+                Err(e) => app.set_error(format!("Failed to load trading summary: {}", e)),
             }
         }
     }
