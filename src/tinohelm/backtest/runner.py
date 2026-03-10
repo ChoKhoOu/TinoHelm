@@ -1,7 +1,9 @@
 """Backtest runner wrapping NautilusTrader BacktestEngine."""
 from __future__ import annotations
 
+import json
 import logging
+import time
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -9,6 +11,7 @@ from typing import Any
 
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.backtest.models import FillModel
+from nautilus_trader.common.actor import Actor, ActorConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model import TraderId
 from nautilus_trader.model.enums import AccountType, OmsType
@@ -23,6 +26,67 @@ from tinohelm.portfolio.loader import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Progress reporter — lightweight actor for bar-level progress tracking
+# ---------------------------------------------------------------------------
+
+class _ProgressReporterConfig(ActorConfig, frozen=True):
+    component_id: str = "ProgressReporter-001"
+
+
+class _ProgressReporter(Actor):
+    """Counts processed bars and periodically writes progress to Redis.
+
+    Uses class-level attributes set by BacktestRunner before engine.run().
+    This is safe because the worker processes one backtest at a time.
+    """
+
+    _redis = None       # sync redis.Redis client
+    _run_id: str = ""
+    _total_bars: int = 0
+    _bar_count: int = 0
+    _start_time: float = 0.0
+    _report_every: int = 2000
+
+    def on_start(self) -> None:
+        cls = self.__class__
+        cls._bar_count = 0
+        cls._start_time = time.monotonic()
+        bar_types = self.cache.bar_types()
+        logger.warning("PROGRESS_REPORTER on_start: bar_types=%s", [str(bt) for bt in bar_types])
+        for bt in bar_types:
+            self.subscribe_bars(bt)
+
+    def on_bar(self, bar) -> None:
+        cls = self.__class__
+        cls._bar_count += 1
+        if cls._bar_count <= 3:
+            logger.warning("PROGRESS_REPORTER on_bar #%d: %s", cls._bar_count, bar)
+        if (
+            cls._bar_count % cls._report_every == 0
+            and cls._redis is not None
+            and cls._total_bars > 0
+        ):
+            # Map bar progress to 10-90% range (leaving 0-10 for setup, 90-100 for post)
+            pct = min(int(cls._bar_count / cls._total_bars * 80) + 10, 90)
+            elapsed = round(time.monotonic() - cls._start_time, 1)
+            try:
+                cls._redis.setex(
+                    f"tino:backtest:progress:{cls._run_id}", 86400, str(pct),
+                )
+                payload = json.dumps({
+                    "type": "backtest.progress",
+                    "run_id": cls._run_id,
+                    "pct": pct,
+                    "elapsed_secs": elapsed,
+                })
+                cls._redis.publish(
+                    f"tino:backtest:progress:{cls._run_id}", payload,
+                )
+            except Exception:
+                pass  # Never let Redis errors crash the backtest
 
 
 class BacktestRunner:
@@ -83,6 +147,8 @@ class BacktestRunner:
         self.fill_model_config = fill_model
         self.artifacts_dir: Path | None = None
         self._engine: BacktestEngine | None = None
+        self._redis_client = None  # sync Redis for progress reporting
+        self._run_id: str = ""
 
         # Portfolio config (explicit or auto-wrapped from legacy params)
         self._portfolio_config = portfolio_config
@@ -142,6 +208,15 @@ class BacktestRunner:
 
         portfolio_config = self._build_portfolio_config()
 
+        # Sync symbols/intervals from portfolio config when not provided by the job
+        # (portfolio strategies define their own symbols/interval in portfolio.yaml)
+        if not self.symbols and portfolio_config.symbols:
+            self.symbols = portfolio_config.symbols
+            self.symbol = self.symbols[0] if self.symbols else ""
+        if not self.intervals and portfolio_config.interval:
+            self.intervals = [portfolio_config.interval]
+            self.interval = portfolio_config.interval
+
         # Configure engine
         engine_config = BacktestEngineConfig(
             trader_id=TraderId("BACKTESTER-001"),
@@ -194,6 +269,7 @@ class BacktestRunner:
 
         # Load bar data for each (symbol, interval) combination
         all_bar_type_strs: list[str] = []
+        total_bar_count: int = 0
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
@@ -206,6 +282,7 @@ class BacktestRunner:
                     end=self.end,
                 )
                 if bars:
+                    total_bar_count += len(bars)
                     engine.add_data(bars)
                     all_bar_type_strs.append(bar_type_str)
                 elif ivl != "1m":
@@ -217,6 +294,7 @@ class BacktestRunner:
                         end=self.end,
                     )
                     if bars:
+                        total_bar_count += len(bars)
                         engine.add_data(bars)
                         interval_part = _INTERVAL_MAP.get(ivl, "1-MINUTE")
                         composite_bar_type_str = (
@@ -271,6 +349,22 @@ class BacktestRunner:
             logger.info("Registered %d custom statistics with analyzer", n)
         except Exception:
             logger.warning("Failed to register custom statistics", exc_info=True)
+
+        # Add progress reporter actor for bar-level progress tracking
+        logger.warning("PROGRESS_CHECK: total_bars=%d, redis=%s, run_id=%s",
+                       total_bar_count, self._redis_client is not None,
+                       self._run_id[:8] if self._run_id else "none")
+        if self._redis_client and self._run_id and total_bar_count > 0:
+            _ProgressReporter._redis = self._redis_client
+            _ProgressReporter._run_id = self._run_id
+            _ProgressReporter._total_bars = total_bar_count
+            _ProgressReporter._bar_count = 0
+            reporter = _ProgressReporter(config=_ProgressReporterConfig())
+            engine.add_actor(reporter)
+            logger.info(
+                "Progress reporter enabled: %d total bars, run_id=%s",
+                total_bar_count, self._run_id[:8],
+            )
 
         # Run
         engine.run()

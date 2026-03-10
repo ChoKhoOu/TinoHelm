@@ -153,6 +153,7 @@ def run_node(config: dict[str, Any]) -> None:
     bridge_config = BridgeActorConfig(
         redis_url=f"{redis_url}/{redis_db}" if "/" not in redis_url.split("//")[-1] else redis_url,
         node_type=node_type,
+        db_url=config.get("db_url", ""),
     )
     bridge_actor = BridgeActor(config=bridge_config)
     node.trader.add_actor(bridge_actor)

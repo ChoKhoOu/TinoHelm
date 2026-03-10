@@ -58,6 +58,7 @@ def build_trading_node_config(
         "instance_id": instance_id,
         "redis_url": settings.redis.url,
         "redis_db": redis_db,
+        "db_url": settings.database.url,
         "strategies": strategies,
         "portfolio_config": portfolio_config,
         "binance": {

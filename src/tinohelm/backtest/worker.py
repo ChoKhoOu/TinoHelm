@@ -141,17 +141,21 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 current_run_id = None
                 continue
 
-            # Publish running status
+            # Mark as running in DB + Redis
+            _update_db_status(db_url, run_id, "running")
             job_start_time = time.monotonic()
             _publish_progress(r, run_id, 0)
-            # Store progress for status polling
             r.setex(f"tino:backtest:progress:{run_id}", 86400, "0")
 
             try:
                 from tinohelm.backtest.runner import BacktestRunner
 
                 # Backward compat: support both old single "symbol"/"interval" and new "symbols"/"intervals"
-                symbols = job.get("symbols") or [job["symbol"]]
+                # Empty list is valid for portfolio strategies (symbols come from portfolio.yaml)
+                symbols = job.get("symbols")
+                if symbols is None:
+                    sym = job.get("symbol")
+                    symbols = [sym] if sym else []
                 intervals = job.get("intervals") or [job.get("interval", "1m")]
 
                 runner = BacktestRunner(
@@ -165,6 +169,9 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                     end=datetime.fromisoformat(job["end"]),
                     fill_model=job.get("fill_model"),
                 )
+                # Enable bar-level progress tracking via ProgressReporter actor
+                runner._redis_client = r
+                runner._run_id = run_id
 
                 # Publish progress: engine setup done
                 elapsed = round(time.monotonic() - job_start_time, 1)
@@ -177,6 +184,11 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 runner.artifacts_dir = artifact_dir
 
                 results = runner.run()
+
+                # Progress: engine done, saving artifacts
+                elapsed = round(time.monotonic() - job_start_time, 1)
+                _publish_progress(r, run_id, 95, elapsed_secs=elapsed)
+                r.setex(f"tino:backtest:progress:{run_id}", 86400, "95")
 
                 # Save artifact JSON
                 artifact_path = artifact_dir / "results.json"

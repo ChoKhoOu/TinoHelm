@@ -52,7 +52,8 @@ class BacktestRunRequest(BaseModel):
             if self.symbol is not None:
                 self.symbols = [self.symbol]
             else:
-                raise ValueError("Either 'symbols' or 'symbol' must be provided")
+                # Portfolio strategies resolve symbols from portfolio.yaml
+                self.symbols = []
         if self.intervals is None:
             if self.interval is not None:
                 self.intervals = [self.interval]
@@ -78,6 +79,7 @@ class BacktestRunItem(BaseModel):
     start_date: date
     end_date: date
     status: str
+    progress_pct: int | None = None
     created_at: str | None = None
     completed_at: str | None = None
     result_summary: dict | None = None
@@ -181,7 +183,7 @@ async def create_backtest_run(
         strategy_name=body.strategy,
         strategy_id=row.id,
         strategy_version_id=strategy_version_id,
-        symbol=",".join(body.symbols),
+        symbol=",".join(body.symbols) if body.symbols else "(portfolio)",
         interval=",".join(body.intervals),
         start_date=body.start_date,
         end_date=body.end_date,
@@ -226,6 +228,7 @@ async def list_backtest_runs(
     start_date: date | None = None,
     end_date: date | None = None,
     db: AsyncSession = Depends(get_db),
+    rds: aioredis.Redis = Depends(get_redis),
 ) -> BacktestRunList:
     """List backtest runs with pagination and optional filters."""
     # Base filter conditions (uses strategy_name column, no FK join needed)
@@ -249,6 +252,24 @@ async def list_backtest_runs(
     base_stmt = base_stmt.order_by(BacktestRun.created_at.desc()).offset(offset).limit(limit)
     rows = (await db.execute(base_stmt)).scalars().all()
 
+    # Fetch progress from Redis for running/queued backtests
+    progress_map: dict[str, int] = {}
+    running_ids = [
+        r.run_id for r in rows
+        if r.status in (RunStatus.running, RunStatus.queued)
+    ]
+    if running_ids:
+        pipe = rds.pipeline()
+        for rid in running_ids:
+            pipe.get(f"tino:backtest:progress:{rid}")
+        progress_values = await pipe.execute()
+        for rid, raw in zip(running_ids, progress_values):
+            if raw is not None:
+                try:
+                    progress_map[rid] = int(raw)
+                except (ValueError, TypeError):
+                    pass
+
     runs = [
         BacktestRunItem(
             run_id=r.run_id,
@@ -258,6 +279,7 @@ async def list_backtest_runs(
             start_date=r.start_date,
             end_date=r.end_date,
             status=r.status.value,
+            progress_pct=progress_map.get(r.run_id),
             created_at=r.created_at.isoformat() if r.created_at else None,
             completed_at=r.completed_at.isoformat() if r.completed_at else None,
             result_summary=r.result_summary_json,

@@ -6,7 +6,7 @@ from datetime import datetime, date
 from uuid import uuid4
 
 from sqlalchemy import (
-    String, Integer, Float, Text, DateTime, Date, Enum, ForeignKey,
+    Boolean, String, Integer, Float, Text, DateTime, Date, Enum, ForeignKey,
     JSON, BigInteger, Index, func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -141,35 +141,62 @@ class Order(Base):
 
 
 class Fill(Base):
+    """Immutable fill/trade record from live/sandbox trading."""
     __tablename__ = "fills"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    node_type: Mapped[NodeType] = mapped_column(Enum(NodeType), nullable=False)
-    order_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    node_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    trade_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    position_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    client_order_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    venue_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    strategy_id_tag: Mapped[str | None] = mapped_column(String(100), nullable=True)
     instrument_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    side: Mapped[str] = mapped_column(String(10), nullable=False)
-    quantity: Mapped[str] = mapped_column(String(30), nullable=False)
-    price: Mapped[str] = mapped_column(String(30), nullable=False)
-    commission: Mapped[str] = mapped_column(String(30), nullable=False, default="0")
+    order_side: Mapped[str] = mapped_column(String(10), nullable=False)
+    last_qty: Mapped[str] = mapped_column(String(50), nullable=False)
+    last_px: Mapped[str] = mapped_column(String(50), nullable=False)
+    commission: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    liquidity_side: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    ts_event: Mapped[str] = mapped_column(String(30), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_fills_node_type", "node_type"),
+        Index("ix_fills_position_id", "position_id"),
+        Index("ix_fills_instrument_id", "instrument_id"),
+    )
 
 
 class Position(Base):
+    """Live/sandbox position snapshot -- upserted on each position event."""
     __tablename__ = "positions"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    node_type: Mapped[NodeType] = mapped_column(Enum(NodeType), nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    node_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    position_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    strategy_id_tag: Mapped[str] = mapped_column(String(100), nullable=False)
     instrument_id: Mapped[str] = mapped_column(String(100), nullable=False)
     side: Mapped[str] = mapped_column(String(10), nullable=False)
-    quantity: Mapped[str] = mapped_column(String(30), nullable=False)
-    avg_price: Mapped[str] = mapped_column(String(30), nullable=False)
-    unrealized_pnl: Mapped[str] = mapped_column(String(30), nullable=False, default="0")
-    realized_pnl: Mapped[str] = mapped_column(String(30), nullable=False, default="0")
-    strategy_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    quantity: Mapped[str] = mapped_column(String(50), nullable=False, server_default="0")
+    signed_qty: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    avg_px_open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_px_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    entry_side: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    peak_qty: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    ts_opened: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    ts_closed: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    duration: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    is_open: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        Index("ix_positions_node_instrument", "node_type", "instrument_id"),
+        Index("ix_positions_node_type", "node_type"),
+        Index("ix_positions_instrument_id", "instrument_id"),
     )
 
 

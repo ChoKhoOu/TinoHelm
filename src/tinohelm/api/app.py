@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from tinohelm.api import deps
-from tinohelm.api.routes import backtest, dashboard, data, node, optimize, settings, strategy, watchlist
+from tinohelm.api.routes import backtest, dashboard, data, node, optimize, settings, strategy, trading, watchlist
 from tinohelm.api.ws import hub
 from tinohelm.core.bridge import EventBridge
 from tinohelm.core.config import get_settings
@@ -111,6 +111,7 @@ def create_app() -> FastAPI:
     app.include_router(node.router)
     app.include_router(strategy.router)
     app.include_router(data.router)
+    app.include_router(trading.router)
     app.include_router(dashboard.router)
     app.include_router(settings.router)
     app.include_router(watchlist.router)

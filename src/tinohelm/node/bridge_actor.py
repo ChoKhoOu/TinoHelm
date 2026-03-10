@@ -1,9 +1,10 @@
-"""BridgeActor — bridges NautilusTrader events to Redis PubSub."""
+"""BridgeActor — bridges NautilusTrader events to Redis PubSub and PostgreSQL."""
 from __future__ import annotations
 
 import json
+import os
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import redis
@@ -24,16 +25,26 @@ from nautilus_trader.model.events import (
 from nautilus_trader.core.message import Event
 
 
+def _ts_ns_to_iso(ts_ns: int) -> str:
+    """Convert nanosecond timestamp to ISO-8601 string."""
+    return datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc).isoformat()
+
+
 class BridgeActorConfig(ActorConfig):
     """Configuration for BridgeActor."""
     redis_url: str = "redis://localhost:6379"
     node_type: str = "sandbox"  # "sandbox" or "live"
     heartbeat_interval_secs: int = 5
     heartbeat_ttl_secs: int = 15
+    db_url: str = ""  # Empty string = no DB persistence
 
 
 class BridgeActor(Actor):
-    """Bridges NT MessageBus events to Redis PubSub for external consumption."""
+    """Bridges NT MessageBus events to Redis PubSub for external consumption.
+
+    When ``db_url`` is configured, position events are upserted and order
+    fills are inserted into PostgreSQL for durable persistence.
+    """
 
     def __init__(self, config: BridgeActorConfig) -> None:
         super().__init__(config)
@@ -41,13 +52,25 @@ class BridgeActor(Actor):
         self._node_type = config.node_type
         self._hb_interval = config.heartbeat_interval_secs
         self._hb_ttl = config.heartbeat_ttl_secs
+        self._db_url = config.db_url or os.environ.get("TINO_DATABASE__URL", "")
         self._redis: redis.Redis | None = None
+        self._db_engine: Any = None  # sqlalchemy.Engine | None
         self._cmd_thread: threading.Thread | None = None
         self._running = False
 
     def on_start(self) -> None:
         self._redis = redis.from_url(self._redis_url)
         self._running = True
+
+        # Initialize sync DB engine for persistence (optional)
+        if self._db_url:
+            try:
+                from tinohelm.db.sync_engine import get_sync_engine
+                self._db_engine = get_sync_engine(self._db_url)
+                self.log.info("DB persistence enabled")
+            except Exception as e:
+                self.log.error(f"Failed to init DB engine: {e}")
+                self._db_engine = None
 
         # Subscribe to trading events
         self.register_event_handler(OrderFilled, self._on_order_filled)
@@ -185,6 +208,197 @@ class BridgeActor(Actor):
             self.log.info("STOP command received")
             self._publish("commands_ack", {"cmd": "stop", "status": "received"})
 
+    # --- DB persistence helpers ---
+
+    def _persist_position(self, pos: Any) -> None:
+        """Upsert position snapshot to the positions table.
+
+        Uses INSERT ... ON CONFLICT(position_id) DO UPDATE for idempotency.
+        """
+        if not self._db_engine:
+            return
+        try:
+            from sqlalchemy import text
+            from sqlalchemy.orm import Session
+
+            position_id = str(pos.id)
+            strategy_id_tag = str(pos.strategy_id) if pos.strategy_id else ""
+            instrument_id = str(pos.instrument_id)
+            side = pos.side.name
+            quantity = str(pos.quantity)
+            signed_qty = float(pos.signed_qty)
+            avg_px_open = float(pos.avg_px_open)
+            avg_px_close = float(pos.avg_px_close) if pos.avg_px_close else None
+            realized_pnl = pos.realized_pnl.as_double() if pos.realized_pnl else None
+            unrealized_pnl = None  # requires a live price; not available here
+            currency = str(pos.realized_pnl.currency) if pos.realized_pnl else None
+            entry_side = pos.entry.name
+            peak_qty = str(pos.peak_qty)
+            ts_opened = _ts_ns_to_iso(pos.ts_opened)
+            ts_closed = _ts_ns_to_iso(pos.ts_closed) if pos.ts_closed and pos.ts_closed > 0 else None
+            duration = str(pos.duration_ns) if pos.duration_ns else None
+            is_open = pos.is_open
+            event_count = pos.event_count
+
+            stmt = text("""
+                INSERT INTO positions (
+                    node_type, position_id, strategy_id_tag, instrument_id,
+                    side, quantity, signed_qty, avg_px_open, avg_px_close,
+                    realized_pnl, unrealized_pnl, currency, entry_side,
+                    peak_qty, ts_opened, ts_closed, duration,
+                    is_open, event_count
+                ) VALUES (
+                    :node_type, :position_id, :strategy_id_tag, :instrument_id,
+                    :side, :quantity, :signed_qty, :avg_px_open, :avg_px_close,
+                    :realized_pnl, :unrealized_pnl, :currency, :entry_side,
+                    :peak_qty, :ts_opened, :ts_closed, :duration,
+                    :is_open, :event_count
+                )
+                ON CONFLICT (position_id) DO UPDATE SET
+                    side = EXCLUDED.side,
+                    quantity = EXCLUDED.quantity,
+                    signed_qty = EXCLUDED.signed_qty,
+                    avg_px_open = EXCLUDED.avg_px_open,
+                    avg_px_close = EXCLUDED.avg_px_close,
+                    realized_pnl = EXCLUDED.realized_pnl,
+                    unrealized_pnl = EXCLUDED.unrealized_pnl,
+                    currency = EXCLUDED.currency,
+                    peak_qty = EXCLUDED.peak_qty,
+                    ts_closed = EXCLUDED.ts_closed,
+                    duration = EXCLUDED.duration,
+                    is_open = EXCLUDED.is_open,
+                    event_count = EXCLUDED.event_count,
+                    updated_at = NOW()
+            """)
+
+            with Session(self._db_engine) as session:
+                session.execute(stmt, {
+                    "node_type": self._node_type,
+                    "position_id": position_id,
+                    "strategy_id_tag": strategy_id_tag,
+                    "instrument_id": instrument_id,
+                    "side": side,
+                    "quantity": quantity,
+                    "signed_qty": signed_qty,
+                    "avg_px_open": avg_px_open,
+                    "avg_px_close": avg_px_close,
+                    "realized_pnl": realized_pnl,
+                    "unrealized_pnl": unrealized_pnl,
+                    "currency": currency,
+                    "entry_side": entry_side,
+                    "peak_qty": peak_qty,
+                    "ts_opened": ts_opened,
+                    "ts_closed": ts_closed,
+                    "duration": duration,
+                    "is_open": is_open,
+                    "event_count": event_count,
+                })
+                session.commit()
+        except Exception as e:
+            self.log.error(f"DB persist position error: {e}")
+
+    def _persist_fill(self, event: OrderFilled) -> None:
+        """Insert fill record to the fills table.
+
+        Uses INSERT ... ON CONFLICT(trade_id) DO NOTHING for dedup.
+        """
+        if not self._db_engine:
+            return
+        try:
+            from sqlalchemy import text
+            from sqlalchemy.orm import Session
+
+            trade_id = str(event.trade_id)
+            position_id = str(event.position_id) if event.position_id else None
+            client_order_id = str(event.client_order_id)
+            venue_order_id = str(event.venue_order_id) if event.venue_order_id else None
+            strategy_id_tag = str(event.strategy_id) if event.strategy_id else None
+            instrument_id = str(event.instrument_id)
+            order_side = event.order_side.name
+            last_qty = str(event.last_qty)
+            last_px = str(event.last_px)
+            commission = event.commission.as_double() if event.commission else None
+            commission_str = str(commission) if commission is not None else None
+            liquidity_side = str(event.liquidity_side.name) if event.liquidity_side else None
+            ts_event = _ts_ns_to_iso(event.ts_event)
+
+            stmt = text("""
+                INSERT INTO fills (
+                    node_type, trade_id, position_id, client_order_id,
+                    venue_order_id, strategy_id_tag, instrument_id, order_side,
+                    last_qty, last_px, commission, liquidity_side, ts_event
+                ) VALUES (
+                    :node_type, :trade_id, :position_id, :client_order_id,
+                    :venue_order_id, :strategy_id_tag, :instrument_id, :order_side,
+                    :last_qty, :last_px, :commission, :liquidity_side, :ts_event
+                )
+                ON CONFLICT (trade_id) DO NOTHING
+            """)
+
+            with Session(self._db_engine) as session:
+                session.execute(stmt, {
+                    "node_type": self._node_type,
+                    "trade_id": trade_id,
+                    "position_id": position_id,
+                    "client_order_id": client_order_id,
+                    "venue_order_id": venue_order_id,
+                    "strategy_id_tag": strategy_id_tag,
+                    "instrument_id": instrument_id,
+                    "order_side": order_side,
+                    "last_qty": last_qty,
+                    "last_px": last_px,
+                    "commission": commission_str,
+                    "liquidity_side": liquidity_side,
+                    "ts_event": ts_event,
+                })
+                session.commit()
+        except Exception as e:
+            self.log.error(f"DB persist fill error: {e}")
+
+    def _build_position_payload(self, pos: Any, event_type: str, ts_event: int) -> dict:
+        """Build a rich position payload for Redis publish."""
+        return {
+            "type": "position.update",
+            "event": event_type,
+            "node_type": self._node_type,
+            "position_id": str(pos.id),
+            "strategy_id": str(pos.strategy_id) if pos.strategy_id else None,
+            "instrument_id": str(pos.instrument_id),
+            "side": pos.side.name,
+            "quantity": str(pos.quantity),
+            "signed_qty": float(pos.signed_qty),
+            "avg_px_open": float(pos.avg_px_open),
+            "avg_px_close": float(pos.avg_px_close) if pos.avg_px_close else None,
+            "realized_pnl": pos.realized_pnl.as_double() if pos.realized_pnl else 0.0,
+            "entry_side": pos.entry.name,
+            "peak_qty": str(pos.peak_qty),
+            "is_open": pos.is_open,
+            "event_count": pos.event_count,
+            "ts_opened": _ts_ns_to_iso(pos.ts_opened),
+            "ts_closed": _ts_ns_to_iso(pos.ts_closed) if pos.ts_closed and pos.ts_closed > 0 else None,
+            "duration_ns": pos.duration_ns if pos.duration_ns else None,
+            "ts": _ts_ns_to_iso(ts_event),
+        }
+
+    def _build_fill_payload(self, event: OrderFilled) -> dict:
+        """Build a rich fill payload for Redis publish."""
+        return {
+            "type": "fill.new",
+            "node_type": self._node_type,
+            "trade_id": str(event.trade_id),
+            "position_id": str(event.position_id) if event.position_id else None,
+            "client_order_id": str(event.client_order_id),
+            "venue_order_id": str(event.venue_order_id) if event.venue_order_id else None,
+            "strategy_id": str(event.strategy_id) if event.strategy_id else None,
+            "instrument_id": str(event.instrument_id),
+            "order_side": event.order_side.name,
+            "last_qty": str(event.last_qty),
+            "last_px": str(event.last_px),
+            "commission": event.commission.as_double() if event.commission else 0.0,
+            "liquidity_side": str(event.liquidity_side.name) if event.liquidity_side else None,
+            "ts": _ts_ns_to_iso(event.ts_event),
+        }
+
     # --- Event handlers ---
 
     def _on_bar(self, bar: Bar) -> None:
@@ -202,15 +416,9 @@ class BridgeActor(Actor):
         })
 
     def _on_order_filled(self, event: OrderFilled) -> None:
-        self._publish("fills", {
-            "event": "order_filled",
-            "order_id": str(event.client_order_id),
-            "instrument_id": str(event.instrument_id),
-            "side": str(event.order_side),
-            "quantity": str(event.last_qty),
-            "price": str(event.last_px),
-            "ts": str(event.ts_event),
-        })
+        payload = self._build_fill_payload(event)
+        self._publish("fills", payload)
+        self._persist_fill(event)
 
     def _on_order_accepted(self, event: OrderAccepted) -> None:
         self._publish("orders", {
@@ -247,33 +455,18 @@ class BridgeActor(Actor):
 
     def _on_position_opened(self, event: PositionOpened) -> None:
         pos = event.position
-        self._publish("positions", {
-            "event": "position_opened",
-            "instrument_id": str(pos.instrument_id),
-            "side": str(pos.side),
-            "quantity": str(pos.quantity),
-            "avg_price": str(pos.avg_px_open),
-            "ts": str(event.ts_event),
-        })
+        payload = self._build_position_payload(pos, "position_opened", event.ts_event)
+        self._publish("positions", payload)
+        self._persist_position(pos)
 
     def _on_position_changed(self, event: PositionChanged) -> None:
         pos = event.position
-        self._publish("positions", {
-            "event": "position_changed",
-            "instrument_id": str(pos.instrument_id),
-            "side": str(pos.side),
-            "quantity": str(pos.quantity),
-            "unrealized_pnl": str(pos.unrealized_pnl) if pos.unrealized_pnl else "0",
-            "realized_pnl": str(pos.realized_pnl) if pos.realized_pnl else "0",
-            "ts": str(event.ts_event),
-        })
+        payload = self._build_position_payload(pos, "position_changed", event.ts_event)
+        self._publish("positions", payload)
+        self._persist_position(pos)
 
     def _on_position_closed(self, event: PositionClosed) -> None:
         pos = event.position
-        self._publish("positions", {
-            "event": "position_closed",
-            "instrument_id": str(pos.instrument_id),
-            "realized_pnl": str(pos.realized_pnl) if pos.realized_pnl else "0",
-            "duration": str(pos.duration),
-            "ts": str(event.ts_event),
-        })
+        payload = self._build_position_payload(pos, "position_closed", event.ts_event)
+        self._publish("positions", payload)
+        self._persist_position(pos)
