@@ -24,8 +24,18 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::api::ApiClient;
+use crate::types::{BacktestRunList, Strategy};
 use app::{App, PopupKind, Workspace, WsState};
 use ws::WsClientEvent;
+
+/// Async data command — results from background API calls.
+enum DataCmd {
+    Backtests(anyhow::Result<BacktestRunList>),
+    Strategies(anyhow::Result<Vec<Strategy>>),
+    NodeStatus(anyhow::Result<serde_json::Value>),
+    DataCatalog(anyhow::Result<serde_json::Value>),
+    DetailResult(anyhow::Result<serde_json::Value>),
+}
 
 /// Run the interactive TUI dashboard.
 pub async fn run(client: ApiClient) -> Result<()> {
@@ -71,8 +81,11 @@ async fn run_app(
         ws::run_ws_client(ws_url, ws_tx).await;
     });
 
-    // Load initial data
-    load_backtests(&client, &mut app).await;
+    // Async data loading channel
+    let (data_tx, mut data_rx) = mpsc::unbounded_channel::<DataCmd>();
+
+    // Load initial data (non-blocking)
+    fire_load_backtests(&client, &mut app, &data_tx);
 
     loop {
         let tick_rate = Duration::from_millis(app.tick_rate_ms());
@@ -80,7 +93,7 @@ async fn run_app(
         // Render
         terminal.draw(|f| render(f, &app))?;
 
-        // Multiplex: terminal events, WS events, tick timer
+        // Multiplex: terminal events, WS events, data results, tick timer
         tokio::select! {
             _ = tokio::task::spawn_blocking({
                 let tick = tick_rate;
@@ -88,7 +101,7 @@ async fn run_app(
             }) => {
                 while event::poll(Duration::ZERO)? {
                     if let Event::Key(key) = event::read()? {
-                        if handle_key(&mut app, &client, key.code, key.modifiers).await {
+                        if handle_key(&mut app, &client, &data_tx, key.code, key.modifiers).await {
                             return Ok(());
                         }
                     }
@@ -116,6 +129,10 @@ async fn run_app(
                     }
                 }
             }
+
+            Some(cmd) = data_rx.recv() => {
+                handle_data_cmd(&mut app, cmd);
+            }
         }
 
         app.tick();
@@ -130,10 +147,11 @@ async fn run_app(
 fn render(f: &mut ratatui::Frame, app: &App) {
     let size = f.area();
 
-    // Global layout: [header(1)] [content(fill)] [hints(1)] [error?(1)]
+    // Global layout: [header(3)] [gap(1)] [content(fill)] [hints(1)] [error?(1)]
     let has_error = app.error_banner.is_some();
     let constraints = if has_error {
         vec![
+            Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Min(5),
             Constraint::Length(1),
@@ -141,6 +159,7 @@ fn render(f: &mut ratatui::Frame, app: &App) {
         ]
     } else {
         vec![
+            Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Min(5),
             Constraint::Length(1),
@@ -158,29 +177,30 @@ fn render(f: &mut ratatui::Frame, app: &App) {
         size,
     );
 
-    // Header bar
-    chrome::render_header(f, chunks[0], app);
-
-    // Main content — workspace router
-    // Boot animation: skip full rendering until boot is complete
+    // Boot animation: use full screen, skip header/hints/error
     if !app.boot_complete {
-        render_boot(f, chunks[1], app);
+        render_boot(f, size, app);
     } else {
+        // Header bar
+        chrome::render_header(f, chunks[0], app);
+
+        // chunks[1] is the gap — left as blank
+
         match app.workspace {
-            Workspace::Dashboard => workspaces::dashboard::render(f, chunks[1], app),
-            Workspace::Backtest => workspaces::backtest::render(f, chunks[1], app),
-            Workspace::Strategy => workspaces::strategy::render(f, chunks[1], app),
-            Workspace::Nodes => workspaces::nodes::render(f, chunks[1], app),
-            Workspace::Data => workspaces::data::render(f, chunks[1], app),
+            Workspace::Dashboard => workspaces::dashboard::render(f, chunks[2], app),
+            Workspace::Backtest => workspaces::backtest::render(f, chunks[2], app),
+            Workspace::Strategy => workspaces::strategy::render(f, chunks[2], app),
+            Workspace::Nodes => workspaces::nodes::render(f, chunks[2], app),
+            Workspace::Data => workspaces::data::render(f, chunks[2], app),
         }
-    }
 
-    // Hint bar
-    chrome::render_hints(f, chunks[2], app);
+        // Hint bar
+        chrome::render_hints(f, chunks[3], app);
 
-    // Error banner
-    if has_error {
-        chrome::render_error(f, chunks[3], app);
+        // Error banner
+        if has_error {
+            chrome::render_error(f, chunks[4], app);
+        }
     }
 
     // Popup overlay (rendered last, on top of everything)
@@ -269,13 +289,14 @@ fn render_boot(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
     // Phase 3+: Pixel logo with block-character frame (centered)
     {
         // Block-art pixel font: 3 rows, ~42 cols
+        //  T(5)  I(3)  N(4)   O(4)   H(4)  E(4)   L(4)   M(5)
         let logo_lines: &[&str] = &[
-            "\u{2580}\u{2580}\u{2588}\u{2580}\u{2580} \u{2580}\u{2588}\u{2580} \u{2588}\u{2584} \u{2588} \u{2584}\u{2580}\u{2580}\u{2584} \u{2588}  \u{2588} \u{2588}\u{2580}\u{2580} \u{2588}   \u{2588}\u{2584}\u{2580}\u{2584}\u{2588}",
-            "  \u{2588}    \u{2588}  \u{2588} \u{2580}\u{2588} \u{2588}  \u{2588} \u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}  \u{2588}   \u{2588} \u{2580} \u{2588}",
-            "  \u{2588}   \u{2580}\u{2588}\u{2580} \u{2588}  \u{2588} \u{2580}\u{2584}\u{2584}\u{2580} \u{2588}  \u{2588} \u{2580}\u{2580}\u{2580} \u{2580}\u{2580}\u{2580} \u{2588}   \u{2588}",
+            "\u{2580}\u{2580}\u{2588}\u{2580}\u{2580} \u{2580}\u{2588}\u{2580} \u{2588}\u{2584} \u{2588} \u{2584}\u{2580}\u{2580}\u{2584} \u{2588}  \u{2588} \u{2588}\u{2580}\u{2580}\u{2580} \u{2588}    \u{2588}\u{2584}\u{2580}\u{2584}\u{2588}",
+            "  \u{2588}    \u{2588}  \u{2588} \u{2580}\u{2588} \u{2588}  \u{2588} \u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}\u{2580}  \u{2588}    \u{2588} \u{2580} \u{2588}",
+            "  \u{2588}   \u{2580}\u{2588}\u{2580} \u{2588}  \u{2588} \u{2580}\u{2584}\u{2584}\u{2580} \u{2588}  \u{2588} \u{2580}\u{2580}\u{2580}\u{2580} \u{2580}\u{2580}\u{2580}\u{2580} \u{2588}   \u{2588}",
         ];
 
-        let logo_w = 42_u16;
+        let logo_w = 40_u16;
         let frame_w = (logo_w + 6).min(area.width); // +6 for "█  " + "  █" padding
         let frame_h = 7_u16; // top bar + blank + 3 logo rows + blank + bottom bar
         let frame_y = mid_y.saturating_sub(frame_h / 2 + 2);
@@ -302,17 +323,36 @@ fn render_boot(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         // Blank line inside frame
         frame_lines.push(pixel_frame_blank(fw));
 
-        // Logo lines (centered inside frame)
+        // Logo lines (centered inside frame, orange→yellow horizontal gradient)
+        let grad_start: (u8, u8, u8) = (255, 120, 0);   // deep orange
+        let grad_end: (u8, u8, u8) = (255, 230, 60);     // warm yellow
         for logo_row in logo_lines {
             let logo_len = unicode_width(logo_row);
             let pad = fw.saturating_sub(logo_len + 4) / 2;
-            frame_lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::styled("\u{2588} ", Style::default().fg(Color::Rgb(40, 30, 0))),
                 Span::raw(" ".repeat(pad)),
-                Span::styled(logo_row.to_string(), Style::default().fg(theme::FG_AMBER)),
-                Span::raw(" ".repeat(fw.saturating_sub(logo_len + 4 + pad))),
-                Span::styled(" \u{2588}", Style::default().fg(Color::Rgb(40, 30, 0))),
-            ]));
+            ];
+            // Per-character gradient
+            let chars: Vec<char> = logo_row.chars().collect();
+            let max_i = chars.len().saturating_sub(1).max(1) as f64;
+            for (i, ch) in chars.iter().enumerate() {
+                let t = i as f64 / max_i;
+                let r = (grad_start.0 as f64 + (grad_end.0 as f64 - grad_start.0 as f64) * t) as u8;
+                let g = (grad_start.1 as f64 + (grad_end.1 as f64 - grad_start.1 as f64) * t) as u8;
+                let b = (grad_start.2 as f64 + (grad_end.2 as f64 - grad_start.2 as f64) * t) as u8;
+                if *ch == ' ' {
+                    spans.push(Span::raw(" "));
+                } else {
+                    spans.push(Span::styled(
+                        ch.to_string(),
+                        Style::default().fg(Color::Rgb(r, g, b)),
+                    ));
+                }
+            }
+            spans.push(Span::raw(" ".repeat(fw.saturating_sub(logo_len + 4 + pad))));
+            spans.push(Span::styled(" \u{2588}", Style::default().fg(Color::Rgb(40, 30, 0))));
+            frame_lines.push(Line::from(spans));
         }
 
         // Blank line inside frame
@@ -412,7 +452,7 @@ fn render_popup(
 
     // Determine popup size
     let (width, height) = match popup {
-        PopupKind::BacktestForm => (50, 18),
+        PopupKind::BacktestForm => (50, 24),
         PopupKind::DataFetchForm => (50, 14),
         PopupKind::Help => (60, 20),
         PopupKind::Confirm { .. } => (50, 8),
@@ -476,18 +516,73 @@ fn render_backtest_form(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app
             Span::styled(cursor, Style::default().fg(theme::FG_CURSOR)),
             Span::styled("]", Style::default().fg(theme::FG_BORDER)),
         ]));
-        lines.push(Line::from(""));
+
+        // Show strategy suggestions below the Strategy field
+        if i == 0 && is_focused && !app.form_suggestions.is_empty() {
+            let max_visible = 5;
+            let total = app.form_suggestions.len();
+            let sel = app.form_suggestion_idx;
+            // Scroll window to keep selected item visible
+            let start = if sel >= max_visible {
+                sel - max_visible + 1
+            } else {
+                0
+            };
+            let end = (start + max_visible).min(total);
+
+            if start > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("              \u{25B4} {} above", start), // ▴
+                    Style::default().fg(theme::FG_DIM),
+                )));
+            }
+            for j in start..end {
+                let name = &app.form_suggestions[j];
+                let is_sel = j == sel;
+                let (prefix, style) = if is_sel {
+                    ("\u{25B8} ", Style::default().fg(theme::FG_AMBER)) // ▸
+                } else {
+                    ("  ", Style::default().fg(theme::FG_DIM))
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("            {}{}", prefix, name),
+                    style,
+                )));
+            }
+            if end < total {
+                lines.push(Line::from(Span::styled(
+                    format!("              \u{25BE} {} more", total - end), // ▾
+                    Style::default().fg(theme::FG_DIM),
+                )));
+            }
+        } else {
+            lines.push(Line::from(""));
+        }
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  Tab", theme::style_hint_key()),
-        Span::styled(" next  ", theme::style_hint_desc()),
-        Span::styled("Enter", theme::style_hint_key()),
-        Span::styled(" submit  ", theme::style_hint_desc()),
-        Span::styled("Esc", theme::style_hint_key()),
-        Span::styled(" cancel", theme::style_hint_desc()),
-    ]));
+    let hint_line = if app.form_focus == 0 {
+        Line::from(vec![
+            Span::styled("  \u{2191}\u{2193}", theme::style_hint_key()),
+            Span::styled(" select  ", theme::style_hint_desc()),
+            Span::styled("Enter", theme::style_hint_key()),
+            Span::styled(" accept  ", theme::style_hint_desc()),
+            Span::styled("Tab", theme::style_hint_key()),
+            Span::styled(" next  ", theme::style_hint_desc()),
+            Span::styled("Esc", theme::style_hint_key()),
+            Span::styled(" cancel", theme::style_hint_desc()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  Tab", theme::style_hint_key()),
+            Span::styled(" next  ", theme::style_hint_desc()),
+            Span::styled("Enter", theme::style_hint_key()),
+            Span::styled(" submit  ", theme::style_hint_desc()),
+            Span::styled("Esc", theme::style_hint_key()),
+            Span::styled(" cancel", theme::style_hint_desc()),
+        ])
+    };
+    lines.push(hint_line);
 
     let p = Paragraph::new(lines)
         .block(
@@ -591,6 +686,7 @@ fn centered_rect(width: u16, height: u16, parent: ratatui::layout::Rect) -> rata
 async fn handle_key(
     app: &mut App,
     client: &ApiClient,
+    tx: &mpsc::UnboundedSender<DataCmd>,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
@@ -607,7 +703,7 @@ async fn handle_key(
 
     // Popup key handling
     if app.popup.is_some() {
-        return handle_popup_key(app, client, code).await;
+        return handle_popup_key(app, client, tx, code).await;
     }
 
     match code {
@@ -617,24 +713,24 @@ async fn handle_key(
         // Workspace switching — F-keys
         KeyCode::F(1) | KeyCode::Char('1') => {
             app.switch_workspace(Workspace::Dashboard);
-            load_backtests(client, app).await;
-            load_node_status(client, app).await;
+            fire_load_backtests(client, app, tx);
+            fire_load_node_status(client, app, tx);
         }
         KeyCode::F(2) | KeyCode::Char('2') => {
             app.switch_workspace(Workspace::Backtest);
-            load_backtests(client, app).await;
+            fire_load_backtests(client, app, tx);
         }
         KeyCode::F(3) | KeyCode::Char('3') => {
             app.switch_workspace(Workspace::Strategy);
-            load_strategies(client, app).await;
+            fire_load_strategies(client, app, tx);
         }
         KeyCode::F(4) | KeyCode::Char('4') => {
             app.switch_workspace(Workspace::Nodes);
-            load_node_status(client, app).await;
+            fire_load_node_status(client, app, tx);
         }
         KeyCode::F(5) | KeyCode::Char('5') => {
             app.switch_workspace(Workspace::Data);
-            load_data_catalog(client, app).await;
+            fire_load_data_catalog(client, app, tx);
         }
 
         // Help
@@ -652,7 +748,7 @@ async fn handle_key(
                 Workspace::Data => Workspace::Dashboard,
             };
             app.switch_workspace(next);
-            load_workspace_data(client, app).await;
+            fire_load_workspace_data(client, app, tx);
         }
 
         // Shift+Tab — cycle to previous workspace
@@ -665,7 +761,7 @@ async fn handle_key(
                 Workspace::Data => Workspace::Nodes,
             };
             app.switch_workspace(prev);
-            load_workspace_data(client, app).await;
+            fire_load_workspace_data(client, app, tx);
         }
 
         // Left/Right — toggle panel focus in split views
@@ -688,7 +784,7 @@ async fn handle_key(
                 handle_nav_down(app);
                 if app.workspace == Workspace::Backtest && app.backtest_selected != prev_sel {
                     app.detail_scroll = 0;
-                    load_detail_result(client, app).await;
+                    fire_load_detail_result(client, app, tx);
                 }
             }
         }
@@ -702,7 +798,7 @@ async fn handle_key(
                 handle_nav_up(app);
                 if app.workspace == Workspace::Backtest && app.backtest_selected != prev_sel {
                     app.detail_scroll = 0;
-                    load_detail_result(client, app).await;
+                    fire_load_detail_result(client, app, tx);
                 }
             }
         }
@@ -710,7 +806,7 @@ async fn handle_key(
         // Enter — open detail / load detail data
         KeyCode::Enter => {
             if app.workspace == Workspace::Backtest && !app.backtests.is_empty() {
-                load_detail_result(client, app).await;
+                fire_load_detail_result(client, app, tx);
                 app.panel_focus = app::PanelFocus::Right;
             }
         }
@@ -718,8 +814,10 @@ async fn handle_key(
         // New backtest
         KeyCode::Char('n') => {
             if app.workspace == Workspace::Backtest || app.workspace == Workspace::Dashboard {
-                app.form_strategy.clear();
-                app.form_focus = 0;
+                if app.strategies.is_empty() {
+                    fire_load_strategies(client, app, tx);
+                }
+                app.init_backtest_form();
                 app.open_popup(PopupKind::BacktestForm);
             }
         }
@@ -727,22 +825,22 @@ async fn handle_key(
         // Refresh
         KeyCode::Char('r') => match app.workspace {
             Workspace::Dashboard => {
-                load_backtests(client, app).await;
-                load_node_status(client, app).await;
+                fire_load_backtests(client, app, tx);
+                fire_load_node_status(client, app, tx);
             }
             Workspace::Backtest => {
-                load_backtests(client, app).await;
+                fire_load_backtests(client, app, tx);
             }
             Workspace::Strategy => {
-                // Rescan strategies
+                // Rescan strategies (action — keep blocking), then refresh list
                 let _ = client.rescan_strategies().await;
-                load_strategies(client, app).await;
+                fire_load_strategies(client, app, tx);
             }
             Workspace::Nodes => {
-                load_node_status(client, app).await;
+                fire_load_node_status(client, app, tx);
             }
             Workspace::Data => {
-                load_data_catalog(client, app).await;
+                fire_load_data_catalog(client, app, tx);
             }
         },
 
@@ -759,7 +857,7 @@ async fn handle_key(
                             app::AlertKind::Info,
                             format!("{} node starting…", node_type),
                         );
-                        load_node_status(client, app).await;
+                        fire_load_node_status(client, app, tx);
                     }
                     Err(e) => app.set_error(format!("Failed to start {}: {}", node_type, e)),
                 }
@@ -777,7 +875,7 @@ async fn handle_key(
                             app::AlertKind::Info,
                             format!("{} node stopping…", node_type),
                         );
-                        load_node_status(client, app).await;
+                        fire_load_node_status(client, app, tx);
                     }
                     Err(e) => app.set_error(format!("Failed to stop {}: {}", node_type, e)),
                 }
@@ -830,31 +928,96 @@ async fn handle_key(
 }
 
 /// Handle keys when a popup is open.
-async fn handle_popup_key(app: &mut App, client: &ApiClient, code: KeyCode) -> bool {
+async fn handle_popup_key(app: &mut App, client: &ApiClient, tx: &mpsc::UnboundedSender<DataCmd>, code: KeyCode) -> bool {
     match &app.popup {
         Some(PopupKind::BacktestForm) => match code {
             KeyCode::Esc => {
                 app.close_popup();
             }
             KeyCode::Tab => {
+                // On Strategy field, accept suggestion before moving
+                if app.form_focus == 0 && !app.form_suggestions.is_empty() {
+                    app.accept_suggestion();
+                }
                 app.form_focus = (app.form_focus + 1) % 5;
+                if app.form_focus == 0 {
+                    app.update_form_suggestions();
+                }
             }
             KeyCode::BackTab => {
+                if app.form_focus == 0 && !app.form_suggestions.is_empty() {
+                    app.accept_suggestion();
+                }
                 app.form_focus = if app.form_focus == 0 {
                     4
                 } else {
                     app.form_focus - 1
                 };
+                if app.form_focus == 0 {
+                    app.update_form_suggestions();
+                }
+            }
+            KeyCode::Up => {
+                if app.form_focus == 0 && !app.form_suggestions.is_empty() {
+                    app.form_suggestion_idx = app.form_suggestion_idx
+                        .checked_sub(1)
+                        .unwrap_or(app.form_suggestions.len() - 1);
+                }
+            }
+            KeyCode::Down => {
+                if app.form_focus == 0 && !app.form_suggestions.is_empty() {
+                    app.form_suggestion_idx =
+                        (app.form_suggestion_idx + 1) % app.form_suggestions.len();
+                }
             }
             KeyCode::Backspace => {
+                let is_date = app.form_focus == 3 || app.form_focus == 4;
                 let field = get_form_field_mut(app);
-                field.pop();
+                if is_date {
+                    // Remove trailing dash along with the digit
+                    if field.ends_with('-') {
+                        field.pop(); // remove dash
+                    }
+                    field.pop(); // remove digit
+                } else {
+                    field.pop();
+                }
+                if app.form_focus == 0 {
+                    app.update_form_suggestions();
+                }
             }
             KeyCode::Char(c) => {
-                let field = get_form_field_mut(app);
-                field.push(c);
+                let is_date = app.form_focus == 3 || app.form_focus == 4;
+                if is_date {
+                    // Date fields: only accept digits, auto-insert dashes
+                    if c.is_ascii_digit() {
+                        let field = get_form_field_mut(app);
+                        let digits: String = field.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                        if digits.len() < 8 {
+                            let mut new_digits = digits;
+                            new_digits.push(c);
+                            // Format as YYYY-MM-DD
+                            let formatted = format_date_digits(&new_digits);
+                            let field = get_form_field_mut(app);
+                            *field = formatted;
+                        }
+                    }
+                    // Ignore non-digit input for date fields
+                } else {
+                    let field = get_form_field_mut(app);
+                    field.push(c);
+                    if app.form_focus == 0 {
+                        app.update_form_suggestions();
+                    }
+                }
             }
             KeyCode::Enter => {
+                // On Strategy field, accept suggestion first
+                if app.form_focus == 0 && !app.form_suggestions.is_empty() {
+                    app.accept_suggestion();
+                    app.form_focus = 1; // advance to Symbol
+                    return false;
+                }
                 if app.form_strategy.is_empty() {
                     app.set_error("Strategy name is required".to_string());
                     return false;
@@ -873,6 +1036,7 @@ async fn handle_popup_key(app: &mut App, client: &ApiClient, code: KeyCode) -> b
                     initial_capital: 10000.0,
                     leverage: 1.0,
                     params: None,
+                    fill_model: None,
                 };
 
                 match client.run_backtest(&req).await {
@@ -882,7 +1046,7 @@ async fn handle_popup_key(app: &mut App, client: &ApiClient, code: KeyCode) -> b
                             app::AlertKind::Info,
                             format!("Backtest '{}' submitted", app.form_strategy),
                         );
-                        load_backtests(client, app).await;
+                        fire_load_backtests(client, app, tx);
                     }
                     Err(e) => {
                         app.set_error(format!("Failed to submit: {}", e));
@@ -929,6 +1093,18 @@ fn get_form_field_mut(app: &mut App) -> &mut String {
     }
 }
 
+/// Format raw digits into YYYY-MM-DD, inserting dashes at the right positions.
+fn format_date_digits(digits: &str) -> String {
+    let mut out = String::with_capacity(10);
+    for (i, ch) in digits.chars().enumerate() {
+        if i == 4 || i == 6 {
+            out.push('-');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn handle_nav_down(app: &mut App) {
     match app.workspace {
         Workspace::Dashboard | Workspace::Backtest => {
@@ -970,112 +1146,154 @@ fn handle_nav_up(app: &mut App) {
     }
 }
 
-// ── Data loading helpers ────────────────────────────────────────────────
+// ── Non-blocking data loading ───────────────────────────────────────────
 
-/// Load appropriate data when switching to a workspace.
-async fn load_workspace_data(client: &ApiClient, app: &mut App) {
-    match app.workspace {
-        Workspace::Dashboard => {
-            load_backtests(client, app).await;
-            load_node_status(client, app).await;
-        }
-        Workspace::Backtest => {
-            load_backtests(client, app).await;
-            if !app.backtests.is_empty() {
-                load_detail_result(client, app).await;
-            }
-        }
-        Workspace::Strategy => {
-            load_strategies(client, app).await;
-        }
-        Workspace::Nodes => {
-            load_node_status(client, app).await;
-        }
-        Workspace::Data => {
-            load_data_catalog(client, app).await;
-        }
-    }
-}
-
-async fn load_backtests(client: &ApiClient, app: &mut App) {
+fn fire_load_backtests(
+    client: &ApiClient,
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
     app.backtest_loading = true;
-    match client.list_backtests().await {
-        Ok(list) => {
-            app.backtests = list.runs;
-            if app.backtest_selected >= app.backtests.len() && !app.backtests.is_empty() {
-                app.backtest_selected = app.backtests.len() - 1;
-            }
-        }
-        Err(e) => {
-            app.set_error(format!("Failed to load backtests: {}", e));
-        }
-    }
-    app.backtest_loading = false;
+    let c = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = c.list_backtests().await;
+        let _ = tx.send(DataCmd::Backtests(result));
+    });
 }
 
-async fn load_strategies(client: &ApiClient, app: &mut App) {
+fn fire_load_strategies(
+    client: &ApiClient,
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
     app.strategy_loading = true;
-    match client.list_strategies().await {
-        Ok(list) => {
-            app.strategies = list;
-            if app.strategy_selected >= app.strategies.len() && !app.strategies.is_empty() {
-                app.strategy_selected = app.strategies.len() - 1;
-            }
-        }
-        Err(e) => {
-            app.set_error(format!("Failed to load strategies: {}", e));
-        }
-    }
-    app.strategy_loading = false;
+    let c = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = c.list_strategies().await;
+        let _ = tx.send(DataCmd::Strategies(result));
+    });
 }
 
-async fn load_node_status(client: &ApiClient, app: &mut App) {
+fn fire_load_node_status(
+    client: &ApiClient,
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
     app.node_loading = true;
-    match client.node_status().await {
-        Ok(status) => {
-            app.node_status = Some(status);
-        }
-        Err(e) => {
-            app.set_error(format!("Failed to load node status: {}", e));
-        }
-    }
-    app.node_loading = false;
+    let c = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = c.node_status().await;
+        let _ = tx.send(DataCmd::NodeStatus(result));
+    });
 }
 
-async fn load_detail_result(client: &ApiClient, app: &mut App) {
+fn fire_load_data_catalog(
+    client: &ApiClient,
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
+    app.data_loading = true;
+    let c = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = c.list_data().await;
+        let _ = tx.send(DataCmd::DataCatalog(result));
+    });
+}
+
+fn fire_load_detail_result(
+    client: &ApiClient,
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
     let run_id = match app.backtests.get(app.backtest_selected) {
         Some(bt) => bt.run_id.clone(),
         None => return,
     };
     app.detail_result = None;
     app.detail_equity = Vec::new();
+    let c = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = c.get_result(&run_id).await;
+        let _ = tx.send(DataCmd::DetailResult(result));
+    });
+}
 
-    match client.get_result(&run_id).await {
-        Ok(result) => {
-            if let Some(curve) = result.get("equity_curve").and_then(|c| c.as_array()) {
-                app.detail_equity = curve
-                    .iter()
-                    .filter_map(|v| v.as_f64())
-                    .map(|v| v.max(0.0) as u64)
-                    .collect();
-            }
-            app.detail_result = Some(result);
+fn fire_load_workspace_data(
+    client: &ApiClient,
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
+    match app.workspace {
+        Workspace::Dashboard => {
+            fire_load_backtests(client, app, tx);
+            fire_load_node_status(client, app, tx);
         }
-        Err(_) => {
-            // Result not available yet
-        }
+        Workspace::Backtest => fire_load_backtests(client, app, tx),
+        Workspace::Strategy => fire_load_strategies(client, app, tx),
+        Workspace::Nodes => fire_load_node_status(client, app, tx),
+        Workspace::Data => fire_load_data_catalog(client, app, tx),
     }
 }
 
-async fn load_data_catalog(client: &ApiClient, app: &mut App) {
-    app.data_loading = true;
-    match client.list_data().await {
-        Ok(data) => {
-            app.data_catalog = Some(data);
+fn handle_data_cmd(app: &mut App, cmd: DataCmd) {
+    match cmd {
+        DataCmd::Backtests(result) => {
+            app.backtest_loading = false;
+            match result {
+                Ok(list) => {
+                    app.backtests = list.runs;
+                    if app.backtest_selected >= app.backtests.len() && !app.backtests.is_empty() {
+                        app.backtest_selected = app.backtests.len() - 1;
+                    }
+                }
+                Err(e) => app.set_error(format!("Failed to load backtests: {}", e)),
+            }
         }
-        Err(e) => {
-            app.set_error(format!("Failed to load data catalog: {}", e));
+        DataCmd::Strategies(result) => {
+            app.strategy_loading = false;
+            match result {
+                Ok(list) => {
+                    app.strategies = list;
+                    if app.strategy_selected >= app.strategies.len() && !app.strategies.is_empty() {
+                        app.strategy_selected = app.strategies.len() - 1;
+                    }
+                }
+                Err(e) => app.set_error(format!("Failed to load strategies: {}", e)),
+            }
+        }
+        DataCmd::NodeStatus(result) => {
+            app.node_loading = false;
+            match result {
+                Ok(status) => app.node_status = Some(status),
+                Err(e) => app.set_error(format!("Failed to load node status: {}", e)),
+            }
+        }
+        DataCmd::DataCatalog(result) => {
+            app.data_loading = false;
+            match result {
+                Ok(data) => app.data_catalog = Some(data),
+                Err(e) => app.set_error(format!("Failed to load data catalog: {}", e)),
+            }
+        }
+        DataCmd::DetailResult(result) => {
+            match result {
+                Ok(detail) => {
+                    if let Some(curve) = detail.get("equity_curve").and_then(|c| c.as_array()) {
+                        app.detail_equity = curve
+                            .iter()
+                            .filter_map(|v| v.as_f64())
+                            .map(|v| v.max(0.0) as u64)
+                            .collect();
+                    }
+                    app.detail_result = Some(detail);
+                }
+                Err(_) => {}
+            }
         }
     }
-    app.data_loading = false;
 }

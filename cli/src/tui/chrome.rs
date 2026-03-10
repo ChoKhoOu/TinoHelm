@@ -10,100 +10,164 @@ use ratatui::{
 
 use super::app::{utc_clock, App, PopupKind, Workspace, WsState};
 use super::theme;
+use super::widgets;
 
-/// Render the top header bar: [TINO]HELM + workspace tabs + WS dot + clock.
+/// Render the top header bar (3 rows):
+/// Row 1: Mini pixel logo (TINO) + nav tabs + WS status + clock
+/// Row 2: Logo row 2 + subtitle
+/// Row 3: Logo row 3 + separator line
 pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
-    let mut spans = Vec::new();
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::Color;
 
-    // Brand logo
-    spans.push(Span::styled(
-        " [TINO]",
-        Style::default()
-            .fg(theme::FG_LOGO)
-            .add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled(
-        "HELM ",
-        Style::default()
-            .fg(theme::FG_AMBER)
-            .add_modifier(Modifier::BOLD),
-    ));
+    // Fill background
+    f.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(theme::BG_HEADER)),
+        area,
+    );
 
-    // Separator between brand and nav
-    spans.push(Span::styled(
-        " \u{2502} ",
-        Style::default().fg(theme::FG_BORDER),
-    ));
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
 
-    // Workspace tabs
-    let tabs = [
-        ("F1", "DASH", Workspace::Dashboard),
-        ("F2", "BACK", Workspace::Backtest),
-        ("F3", "STRAT", Workspace::Strategy),
-        ("F4", "NODE", Workspace::Nodes),
-        ("F5", "DATA", Workspace::Data),
+    // Mini block-char "TINO" logo (3 rows × 19 cols)
+    let mini_logo: [&str; 3] = [
+        "\u{2580}\u{2580}\u{2588}\u{2580}\u{2580} \u{2580}\u{2588}\u{2580} \u{2588}\u{2584} \u{2588} \u{2584}\u{2580}\u{2580}\u{2584}",
+        "  \u{2588}    \u{2588}  \u{2588} \u{2580}\u{2588} \u{2588}  \u{2588}",
+        "  \u{2588}   \u{2580}\u{2588}\u{2580} \u{2588}  \u{2588} \u{2580}\u{2584}\u{2584}\u{2580}",
     ];
+    let logo_w = 19;
+    let logo_pad = 2; // left padding
 
-    for (i, (key, label, ws)) in tabs.iter().enumerate() {
-        let is_active = app.workspace == *ws;
-        if is_active {
-            spans.push(Span::styled(
-                format!(" {} ", key),
-                Style::default()
-                    .fg(theme::BG_PRIMARY)
-                    .bg(theme::FG_AMBER)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                format!(" {} ", label),
-                Style::default()
-                    .fg(theme::FG_AMBER)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(
-                format!(" {}", key),
-                Style::default().fg(theme::FG_DIM),
-            ));
-            spans.push(Span::styled(
-                format!(" {} ", label),
-                Style::default().fg(theme::FG_SECONDARY),
-            ));
+    // Gradient colors (orange→yellow)
+    let gs: (u8, u8, u8) = (255, 120, 0);
+    let ge: (u8, u8, u8) = (255, 230, 60);
+
+    // Helper: render a logo line as gradient spans
+    let gradient_logo = |line: &str| -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        spans.push(Span::raw(" ".repeat(logo_pad)));
+        let chars: Vec<char> = line.chars().collect();
+        let max_i = (logo_w - 1).max(1) as f64;
+        for (i, ch) in chars.iter().enumerate() {
+            if *ch == ' ' {
+                spans.push(Span::raw(" "));
+            } else {
+                let t = i as f64 / max_i;
+                let r = (gs.0 as f64 + (ge.0 as f64 - gs.0 as f64) * t) as u8;
+                let g = (gs.1 as f64 + (ge.1 as f64 - gs.1 as f64) * t) as u8;
+                let b = (gs.2 as f64 + (ge.2 as f64 - gs.2 as f64) * t) as u8;
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD),
+                ));
+            }
         }
-        // Dim separator between tabs (except after last)
-        if i < tabs.len() - 1 {
-            spans.push(Span::styled(
-                "\u{2502}",
-                Style::default().fg(theme::FG_BORDER),
-            ));
-        }
+        spans
+    };
+
+    let right_start = logo_pad + logo_w + 1; // after logo + 1 gap
+
+    // ── Row 1: Logo line 1 + WS + clock (right-aligned) ────────────────
+    {
+        let mut spans = gradient_logo(mini_logo[0]);
+
+        // Right-align WS + clock
+        let right_needed = 16;
+        let pad = (area.width as usize).saturating_sub(right_start + right_needed);
+        spans.push(Span::raw(" ".repeat(pad)));
+
+        let (ws_dot, ws_color) = match app.ws_state {
+            WsState::Connected => ("\u{25CF}", widgets::pulse_color(
+                theme::FG_POSITIVE, Color::Rgb(0, 100, 0), app.frame_count,
+            )),
+            WsState::Connecting => ("\u{25D0}", widgets::pulse_color(
+                theme::FG_QUEUED, Color::Rgb(100, 80, 0), app.frame_count,
+            )),
+            WsState::Disconnected => ("\u{25CB}", theme::FG_NEGATIVE),
+        };
+        spans.push(Span::styled(ws_dot, Style::default().fg(ws_color)));
+        spans.push(Span::styled(" WS ", Style::default().fg(theme::FG_DIM)));
+        spans.push(Span::styled(utc_clock(), Style::default().fg(theme::FG_SECONDARY)));
+        spans.push(Span::raw(" "));
+
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::BG_HEADER)),
+            rows[0],
+        );
     }
 
-    // Right side: WS status + clock
-    let ws_text = area.width as usize;
-    let left_len = 10 + tabs.len() * 10; // approximate
-    let pad = ws_text.saturating_sub(left_len + 16);
-    spans.push(Span::raw(" ".repeat(pad)));
+    // ── Row 2: Logo line 2 + nav tabs ────────────────────────────────
+    {
+        let mut spans = gradient_logo(mini_logo[1]);
 
-    // WS connection dot
-    let (ws_dot, ws_color) = match app.ws_state {
-        WsState::Connected => ("\u{25CF}", theme::FG_POSITIVE),    // ●
-        WsState::Connecting => ("\u{25D0}", theme::FG_QUEUED),     // ◐
-        WsState::Disconnected => ("\u{25CB}", theme::FG_NEGATIVE), // ○
-    };
-    spans.push(Span::styled(ws_dot, Style::default().fg(ws_color)));
-    spans.push(Span::styled("WS ", Style::default().fg(theme::FG_DIM)));
+        // Separator
+        spans.push(Span::styled("  \u{2502} ", Style::default().fg(theme::FG_BORDER)));
 
-    // UTC clock
-    spans.push(Span::styled(
-        utc_clock(),
-        Style::default().fg(theme::FG_SECONDARY),
-    ));
-    spans.push(Span::raw(" "));
+        // Nav tabs
+        let tabs = [
+            ("F1", "DASH", Workspace::Dashboard),
+            ("F2", "BACK", Workspace::Backtest),
+            ("F3", "STRAT", Workspace::Strategy),
+            ("F4", "NODE", Workspace::Nodes),
+            ("F5", "DATA", Workspace::Data),
+        ];
 
-    let line = Line::from(spans);
-    let p = Paragraph::new(line).style(Style::default().bg(theme::BG_HEADER));
-    f.render_widget(p, area);
+        for (i, (key, label, ws)) in tabs.iter().enumerate() {
+            let is_active = app.workspace == *ws;
+            if is_active {
+                spans.push(Span::styled(
+                    format!(" {} ", key),
+                    Style::default()
+                        .fg(theme::BG_PRIMARY)
+                        .bg(theme::FG_AMBER)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!("{} ", label),
+                    Style::default().fg(theme::FG_AMBER).add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!(" {} ", key),
+                    Style::default().fg(theme::FG_DIM),
+                ));
+                spans.push(Span::styled(
+                    format!("{} ", label),
+                    Style::default().fg(theme::FG_SECONDARY),
+                ));
+            }
+            if i < tabs.len() - 1 {
+                spans.push(Span::styled("\u{2502}", Style::default().fg(theme::FG_BORDER)));
+            }
+        }
+
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::BG_HEADER)),
+            rows[1],
+        );
+    }
+
+    // ── Row 3: Logo line 3 + "helm" + separator line ──────────────────
+    {
+        let mut spans = gradient_logo(mini_logo[2]);
+        spans.push(Span::styled("  helm ", Style::default().fg(theme::FG_SECONDARY)));
+        let sep_len = (area.width as usize).saturating_sub(right_start + 7);
+        spans.push(Span::styled(
+            "\u{2500}".repeat(sep_len),
+            Style::default().fg(theme::FG_BORDER),
+        ));
+
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::BG_HEADER)),
+            rows[2],
+        );
+    }
 }
 
 /// Render the bottom hint bar with context-sensitive key shortcuts.

@@ -10,7 +10,7 @@ use ratatui::{
 
 use crate::tui::app::{App, PanelFocus};
 use crate::tui::theme;
-use crate::tui::widgets::{header_cell, kv_line, titled_block};
+use crate::tui::widgets::{self, header_cell, kv_line, titled_block};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::default()
@@ -25,9 +25,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 fn render_list(f: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.panel_focus == PanelFocus::Left;
     let title = if app.strategy_loading {
-        " STRATEGIES (loading\u{2026}) "
+        format!(" STRATEGIES {} ", widgets::spinner(app.frame_count))
     } else {
-        " STRATEGIES "
+        " STRATEGIES ".to_string()
     };
 
     let header = Row::new(vec![
@@ -72,7 +72,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(titled_block(title, is_focused));
+        .block(titled_block(&title, is_focused));
 
     f.render_widget(table, area);
 }

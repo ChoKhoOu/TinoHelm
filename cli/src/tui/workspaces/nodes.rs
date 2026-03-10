@@ -7,6 +7,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use ratatui_macros::{line, span};
 
 use crate::tui::app::{App, PanelFocus};
 use crate::tui::theme;
@@ -50,7 +51,12 @@ fn render_node_card(
     let (status_text, status_color, dot) = match last_hb {
         Some(t) if now.duration_since(t).as_secs() < HEARTBEAT_TIMEOUT_SECS => {
             let ago = now.duration_since(t).as_secs();
-            (format!("Online ({}s)", ago), theme::FG_POSITIVE, "\u{25CF}") // ●
+            let color = widgets::pulse_color(
+                theme::FG_POSITIVE,
+                ratatui::style::Color::Rgb(0, 100, 0),
+                app.frame_count,
+            );
+            (format!("Online ({}s)", ago), color, "\u{25CF}") // ●
         }
         Some(t) => {
             let ago = now.duration_since(t).as_secs();
@@ -71,33 +77,25 @@ fn render_node_card(
         .unwrap_or(0);
 
     let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!(" {} ", dot),
-                Style::default().fg(status_color),
-            ),
-            Span::styled(
-                name,
-                Style::default()
-                    .fg(theme::FG_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" Status ", Style::default().fg(theme::FG_AMBER)),
-            Span::styled(&status_text, Style::default().fg(status_color)),
-        ]),
-        Line::from(vec![
-            Span::styled(" Restart ", Style::default().fg(theme::FG_AMBER)),
-            Span::styled(format!("{}", restart_count), Style::default().fg(theme::FG_PRIMARY)),
-        ]),
+        line![
+            span!(Style::default().fg(status_color); " {} ", dot),
+            span!(Style::default().fg(theme::FG_PRIMARY).add_modifier(Modifier::BOLD); "{}", name),
+        ],
+        line![
+            span!(Style::default().fg(theme::FG_AMBER); " Status "),
+            span!(Style::default().fg(status_color); "{}", &status_text),
+        ],
+        line![
+            span!(Style::default().fg(theme::FG_AMBER); " Restart "),
+            span!(Style::default().fg(theme::FG_PRIMARY); "{}", restart_count),
+        ],
         Line::from(""),
-        Line::from(vec![
-            Span::styled(" [s]", theme::style_hint_key()),
-            Span::styled(" start ", theme::style_hint_desc()),
-            Span::styled("[x]", theme::style_hint_key()),
-            Span::styled(" stop", theme::style_hint_desc()),
-        ]),
+        line![
+            span!(theme::style_hint_key(); " [s]"),
+            span!(theme::style_hint_desc(); " start "),
+            span!(theme::style_hint_key(); "[x]"),
+            span!(theme::style_hint_desc(); " stop"),
+        ],
     ];
 
     let block = titled_block(&format!(" {} ", name), focused);
@@ -129,18 +127,18 @@ fn render_workers(f: &mut Frame, area: Rect, app: &App) {
                 ("\u{25CB}", theme::FG_NEGATIVE)
             };
             let status = if alive { "idle" } else { "off" };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {} ", dot), Style::default().fg(color)),
-                Span::styled(format!("w:{} ", pid), Style::default().fg(theme::FG_PRIMARY)),
-                Span::styled(status, Style::default().fg(color)),
-            ]));
+            lines.push(line![
+                span!(Style::default().fg(color); " {} ", dot),
+                span!(Style::default().fg(theme::FG_PRIMARY); "w:{} ", pid),
+                span!(Style::default().fg(color); "{}", status),
+            ]);
         }
     }
 
     if lines.is_empty() {
         if app.node_loading {
             lines.push(Line::from(Span::styled(
-                " Loading\u{2026}",
+                format!(" {} Loading\u{2026}", widgets::spinner(app.frame_count)),
                 theme::style_dim(),
             )));
         } else {
@@ -189,20 +187,11 @@ fn render_event_log(f: &mut Frame, area: Rect, app: &App) {
                 "sys.err" => theme::FG_NEGATIVE,
                 _ => theme::FG_DIM,
             };
-            Line::from(vec![
-                Span::styled(
-                    format!(" {} ", entry.timestamp),
-                    Style::default().fg(theme::FG_DIM),
-                ),
-                Span::styled(
-                    format!("{:<8}", entry.event_type),
-                    Style::default().fg(type_color),
-                ),
-                Span::styled(
-                    format!(" {}", entry.message),
-                    Style::default().fg(theme::FG_SECONDARY),
-                ),
-            ])
+            line![
+                span!(Style::default().fg(theme::FG_DIM); " {} ", entry.timestamp),
+                span!(Style::default().fg(type_color); "{:<8}", entry.event_type),
+                span!(Style::default().fg(theme::FG_SECONDARY); " {}", entry.message),
+            ]
         })
         .collect();
 

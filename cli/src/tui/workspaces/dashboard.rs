@@ -2,12 +2,13 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    prelude::Stylize,
-    style::{Modifier, Style},
+    style::Style,
+    symbols,
     text::{Line, Span},
-    widgets::{Paragraph, Sparkline},
+    widgets::{Axis, Chart, Dataset, GraphType, LineGauge, Paragraph},
     Frame,
 };
+use ratatui_macros::{line, span};
 
 use crate::tui::app::App;
 use crate::tui::theme;
@@ -67,10 +68,10 @@ fn render_system_status(f: &mut Frame, area: Rect, app: &App) {
         status_line("  Sandbox ", sandbox_status.0, sandbox_status.1),
         status_line("  Live    ", live_status.0, live_status.1),
         status_line("  WS      ", ws_status.0, ws_status.1),
-        Line::from(vec![
-            Span::styled("  Workers ", Style::default().fg(theme::FG_AMBER)),
-            Span::styled(worker_count, Style::default().fg(theme::FG_PRIMARY)),
-        ]),
+        line![
+            span!(Style::default().fg(theme::FG_AMBER); "  Workers "),
+            span!(Style::default().fg(theme::FG_PRIMARY); "{}", worker_count),
+        ],
     ];
 
     let p = Paragraph::new(lines).block(block);
@@ -88,18 +89,18 @@ fn heartbeat_status(last_hb: Option<std::time::Instant>, now: std::time::Instant
 }
 
 fn status_line<'a>(label: &'a str, value: &'a str, color: ratatui::style::Color) -> Line<'a> {
-    let (dot, _) = if color == theme::FG_POSITIVE {
-        ("\u{25CF} ", color) // ●
+    let dot = if color == theme::FG_POSITIVE {
+        "\u{25CF} " // ●
     } else if color == theme::FG_NEGATIVE {
-        ("\u{25CB} ", color) // ○
+        "\u{25CB} " // ○
     } else {
-        ("\u{25D0} ", color) // ◐
+        "\u{25D0} " // ◐
     };
-    Line::from(vec![
-        Span::styled(label, Style::default().fg(theme::FG_AMBER)),
-        Span::styled(dot, Style::default().fg(color)),
-        Span::styled(value, Style::default().fg(color)),
-    ])
+    line![
+        span!(Style::default().fg(theme::FG_AMBER); "{}", label),
+        span!(Style::default().fg(color); "{}", dot),
+        span!(Style::default().fg(color); "{}", value),
+    ]
 }
 
 fn render_recent_backtests(f: &mut Frame, area: Rect, app: &App) {
@@ -150,14 +151,14 @@ fn render_recent_backtests(f: &mut Frame, area: Rect, app: &App) {
             theme::FG_DIM
         };
 
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {}  ", id_short), Style::default().fg(theme::FG_HINT)),
-            Span::styled(format!("{:<14}", name), Style::default().fg(theme::FG_PRIMARY)),
-            Span::styled(format!("{:<8}", sym), Style::default().fg(theme::FG_SECONDARY)),
-            Span::styled(format!("{:<4}", &bt.interval), Style::default().fg(theme::FG_SECONDARY)),
-            Span::styled(format!("{} ", status_short), Style::default().fg(status_color)),
-            Span::styled(pnl_text, Style::default().fg(pnl_color)),
-        ]));
+        lines.push(line![
+            span!(Style::default().fg(theme::FG_HINT); "  {}  ", id_short),
+            span!(Style::default().fg(theme::FG_PRIMARY); "{:<14}", name),
+            span!(Style::default().fg(theme::FG_SECONDARY); "{:<8}", sym),
+            span!(Style::default().fg(theme::FG_SECONDARY); "{:<4}", &bt.interval),
+            span!(Style::default().fg(status_color); "{} ", status_short),
+            span!(Style::default().fg(pnl_color); "{}", pnl_text),
+        ]);
     }
 
     let p = Paragraph::new(lines).block(block);
@@ -165,7 +166,11 @@ fn render_recent_backtests(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_active_jobs(f: &mut Frame, area: Rect, app: &App) {
+    use crate::types::BacktestRunItem;
+
     let block = titled_block(" ACTIVE JOBS ", false);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     let running: Vec<&BacktestRunItem> = app
         .backtests
@@ -173,19 +178,24 @@ fn render_active_jobs(f: &mut Frame, area: Rect, app: &App) {
         .filter(|b| b.status.starts_with("running") || b.status == "queued")
         .collect();
 
-    use crate::types::BacktestRunItem;
-
-    let mut lines = Vec::new();
     if running.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  No active jobs",
-            theme::style_dim(),
-        )));
+        let p = Paragraph::new(Span::styled("  No active jobs", theme::style_dim()));
+        f.render_widget(p, inner);
+        return;
     }
 
-    for bt in running.iter().take(3) {
+    let constraints: Vec<Constraint> = running
+        .iter()
+        .take(3)
+        .map(|_| Constraint::Length(1))
+        .collect();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    for (i, bt) in running.iter().take(3).enumerate() {
         let name = bt.strategy_name.as_deref().unwrap_or("-");
-        // Parse percentage from status like "running (67%)"
         let pct: u16 = bt
             .status
             .split('(')
@@ -193,26 +203,14 @@ fn render_active_jobs(f: &mut Frame, area: Rect, app: &App) {
             .and_then(|s| s.trim_end_matches("%)").parse().ok())
             .unwrap_or(0);
 
-        let bar_width = (area.width as usize).saturating_sub(40);
-        let filled = (bar_width as u16 * pct / 100) as usize;
-        let empty = bar_width.saturating_sub(filled);
+        let gauge = LineGauge::default()
+            .label(span!(Style::default().fg(theme::FG_PRIMARY); " {:<14} {:>3}%", name, pct))
+            .ratio(pct as f64 / 100.0)
+            .filled_style(Style::default().fg(theme::FG_RUNNING))
+            .unfilled_style(Style::default().fg(theme::FG_BORDER));
 
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:<14}", name), Style::default().fg(theme::FG_PRIMARY)),
-            Span::styled(
-                "\u{2593}".repeat(filled), // ▓
-                Style::default().fg(theme::FG_RUNNING),
-            ),
-            Span::styled(
-                "\u{2591}".repeat(empty), // ░
-                Style::default().fg(theme::FG_BORDER),
-            ),
-            Span::styled(format!(" {:>3}%", pct), Style::default().fg(theme::FG_PRIMARY)),
-        ]));
+        f.render_widget(gauge, rows[i]);
     }
-
-    let p = Paragraph::new(lines).block(block);
-    f.render_widget(p, area);
 }
 
 fn render_equity_curve(f: &mut Frame, area: Rect, app: &App) {
@@ -228,11 +226,40 @@ fn render_equity_curve(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let sparkline = Sparkline::default()
-        .block(block)
-        .data(&app.detail_equity)
-        .style(Style::default().fg(theme::FG_RUNNING))
-        .add_modifier(Modifier::BOLD);
+    let data: Vec<(f64, f64)> = app
+        .detail_equity
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (i as f64, v as f64))
+        .collect();
 
-    f.render_widget(sparkline, area);
+    let x_max = data.len().saturating_sub(1) as f64;
+    let y_min = data.iter().map(|d| d.1).fold(f64::INFINITY, f64::min);
+    let y_max = data.iter().map(|d| d.1).fold(f64::NEG_INFINITY, f64::max);
+    let y_pad = (y_max - y_min).max(1.0) * 0.05;
+
+    let dataset = Dataset::default()
+        .marker(symbols::Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(theme::FG_RUNNING))
+        .data(&data);
+
+    let chart = Chart::new(vec![dataset])
+        .block(block)
+        .x_axis(
+            Axis::default()
+                .style(Style::default().fg(theme::FG_DIM))
+                .bounds([0.0, x_max]),
+        )
+        .y_axis(
+            Axis::default()
+                .style(Style::default().fg(theme::FG_DIM))
+                .bounds([y_min - y_pad, y_max + y_pad])
+                .labels(vec![
+                    Span::styled(format!("{:.0}", y_min), Style::default().fg(theme::FG_SECONDARY)),
+                    Span::styled(format!("{:.0}", y_max), Style::default().fg(theme::FG_SECONDARY)),
+                ]),
+        );
+
+    f.render_widget(chart, area);
 }

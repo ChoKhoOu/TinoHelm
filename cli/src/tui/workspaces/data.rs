@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::tui::app::App;
 use crate::tui::theme;
-use crate::tui::widgets::titled_block;
+use crate::tui::widgets::{self, titled_block};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let block = titled_block(" DATA CATALOG ", false);
@@ -48,20 +48,25 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 .get("interval")
                 .and_then(|v| v.as_str())
                 .unwrap_or("-");
-            let bars = item
-                .get("bar_count")
-                .and_then(|v| v.as_u64())
-                .map(|v| format!("{}", v))
-                .unwrap_or_else(|| "-".to_string());
+            let bars = "-".to_string(); // API does not provide bar count
             let size = item
-                .get("size_mb")
-                .and_then(|v| v.as_f64())
-                .map(|v| format!("{:.1} MB", v))
+                .get("size_bytes")
+                .and_then(|v| v.as_u64())
+                .map(|v| format!("{:.1} MB", v as f64 / 1_048_576.0))
                 .unwrap_or_else(|| "-".to_string());
-            let range = item
-                .get("date_range")
+            let start_d = item
+                .get("start_date")
                 .and_then(|v| v.as_str())
-                .unwrap_or("-");
+                .unwrap_or("");
+            let end_d = item
+                .get("end_date")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let range = if start_d.is_empty() && end_d.is_empty() {
+                "-".to_string()
+            } else {
+                format!("{} ~ {}", start_d, end_d)
+            };
 
             lines.push(Line::from(Span::styled(
                 format!(
@@ -80,7 +85,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         }
     } else if app.data_loading {
         lines.push(Line::from(Span::styled(
-            "  Loading\u{2026}",
+            format!("  {} Loading\u{2026}", widgets::spinner(app.frame_count)),
             theme::style_dim(),
         )));
     } else {

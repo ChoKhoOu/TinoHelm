@@ -2,16 +2,16 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    prelude::Stylize,
-    style::{Modifier, Style},
+    style::Style,
+    symbols,
     text::{Line, Span},
-    widgets::{Cell, Paragraph, Row, Sparkline, Table},
+    widgets::{Axis, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table},
     Frame,
 };
 
 use crate::tui::app::{App, PanelFocus};
 use crate::tui::theme;
-use crate::tui::widgets::{colored_val, divider_line, header_cell, kv_line, section_title, stat_pair, titled_block};
+use crate::tui::widgets::{self, colored_val, divider_line, header_cell, kv_line, section_title, stat_pair, stat_pair_neutral, titled_block};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::default()
@@ -26,9 +26,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 fn render_list(f: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.panel_focus == PanelFocus::Left;
     let title = if app.backtest_loading {
-        " BACKTEST RUNS (loading\u{2026}) "
+        format!(" BACKTEST RUNS {} ", widgets::spinner(app.frame_count))
     } else {
-        " BACKTEST RUNS "
+        " BACKTEST RUNS ".to_string()
     };
 
     let header = Row::new(vec![
@@ -77,17 +77,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
                 "?"
             };
 
-            // PnL for completed
-            let status_display = if bt.status == "completed" {
-                bt.result_summary
-                    .as_ref()
-                    .and_then(|s| s.get("total_pnl_pct").or_else(|| s.get("total_pnl")))
-                    .and_then(|v| v.as_f64())
-                    .map(|v| format!("{}{:+.1}%", status_short, v))
-                    .unwrap_or_else(|| status_short.to_string())
-            } else {
-                status_short.to_string()
-            };
+            let status_display = status_short.to_string();
 
             Row::new(vec![
                 Cell::from(bt.run_id.get(..6).unwrap_or(&bt.run_id).to_string())
@@ -119,7 +109,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(titled_block(title, is_focused));
+        .block(titled_block(&title, is_focused));
 
     f.render_widget(table, area);
 }
@@ -267,7 +257,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(theme::FG_NEGATIVE),
                 ),
                 Span::styled(
-                    format!(" {}W {}L  WR: {}", winning, losing, wr_str),
+                    format!(" {}T  {}W {}L  WR: {}", total_trades, winning, losing, wr_str),
                     Style::default().fg(theme::FG_SECONDARY),
                 ),
             ]));
@@ -283,13 +273,13 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
             "Lg Win",
             get_f("largest_win"),
             "Lg Loss",
-            get_f("largest_loss"),
+            get_f("largest_loss").map(|v| -v.abs()),
         ));
         lines.push(stat_pair(
             "Avg W",
             get_f("avg_win"),
             "Avg L",
-            get_f("avg_loss"),
+            get_f("avg_loss").map(|v| -v.abs()),
         ));
 
         let w_streak = get_f("winning_streak").unwrap_or(0.0) as u32;
@@ -325,15 +315,15 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
             "Gross+",
             get_f("gross_profit"),
             "Gross-",
-            get_f("gross_loss"),
+            get_f("gross_loss").map(|v| -v.abs()),
         ));
-        lines.push(stat_pair(
+        lines.push(stat_pair_neutral(
             "Fees",
             get_f("total_fees"),
             "Orders",
             get_f("total_orders"),
         ));
-        lines.push(stat_pair(
+        lines.push(stat_pair_neutral(
             "Filled",
             get_f("filled_orders"),
             "Open",
@@ -550,14 +540,44 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
         .block(titled_block(&title, is_focused));
     f.render_widget(stats_para, chunks[0]);
 
-    // ── Equity sparkline ──
+    // ── Equity chart ──
     if has_equity {
-        let sparkline = Sparkline::default()
-            .block(titled_block(" EQUITY ", is_focused))
-            .data(&app.detail_equity)
+        let data: Vec<(f64, f64)> = app
+            .detail_equity
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i as f64, v as f64))
+            .collect();
+
+        let x_max = data.len().saturating_sub(1) as f64;
+        let y_min = data.iter().map(|d| d.1).fold(f64::INFINITY, f64::min);
+        let y_max = data.iter().map(|d| d.1).fold(f64::NEG_INFINITY, f64::max);
+        let y_pad = (y_max - y_min).max(1.0) * 0.05;
+
+        let dataset = Dataset::default()
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
             .style(Style::default().fg(theme::FG_RUNNING))
-            .add_modifier(Modifier::BOLD);
-        f.render_widget(sparkline, chunks[1]);
+            .data(&data);
+
+        let chart = Chart::new(vec![dataset])
+            .block(titled_block(" EQUITY ", is_focused))
+            .x_axis(
+                Axis::default()
+                    .style(Style::default().fg(theme::FG_DIM))
+                    .bounds([0.0, x_max]),
+            )
+            .y_axis(
+                Axis::default()
+                    .style(Style::default().fg(theme::FG_DIM))
+                    .bounds([y_min - y_pad, y_max + y_pad])
+                    .labels(vec![
+                        Span::styled(format!("{:.0}", y_min), Style::default().fg(theme::FG_SECONDARY)),
+                        Span::styled(format!("{:.0}", y_max), Style::default().fg(theme::FG_SECONDARY)),
+                    ]),
+            );
+
+        f.render_widget(chart, chunks[1]);
     }
 }
 

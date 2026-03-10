@@ -96,6 +96,8 @@ pub struct App {
     pub form_start: String,
     pub form_end: String,
     pub form_focus: usize,
+    pub form_suggestions: Vec<String>,
+    pub form_suggestion_idx: usize,
 
     // ── Strategy state ──────────────────────────────────────────────────
     pub strategies: Vec<Strategy>,
@@ -156,6 +158,8 @@ impl App {
             form_start: String::new(),
             form_end: String::new(),
             form_focus: 0,
+            form_suggestions: Vec::new(),
+            form_suggestion_idx: 0,
 
             strategies: Vec::new(),
             strategy_selected: 0,
@@ -226,6 +230,44 @@ impl App {
         }
     }
 
+    /// Initialize backtest form with defaults and strategy suggestions.
+    pub fn init_backtest_form(&mut self) {
+        self.form_strategy.clear();
+        self.form_focus = 0;
+        self.form_suggestion_idx = 0;
+        self.update_form_suggestions();
+
+        // Pre-fill dates: Start = 3 months ago, End = today
+        let (today, three_months_ago) = default_date_range();
+        if self.form_start.is_empty() {
+            self.form_start = three_months_ago;
+        }
+        if self.form_end.is_empty() {
+            self.form_end = today;
+        }
+    }
+
+    /// Update strategy suggestions based on current input.
+    pub fn update_form_suggestions(&mut self) {
+        let query = self.form_strategy.to_lowercase();
+        self.form_suggestions = self
+            .strategies
+            .iter()
+            .map(|s| s.name.clone())
+            .filter(|name| query.is_empty() || name.to_lowercase().contains(&query))
+            .collect();
+        if self.form_suggestion_idx >= self.form_suggestions.len() {
+            self.form_suggestion_idx = 0;
+        }
+    }
+
+    /// Accept the currently selected suggestion into the strategy field.
+    pub fn accept_suggestion(&mut self) {
+        if let Some(name) = self.form_suggestions.get(self.form_suggestion_idx) {
+            self.form_strategy = name.clone();
+        }
+    }
+
     /// Adaptive tick rate in milliseconds.
     pub fn tick_rate_ms(&self) -> u64 {
         if !self.boot_complete {
@@ -246,8 +288,14 @@ impl App {
     }
 
     pub fn has_active_animations(&self) -> bool {
-        // For now, just check if ticker is scrolling
         !self.alerts.is_empty()
+            || self.backtest_loading
+            || self.strategy_loading
+            || self.node_loading
+            || self.data_loading
+            || self.sandbox_last_heartbeat.is_some()
+            || self.live_last_heartbeat.is_some()
+            || matches!(self.ws_state, WsState::Connected | WsState::Connecting)
     }
 
     pub fn tick(&mut self) {
@@ -376,4 +424,34 @@ pub fn utc_clock() -> String {
     let h = (secs % 86400) / 3600;
     let m = (secs % 3600) / 60;
     format!("{:02}:{:02} UTC", h, m)
+}
+
+/// Return (today, 3_months_ago) as YYYY-MM-DD strings.
+fn default_date_range() -> (String, String) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let total_days = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 86400;
+
+    let today = days_to_ymd(total_days);
+    let ago = days_to_ymd(total_days.saturating_sub(90));
+    (today, ago)
+}
+
+/// Convert days since epoch to YYYY-MM-DD.
+fn days_to_ymd(days: u64) -> String {
+    // Civil calendar from days since 1970-01-01
+    let z = days as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
 }
