@@ -244,6 +244,26 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
             "CAGR",
             get_f("annual_return"),
         ));
+        // Diversification ratio (from portfolio_analytics, only for multi-instrument)
+        if let Some(pa) = app
+            .detail_result
+            .as_ref()
+            .and_then(|r| r.get("portfolio_analytics"))
+            .and_then(|p| p.as_object())
+        {
+            let div_r = pa.get("diversification_ratio").and_then(|v| v.as_f64());
+            let div_b = pa
+                .get("diversification_benefit_pct")
+                .and_then(|v| v.as_f64());
+            if div_r.is_some() || div_b.is_some() {
+                lines.push(stat_pair(
+                    "DivRat",
+                    div_r,
+                    "DivBen",
+                    div_b,
+                ));
+            }
+        }
 
         // ── Trade Statistics ──
         lines.push(divider_line());
@@ -432,8 +452,14 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                         .and_then(|v| v.as_f64())
                         .unwrap_or(0.0);
                     let short = name.trim_end_matches(".BINANCE");
+                    let sr = data
+                        .get("sharpe_ratio")
+                        .and_then(|v| v.as_f64());
+                    let mdd = data
+                        .get("max_drawdown")
+                        .and_then(|v| v.as_f64());
 
-                    let bar_max = 12_usize;
+                    let bar_max = 8_usize;
                     let bar_len = ((pnl.abs() / max_abs) * bar_max as f64).round() as usize;
                     let bar_len =
                         bar_len.min(bar_max).max(if pnl.abs() > 0.01 { 1 } else { 0 });
@@ -450,6 +476,15 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                         theme::FG_PRIMARY
                     };
 
+                    let sr_str = match sr {
+                        Some(v) => format!(" SR:{:.1}", v),
+                        None => String::new(),
+                    };
+                    let mdd_str = match mdd {
+                        Some(v) if v.abs() > 0.0001 => format!(" DD:{:.0}%", v * 100.0),
+                        _ => String::new(),
+                    };
+
                     lines.push(Line::from(vec![
                         Span::styled(
                             format!("  {:<13}", short),
@@ -460,7 +495,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                             Style::default().fg(pnl_color),
                         ),
                         Span::styled(
-                            format!(" {:>3}T {:>3.0}%", trades, wr * 100.0),
+                            format!(" {:>3}T {:>3.0}%{}{}", trades, wr * 100.0, sr_str, mdd_str),
                             Style::default().fg(theme::FG_SECONDARY),
                         ),
                         Span::raw(" "),
