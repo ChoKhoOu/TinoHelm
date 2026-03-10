@@ -49,21 +49,24 @@ class _ProgressReporter(Actor):
     _bar_count: int = 0
     _start_time: float = 0.0
     _report_every: int = 2000
+    _bar_type_strs: list = []  # Set before engine.run() — explicit bar type strings
 
     def on_start(self) -> None:
+        from nautilus_trader.model.data import BarType
+
         cls = self.__class__
         cls._bar_count = 0
         cls._start_time = time.monotonic()
-        bar_types = self.cache.bar_types()
-        logger.warning("PROGRESS_REPORTER on_start: bar_types=%s", [str(bt) for bt in bar_types])
-        for bt in bar_types:
-            self.subscribe_bars(bt)
+        # Subscribe to explicitly provided bar types (cache may be empty at this point)
+        for bt_str in cls._bar_type_strs:
+            try:
+                self.subscribe_bars(BarType.from_str(bt_str))
+            except Exception:
+                pass
 
     def on_bar(self, bar) -> None:
         cls = self.__class__
         cls._bar_count += 1
-        if cls._bar_count <= 3:
-            logger.warning("PROGRESS_REPORTER on_bar #%d: %s", cls._bar_count, bar)
         if (
             cls._bar_count % cls._report_every == 0
             and cls._redis is not None
@@ -152,6 +155,116 @@ class BacktestRunner:
 
         # Portfolio config (explicit or auto-wrapped from legacy params)
         self._portfolio_config = portfolio_config
+
+    # Timeframes ordered from lowest to highest for composite source resolution
+    _TIMEFRAME_PRIORITY: list[str] = [
+        "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d",
+    ]
+
+    def _resolve_bars(
+        self,
+        catalog: ParquetDataCatalog,
+        sym: str,
+        nt_sym: str,
+        ivl: str,
+    ) -> tuple[list | None, str, str | None]:
+        """Resolve bar data for a (symbol, interval) pair.
+
+        Strategy:
+          1. Try loading target interval directly from catalog.
+          2. Find the lowest available timeframe below target for composite aggregation.
+          3. If nothing local, download target interval from Binance and write to catalog.
+
+        Returns:
+            (bars, bar_type_str, source_bar_type_str_or_None)
+            - bars: list of NT Bar objects, or None if all attempts fail
+            - bar_type_str: the bar type string the strategy should subscribe to
+            - source_bar_type_str: the actually loaded source bar type (for progress), None if direct
+        """
+        # 1. Direct load: target interval exists in catalog
+        bar_type_str = _make_bar_type_str(sym, ivl)
+        bars = catalog.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
+        if bars:
+            logger.info("Loaded %d %s bars for %s directly", len(bars), ivl, sym)
+            return bars, bar_type_str, None
+
+        # 2. Composite: find lowest available source timeframe
+        try:
+            target_idx = self._TIMEFRAME_PRIORITY.index(ivl)
+        except ValueError:
+            target_idx = 0  # Unknown interval, skip composite search
+
+        source_ivl: str | None = None
+        source_bars = None
+        for candidate in self._TIMEFRAME_PRIORITY[:target_idx]:
+            candidate_bt = _make_bar_type_str(sym, candidate)
+            source_bars = catalog.bars(bar_types=[candidate_bt], start=self.start, end=self.end)
+            if source_bars:
+                source_ivl = candidate
+                break
+
+        if source_bars and source_ivl:
+            source_bt_str = _make_bar_type_str(sym, source_ivl)
+            source_interval_part = _INTERVAL_MAP.get(source_ivl, "1-MINUTE")
+            target_interval_part = _INTERVAL_MAP.get(ivl, "1-MINUTE")
+            composite_bt_str = (
+                f"{nt_sym}-{target_interval_part}-LAST-INTERNAL@{source_interval_part}-EXTERNAL"
+            )
+            logger.info(
+                "No %s data for %s, using %s composite aggregation (%d bars): %s",
+                ivl, sym, source_ivl, len(source_bars), composite_bt_str,
+            )
+            return source_bars, composite_bt_str, source_bt_str
+
+        # 3. Auto-download: fetch target interval from Binance and write to catalog
+        logger.info("No local data for %s %s, downloading from Binance...", sym, ivl)
+        bars = self._download_bars(sym, ivl, catalog)
+        if bars:
+            bar_type_str = _make_bar_type_str(sym, ivl)
+            logger.info("Downloaded and loaded %d %s bars for %s", len(bars), ivl, sym)
+            return bars, bar_type_str, None
+
+        return None, bar_type_str, None
+
+    def _download_bars(
+        self,
+        sym: str,
+        ivl: str,
+        catalog: ParquetDataCatalog,
+    ) -> list | None:
+        """Synchronously download bars from Binance and write to catalog.
+
+        Returns the loaded Bar objects, or None on failure.
+        """
+        import asyncio
+        from tinohelm.data.providers.binance import fetch_klines
+        from tinohelm.data.catalog import klines_to_bars, write_bars
+
+        try:
+            klines = asyncio.run(fetch_klines(
+                symbol=sym,
+                interval=ivl,
+                start=self.start,
+                end=self.end,
+            ))
+            if not klines:
+                logger.warning("Binance returned no data for %s %s", sym, ivl)
+                return None
+
+            bars = klines_to_bars(klines, sym, ivl)
+            if not bars:
+                logger.warning("Failed to convert klines to bars for %s %s", sym, ivl)
+                return None
+
+            write_bars(bars, sym, ivl, str(catalog.path))
+            logger.info("Wrote %d bars to catalog for %s %s", len(bars), sym, ivl)
+
+            # Reload from catalog to get properly indexed data
+            bar_type_str = _make_bar_type_str(sym, ivl)
+            return catalog.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
+        except Exception:
+            logger.warning("Failed to download bars for %s %s from Binance", sym, ivl, exc_info=True)
+            return None
 
     def _build_portfolio_config(self):
         """Build a PortfolioConfig from legacy constructor params if not provided."""
@@ -269,54 +382,40 @@ class BacktestRunner:
 
         # Load bar data for each (symbol, interval) combination
         all_bar_type_strs: list[str] = []
+        loaded_bar_type_strs: list[str] = []  # bar types with actual data (for progress)
         total_bar_count: int = 0
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
-                bar_type_str = _make_bar_type_str(sym, ivl)
-
-                # Try loading direct bar data first
-                bars = catalog.bars(
-                    bar_types=[bar_type_str],
-                    start=self.start,
-                    end=self.end,
+                bars, bt_str, source_bt_str = self._resolve_bars(
+                    catalog, sym, nt_sym, ivl,
                 )
                 if bars:
                     total_bar_count += len(bars)
+                    loaded_bar_type_strs.append(source_bt_str or bt_str)
                     engine.add_data(bars)
-                    all_bar_type_strs.append(bar_type_str)
-                elif ivl != "1m":
-                    # Fall back to 1m and use NT composite aggregation
-                    source_bar_type_str = _make_bar_type_str(sym, "1m")
-                    bars = catalog.bars(
-                        bar_types=[source_bar_type_str],
-                        start=self.start,
-                        end=self.end,
-                    )
-                    if bars:
-                        total_bar_count += len(bars)
-                        engine.add_data(bars)
-                        interval_part = _INTERVAL_MAP.get(ivl, "1-MINUTE")
-                        composite_bar_type_str = (
-                            f"{nt_sym}-{interval_part}-LAST-INTERNAL@1-MINUTE-EXTERNAL"
-                        )
-                        all_bar_type_strs.append(composite_bar_type_str)
-                        logger.info(
-                            "No %s data found for %s, using 1m composite aggregation: %s",
-                            ivl, sym, composite_bar_type_str,
-                        )
-                    else:
-                        logger.warning(
-                            "No bar data found for %s (tried %s and 1m)", sym, ivl,
-                        )
+                    all_bar_type_strs.append(bt_str)
                 else:
-                    logger.warning("No bar data found for %s at %s", sym, ivl)
+                    logger.warning("No bar data available for %s at %s", sym, ivl)
 
         # Inject NT-format params for strategy config resolution
         self.strategy_params.setdefault("instrument_id", nt_symbols[0] if nt_symbols else "")
         self.strategy_params.setdefault("instrument_ids", nt_symbols)
         self.strategy_params.setdefault("bar_type", all_bar_type_strs[0] if all_bar_type_strs else "")
         self.strategy_params.setdefault("bar_types", all_bar_type_strs)
+
+        # Build per-symbol bar_type map so the portfolio loader can pick up
+        # composite bar types (e.g. INTERNAL@1-MINUTE-EXTERNAL) instead of
+        # building plain EXTERNAL bar types that don't match loaded data.
+        bar_type_map: dict[str, str] = {}
+        for bt_str in all_bar_type_strs:
+            # Extract NT symbol from bar_type string (everything before the interval part)
+            # e.g. "BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+            for ns in nt_symbols:
+                if bt_str.startswith(ns):
+                    bar_type_map[ns] = bt_str
+                    break
+        portfolio_config.params["_bar_type_map"] = bar_type_map
 
         # Create strategy instances via portfolio_loader
         strategy_instances = create_strategies(portfolio_config)
@@ -351,14 +450,12 @@ class BacktestRunner:
             logger.warning("Failed to register custom statistics", exc_info=True)
 
         # Add progress reporter actor for bar-level progress tracking
-        logger.warning("PROGRESS_CHECK: total_bars=%d, redis=%s, run_id=%s",
-                       total_bar_count, self._redis_client is not None,
-                       self._run_id[:8] if self._run_id else "none")
         if self._redis_client and self._run_id and total_bar_count > 0:
             _ProgressReporter._redis = self._redis_client
             _ProgressReporter._run_id = self._run_id
             _ProgressReporter._total_bars = total_bar_count
             _ProgressReporter._bar_count = 0
+            _ProgressReporter._bar_type_strs = loaded_bar_type_strs
             reporter = _ProgressReporter(config=_ProgressReporterConfig())
             engine.add_actor(reporter)
             logger.info(
@@ -376,6 +473,7 @@ class BacktestRunner:
         if self.artifacts_dir is not None:
             self._export_reports(engine)
             self._generate_tearsheet(engine, all_bar_type_strs)
+            self._enhance_tearsheet(results)
 
         # Cleanup
         engine.dispose()
@@ -473,6 +571,119 @@ class BacktestRunner:
             logger.info("Generated tearsheet: %s", output_path)
         except Exception:
             logger.warning("Failed to generate tearsheet", exc_info=True)
+
+    def _enhance_tearsheet(self, results: dict[str, Any]) -> None:
+        """Inject per-instrument performance breakdown into the tearsheet HTML.
+
+        Adds a Plotly horizontal bar chart and a detailed summary table
+        showing PnL, return %, win rate, and other per-symbol metrics.
+        Only activates for multi-instrument (portfolio) backtests.
+        """
+        tearsheet_path = self.artifacts_dir / "tearsheet.html"
+        if not tearsheet_path.exists():
+            return
+
+        per_instrument = results.get("per_instrument", {})
+        if len(per_instrument) <= 1:
+            return
+
+        import json
+
+        sorted_items = sorted(
+            per_instrument.items(),
+            key=lambda x: x[1].get("total_pnl", 0),
+            reverse=True,
+        )
+
+        # Plotly data (reversed for bottom-to-top horizontal bar display)
+        symbols = [k.replace(".BINANCE", "") for k, _ in reversed(sorted_items)]
+        pnls = [round(v.get("total_pnl", 0), 2) for _, v in reversed(sorted_items)]
+        colors = ["#00963c" if p >= 0 else "#c62828" for p in pnls]
+        chart_height = max(300, len(sorted_items) * 35 + 100)
+
+        trace = json.dumps([{
+            "type": "bar", "orientation": "h",
+            "y": symbols, "x": pnls,
+            "marker": {"color": colors},
+            "text": [f"{p:+.2f}" for p in pnls],
+            "textposition": "outside",
+            "hovertemplate": "%{y}: %{x:+.2f} USDT<extra></extra>",
+        }])
+        chart_layout = json.dumps({
+            "title": {"text": "PnL by Instrument (USDT)", "font": {"size": 16}},
+            "xaxis": {"title": "PnL", "zeroline": True, "zerolinecolor": "#ddd", "gridcolor": "#eee"},
+            "yaxis": {"automargin": True},
+            "margin": {"l": 130, "r": 80, "t": 50, "b": 40},
+            "template": "plotly_white",
+            "height": chart_height,
+        })
+
+        # Build HTML table rows
+        rows = []
+        for inst_id, data in sorted_items:
+            short = inst_id.replace(".BINANCE", "")
+            pnl = data.get("total_pnl", 0)
+            ret = data.get("return_pct", 0)
+            trades = data.get("total_trades", 0)
+            wr = data.get("win_rate", 0) * 100
+            pf = data.get("profit_factor")
+            lg_w = data.get("largest_win")
+            lg_l = data.get("largest_loss")
+            avg = data.get("avg_pnl")
+
+            pc = "pos" if pnl >= 0 else "neg"
+            rc = "pos" if ret >= 0 else "neg"
+            pf_s = f"{pf:.2f}" if pf is not None else "\u2013"
+            lw_s = f"{lg_w:+.2f}" if lg_w is not None else "\u2013"
+            ll_s = f"{lg_l:.2f}" if lg_l is not None else "\u2013"
+            avg_s = f"{avg:+.2f}" if avg is not None else "\u2013"
+
+            rows.append(
+                f'<tr><td class="sym">{short}</td>'
+                f'<td class="{pc}">{pnl:+.2f}</td>'
+                f'<td class="{rc}">{ret:+.2f}%</td>'
+                f'<td>{trades}</td><td>{wr:.1f}%</td>'
+                f'<td>{pf_s}</td>'
+                f'<td class="pos">{lw_s}</td>'
+                f'<td class="neg">{ll_s}</td>'
+                f'<td>{avg_s}</td></tr>'
+            )
+
+        section = f"""
+<!-- TinoHelm: Per-Instrument Breakdown -->
+<style>
+.th-inst {{ max-width:1200px; margin:40px auto; padding:0 20px;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }}
+.th-inst h2 {{ color:#333; border-bottom:3px solid #ffb000; padding-bottom:10px; font-size:20px; }}
+.th-inst table {{ width:100%; border-collapse:collapse; margin-top:16px; font-size:13px; }}
+.th-inst th {{ padding:10px 12px; text-align:left; border-bottom:2px solid #ffb000;
+  font-weight:600; color:#555; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }}
+.th-inst td {{ padding:8px 12px; border-bottom:1px solid #eee; }}
+.th-inst tbody tr:hover {{ background:#f7f7f7; }}
+.th-inst .sym {{ font-weight:600; color:#2c6fbb; }}
+.th-inst .pos {{ color:#00963c; font-weight:600; }}
+.th-inst .neg {{ color:#c62828; font-weight:600; }}
+</style>
+<div class="th-inst">
+<h2>Per-Instrument Performance</h2>
+<div id="th-inst-chart" style="width:100%;height:{chart_height}px"></div>
+<script>Plotly.newPlot('th-inst-chart',{trace},{chart_layout},{{responsive:true}})</script>
+<table><thead><tr>
+<th>Symbol</th><th>PnL</th><th>Return</th><th>Trades</th>
+<th>Win Rate</th><th>PF</th><th>Best</th><th>Worst</th><th>Avg PnL</th>
+</tr></thead><tbody>{"".join(rows)}</tbody></table>
+</div>
+"""
+        try:
+            html = tearsheet_path.read_text(encoding="utf-8")
+            html = html.replace("</body>", section + "\n</body>")
+            tearsheet_path.write_text(html, encoding="utf-8")
+            logger.info(
+                "Enhanced tearsheet with per-instrument breakdown (%d instruments)",
+                len(sorted_items),
+            )
+        except Exception:
+            logger.warning("Failed to enhance tearsheet", exc_info=True)
 
     def _extract_results(self, engine: BacktestEngine, starting_balance: float = 10000) -> dict[str, Any]:
         """Extract results from completed backtest engine."""

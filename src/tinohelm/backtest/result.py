@@ -369,6 +369,7 @@ def extract_backtest_results(
                 "largest_win": round(max(inst_pnls), 4) if inst_pnls else None,
                 "largest_loss": round(min(inst_pnls), 4) if inst_pnls else None,
                 "avg_pnl": round(sum(inst_pnls) / len(inst_pnls), 4) if inst_pnls else None,
+                "return_pct": round(sum(inst_pnls) / starting_balance * 100, 4) if starting_balance > 0 else 0.0,
             }
     except Exception:
         logger.warning("Failed to compute per-instrument breakdown", exc_info=True)
