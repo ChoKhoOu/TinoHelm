@@ -15,7 +15,6 @@ dependencies = [
     "asyncpg>=0.30.0",
     "alembic>=1.14.0",
     "redis>=5.0.0",
-    "typer>=0.15.0",
     "pydantic-settings>=2.7.0",
     "httpx>=0.28.0",
     "pyyaml>=6.0",
@@ -24,9 +23,6 @@ dependencies = [
 
 [project.optional-dependencies]
 optimize = ["optuna>=3.0.0"]
-
-[project.scripts]
-tino = "tinohelm.cli.main:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

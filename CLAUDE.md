@@ -36,13 +36,6 @@ cli/target/release/tino backtest list
 cli/target/release/tino strategy list
 cli/target/release/tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
 
-# Python CLI (legacy — thin HTTP client, needs API server running)
-.venv/bin/tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
-.venv/bin/tino backtest list
-.venv/bin/tino strategy list
-.venv/bin/tino strategy rescan     # Hot-reload strategies without restart
-.venv/bin/tino data fetch BTCUSDT-PERP 1m 2024-01-01 2025-01-01
-
 # Frontend
 cd web && npm ci && npm run dev    # Dev server on :3000
 cd web && npm run build            # Static export to web/out/
