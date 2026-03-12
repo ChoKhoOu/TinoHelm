@@ -81,6 +81,17 @@ impl ApiClient {
         Ok(body)
     }
 
+    pub async fn delete_backtest(&self, run_id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/backtest/{}", self.base_url, run_id))
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
     // ---- Optimization ----
 
     pub async fn optimize_backtest(&self, req: &OptimizeRequest) -> Result<OptimizeResponse> {

@@ -758,7 +758,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
         // Scroll hint
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  \u{2190} focus list  \u{2193}\u{2191} scroll".to_string(),
+            "  \u{2190} focus list  \u{2193}\u{2191} scroll  o report  d dir".to_string(),
             Style::default().fg(theme::FG_DIM),
         )));
     } else if bt.status != "completed" {

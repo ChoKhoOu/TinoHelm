@@ -44,9 +44,9 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let logo_w = 19;
     let logo_pad = 2; // left padding
 
-    // Gradient colors (orange→yellow)
-    let gs: (u8, u8, u8) = (255, 120, 0);
-    let ge: (u8, u8, u8) = (255, 230, 60);
+    // Gradient colors (orange-red → orange → yellow)
+    let gs: (u8, u8, u8) = (230, 60, 10);
+    let ge: (u8, u8, u8) = (255, 230, 50);
 
     // Helper: render a logo line as gradient spans
     let gradient_logo = |line: &str| -> Vec<Span<'static>> {
@@ -198,6 +198,9 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
                 ("j/k", "nav"),
                 ("\u{2190}/\u{2192}", "panel"),
                 ("n", "new"),
+                ("x", "delete"),
+                ("o", "report"),
+                ("d", "dir"),
                 ("r", "refresh"),
             ]
         }

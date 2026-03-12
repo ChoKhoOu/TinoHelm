@@ -28,6 +28,12 @@ pub enum PopupKind {
     Confirm { message: String },
 }
 
+/// Action pending user confirmation via the Confirm popup.
+#[derive(Debug, Clone)]
+pub enum PendingAction {
+    DeleteBacktest { run_id: String },
+}
+
 /// WebSocket connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WsState {
@@ -71,6 +77,7 @@ pub struct App {
 
     // ── Popup/Modal ─────────────────────────────────────────────────────
     pub popup: Option<PopupKind>,
+    pub pending_action: Option<PendingAction>,
 
     // ── Animation state ─────────────────────────────────────────────────
     pub frame_count: u64,
@@ -146,6 +153,7 @@ impl App {
             panel_focus: PanelFocus::Left,
 
             popup: None,
+            pending_action: None,
 
             frame_count: 0,
             boot_complete: false,

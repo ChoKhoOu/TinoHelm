@@ -243,30 +243,52 @@ fn render_boot(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         return;
     }
 
-    // Phase 1: CRT warm-up — single bright horizontal scanline at center
+    // Phase 1: CRT warm-up — gradient horizontal scanline at center
     if phase == 1 {
+        // Gradient: orange-red → orange → yellow
+        let gs: (u8, u8, u8) = (230, 60, 10);
+        let ge: (u8, u8, u8) = (255, 230, 50);
+        let max_i = w.saturating_sub(1).max(1) as f64;
+
+        // Dim glow line above
         if mid_y > area.y {
+            let glow: Vec<Span> = (0..w).map(|i| {
+                let t = i as f64 / max_i;
+                let r = (gs.0 as f64 * 0.35 + (ge.0 as f64 * 0.35 - gs.0 as f64 * 0.35) * t) as u8;
+                let g = (gs.1 as f64 * 0.35 + (ge.1 as f64 * 0.35 - gs.1 as f64 * 0.35) * t) as u8;
+                let b = (gs.2 as f64 * 0.35 + (ge.2 as f64 * 0.35 - gs.2 as f64 * 0.35) * t) as u8;
+                Span::styled("\u{2591}", Style::default().fg(Color::Rgb(r, g, b)))
+            }).collect();
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "\u{2591}".repeat(w),
-                    Style::default().fg(Color::Rgb(80, 55, 0)),
-                ))),
+                Paragraph::new(Line::from(glow)),
                 Rect::new(area.x, mid_y - 1, area.width, 1),
             );
         }
+
+        // Main scanline with gradient
+        let line: Vec<Span> = (0..w).map(|i| {
+            let t = i as f64 / max_i;
+            let r = (gs.0 as f64 + (ge.0 as f64 - gs.0 as f64) * t) as u8;
+            let g = (gs.1 as f64 + (ge.1 as f64 - gs.1 as f64) * t) as u8;
+            let b = (gs.2 as f64 + (ge.2 as f64 - gs.2 as f64) * t) as u8;
+            Span::styled("\u{2501}", Style::default().fg(Color::Rgb(r, g, b)))
+        }).collect();
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "\u{2501}".repeat(w),
-                Style::default().fg(theme::FG_AMBER),
-            ))),
+            Paragraph::new(Line::from(line)),
             Rect::new(area.x, mid_y, area.width, 1),
         );
+
+        // Dim glow line below
         if mid_y + 1 < area.y + area.height {
+            let glow: Vec<Span> = (0..w).map(|i| {
+                let t = i as f64 / max_i;
+                let r = (gs.0 as f64 * 0.35 + (ge.0 as f64 * 0.35 - gs.0 as f64 * 0.35) * t) as u8;
+                let g = (gs.1 as f64 * 0.35 + (ge.1 as f64 * 0.35 - gs.1 as f64 * 0.35) * t) as u8;
+                let b = (gs.2 as f64 * 0.35 + (ge.2 as f64 * 0.35 - gs.2 as f64 * 0.35) * t) as u8;
+                Span::styled("\u{2591}", Style::default().fg(Color::Rgb(r, g, b)))
+            }).collect();
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "\u{2591}".repeat(w),
-                    Style::default().fg(Color::Rgb(80, 55, 0)),
-                ))),
+                Paragraph::new(Line::from(glow)),
                 Rect::new(area.x, mid_y + 1, area.width, 1),
             );
         }
@@ -334,8 +356,8 @@ fn render_boot(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         frame_lines.push(pixel_frame_blank(fw));
 
         // Logo lines (centered inside frame, orange→yellow horizontal gradient)
-        let grad_start: (u8, u8, u8) = (255, 120, 0);   // deep orange
-        let grad_end: (u8, u8, u8) = (255, 230, 60);     // warm yellow
+        let grad_start: (u8, u8, u8) = (230, 60, 10);    // orange-red
+        let grad_end: (u8, u8, u8) = (255, 230, 50);     // warm yellow
         for logo_row in logo_lines {
             let logo_len = unicode_width(logo_row);
             let pad = fw.saturating_sub(logo_len + 4) / 2;
@@ -858,7 +880,42 @@ async fn handle_key(
             }
         },
 
-        // Node start/stop
+        // Delete backtest (with confirmation)
+        KeyCode::Char('x') | KeyCode::Delete => {
+            if app.workspace == Workspace::Backtest {
+                if let Some(bt) = app.backtests.get(app.backtest_selected) {
+                    if bt.status == "running" || bt.status == "queued" {
+                        app.set_error("Cannot delete a running/queued backtest — cancel it first".to_string());
+                    } else {
+                        let id_short = bt.run_id.get(..8).unwrap_or(&bt.run_id);
+                        let strategy = bt.strategy_name.as_deref().unwrap_or("?");
+                        app.pending_action = Some(app::PendingAction::DeleteBacktest {
+                            run_id: bt.run_id.clone(),
+                        });
+                        app.open_popup(PopupKind::Confirm {
+                            message: format!("Delete backtest #{}  ({}) ?", id_short, strategy),
+                        });
+                    }
+                }
+            } else if app.workspace == Workspace::Nodes {
+                let node_type = match app.panel_focus {
+                    app::PanelFocus::Left => "sandbox",
+                    app::PanelFocus::Right => "live",
+                };
+                match client.node_stop(node_type).await {
+                    Ok(_) => {
+                        app.push_alert(
+                            app::AlertKind::Info,
+                            format!("{} node stopping…", node_type),
+                        );
+                        fire_load_node_status(client, app, tx);
+                    }
+                    Err(e) => app.set_error(format!("Failed to stop {}: {}", node_type, e)),
+                }
+            }
+        }
+
+        // Node start
         KeyCode::Char('s') => {
             if app.workspace == Workspace::Nodes {
                 let node_type = match app.panel_focus {
@@ -874,24 +931,6 @@ async fn handle_key(
                         fire_load_node_status(client, app, tx);
                     }
                     Err(e) => app.set_error(format!("Failed to start {}: {}", node_type, e)),
-                }
-            }
-        }
-        KeyCode::Char('x') => {
-            if app.workspace == Workspace::Nodes {
-                let node_type = match app.panel_focus {
-                    app::PanelFocus::Left => "sandbox",
-                    app::PanelFocus::Right => "live",
-                };
-                match client.node_stop(node_type).await {
-                    Ok(_) => {
-                        app.push_alert(
-                            app::AlertKind::Info,
-                            format!("{} node stopping…", node_type),
-                        );
-                        fire_load_node_status(client, app, tx);
-                    }
-                    Err(e) => app.set_error(format!("Failed to stop {}: {}", node_type, e)),
                 }
             }
         }
@@ -916,6 +955,47 @@ async fn handle_key(
                             }
                         }
                         Err(e) => app.set_error(format!("Validate error: {}", e)),
+                    }
+                }
+            }
+        }
+
+        // Open tearsheet HTML report in browser
+        KeyCode::Char('o') => {
+            if app.workspace == Workspace::Backtest {
+                if let Some(bt) = app.backtests.get(app.backtest_selected) {
+                    if let Some(home) = dirs::home_dir() {
+                        let path = home
+                            .join(".tino/data/artifacts")
+                            .join(&bt.run_id)
+                            .join("tearsheet.html");
+                        if path.exists() {
+                            let _ = std::process::Command::new("open")
+                                .arg(&path)
+                                .spawn();
+                        } else {
+                            app.set_error("Tearsheet not found".to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Open artifacts directory
+        KeyCode::Char('d') => {
+            if app.workspace == Workspace::Backtest {
+                if let Some(bt) = app.backtests.get(app.backtest_selected) {
+                    if let Some(home) = dirs::home_dir() {
+                        let path = home
+                            .join(".tino/data/artifacts")
+                            .join(&bt.run_id);
+                        if path.exists() {
+                            let _ = std::process::Command::new("open")
+                                .arg(&path)
+                                .spawn();
+                        } else {
+                            app.set_error("Artifacts directory not found".to_string());
+                        }
                     }
                 }
             }
@@ -1043,8 +1123,8 @@ async fn handle_popup_key(app: &mut App, client: &ApiClient, tx: &mpsc::Unbounde
 
                 let req = crate::types::BacktestRunRequest {
                     strategy: app.form_strategy.clone(),
-                    symbols: vec![app.form_symbol.clone()],
-                    intervals: vec![app.form_interval.clone()],
+                    symbols: if app.form_symbol.is_empty() { vec![] } else { vec![app.form_symbol.clone()] },
+                    intervals: if app.form_interval.is_empty() { vec![] } else { vec![app.form_interval.clone()] },
                     start_date: app.form_start.clone(),
                     end_date: app.form_end.clone(),
                     initial_capital: 10000.0,
@@ -1077,10 +1157,29 @@ async fn handle_popup_key(app: &mut App, client: &ApiClient, tx: &mpsc::Unbounde
         Some(PopupKind::Confirm { .. }) => match code {
             KeyCode::Char('y') => {
                 app.close_popup();
-                // TODO: execute confirmed action
+                if let Some(action) = app.pending_action.take() {
+                    match action {
+                        app::PendingAction::DeleteBacktest { run_id } => {
+                            let id_short = run_id.get(..8).unwrap_or(&run_id).to_string();
+                            match client.delete_backtest(&run_id).await {
+                                Ok(_) => {
+                                    app.push_alert(
+                                        app::AlertKind::Info,
+                                        format!("Backtest #{} deleted", id_short),
+                                    );
+                                    app.detail_result = None;
+                                    app.detail_equity = Vec::new();
+                                    fire_load_backtests(client, app, tx);
+                                }
+                                Err(e) => app.set_error(format!("Delete failed: {}", e)),
+                            }
+                        }
+                    }
+                }
             }
             KeyCode::Char('n') | KeyCode::Esc => {
                 app.close_popup();
+                app.pending_action = None;
             }
             _ => {}
         },
