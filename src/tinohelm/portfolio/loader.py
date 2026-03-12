@@ -49,9 +49,12 @@ def create_strategies(config: PortfolioConfig) -> list[Any]:
 
         per_symbol_params = dict(config.params)
         per_symbol_params["instrument_id"] = nt_symbol
-        # Use bar_type from params (may be composite) if already set by runner,
-        # otherwise build from symbol + interval
-        if "bar_type" not in per_symbol_params:
+        # Use bar_type from runner's per-symbol map (handles composite aggregation),
+        # fall back to building from symbol + interval
+        bar_type_map = per_symbol_params.pop("_bar_type_map", None) or {}
+        if nt_symbol in bar_type_map:
+            per_symbol_params["bar_type"] = bar_type_map[nt_symbol]
+        elif "bar_type" not in per_symbol_params:
             per_symbol_params["bar_type"] = _make_bar_type_str(symbol, config.interval)
 
         # Unique order_id_tag per instance — required for multi-strategy portfolios

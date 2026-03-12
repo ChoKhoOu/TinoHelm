@@ -54,11 +54,15 @@ class BacktestRunRequest(BaseModel):
             else:
                 # Portfolio strategies resolve symbols from portfolio.yaml
                 self.symbols = []
+        # Filter out empty strings (e.g. TUI sends [""] when symbol field is blank)
+        self.symbols = [s for s in self.symbols if s.strip()]
         if self.intervals is None:
             if self.interval is not None:
                 self.intervals = [self.interval]
             else:
                 self.intervals = ["1m"]
+        # Filter out empty strings
+        self.intervals = [i for i in self.intervals if i.strip()]
         return self
 
 
@@ -107,6 +111,13 @@ class BacktestCancelResponse(BaseModel):
 
     run_id: str
     status: str
+
+
+class BacktestDeleteResponse(BaseModel):
+    """Response body for DELETE /{run_id}."""
+
+    run_id: str
+    deleted: bool
 
 
 # ---- helpers ----
@@ -384,3 +395,41 @@ async def cancel_backtest_run(
     await rds.set(f"tino:backtest:cancel:{run_id}", "1", ex=86400)
 
     return BacktestCancelResponse(run_id=run_id, status="cancelling")
+
+
+@router.delete("/{run_id}", response_model=BacktestDeleteResponse)
+async def delete_backtest_run(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> BacktestDeleteResponse:
+    """Delete a backtest run: remove DB record and artifacts folder."""
+    import shutil
+
+    run_id = await resolve_run_id(run_id, db)
+    stmt = select(BacktestRun).where(BacktestRun.run_id == run_id)
+    run = (await db.execute(stmt)).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+
+    if run.status in (RunStatus.running, RunStatus.queued):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete run in '{run.status.value}' state — cancel it first",
+        )
+
+    # Delete artifacts folder
+    if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
+        artifact_dir = (Path(settings.paths.artifacts) / run_id).resolve()
+        artifacts_root = Path(settings.paths.artifacts).resolve()
+        if str(artifact_dir).startswith(str(artifacts_root)) and artifact_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, artifact_dir)
+
+    # Delete DB record
+    await db.delete(run)
+    await db.commit()
+
+    await log_audit(db, "backtest.deleted", {"run_id": run_id})
+    logger.info("Backtest run deleted: %s", run_id)
+
+    return BacktestDeleteResponse(run_id=run_id, deleted=True)
