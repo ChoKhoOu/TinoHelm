@@ -37,8 +37,8 @@ cli/target/release/tino strategy list
 cli/target/release/tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
 
 # Frontend
-cd web && npm ci && npm run dev    # Dev server on :3000
-cd web && npm run build            # Static export to web/out/
+cd src/web && npm ci && npm run dev    # Dev server on :3000
+cd src/web && npm run build            # Static export to src/web/out/
 
 # E2E verification scripts
 ./scripts/e2e_backtest.sh

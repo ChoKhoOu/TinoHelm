@@ -6,8 +6,8 @@ dist/
 build/
 .venv/
 node_modules/
-web/out/
-web/.next/
+src/web/out/
+src/web/.next/
 .next/
 .DS_Store
 
