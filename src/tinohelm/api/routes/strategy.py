@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -146,6 +147,84 @@ async def get_strategy(
             for v in sorted(strategy.versions, key=lambda v: v.version, reverse=True)
         ],
     )
+
+
+@router.get("/{name}/params")
+async def get_strategy_params(
+    name: str,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    """Get strategy parameters with optimization ranges."""
+    stmt = select(Strategy).where(Strategy.name == name)
+    row = (await db.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+
+    config_params: list[dict[str, Any]] = []
+    optimize_ranges: dict[str, Any] = {}
+
+    file_path = Path(row.file_path)
+
+    if file_path.suffix == ".py" and file_path.exists():
+        import importlib.util
+        import inspect
+        import sys
+
+        from tinohelm.strategy.utils import get_config_fields
+
+        module_name = f"_params_discover_{file_path.stem}"
+        str_dir = str(file_path.parent.resolve())
+        added_path = False
+        if str_dir not in sys.path:
+            sys.path.insert(0, str_dir)
+            added_path = True
+
+        if module_name in sys.modules:
+            del sys.modules[module_name]
+
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = mod
+                spec.loader.exec_module(mod)
+
+                for obj_name, obj in inspect.getmembers(mod, inspect.isclass):
+                    if obj.__module__ != module_name:
+                        continue
+                    for base in inspect.getmro(obj):
+                        if base.__name__ == "StrategyConfig" and base.__module__.startswith("nautilus_trader"):
+                            config_params = get_config_fields(obj)
+                            break
+
+                from tinohelm.strategy.utils import parse_optimize_ranges
+                optimize_ranges = parse_optimize_ranges(getattr(mod, "OPTIMIZE", {}) or {})
+        except Exception as e:
+            logger.warning("Failed to inspect strategy %s: %s", name, e)
+        finally:
+            sys.modules.pop(module_name, None)
+            if added_path and str_dir in sys.path:
+                sys.path.remove(str_dir)
+
+    elif file_path.name == "portfolio.yaml" and file_path.exists():
+        import yaml
+        from tinohelm.strategy.utils import parse_optimize_ranges
+        with open(file_path) as f:
+            raw = yaml.safe_load(f)
+        optimize_ranges = parse_optimize_ranges((raw or {}).get("optimize", {}) or {})
+
+    # Filter out internal params (injected by loader)
+    internal_params = {"instrument_id", "instrument_ids", "bar_type", "bar_types",
+                       "_bar_type_map", "order_id_tag", "manage_stop", "manage_gtd_expiry",
+                       "oms_type", "external_order_claims", "manage_contingent_orders"}
+    user_params = [p for p in config_params if p["name"] not in internal_params]
+
+    return {
+        "name": name,
+        "config_params": user_params,
+        "optimize_ranges": optimize_ranges,
+    }
 
 
 @router.post("/create", response_model=CreateStrategyResponse)

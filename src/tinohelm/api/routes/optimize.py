@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import multiprocessing
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from typing import Literal
@@ -47,14 +48,14 @@ class OptimizeRequest(BaseModel):
     end_date: date
     initial_capital: float | None = None
     leverage: float | None = None
-    n_trials: int = Field(ge=1, le=10000)
+    n_trials: int = Field(default=0, ge=0, le=10000)
     fitness_objective: str = Field(pattern=r"^(sharpe|calmar|sortino|profit)$")
     train_pct: float = Field(default=85.0, ge=50.0, le=99.0)
     param_ranges: dict[str, ParamRangeSpec] | None = None
-    n_workers: int = Field(default=1, ge=1, le=16, description="Parallel trial workers")
+    n_workers: int = Field(default=0, ge=0, le=16, description="Parallel trial workers (0=auto)")
     walk_forward_folds: int = Field(default=0, ge=0, le=20, description="Walk-forward folds (0=disabled)")
     pruning: bool = Field(default=True, description="Enable Optuna trial pruning")
-    sampler: str = Field(default="tpe", pattern=r"^(tpe|cmaes|random)$", description="Optuna sampler")
+    sampler: str = Field(default="auto", pattern=r"^(auto|tpe|cmaes|random)$", description="Optuna sampler (auto=smart select)")
     patience: int = Field(default=0, ge=0, le=1000, description="Early stopping patience (0=disabled)")
 
 
@@ -93,6 +94,53 @@ class OptimizeRunItem(BaseModel):
     trials_completed: int
     created_at: str | None = None
     completed_at: str | None = None
+
+
+# ---- helpers ----
+
+def _discover_optimize_ranges(strategy_row: Strategy) -> dict[str, dict[str, Any]]:
+    """Load optimize ranges from strategy's OPTIMIZE dict or portfolio.yaml."""
+    from pathlib import Path as P
+
+    from tinohelm.strategy.utils import parse_optimize_ranges
+
+    file_path = P(strategy_row.file_path)
+
+    # Portfolio: check portfolio.yaml for optimize section
+    if file_path.name == "portfolio.yaml" and file_path.exists():
+        import yaml
+        with open(file_path) as f:
+            raw = yaml.safe_load(f)
+        return parse_optimize_ranges((raw or {}).get("optimize", {}) or {})
+
+    # Single file: check module-level OPTIMIZE dict
+    if file_path.suffix == ".py" and file_path.exists():
+        import importlib.util
+        import sys
+
+        module_name = f"_opt_discover_{file_path.stem}"
+        str_dir = str(file_path.parent.resolve())
+        added_path = str_dir not in sys.path
+        if added_path:
+            sys.path.insert(0, str_dir)
+
+        if module_name in sys.modules:
+            del sys.modules[module_name]
+        spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = mod
+            try:
+                spec.loader.exec_module(mod)
+                return parse_optimize_ranges(getattr(mod, "OPTIMIZE", {}) or {})
+            except Exception as e:
+                logger.warning("Failed to load OPTIMIZE from %s: %s", file_path, e)
+            finally:
+                sys.modules.pop(module_name, None)
+                if added_path and str_dir in sys.path:
+                    sys.path.remove(str_dir)
+
+    return {}
 
 
 # ---- routes ----
@@ -136,6 +184,31 @@ async def start_optimization(
     if body.leverage is not None:
         strategy_params["leverage"] = body.leverage
 
+    # Auto-discover param_ranges if not provided
+    if body.param_ranges:
+        param_ranges_dict: dict[str, Any] | None = {k: v.model_dump() for k, v in body.param_ranges.items()}
+    else:
+        discovered = _discover_optimize_ranges(row)
+        if discovered:
+            param_ranges_dict = discovered
+            logger.info("Auto-discovered %d optimize ranges for '%s'", len(discovered), body.strategy)
+        else:
+            param_ranges_dict = None
+
+    # Resolve smart defaults for n_trials/n_workers so the DB has correct values
+    from tinohelm.backtest.optimizer import _auto_n_trials, _auto_workers
+
+    resolved_n_trials = body.n_trials
+    if resolved_n_trials <= 0:
+        resolved_n_trials = _auto_n_trials(param_ranges_dict or {})
+    resolved_n_workers = body.n_workers
+    if resolved_n_workers <= 0:
+        resolved_n_workers = _auto_workers()
+
+    # Update DB record with resolved values
+    opt_run.n_trials = resolved_n_trials
+    await db.commit()
+
     # Launch optimizer in a background process
     from tinohelm.backtest.optimizer import run_optimization
 
@@ -149,15 +222,15 @@ async def start_optimization(
             "start_date": body.start_date,
             "end_date": body.end_date,
             "catalog_path": str(settings.paths.catalog),
-            "n_trials": body.n_trials,
+            "n_trials": resolved_n_trials,
             "fitness_objective": body.fitness_objective,
             "train_pct": body.train_pct,
             "db_url": settings.database.url,
             "redis_url": settings.redis.url,
             "optimization_id": optimization_id,
-            "param_ranges": {k: v.model_dump() for k, v in body.param_ranges.items()} if body.param_ranges else None,
+            "param_ranges": param_ranges_dict,
             "strategy_params": strategy_params,
-            "n_workers": body.n_workers,
+            "n_workers": resolved_n_workers,
             "walk_forward_folds": body.walk_forward_folds,
             "pruning": body.pruning,
             "sampler": body.sampler,
