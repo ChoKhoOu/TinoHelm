@@ -61,6 +61,9 @@ class PortfolioConfig:
     # Account settings
     account: AccountSettings = field(default_factory=AccountSettings)
 
+    # Optimization parameter ranges (optional)
+    optimize_ranges: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     # Source path (folder or .py file)
     source_path: Path | None = None
 
@@ -177,6 +180,10 @@ def _load_from_yaml(yaml_path: Path, folder: Path) -> PortfolioConfig:
     # Strategy params
     params = raw.get("params", {}) or {}
 
+    # Optimization parameter ranges
+    from tinohelm.strategy.utils import parse_optimize_ranges
+    optimize_ranges = parse_optimize_ranges(raw.get("optimize", {}) or {})
+
     config = PortfolioConfig(
         strategy_class=strategy_class,
         config_class=config_class,
@@ -185,6 +192,7 @@ def _load_from_yaml(yaml_path: Path, folder: Path) -> PortfolioConfig:
         params=params,
         actors=actors,
         account=account,
+        optimize_ranges=optimize_ranges,
         source_path=folder,
         implicit=False,
     )
@@ -214,7 +222,7 @@ def _wrap_single_file(
         )
 
     # Discover strategy and config class names from the file
-    strategy_class_name, config_class_name = _discover_classes(py_file)
+    strategy_class_name, config_class_name, optimize_ranges = _discover_classes(py_file)
 
     module_stem = py_file.stem
     strategy_class = f"{module_stem}:{strategy_class_name}"
@@ -230,23 +238,32 @@ def _wrap_single_file(
         params=params or {},
         actors=[],
         account=AccountSettings(),
+        optimize_ranges=optimize_ranges,
         source_path=py_file.parent,
         implicit=True,
     )
 
 
-def _discover_classes(py_file: Path) -> tuple[str, str]:
+def _discover_classes(py_file: Path) -> tuple[str, str, dict[str, dict[str, Any]]]:
     """Discover Strategy and StrategyConfig class names from a .py file.
 
     Uses the same import mechanism as the scanner to find NT subclasses.
+    Returns (strategy_class_name, config_class_name, optimize_ranges).
     """
     import importlib.util
     import inspect
     import sys
 
     module_name = f"_portfolio_discover_{py_file.stem}"
+    str_dir = str(py_file.parent.resolve())
+    added_path = str_dir not in sys.path
+    if added_path:
+        sys.path.insert(0, str_dir)
+
     spec = importlib.util.spec_from_file_location(module_name, str(py_file))
     if spec is None or spec.loader is None:
+        if added_path:
+            sys.path.remove(str_dir)
         raise ImportError(f"Cannot load module from {py_file}")
 
     mod = importlib.util.module_from_spec(spec)
@@ -254,6 +271,8 @@ def _discover_classes(py_file: Path) -> tuple[str, str]:
     try:
         spec.loader.exec_module(mod)
     except Exception as e:
+        if added_path and str_dir in sys.path:
+            sys.path.remove(str_dir)
         raise ImportError(f"Failed to import {py_file}: {e}") from e
 
     strategy_cls_name = None
@@ -273,7 +292,11 @@ def _discover_classes(py_file: Path) -> tuple[str, str]:
     if not config_cls_name:
         raise ValueError(f"No StrategyConfig subclass found in {py_file}")
 
+    optimize_ranges = getattr(mod, "OPTIMIZE", {}) or {}
+
     # Clean up
     del sys.modules[module_name]
+    if added_path and str_dir in sys.path:
+        sys.path.remove(str_dir)
 
-    return strategy_cls_name, config_cls_name
+    return strategy_cls_name, config_cls_name, optimize_ranges

@@ -98,6 +98,8 @@ def _scan_single_file(py_file: Path) -> dict[str, Any] | None:
         return None
 
     config_params = get_config_fields(config_cls)
+    from tinohelm.strategy.utils import parse_optimize_ranges
+    optimize_ranges = parse_optimize_ranges(getattr(module, "OPTIMIZE", {}) or {})
 
     hooks = []
     for hook_name in [
@@ -120,6 +122,7 @@ def _scan_single_file(py_file: Path) -> dict[str, Any] | None:
         "config_params": config_params,
         "hooks": hooks,
         "type": "single",
+        "optimize_ranges": optimize_ranges,
     }
 
 
@@ -139,6 +142,10 @@ def _scan_portfolio_folder(folder: Path, yaml_path: Path) -> dict[str, Any] | No
     symbols = raw.get("symbols", [])
     interval = raw.get("interval", "")
     actors = raw.get("actors", []) or []
+
+    # Optimization parameter ranges
+    from tinohelm.strategy.utils import parse_optimize_ranges
+    optimize_ranges = parse_optimize_ranges(raw.get("optimize", {}) or {})
 
     # Compute hash from portfolio.yaml
     code_hash = _compute_hash(yaml_path)
@@ -160,6 +167,7 @@ def _scan_portfolio_folder(folder: Path, yaml_path: Path) -> dict[str, Any] | No
         "symbols": symbols,
         "interval": interval,
         "actors": [a.get("name", a.get("class", "")) for a in actors if isinstance(a, dict)],
+        "optimize_ranges": optimize_ranges,
     }
 
 
