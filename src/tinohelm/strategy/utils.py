@@ -39,6 +39,29 @@ def get_config_field_names(cls: type) -> set[str]:
     return set()
 
 
+_VALID_OPT_TYPES = {"int", "float"}
+
+
+def parse_optimize_ranges(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate and normalize an OPTIMIZE / optimize YAML dict.
+
+    Returns only entries that have both ``min`` and ``max`` keys.
+    Invalid entries are silently skipped.
+    """
+    ranges: dict[str, dict[str, Any]] = {}
+    for pname, pspec in raw.items():
+        if not isinstance(pspec, dict) or "min" not in pspec or "max" not in pspec:
+            continue
+        ptype = pspec.get("type", "float")
+        if ptype not in _VALID_OPT_TYPES:
+            ptype = "float"
+        entry: dict[str, Any] = {"type": ptype, "min": pspec["min"], "max": pspec["max"]}
+        if "step" in pspec:
+            entry["step"] = pspec["step"]
+        ranges[pname] = entry
+    return ranges
+
+
 def _extract_pydantic_fields(cls: type) -> list[dict[str, Any]]:
     fields = []
     for field_name, field_info in cls.model_fields.items():
