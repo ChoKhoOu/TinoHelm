@@ -206,6 +206,34 @@ def _run_backtest(
 
 
 # ---------------------------------------------------------------------------
+# Smart defaults
+# ---------------------------------------------------------------------------
+
+def _auto_n_trials(param_ranges: dict[str, dict[str, Any]]) -> int:
+    """Calculate a reasonable n_trials based on search space dimensionality."""
+    n_dims = len(param_ranges)
+    if n_dims == 0:
+        return 50
+    return max(50, n_dims * 20)
+
+
+def _auto_sampler(param_ranges: dict[str, dict[str, Any]]) -> str:
+    """Select sampler based on parameter types and count."""
+    n_dims = len(param_ranges)
+    has_int = any(p.get("type") == "int" for p in param_ranges.values())
+    if n_dims <= 3 and not has_int:
+        return "cmaes"
+    return "tpe"
+
+
+def _auto_workers() -> int:
+    """Select worker count based on CPU cores."""
+    import os
+    cpu_count = os.cpu_count() or 2
+    return min(4, max(1, cpu_count // 2))
+
+
+# ---------------------------------------------------------------------------
 # Main optimizer class
 # ---------------------------------------------------------------------------
 
@@ -262,7 +290,7 @@ class BacktestOptimizer:
         self.strategy_params = strategy_params or {}
 
         # New fields
-        self.n_workers = max(1, n_workers)
+        self.n_workers = n_workers
         self.walk_forward_folds = max(0, walk_forward_folds)
         self.pruning = pruning
         self.sampler = sampler
@@ -384,6 +412,23 @@ class BacktestOptimizer:
         if optuna is None:
             self._fail("optuna is not installed")
             return
+
+        # Smart defaults
+        if self.n_trials <= 0:
+            self.n_trials = _auto_n_trials(self.param_ranges)
+            logger.info("Auto n_trials=%d (based on %d params)", self.n_trials, len(self.param_ranges))
+
+        if self.sampler == "auto":
+            self.sampler = _auto_sampler(self.param_ranges)
+            logger.info("Auto sampler=%s", self.sampler)
+
+        if self.patience <= 0 and self.n_trials >= 40:
+            self.patience = max(10, self.n_trials // 4)
+            logger.info("Auto patience=%d", self.patience)
+
+        if self.n_workers <= 0:
+            self.n_workers = _auto_workers()
+            logger.info("Auto workers=%d", self.n_workers)
 
         import redis as redis_lib
 
