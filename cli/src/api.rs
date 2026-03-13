@@ -167,6 +167,17 @@ impl ApiClient {
         Ok(body)
     }
 
+    pub async fn get_strategy_params(&self, name: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!("{}/api/strategies/{}/params", self.base_url, name))
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
     pub async fn validate_strategy(&self, name: &str) -> Result<ValidateResult> {
         let resp = self
             .client

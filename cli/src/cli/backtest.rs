@@ -82,8 +82,8 @@ pub enum BacktestCmd {
         /// End date (YYYY-MM-DD)
         #[arg(long)]
         end: String,
-        /// Number of Optuna trials
-        #[arg(long, short = 'n', default_value = "100")]
+        /// Number of Optuna trials (0 = auto)
+        #[arg(long, short = 'n', default_value = "0")]
         trials: u32,
         /// Objective: sharpe/calmar/sortino/profit
         #[arg(long, default_value = "sharpe")]
@@ -91,14 +91,14 @@ pub enum BacktestCmd {
         /// Train percentage (50-99)
         #[arg(long, default_value = "85")]
         train_pct: f64,
-        /// Parallel trial workers
-        #[arg(long, short = 'w', default_value = "1")]
+        /// Parallel trial workers (0 = auto)
+        #[arg(long, short = 'w', default_value = "0")]
         workers: u32,
         /// Walk-forward folds (0=disabled)
         #[arg(long, default_value = "0")]
         walk_forward: u32,
-        /// Sampler: tpe/cmaes/random
-        #[arg(long, default_value = "tpe")]
+        /// Sampler: auto/tpe/cmaes/random
+        #[arg(long, default_value = "auto")]
         sampler: String,
         /// Early stopping patience (0=disabled)
         #[arg(long, default_value = "0")]

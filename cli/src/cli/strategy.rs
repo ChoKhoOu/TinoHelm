@@ -31,6 +31,19 @@ pub enum StrategyCmd {
     },
     /// Re-scan strategies directory
     Rescan,
+    /// Show strategy parameters and optimization ranges
+    Params {
+        /// Strategy name
+        name: String,
+    },
+}
+
+fn format_num(v: f64) -> String {
+    if v == v.floor() {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
 }
 
 pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Result<()> {
@@ -275,6 +288,74 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 println!();
                 for name in &result.strategies {
                     println!("    {} {}", "+".with(POS), name);
+                }
+            }
+
+            println!();
+        }
+        StrategyCmd::Params { name } => {
+            let resp = client.get_strategy_params(&name).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+                return Ok(());
+            }
+
+            header(&format!("Parameters: {}", accent(&name)));
+            divider(60);
+
+            let params = resp["config_params"].as_array();
+            let opt_ranges = &resp["optimize_ranges"];
+
+            if let Some(params) = params {
+                if params.is_empty() {
+                    println!("  No configurable parameters found.");
+                } else {
+                    let t = Table::new(&[
+                        ("Parameter", 22, "left"),
+                        ("Type", 10, "left"),
+                        ("Default", 12, "left"),
+                        ("Optimize Range", 20, "left"),
+                    ]);
+                    t.header();
+
+                    for p in params {
+                        let pname = p["name"].as_str().unwrap_or("-");
+                        let ptype = p["type"].as_str().unwrap_or("Any");
+                        let ptype_short = ptype
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(ptype)
+                            .trim_start_matches("typing.")
+                            .replace("'", "");
+                        let pdefault = if p["required"].as_bool().unwrap_or(false) {
+                            format!("{}", "required".with(NEG))
+                        } else {
+                            p["default"]
+                                .as_str()
+                                .unwrap_or("-")
+                                .to_string()
+                        };
+
+                        let opt_range = if let Some(range) = opt_ranges.get(pname) {
+                            let lo = range["min"].as_f64().map(|v| format_num(v)).unwrap_or_default();
+                            let hi = range["max"].as_f64().map(|v| format_num(v)).unwrap_or_default();
+                            let step_str = range["step"]
+                                .as_f64()
+                                .map(|s| format!(" (step {})", format_num(s)))
+                                .unwrap_or_default();
+                            format!("{}", format!("{}..{}{}", lo, hi, step_str).with(POS))
+                        } else {
+                            format!("{}", "-".dark_grey())
+                        };
+
+                        t.row(&[
+                            &accent(pname),
+                            &ptype_short,
+                            &pdefault,
+                            &opt_range,
+                        ]);
+                    }
+                    t.footer();
                 }
             }
 
