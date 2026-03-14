@@ -1,23 +1,22 @@
 """Sandbox TradingNode entry-point.
 
-Spawned as a ``multiprocessing.Process`` by the ProcessManager.  The node
-uses Binance *testnet* data with a **simulated** execution client so no
-real orders are sent.
+Spawned as a Docker container via ``sandbox_main.py``.  The node uses Binance
+*testnet* data with a **simulated** execution client so no real orders are
+sent.
 
-Strategy/actor loading is handled by the shared portfolio_loader module.
-Redis event bridging and heartbeat are handled by BridgeActor.
+Strategy/actor loading, BridgeActor wiring, and signal-based shutdown are
+handled by the shared ``_common`` module.
 """
 from __future__ import annotations
 
 import logging
-import signal
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 def run_node(config: dict[str, Any]) -> None:
-    """Entry-point executed in a child process.
+    """Entry-point executed inside the sandbox-node Docker container.
 
     Parameters
     ----------
@@ -26,6 +25,7 @@ def run_node(config: dict[str, Any]) -> None:
         :func:`tinohelm.node.factory.build_trading_node_config`.
     """
     # ---- Lazy imports (heavy nautilus deps only in the subprocess) --------
+    from nautilus_trader.adapters.binance.config import BinanceDataClientConfig
     from nautilus_trader.config import (
         CacheConfig,
         DatabaseConfig,
@@ -37,15 +37,9 @@ def run_node(config: dict[str, Any]) -> None:
         TradingNodeConfig,
     )
     from nautilus_trader.live.node import TradingNode
-    from nautilus_trader.adapters.binance.config import BinanceDataClientConfig
 
-    from tinohelm.node.bridge_actor import BridgeActor, BridgeActorConfig
-    from tinohelm.portfolio.loader import create_strategies, create_actors
-    from tinohelm.portfolio.config import load_portfolio_config
+    from tinohelm.node._common import load_components, run_with_signals
 
-    import threading
-
-    node_type = config["node_type"]
     instance_id = config["instance_id"]
 
     logging.basicConfig(
@@ -55,11 +49,8 @@ def run_node(config: dict[str, Any]) -> None:
     logger.info("Starting sandbox node %s", instance_id)
 
     # ---- Build NautilusTrader config -------------------------------------
-    from urllib.parse import urlparse
-
-    parsed = urlparse(config["redis_url"])
-    redis_host = parsed.hostname or "localhost"
-    redis_port = parsed.port or 6379
+    redis_host = config.get("redis_host", "localhost")
+    redis_port = config.get("redis_port", 6379)
 
     node_config = TradingNodeConfig(
         trader_id=config["trader_id"],
@@ -104,79 +95,5 @@ def run_node(config: dict[str, Any]) -> None:
     )
 
     node = TradingNode(config=node_config)
-
-    # ---- Load strategies and actors via portfolio_loader -----------------
-    portfolio_config_name = config.get("portfolio_config")
-    if portfolio_config_name:
-        portfolio_cfg = load_portfolio_config(portfolio_config_name)
-        strategy_instances = create_strategies(portfolio_cfg)
-        actor_instances = create_actors(portfolio_cfg)
-    else:
-        # Legacy: load from strategy paths list
-        from nautilus_trader.config import ImportableStrategyConfig
-
-        strategy_instances = []
-        for strat_path in config.get("strategies", []):
-            if ":" not in strat_path:
-                logger.error("Invalid strategy path format (expected 'module:Class'): %s", strat_path)
-                continue
-            module_path, class_name = strat_path.rsplit(":", 1)
-            if ".." in module_path or module_path.startswith("/"):
-                logger.error("Suspicious strategy module path rejected: %s", module_path)
-                continue
-            strategy_instances.append(
-                ImportableStrategyConfig(
-                    strategy_path=module_path,
-                    config_path=f"{module_path}:{class_name}Config",
-                ).create()
-            )
-        actor_instances = []
-
-    for strategy in strategy_instances:
-        node.trader.add_strategy(strategy)
-    logger.info("Added %d strategy instance(s)", len(strategy_instances))
-
-    for actor in actor_instances:
-        node.trader.add_actor(actor)
-    if actor_instances:
-        logger.info("Added %d actor(s)", len(actor_instances))
-
-    # ---- Wire BridgeActor for Redis event bridging and commands ----------
-    redis_url = config["redis_url"]
-    redis_db = config.get("redis_db", 0)
-    bridge_config = BridgeActorConfig(
-        redis_url=f"{redis_url}/{redis_db}" if "/" not in redis_url.split("//")[-1] else redis_url,
-        node_type=node_type,
-        db_url=config.get("db_url", ""),
-    )
-    bridge_actor = BridgeActor(config=bridge_config)
-    node.trader.add_actor(bridge_actor)
-
-    # ---- Signal handling -------------------------------------------------
-    shutdown_event = threading.Event()
-
-    def _handle_signal(signum: int, _frame: Any) -> None:
-        logger.info("Received signal %s; initiating shutdown", signal.Signals(signum).name)
-        shutdown_event.set()
-
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
-
-    # ---- Run the node ----------------------------------------------------
-    try:
-        node.run()
-        # Block until we receive a shutdown signal.
-        shutdown_event.wait()
-        logger.info("Shutdown event received; stopping node")
-    except Exception:
-        logger.exception("Sandbox node crashed")
-    finally:
-        try:
-            node.stop()
-        except Exception:
-            logger.exception("Error stopping node")
-        try:
-            node.dispose()
-        except Exception:
-            logger.exception("Error disposing node")
-        logger.info("Sandbox node %s shut down", instance_id)
+    load_components(node, config)
+    run_with_signals(node, instance_id, "Sandbox")
