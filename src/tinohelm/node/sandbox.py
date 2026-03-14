@@ -27,6 +27,8 @@ def run_node(config: dict[str, Any]) -> None:
     """
     # ---- Lazy imports (heavy nautilus deps only in the subprocess) --------
     from nautilus_trader.config import (
+        CacheConfig,
+        DatabaseConfig,
         InstrumentProviderConfig,
         LiveDataEngineConfig,
         LiveExecEngineConfig,
@@ -53,9 +55,27 @@ def run_node(config: dict[str, Any]) -> None:
     logger.info("Starting sandbox node %s", instance_id)
 
     # ---- Build NautilusTrader config -------------------------------------
+    from urllib.parse import urlparse
+
+    parsed = urlparse(config["redis_url"])
+    redis_host = parsed.hostname or "localhost"
+    redis_port = parsed.port or 6379
+
     node_config = TradingNodeConfig(
         trader_id=config["trader_id"],
         logging=LoggingConfig(log_level="INFO"),
+        cache=CacheConfig(
+            database=DatabaseConfig(
+                type="redis",
+                host=redis_host,
+                port=redis_port,
+                timeout=2,
+            ),
+            encoding="msgpack",
+            buffer_interval_ms=100,
+            flush_on_start=True,  # Clean slate each restart — sandbox uses simulated execution
+            use_trader_prefix=True,
+        ),
         data_engine=LiveDataEngineConfig(
             qc_on_start=True,
         ),
@@ -151,6 +171,10 @@ def run_node(config: dict[str, Any]) -> None:
     except Exception:
         logger.exception("Sandbox node crashed")
     finally:
+        try:
+            node.stop()
+        except Exception:
+            logger.exception("Error stopping node")
         try:
             node.dispose()
         except Exception:
