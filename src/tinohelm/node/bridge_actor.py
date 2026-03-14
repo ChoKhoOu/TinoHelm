@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal as _signal
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -10,7 +11,9 @@ from typing import Any
 import redis
 
 from nautilus_trader.common.actor import Actor
+from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.config import ActorConfig
+from nautilus_trader.core.message import Event
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.events import (
     OrderAccepted,
@@ -22,7 +25,6 @@ from nautilus_trader.model.events import (
     PositionChanged,
     PositionClosed,
 )
-from nautilus_trader.core.message import Event
 
 
 def _ts_ns_to_iso(ts_ns: int) -> str:
@@ -57,6 +59,7 @@ class BridgeActor(Actor):
         self._db_engine: Any = None  # sqlalchemy.Engine | None
         self._cmd_thread: threading.Thread | None = None
         self._running = False
+        self._flatten_requested = False  # Atomic flag for thread-safe flatten dispatch
 
     def on_start(self) -> None:
         self._redis = redis.from_url(self._redis_url)
@@ -92,6 +95,14 @@ class BridgeActor(Actor):
             callback=self._send_heartbeat,
         )
 
+        # Command dispatch timer — no callback on purpose: fires through on_event()
+        # so the flatten flag (set by daemon thread) is checked on the NT event
+        # loop thread, making msgbus.publish() thread-safe.
+        self.clock.set_timer(
+            name="bridge_cmd_dispatch",
+            interval=timedelta(seconds=1),
+        )
+
         # Command listener thread (runs Redis SUBSCRIBE in background)
         self._cmd_thread = threading.Thread(
             target=self._command_listener,
@@ -100,6 +111,14 @@ class BridgeActor(Actor):
         self._cmd_thread.start()
 
         self.log.info(f"BridgeActor started for {self._node_type}")
+
+    def on_event(self, event: Event) -> None:
+        """Handle timer events for command dispatch (runs on NT event loop)."""
+        if isinstance(event, TimeEvent) and event.name == "bridge_cmd_dispatch":
+            if self._flatten_requested:
+                self._flatten_requested = False
+                self.log.warning("Executing flatten — closing all positions via msgbus")
+                self.msgbus.publish("risk.flatten", "flatten_all")
 
     def on_stop(self) -> None:
         self._running = False
@@ -196,13 +215,15 @@ class BridgeActor(Actor):
             self._publish("commands_ack", {"cmd": "pause", "status": "received"})
 
         elif action == "flatten":
-            # Market exit all strategies
-            self.log.warning("FLATTEN command received - closing all positions")
-            self._publish("commands_ack", {"cmd": "flatten", "status": "received"})
+            # Schedule flatten on the NT event loop via atomic flag
+            self.log.warning("FLATTEN command received - scheduling position exit")
+            self._flatten_requested = True
+            self._publish("commands_ack", {"cmd": "flatten", "status": "scheduled"})
 
         elif action == "shutdown":
-            self.log.warning("SHUTDOWN command received")
+            self.log.warning("SHUTDOWN command received - initiating node shutdown")
             self._publish("commands_ack", {"cmd": "shutdown", "status": "received"})
+            os.kill(os.getpid(), _signal.SIGTERM)
 
         elif action == "stop":
             self.log.info("STOP command received")
