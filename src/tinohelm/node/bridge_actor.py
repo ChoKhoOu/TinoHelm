@@ -75,15 +75,9 @@ class BridgeActor(Actor):
                 self.log.error(f"Failed to init DB engine: {e}")
                 self._db_engine = None
 
-        # Subscribe to trading events
-        self.register_event_handler(OrderFilled, self._on_order_filled)
-        self.register_event_handler(OrderAccepted, self._on_order_accepted)
-        self.register_event_handler(OrderRejected, self._on_order_rejected)
-        self.register_event_handler(OrderCanceled, self._on_order_canceled)
-        self.register_event_handler(OrderExpired, self._on_order_expired)
-        self.register_event_handler(PositionOpened, self._on_position_opened)
-        self.register_event_handler(PositionChanged, self._on_position_changed)
-        self.register_event_handler(PositionClosed, self._on_position_closed)
+        # Subscribe to trading events via msgbus wildcard topics
+        self.msgbus.subscribe("events.order.*", self._on_order_event)
+        self.msgbus.subscribe("events.position.*", self._on_position_event)
 
         # Subscribe to bar data via MessageBus
         self.msgbus.subscribe(topic="data.bars.*", handler=self._on_bar)
@@ -419,6 +413,30 @@ class BridgeActor(Actor):
             "liquidity_side": str(event.liquidity_side.name) if event.liquidity_side else None,
             "ts": _ts_ns_to_iso(event.ts_event),
         }
+
+    # --- Event dispatchers ---
+
+    def _on_order_event(self, event: Event) -> None:
+        """Dispatch order events from msgbus wildcard subscription."""
+        if isinstance(event, OrderFilled):
+            self._on_order_filled(event)
+        elif isinstance(event, OrderAccepted):
+            self._on_order_accepted(event)
+        elif isinstance(event, OrderRejected):
+            self._on_order_rejected(event)
+        elif isinstance(event, OrderCanceled):
+            self._on_order_canceled(event)
+        elif isinstance(event, OrderExpired):
+            self._on_order_expired(event)
+
+    def _on_position_event(self, event: Event) -> None:
+        """Dispatch position events from msgbus wildcard subscription."""
+        if isinstance(event, PositionOpened):
+            self._on_position_opened(event)
+        elif isinstance(event, PositionChanged):
+            self._on_position_changed(event)
+        elif isinstance(event, PositionClosed):
+            self._on_position_closed(event)
 
     # --- Event handlers ---
 
