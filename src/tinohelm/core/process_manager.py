@@ -1,11 +1,9 @@
-"""Process manager for TradingNode subprocesses and backtest workers."""
+"""Process manager for backtest workers and trading node config (Redis-based)."""
 from __future__ import annotations
 
 import json
 import logging
-import signal
 import time
-from dataclasses import dataclass, field
 from multiprocessing import Process
 from typing import Any
 
@@ -16,21 +14,12 @@ logger = logging.getLogger(__name__)
 VALID_NODE_TYPES = ("sandbox", "live")
 
 
-@dataclass
-class NodeInfo:
-    """Metadata for a managed TradingNode subprocess."""
-
-    process: Process | None = None
-    pid: int | None = None
-    status: str = "stopped"  # running | stopped | error
-    node_type: str = ""
-    restart_count: int = 0
-    max_restarts: int = 3
-    config: dict[str, Any] = field(default_factory=dict)
-
-
 class ProcessManager:
-    """Manages TradingNode subprocesses (sandbox/live) and backtest workers.
+    """Manages backtest worker processes and trading node configuration.
+
+    Trading nodes run as independent Docker containers. This class writes
+    config to Redis and publishes lifecycle commands — it does NOT spawn
+    or manage node processes directly.
 
     Uses sync ``redis.Redis`` for pubsub publishing because this object lives
     in the main FastAPI process and publishing is a quick fire-and-forget call.
@@ -48,106 +37,66 @@ class ProcessManager:
         self._catalog_path = catalog_path
         self._artifacts_path = artifacts_path
         self._db_url = db_url
-        self._nodes: dict[str, NodeInfo] = {}
         self._backtest_workers: list[Process] = []
         self._min_workers: int = 1
         self._max_workers: int = 4
         self._ephemeral_idle_timeout: int = 60
 
     # ------------------------------------------------------------------
-    # Node lifecycle
+    # Node lifecycle (Redis config + commands — no process management)
     # ------------------------------------------------------------------
 
-    def start_node(self, node_type: str, strategies: list[str]) -> None:
-        """Spawn a TradingNode subprocess for *node_type* (sandbox or live).
-
-        The subprocess target is resolved to the corresponding ``run_node``
-        entry-point inside ``tinohelm.node.<node_type>``.  The node config
-        dict is built via :func:`tinohelm.node.factory.build_trading_node_config`
-        and passed as the sole argument.
-        """
+    def start_node(
+        self,
+        node_type: str,
+        strategies: list[str],
+        portfolio_config: str | None = None,
+    ) -> dict:
+        """Write node config to Redis. Docker manages actual process lifecycle."""
         if node_type not in VALID_NODE_TYPES:
             raise ValueError(f"Invalid node_type {node_type!r}; must be one of {VALID_NODE_TYPES}")
-
-        if node_type in self._nodes and self._nodes[node_type].status == "running":
-            logger.warning("Node %s is already running (pid=%s)", node_type, self._nodes[node_type].pid)
-            return
 
         from tinohelm.core.config import get_settings
         from tinohelm.node.factory import build_trading_node_config
 
         settings = get_settings()
-        config = build_trading_node_config(node_type, strategies, settings)
+        config = build_trading_node_config(
+            node_type, strategies, settings,
+            portfolio_config=portfolio_config, for_redis=True,
+        )
 
-        # Resolve entry-point
-        if node_type == "sandbox":
-            from tinohelm.node.sandbox import run_node
-        else:
-            from tinohelm.node.live import run_node
+        # Write config (credentials excluded) to Redis
+        self._redis.set(
+            f"tino:node:config:{node_type}",
+            json.dumps(config),
+            ex=3600,  # 1h TTL — node reads once at startup
+        )
 
-        proc = Process(target=run_node, args=(config,), name=f"tino-{node_type}", daemon=False)
-        proc.start()
+        # Update state
+        self._redis.set(f"tino:node:state:{node_type}", json.dumps({
+            "status": "config_ready",
+            "config_version": config["config_version"],
+            "requested_at": time.time(),
+        }))
 
-        info = self._nodes.get(node_type, NodeInfo())
-        info.restart_count = 0
-        info.process = proc
-        info.pid = proc.pid
-        info.status = "running"
-        info.node_type = node_type
-        info.config = {"strategies": config.get("strategies", []), "node_type": node_type}
-        self._nodes[node_type] = info
-
-        logger.info("Started %s node (pid=%s, strategies=%s)", node_type, proc.pid, strategies)
+        logger.info("Wrote %s node config to Redis (version=%s)", node_type, config["config_version"])
+        return {"status": "config_ready", "config_version": config["config_version"]}
 
     def stop_node(self, node_type: str) -> None:
-        """Gracefully stop a TradingNode subprocess.
-
-        1. Publish a ``shutdown`` command on the Redis commands channel.
-        2. Wait up to 10 s for the process to exit.
-        3. Send SIGTERM and wait another 5 s.
-        4. Send SIGKILL as a last resort.
-        """
-        info = self._nodes.get(node_type)
-        if info is None or info.status != "running":
-            logger.info("Node %s is not running; nothing to stop", node_type)
-            return
-
+        """Stop a trading node via Redis shutdown command."""
         channel = f"tino:{node_type}:commands"
         self._redis.publish(channel, json.dumps({"cmd": "shutdown"}))
-        logger.info("Published shutdown command to %s", channel)
+        logger.info("Published shutdown command to %s; waiting up to 15s for node to stop", channel)
 
-        proc = info.process
-        if proc is None:
-            info.status = "stopped"
-            return
+        # Poll heartbeat — wait for node to stop
+        for _ in range(15):
+            if not self._redis.exists(f"tino:heartbeat:{node_type}"):
+                logger.info("Node %s confirmed stopped (heartbeat gone)", node_type)
+                self._redis.delete(f"tino:node:state:{node_type}")
+                return
+            time.sleep(1)
 
-        # Phase 1: wait for graceful exit
-        proc.join(timeout=10)
-        if not proc.is_alive():
-            info.status = "stopped"
-            logger.info("Node %s exited gracefully", node_type)
-            return
-
-        # Phase 2: SIGTERM
-        logger.warning("Node %s did not exit in 10 s; sending SIGTERM", node_type)
-        try:
-            proc.terminate()
-        except OSError:
-            pass
-        proc.join(timeout=5)
-        if not proc.is_alive():
-            info.status = "stopped"
-            return
-
-        # Phase 3: SIGKILL
-        logger.warning("Node %s still alive after SIGTERM; sending SIGKILL", node_type)
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        proc.join(timeout=3)
-        info.status = "stopped"
-        logger.info("Node %s killed", node_type)
+        logger.warning("Node %s heartbeat still present after 15s; Docker will manage", node_type)
 
     # ------------------------------------------------------------------
     # Kill switch
@@ -163,76 +112,46 @@ class ProcessManager:
 
         Level 1 -- Pause a single strategy (requires *strategy_id*).
         Level 2 -- Flatten all positions immediately.
-        Level 3 -- Full shutdown: publish shutdown, SIGTERM, SIGKILL.
+        Level 3 -- Full shutdown via Redis command.
         """
         channel = f"tino:{node_type}:commands"
 
         if level == 1:
             if strategy_id is None:
                 raise ValueError("strategy_id is required for kill-switch level 1")
-            payload = {"cmd": "pause", "strategy_id": strategy_id}
-            self._redis.publish(channel, json.dumps(payload))
+            self._redis.publish(channel, json.dumps({"cmd": "pause", "strategy_id": strategy_id}))
             logger.warning("Kill-switch L1: paused strategy %s on %s", strategy_id, node_type)
 
         elif level == 2:
-            payload = {"cmd": "flatten"}
-            self._redis.publish(channel, json.dumps(payload))
+            self._redis.publish(channel, json.dumps({"cmd": "flatten"}))
             logger.warning("Kill-switch L2: flatten all positions on %s", node_type)
 
         elif level == 3:
-            payload = {"cmd": "shutdown"}
-            self._redis.publish(channel, json.dumps(payload))
+            self._redis.publish(channel, json.dumps({"cmd": "shutdown"}))
             logger.critical("Kill-switch L3: shutdown %s node", node_type)
-            time.sleep(2)
-
-            info = self._nodes.get(node_type)
-            if info and info.process and info.process.is_alive():
-                try:
-                    info.process.terminate()
-                except OSError:
-                    pass
-                info.process.join(timeout=5)
-
-                if info.process.is_alive():
-                    try:
-                        info.process.kill()
-                    except OSError:
-                        pass
-                    info.process.join(timeout=3)
-
-                info.status = "stopped"
-                logger.critical("Kill-switch L3: %s node terminated", node_type)
+            # Poll heartbeat for confirmation
+            for _ in range(15):
+                if not self._redis.exists(f"tino:heartbeat:{node_type}"):
+                    logger.info("Kill-switch L3: %s node confirmed stopped", node_type)
+                    break
+                time.sleep(1)
         else:
             raise ValueError(f"Invalid kill-switch level {level}; must be 1, 2, or 3")
 
     # ------------------------------------------------------------------
-    # Status
+    # Status (Redis-only)
     # ------------------------------------------------------------------
 
     def get_status(self) -> dict[str, Any]:
-        """Return status for all managed nodes and backtest workers.
+        """Return status for all nodes and backtest workers.
 
-        Reads Redis heartbeat keys (``tino:heartbeat:<node_type>``) to enrich
-        the response with last-seen timestamps.
+        Node status is determined purely from Redis heartbeat and state keys.
         """
         result: dict[str, Any] = {"nodes": {}, "backtest_workers": []}
 
         for node_type in VALID_NODE_TYPES:
-            info = self._nodes.get(node_type)
             heartbeat_raw = self._redis.get(f"tino:heartbeat:{node_type}")
-
-            if info is None:
-                result["nodes"][node_type] = {
-                    "status": "stopped",
-                    "pid": None,
-                    "restart_count": 0,
-                    "heartbeat": None,
-                }
-                continue
-
-            # Refresh status from process liveness
-            if info.process and not info.process.is_alive() and info.status == "running":
-                info.status = "error"
+            state_raw = self._redis.get(f"tino:node:state:{node_type}")
 
             heartbeat: dict[str, Any] | None = None
             if heartbeat_raw:
@@ -241,12 +160,24 @@ class ProcessManager:
                 except (json.JSONDecodeError, TypeError):
                     heartbeat = {"raw": heartbeat_raw}
 
+            state: dict[str, Any] = {}
+            if state_raw:
+                try:
+                    state = json.loads(state_raw)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if heartbeat:
+                status = "running"
+            elif state.get("status") == "config_ready":
+                status = "config_ready"
+            else:
+                status = "stopped"
+
             result["nodes"][node_type] = {
-                "status": info.status,
-                "pid": info.pid,
-                "restart_count": info.restart_count,
-                "strategies": info.config.get("strategies", []),
+                "status": status,
                 "heartbeat": heartbeat,
+                "config_version": state.get("config_version"),
             }
 
         for i, w in enumerate(self._backtest_workers):
@@ -357,14 +288,8 @@ class ProcessManager:
     # Public accessors (used by Watchdog)
     # ------------------------------------------------------------------
 
-    def get_node_info(self, node_type: str):
-        return self._nodes.get(node_type)
-
     def get_backtest_workers(self):
         return list(self._backtest_workers)
-
-    def replace_backtest_worker(self, index: int, new_proc):
-        self._backtest_workers[index] = new_proc
 
     @property
     def redis_url(self): return self._redis_url
@@ -383,9 +308,7 @@ class ProcessManager:
     # ------------------------------------------------------------------
 
     def shutdown_all(self) -> None:
-        """Stop every managed node and worker."""
-        for node_type in list(self._nodes.keys()):
-            self.stop_node(node_type)
+        """Stop backtest workers only. Trading nodes are independent containers."""
         self.stop_workers()
         self._redis.close()
-        logger.info("ProcessManager: all processes shut down")
+        logger.info("ProcessManager: backtest workers shut down")
