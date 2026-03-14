@@ -1,7 +1,7 @@
 """Sandbox TradingNode entry-point.
 
 Spawned as a Docker container via ``sandbox_main.py``.  The node uses Binance
-*testnet* data with a **simulated** execution client so no real orders are
+*demo* data with a **simulated** execution client so no real orders are
 sent.
 
 Strategy/actor loading, BridgeActor wiring, and signal-based shutdown are
@@ -25,7 +25,15 @@ def run_node(config: dict[str, Any]) -> None:
         :func:`tinohelm.node.factory.build_trading_node_config`.
     """
     # ---- Lazy imports (heavy nautilus deps only in the subprocess) --------
+    from nautilus_trader.adapters.binance import BINANCE
+    from nautilus_trader.adapters.binance.common.enums import (
+        BinanceAccountType,
+        BinanceEnvironment,
+    )
     from nautilus_trader.adapters.binance.config import BinanceDataClientConfig
+    from nautilus_trader.adapters.binance.factories import (
+        BinanceLiveDataClientFactory,
+    )
     from nautilus_trader.config import (
         CacheConfig,
         DatabaseConfig,
@@ -67,9 +75,7 @@ def run_node(config: dict[str, Any]) -> None:
             flush_on_start=True,  # Clean slate each restart — sandbox uses simulated execution
             use_trader_prefix=True,
         ),
-        data_engine=LiveDataEngineConfig(
-            qc_on_start=True,
-        ),
+        data_engine=LiveDataEngineConfig(),
         exec_engine=LiveExecEngineConfig(
             # Sandbox uses simulated exchange — no reconciliation needed
             reconciliation=False,
@@ -84,8 +90,11 @@ def run_node(config: dict[str, Any]) -> None:
             "BINANCE": BinanceDataClientConfig(
                 api_key=config["binance"]["api_key"],
                 api_secret=config["binance"]["api_secret"],
-                account_type=config["binance"]["account_type"],
-                testnet=True,  # Always testnet for sandbox
+                account_type=BinanceAccountType[config["binance"]["account_type"]],
+                environment=BinanceEnvironment.DEMO,
+                # NT 1.224.0 maps DEMO to testnet URLs for futures — override manually
+                base_url_http="https://demo-fapi.binance.com",
+                base_url_ws="wss://demo-fstream.binance.com",
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
         },
@@ -95,5 +104,8 @@ def run_node(config: dict[str, Any]) -> None:
     )
 
     node = TradingNode(config=node_config)
+    # Sandbox only needs data client (simulated exchange for exec)
+    node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
     load_components(node, config)
+    node.build()
     run_with_signals(node, instance_id, "Sandbox")

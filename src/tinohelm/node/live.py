@@ -26,9 +26,15 @@ def run_node(config: dict[str, Any]) -> None:
         :func:`tinohelm.node.factory.build_trading_node_config`.
     """
     # ---- Lazy imports (heavy nautilus deps only in the subprocess) --------
+    from nautilus_trader.adapters.binance import BINANCE
+    from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
     from nautilus_trader.adapters.binance.config import (
         BinanceDataClientConfig,
         BinanceExecClientConfig,
+    )
+    from nautilus_trader.adapters.binance.factories import (
+        BinanceLiveDataClientFactory,
+        BinanceLiveExecClientFactory,
     )
     from nautilus_trader.config import (
         CacheConfig,
@@ -75,9 +81,7 @@ def run_node(config: dict[str, Any]) -> None:
             flush_on_start=False,  # Recover state on restart for live trading
             use_trader_prefix=True,
         ),
-        data_engine=LiveDataEngineConfig(
-            qc_on_start=True,
-        ),
+        data_engine=LiveDataEngineConfig(),
         exec_engine=LiveExecEngineConfig(
             # -- Reconciliation (startup) --
             reconciliation=reconciliation,
@@ -101,7 +105,7 @@ def run_node(config: dict[str, Any]) -> None:
             "BINANCE": BinanceDataClientConfig(
                 api_key=config["binance"]["api_key"],
                 api_secret=config["binance"]["api_secret"],
-                account_type=config["binance"]["account_type"],
+                account_type=BinanceAccountType[config["binance"]["account_type"]],
                 testnet=testnet,
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
@@ -110,7 +114,7 @@ def run_node(config: dict[str, Any]) -> None:
             "BINANCE": BinanceExecClientConfig(
                 api_key=config["binance"]["api_key"],
                 api_secret=config["binance"]["api_secret"],
-                account_type=config["binance"]["account_type"],
+                account_type=BinanceAccountType[config["binance"]["account_type"]],
                 testnet=testnet,
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
@@ -118,5 +122,8 @@ def run_node(config: dict[str, Any]) -> None:
     )
 
     node = TradingNode(config=node_config)
+    node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
+    node.add_exec_client_factory(BINANCE, BinanceLiveExecClientFactory)
     load_components(node, config)
+    node.build()
     run_with_signals(node, instance_id, "Live")

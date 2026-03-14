@@ -97,7 +97,7 @@ def build_trading_node_config(
 
     if node_type == "sandbox":
         config["trader_id"] = "SANDBOX-001"
-        config["testnet"] = True
+        config["environment"] = "DEMO"
     elif node_type == "live":
         config["trader_id"] = "LIVE-001"
         config["testnet"] = settings.binance.testnet
