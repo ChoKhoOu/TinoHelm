@@ -58,6 +58,8 @@ class BridgeActor(Actor):
         self._redis: redis.Redis | None = None
         self._db_engine: Any = None  # sqlalchemy.Engine | None
         self._cmd_thread: threading.Thread | None = None
+        self._cmd_redis: redis.Redis | None = None
+        self._cmd_pubsub: Any = None
         self._running = False
         self._flatten_requested = False  # Atomic flag for thread-safe flatten dispatch
 
@@ -116,12 +118,12 @@ class BridgeActor(Actor):
 
     def on_stop(self) -> None:
         self._running = False
-        if hasattr(self, '_cmd_pubsub') and self._cmd_pubsub:
+        if self._cmd_pubsub:
             try:
                 self._cmd_pubsub.unsubscribe()
             except Exception:
                 pass
-        if hasattr(self, '_cmd_redis') and self._cmd_redis:
+        if self._cmd_redis:
             try:
                 self._cmd_redis.close()
             except Exception:
@@ -166,8 +168,7 @@ class BridgeActor(Actor):
     def _command_listener(self) -> None:
         """Background thread listening for commands via Redis PubSub."""
         try:
-            import redis as sync_redis
-            r = sync_redis.Redis.from_url(self._redis_url, decode_responses=True)
+            r = redis.Redis.from_url(self._redis_url, decode_responses=True)
             ps = r.pubsub()
             self._cmd_redis = r  # store reference for cleanup
             self._cmd_pubsub = ps  # store reference for cleanup
@@ -430,13 +431,13 @@ class BridgeActor(Actor):
             self._on_order_expired(event)
 
     def _on_position_event(self, event: Event) -> None:
-        """Dispatch position events from msgbus wildcard subscription."""
-        if isinstance(event, PositionOpened):
-            self._on_position_opened(event)
-        elif isinstance(event, PositionChanged):
-            self._on_position_changed(event)
-        elif isinstance(event, PositionClosed):
-            self._on_position_closed(event)
+        """Handle all position events: publish to Redis and persist to DB."""
+        if isinstance(event, (PositionOpened, PositionChanged, PositionClosed)):
+            pos = event.position
+            event_type = type(event).__name__
+            payload = self._build_position_payload(pos, event_type, event.ts_event)
+            self._publish("positions", payload)
+            self._persist_position(pos)
 
     # --- Event handlers ---
 
@@ -492,20 +493,3 @@ class BridgeActor(Actor):
             "ts": str(event.ts_event),
         })
 
-    def _on_position_opened(self, event: PositionOpened) -> None:
-        pos = event.position
-        payload = self._build_position_payload(pos, "position_opened", event.ts_event)
-        self._publish("positions", payload)
-        self._persist_position(pos)
-
-    def _on_position_changed(self, event: PositionChanged) -> None:
-        pos = event.position
-        payload = self._build_position_payload(pos, "position_changed", event.ts_event)
-        self._publish("positions", payload)
-        self._persist_position(pos)
-
-    def _on_position_closed(self, event: PositionClosed) -> None:
-        pos = event.position
-        payload = self._build_position_payload(pos, "position_closed", event.ts_event)
-        self._publish("positions", payload)
-        self._persist_position(pos)
