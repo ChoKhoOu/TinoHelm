@@ -26,7 +26,8 @@ class StartNodeRequest(BaseModel):
     """Request body for POST /start."""
 
     mode: Literal["sandbox", "live"]
-    strategies: list[str]
+    strategies: list[str] = []
+    portfolio_config: str | None = None
 
 
 class StopNodeRequest(BaseModel):
@@ -50,12 +51,25 @@ async def start_node(
     body: StartNodeRequest,
     pm: ProcessManager = Depends(get_process_manager),
 ) -> dict:
-    """Start a TradingNode subprocess."""
+    """Write trading node config to Redis.
+
+    The node Docker container must be started separately:
+      docker compose --profile {mode} up -d
+    """
     try:
-        await asyncio.to_thread(pm.start_node, body.mode, body.strategies)
+        result = await asyncio.to_thread(
+            pm.start_node, body.mode, body.strategies,
+            portfolio_config=body.portfolio_config,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"status": "ok", "mode": body.mode, "message": f"{body.mode} node started"}
+
+    return {
+        "status": result["status"],
+        "mode": body.mode,
+        "config_version": result["config_version"],
+        "message": f"Config written. Start node: docker compose --profile {body.mode} up -d",
+    }
 
 
 @router.post("/stop")
