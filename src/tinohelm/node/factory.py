@@ -1,7 +1,9 @@
 """Factory for building serializable TradingNode config dicts."""
 from __future__ import annotations
 
+import time
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from tinohelm.core.config import Settings
@@ -19,6 +21,7 @@ def build_trading_node_config(
     settings: Settings,
     *,
     portfolio_config: str | None = None,
+    for_redis: bool = False,
 ) -> dict[str, Any]:
     """Build a plain-dict config suitable for passing to a TradingNode subprocess.
 
@@ -39,6 +42,11 @@ def build_trading_node_config(
         Optional portfolio name or path. When provided, the node uses
         ``portfolio_loader`` for strategy/actor creation instead of
         the legacy ``strategies`` list.
+    for_redis
+        When ``True``, the ``binance`` dict uses a ``{"from_env": True, ...}``
+        sentinel instead of embedding credentials.  The standalone entry-points
+        (``sandbox_main`` / ``live_main``) then inject the real credentials
+        from environment variables before calling ``run_node``.
 
     Returns
     -------
@@ -52,20 +60,37 @@ def build_trading_node_config(
     instance_id = f"{node_type}-{uuid4()}"
     redis_db = _REDIS_DB_MAP[node_type]
 
+    # Parse Redis host/port from URL for direct connection metadata.
+    parsed = urlparse(settings.redis.url)
+    redis_host = parsed.hostname or "localhost"
+    redis_port = parsed.port or 6379
+
+    # Binance credentials: embed directly or use from-env sentinel.
+    if for_redis:
+        binance_config: dict[str, Any] = {
+            "from_env": True,
+            "account_type": settings.binance.account_type,
+        }
+    else:
+        binance_config = {
+            "api_key": settings.binance.api_key,
+            "api_secret": settings.binance.api_secret,
+            "account_type": settings.binance.account_type,
+        }
+
     # Base config shared by both node types.
     config: dict[str, Any] = {
         "node_type": node_type,
         "instance_id": instance_id,
+        "config_version": str(int(time.time() * 1000)),
         "redis_url": settings.redis.url,
+        "redis_host": redis_host,
+        "redis_port": redis_port,
         "redis_db": redis_db,
         "db_url": settings.database.url,
         "strategies": strategies,
         "portfolio_config": portfolio_config,
-        "binance": {
-            "api_key": settings.binance.api_key,
-            "api_secret": settings.binance.api_secret,
-            "account_type": settings.binance.account_type,
-        },
+        "binance": binance_config,
         "catalog_path": str(settings.paths.catalog),
         "log_path": str(settings.paths.logs),
     }
