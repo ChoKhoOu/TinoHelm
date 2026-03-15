@@ -1,11 +1,15 @@
-"""Shared utilities for strategy config introspection.
+"""Shared utilities for strategy config introspection and lifecycle support.
 
 Supports both Pydantic (model_fields) and msgspec (__struct_fields__) config classes.
+Also provides L1 soft-pause lifecycle helpers for strategies.
 """
 from __future__ import annotations
 
 import typing
+import weakref
 from typing import Any
+
+from tinohelm.node.topics import LIFECYCLE_PAUSE, LIFECYCLE_RESUME
 
 # Sentinel for "no default"
 _MISSING = object()
@@ -38,6 +42,55 @@ def get_config_field_names(cls: type) -> set[str]:
         return set(cls.__struct_fields__)
     return set()
 
+
+# ---------------------------------------------------------------------------
+# L1 Soft-Pause lifecycle helpers
+# ---------------------------------------------------------------------------
+
+# External pause state — Cython Strategy doesn't allow dynamic attribute setting
+_pause_state: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def setup_pause_support(strategy: Any) -> None:
+    """Wire L1 soft-pause lifecycle support onto a strategy instance.
+
+    Call this in ``on_start()``. Uses a module-level WeakKeyDictionary
+    because NT Strategy is a Cython class that forbids dynamic attributes.
+
+    Usage in strategy::
+
+        def on_start(self):
+            setup_pause_support(self)
+            self.subscribe_bars(self.bar_type)
+            ...
+
+        def on_bar(self, bar):
+            if is_paused(self):
+                return
+            ...
+    """
+    _pause_state[strategy] = False
+
+    def _on_pause(msg: Any) -> None:
+        _pause_state[strategy] = True
+        strategy.log.warning("Strategy PAUSED by lifecycle controller")
+
+    def _on_resume(msg: Any) -> None:
+        _pause_state[strategy] = False
+        strategy.log.info("Strategy RESUMED by lifecycle controller")
+
+    strategy.msgbus.subscribe(f"{LIFECYCLE_PAUSE}.{strategy.id}", _on_pause)
+    strategy.msgbus.subscribe(f"{LIFECYCLE_RESUME}.{strategy.id}", _on_resume)
+
+
+def is_paused(strategy: Any) -> bool:
+    """Check if a strategy is currently paused via L1 lifecycle control."""
+    return _pause_state.get(strategy, False)
+
+
+# ---------------------------------------------------------------------------
+# Optimize range parsing
+# ---------------------------------------------------------------------------
 
 _VALID_OPT_TYPES = {"int", "float"}
 

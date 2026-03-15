@@ -25,6 +25,8 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.trading.strategy import Strategy
 
+from tinohelm.strategy.utils import is_paused, setup_pause_support
+
 
 class {class_name}Config(StrategyConfig):
     """Configuration for {class_name}.
@@ -83,6 +85,9 @@ class {class_name}(Strategy):
             self.stop()
             return
 
+        # Enable L1 lifecycle pause support
+        setup_pause_support(self)
+
         # Subscribe to bar data
         self.subscribe_bars(self.bar_type)
 
@@ -93,6 +98,9 @@ class {class_name}(Strategy):
 
     def on_bar(self, bar: Bar) -> None:
         """Called on each new bar. Implement your trading logic here."""
+        if is_paused(self):
+            return  # L1 soft pause — skip new order logic
+
         # Example: Access bar data
         # open_price = bar.open
         # high = bar.high
