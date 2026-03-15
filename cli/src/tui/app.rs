@@ -32,6 +32,11 @@ pub enum PopupKind {
 #[derive(Debug, Clone)]
 pub enum PendingAction {
     DeleteBacktest { run_id: String },
+    LifecycleAction {
+        action: String,
+        mode: String,
+        strategy_id: Option<String>,
+    },
 }
 
 /// WebSocket connection state.
@@ -40,6 +45,13 @@ pub enum WsState {
     Disconnected,
     Connecting,
     Connected,
+}
+
+/// Which view is active in the Nodes workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeView {
+    Overview,
+    StrategyDetail,
 }
 
 /// An alert for the scrolling ticker.
@@ -116,6 +128,12 @@ pub struct App {
     pub node_loading: bool,
     pub sandbox_last_heartbeat: Option<std::time::Instant>,
     pub live_last_heartbeat: Option<std::time::Instant>,
+    pub node_view: NodeView,
+    pub lifecycle_state: Option<serde_json::Value>,
+    pub sandbox_filter_instrument: Option<String>,
+    pub selected_strategy_tag: Option<String>,
+    pub sandbox_shutting_down: bool,
+    pub sandbox_group_by_strategy: bool,
 
     // ── Data catalog state ──────────────────────────────────────────────
     pub data_catalog: Option<serde_json::Value>,
@@ -186,6 +204,12 @@ impl App {
             node_loading: false,
             sandbox_last_heartbeat: None,
             live_last_heartbeat: None,
+            node_view: NodeView::Overview,
+            lifecycle_state: None,
+            sandbox_filter_instrument: None,
+            selected_strategy_tag: None,
+            sandbox_shutting_down: false,
+            sandbox_group_by_strategy: false,
 
             data_catalog: None,
             data_selected: 0,
@@ -215,6 +239,9 @@ impl App {
         self.workspace = ws;
         self.panel_focus = PanelFocus::Left;
         self.popup = None;
+        self.node_view = NodeView::Overview;
+        self.selected_strategy_tag = None;
+        self.sandbox_filter_instrument = None;
     }
 
     /// Toggle panel focus between left and right.
@@ -345,6 +372,17 @@ impl App {
             self.ticker_offset = self.ticker_offset.wrapping_add(1);
         }
 
+        // Reset shutting_down flag if heartbeat has timed out (node is dead)
+        if self.sandbox_shutting_down {
+            let timed_out = match self.sandbox_last_heartbeat {
+                Some(t) => std::time::Instant::now().duration_since(t).as_secs() >= 30,
+                None => true,
+            };
+            if timed_out {
+                self.sandbox_shutting_down = false;
+            }
+        }
+
         // Auto-dismiss error banner
         if let Some(dismiss_at) = self.error_dismiss_at {
             if std::time::Instant::now() >= dismiss_at {
@@ -408,10 +446,33 @@ impl App {
                     bt.progress_pct = None; // Clear progress on completion
                 }
             }
-            WsEvent::NodeHeartbeat { node_type, .. } => {
+            WsEvent::NodeHeartbeat { node_type, trading_state, strategy_states, .. } => {
                 let now = std::time::Instant::now();
                 match node_type.as_str() {
-                    "sandbox" => self.sandbox_last_heartbeat = Some(now),
+                    "sandbox" => {
+                        self.sandbox_last_heartbeat = Some(now);
+                        self.sandbox_shutting_down = false; // heartbeat received = still alive
+                        // Update lifecycle state from heartbeat (avoids polling)
+                        if trading_state.is_some() || strategy_states.is_some() {
+                            let mut state = serde_json::Map::new();
+                            if let Some(ts) = &trading_state {
+                                state.insert("trading_state".to_string(), serde_json::Value::String(ts.clone()));
+                            }
+                            if let Some(ss) = &strategy_states {
+                                let ss_val: serde_json::Map<String, serde_json::Value> = ss.iter()
+                                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                                    .collect();
+                                state.insert("strategy_states".to_string(), serde_json::Value::Object(ss_val));
+                                // Derive paused list
+                                let paused: Vec<serde_json::Value> = ss.iter()
+                                    .filter(|(_, v)| v.as_str() == "paused")
+                                    .map(|(k, _)| serde_json::Value::String(k.clone()))
+                                    .collect();
+                                state.insert("paused".to_string(), serde_json::Value::Array(paused));
+                            }
+                            self.lifecycle_state = Some(serde_json::Value::Object(state));
+                        }
+                    }
                     "live" => self.live_last_heartbeat = Some(now),
                     _ => {}
                 }
@@ -425,12 +486,48 @@ impl App {
             WsEvent::PositionUpdate(val) => {
                 let id = val.get("position_id").and_then(|v| v.as_str()).unwrap_or("?");
                 self.push_log("pos.upd", format!("Position {} updated", id));
-                self.trading_dirty = true;
+                // Try inline update from WS payload
+                if let Ok(mut pos) = serde_json::from_value::<TradingPosition>(val.clone()) {
+                    // WS uses "strategy_id", DB/REST uses "strategy_id_tag" — map if needed
+                    if pos.strategy_id_tag.is_empty() {
+                        if let Some(sid) = val.get("strategy_id").and_then(|v| v.as_str()) {
+                            pos.strategy_id_tag = sid.to_string();
+                        }
+                    }
+                    // Upsert by position_id
+                    if let Some(existing) = self.positions.iter_mut().find(|p| p.position_id == pos.position_id) {
+                        *existing = pos;
+                    } else {
+                        self.positions.push(pos);
+                    }
+                } else {
+                    // Fallback to full refresh
+                    self.trading_dirty = true;
+                }
             }
             WsEvent::FillNew(val) => {
                 let id = val.get("trade_id").and_then(|v| v.as_str()).unwrap_or("?");
                 self.push_log("fill.new", format!("Fill {}", id));
-                self.trading_dirty = true;
+                // Try inline prepend from WS payload
+                if let Ok(mut fill) = serde_json::from_value::<TradingFill>(val.clone()) {
+                    // WS uses "strategy_id", DB/REST uses "strategy_id_tag" — map if needed
+                    if fill.strategy_id_tag.is_none() {
+                        if let Some(sid) = val.get("strategy_id").and_then(|v| v.as_str()) {
+                            fill.strategy_id_tag = Some(sid.to_string());
+                        }
+                    }
+                    // Prepend (most recent first) and dedup by trade_id
+                    if !self.fills.iter().any(|f| f.trade_id == fill.trade_id) {
+                        self.fills.insert(0, fill);
+                        // Keep max 200 fills in memory
+                        if self.fills.len() > 200 {
+                            self.fills.truncate(200);
+                        }
+                    }
+                } else {
+                    // Fallback to full refresh
+                    self.trading_dirty = true;
+                }
             }
             WsEvent::Unknown => {
                 self.push_log("unknown", "unrecognized event".to_string());
