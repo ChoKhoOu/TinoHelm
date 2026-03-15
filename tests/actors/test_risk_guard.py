@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from datetime import datetime, timezone
 
 from tinohelm.actors.risk_guard import BreachAction
+from tinohelm.node.topics import RISK_GUARD_FLATTEN, RISK_GUARD_STATE
 
 
 class _RiskGuardStub:
@@ -118,14 +119,14 @@ class _RiskGuardStub:
     def _trigger_breach(self, reason: str):
         self._breached = True
         action = self._breach_action.value
-        self.msgbus.publish("risk.guard.state", action)
+        self.msgbus.publish(RISK_GUARD_STATE, action)
         if self._breach_action == BreachAction.FLATTEN_ALL:
             self._publish_flatten_all()
 
     def _publish_flatten_all(self):
         for position in self.portfolio.positions_open():
             instrument_id = str(position.instrument_id)
-            self.msgbus.publish("risk.guard.flatten", instrument_id)
+            self.msgbus.publish(RISK_GUARD_FLATTEN, instrument_id)
 
 
 class TestDailyPnL:
@@ -139,7 +140,7 @@ class TestDailyPnL:
         actor._check_risks()
 
         assert actor._breached is True
-        actor.msgbus.publish.assert_any_call("risk.guard.state", "reduce_only")
+        actor.msgbus.publish.assert_any_call(RISK_GUARD_STATE, "reduce_only")
 
     def test_daily_loss_within_limit(self):
         actor = _RiskGuardStub(daily_stop_loss_pct=-0.02, starting_balance=10000)
@@ -183,7 +184,7 @@ class TestMaxDrawdown:
         actor._check_risks()
 
         assert actor._breached is True
-        actor.msgbus.publish.assert_any_call("risk.guard.state", "reduce_only")
+        actor.msgbus.publish.assert_any_call(RISK_GUARD_STATE, "reduce_only")
 
     def test_drawdown_within_limit(self):
         actor = _RiskGuardStub(max_drawdown_pct=-0.10, starting_balance=10000)
@@ -268,7 +269,7 @@ class TestBreachActions:
 
         actor._check_risks()
 
-        actor.msgbus.publish.assert_called_once_with("risk.guard.state", "reduce_only")
+        actor.msgbus.publish.assert_called_once_with(RISK_GUARD_STATE, "reduce_only")
 
     def test_halt_new_action(self):
         actor = _RiskGuardStub(max_drawdown_pct=-0.05, breach_action="halt_new", starting_balance=10000)
@@ -277,7 +278,7 @@ class TestBreachActions:
 
         actor._check_risks()
 
-        actor.msgbus.publish.assert_called_once_with("risk.guard.state", "halt_new")
+        actor.msgbus.publish.assert_called_once_with(RISK_GUARD_STATE, "halt_new")
 
     def test_flatten_all_action(self):
         actor = _RiskGuardStub(max_drawdown_pct=-0.05, breach_action="flatten_all", starting_balance=10000)
@@ -293,8 +294,8 @@ class TestBreachActions:
         actor._check_risks()
 
         calls = actor.msgbus.publish.call_args_list
-        state_calls = [c for c in calls if c == (("risk.guard.state", "flatten_all"), {})]
-        flatten_calls = [c for c in calls if c[0][0] == "risk.guard.flatten"]
+        state_calls = [c for c in calls if c == ((RISK_GUARD_STATE, "flatten_all"), {})]
+        flatten_calls = [c for c in calls if c[0][0] == RISK_GUARD_FLATTEN]
 
         assert len(state_calls) == 1
         assert len(flatten_calls) == 2

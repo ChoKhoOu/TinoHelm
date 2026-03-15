@@ -14,6 +14,8 @@ from enum import Enum
 from nautilus_trader.common.actor import Actor, ActorConfig
 from nautilus_trader.model.data import Bar
 
+from tinohelm.node.topics import RISK_GUARD_FLATTEN, RISK_GUARD_STATE
+
 logger = logging.getLogger(__name__)
 
 
@@ -251,7 +253,7 @@ class RiskGuardActor(Actor):
         )
 
         # Publish breach state to msgbus
-        self.msgbus.publish("risk.guard.state", action)
+        self.msgbus.publish(RISK_GUARD_STATE, action)
 
         # If flatten_all, also publish each instrument for flattening
         if self._breach_action == BreachAction.FLATTEN_ALL:
@@ -261,7 +263,7 @@ class RiskGuardActor(Actor):
         """Publish instrument IDs of all open positions for flattening."""
         for position in self.portfolio.positions_open():
             instrument_id = str(position.instrument_id)
-            self.msgbus.publish("risk.guard.flatten", instrument_id)
+            self.msgbus.publish(RISK_GUARD_FLATTEN, instrument_id)
             logger.warning("RiskGuardActor: flatten instrument %s", instrument_id)
 
     def on_stop(self) -> None:
