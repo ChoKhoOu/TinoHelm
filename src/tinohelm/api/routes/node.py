@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Literal
 
+import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -40,6 +42,14 @@ class KillSwitchRequest(BaseModel):
     """Request body for POST /kill."""
 
     level: Literal[1, 2, 3]
+    mode: Literal["sandbox", "live"] = "live"
+    strategy_id: str | None = None
+
+
+class LifecycleRequest(BaseModel):
+    """Request body for POST /lifecycle."""
+
+    action: Literal["pause", "resume", "flatten", "halt", "unhalt", "shutdown"]
     mode: Literal["sandbox", "live"] = "live"
     strategy_id: str | None = None
 
@@ -93,6 +103,40 @@ async def kill_switch(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "ok", "level": body.level, "mode": body.mode}
+
+
+@router.post("/lifecycle")
+async def lifecycle_command(
+    body: LifecycleRequest,
+    pm: ProcessManager = Depends(get_process_manager),
+) -> dict:
+    """Execute a lifecycle command (pause/resume/flatten/halt/unhalt/shutdown)."""
+    try:
+        await asyncio.to_thread(
+            pm.lifecycle_command,
+            action=body.action,
+            node_type=body.mode,
+            strategy_id=body.strategy_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "action": body.action, "mode": body.mode}
+
+
+@router.get("/lifecycle/state")
+async def lifecycle_state(
+    mode: Literal["sandbox", "live"] = "live",
+) -> dict:
+    """Return lifecycle state (trading_state, strategy_states, paused list)."""
+    settings = get_settings()
+    r = redis_lib.Redis.from_url(settings.redis.url, decode_responses=True)
+    try:
+        raw = r.get(f"tino:{mode}:lifecycle_state")
+        if raw:
+            return json.loads(raw)
+        return {"trading_state": "unknown", "strategy_states": {}, "paused": []}
+    finally:
+        r.close()
 
 
 @router.get("/status")

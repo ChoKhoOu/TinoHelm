@@ -99,8 +99,42 @@ class ProcessManager:
         logger.warning("Node %s heartbeat still present after 15s; Docker will manage", node_type)
 
     # ------------------------------------------------------------------
-    # Kill switch
+    # Lifecycle commands
     # ------------------------------------------------------------------
+
+    def lifecycle_command(
+        self,
+        action: str,
+        node_type: str = "live",
+        strategy_id: str | None = None,
+    ) -> None:
+        """Publish a lifecycle command to the node via Redis PubSub.
+
+        Actions: pause, resume, flatten, halt, unhalt, shutdown.
+        """
+        if node_type not in VALID_NODE_TYPES:
+            raise ValueError(f"Invalid node_type {node_type!r}; must be one of {VALID_NODE_TYPES}")
+        channel = f"tino:{node_type}:commands"
+        cmd: dict[str, Any] = {"cmd": action}
+        if strategy_id:
+            cmd["strategy_id"] = strategy_id
+
+        self._redis.publish(channel, json.dumps(cmd))
+        logger.warning("Lifecycle command: %s on %s (strategy=%s)", action, node_type, strategy_id)
+
+        # For shutdown, poll heartbeat for confirmation
+        if action == "shutdown":
+            for _ in range(15):
+                if not self._redis.exists(f"tino:heartbeat:{node_type}"):
+                    logger.info("Shutdown confirmed: %s node heartbeat gone", node_type)
+                    break
+                time.sleep(1)
+
+    # ------------------------------------------------------------------
+    # Kill switch (backward compat — delegates to lifecycle_command)
+    # ------------------------------------------------------------------
+
+    _LEVEL_TO_ACTION = {1: "pause", 2: "flatten", 3: "shutdown"}
 
     def kill_switch(
         self,
@@ -112,31 +146,15 @@ class ProcessManager:
 
         Level 1 -- Pause a single strategy (requires *strategy_id*).
         Level 2 -- Flatten all positions immediately.
-        Level 3 -- Full shutdown via Redis command.
+        Level 3 -- Full shutdown (maps to L4 in new 4-level model).
         """
-        channel = f"tino:{node_type}:commands"
-
-        if level == 1:
-            if strategy_id is None:
-                raise ValueError("strategy_id is required for kill-switch level 1")
-            self._redis.publish(channel, json.dumps({"cmd": "pause", "strategy_id": strategy_id}))
-            logger.warning("Kill-switch L1: paused strategy %s on %s", strategy_id, node_type)
-
-        elif level == 2:
-            self._redis.publish(channel, json.dumps({"cmd": "flatten"}))
-            logger.warning("Kill-switch L2: flatten all positions on %s", node_type)
-
-        elif level == 3:
-            self._redis.publish(channel, json.dumps({"cmd": "shutdown"}))
-            logger.critical("Kill-switch L3: shutdown %s node", node_type)
-            # Poll heartbeat for confirmation
-            for _ in range(15):
-                if not self._redis.exists(f"tino:heartbeat:{node_type}"):
-                    logger.info("Kill-switch L3: %s node confirmed stopped", node_type)
-                    break
-                time.sleep(1)
-        else:
+        if level not in self._LEVEL_TO_ACTION:
             raise ValueError(f"Invalid kill-switch level {level}; must be 1, 2, or 3")
+        if level == 1 and strategy_id is None:
+            raise ValueError("strategy_id is required for kill-switch level 1")
+
+        action = self._LEVEL_TO_ACTION[level]
+        self.lifecycle_command(action, node_type, strategy_id)
 
     # ------------------------------------------------------------------
     # Status (Redis-only)
