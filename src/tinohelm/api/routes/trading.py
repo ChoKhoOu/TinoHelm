@@ -25,13 +25,24 @@ class PositionItem(BaseModel):
 
     id: int
     node_type: str
+    position_id: str
+    strategy_id_tag: str
     instrument_id: str
     side: str
     quantity: str
-    avg_price: str
-    unrealized_pnl: str
-    realized_pnl: str
-    strategy_id: str | None = None
+    signed_qty: float
+    avg_px_open: float | None = None
+    avg_px_close: float | None = None
+    realized_pnl: float | None = None
+    unrealized_pnl: float | None = None
+    currency: str | None = None
+    entry_side: str | None = None
+    peak_qty: str | None = None
+    ts_opened: str | None = None
+    ts_closed: str | None = None
+    duration: str | None = None
+    is_open: bool
+    event_count: int
     updated_at: str | None = None
 
 
@@ -40,12 +51,18 @@ class FillItem(BaseModel):
 
     id: int
     node_type: str
-    order_id: str
+    trade_id: str
+    position_id: str | None = None
+    client_order_id: str
+    venue_order_id: str | None = None
+    strategy_id_tag: str | None = None
     instrument_id: str
-    side: str
-    quantity: str
-    price: str
-    commission: str
+    order_side: str
+    last_qty: str
+    last_px: str
+    commission: str | None = None
+    liquidity_side: str | None = None
+    ts_event: str
     created_at: str | None = None
 
 
@@ -67,6 +84,8 @@ class TradingSummary(BaseModel):
 async def list_positions(
     node_type: str | None = Query(None, description="Filter by node type (sandbox/live)"),
     instrument_id: str | None = Query(None, description="Filter by instrument"),
+    strategy_id_tag: str | None = Query(None, description="Filter by strategy ID tag"),
+    is_open: bool | None = Query(None, description="Filter by open/closed status"),
     db: AsyncSession = Depends(get_db),
 ) -> list[PositionItem]:
     """List all positions, optionally filtered."""
@@ -75,18 +94,33 @@ async def list_positions(
         stmt = stmt.where(Position.node_type == node_type)
     if instrument_id is not None:
         stmt = stmt.where(Position.instrument_id == instrument_id)
+    if strategy_id_tag is not None:
+        stmt = stmt.where(Position.strategy_id_tag == strategy_id_tag)
+    if is_open is not None:
+        stmt = stmt.where(Position.is_open == is_open)  # noqa: E712
     rows = (await db.execute(stmt)).scalars().all()
     return [
         PositionItem(
             id=r.id,
-            node_type=r.node_type.value if hasattr(r.node_type, "value") else str(r.node_type),
+            node_type=r.node_type,
+            position_id=r.position_id,
+            strategy_id_tag=r.strategy_id_tag,
             instrument_id=r.instrument_id,
             side=r.side,
             quantity=r.quantity,
-            avg_price=r.avg_price,
-            unrealized_pnl=r.unrealized_pnl,
+            signed_qty=r.signed_qty,
+            avg_px_open=r.avg_px_open,
+            avg_px_close=r.avg_px_close,
             realized_pnl=r.realized_pnl,
-            strategy_id=r.strategy_id,
+            unrealized_pnl=r.unrealized_pnl,
+            currency=r.currency,
+            entry_side=r.entry_side,
+            peak_qty=r.peak_qty,
+            ts_opened=r.ts_opened,
+            ts_closed=r.ts_closed,
+            duration=r.duration,
+            is_open=r.is_open,
+            event_count=r.event_count,
             updated_at=r.updated_at.isoformat() if r.updated_at else None,
         )
         for r in rows
@@ -105,14 +139,25 @@ async def get_position(
         raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
     return PositionItem(
         id=r.id,
-        node_type=r.node_type.value if hasattr(r.node_type, "value") else str(r.node_type),
+        node_type=r.node_type,
+        position_id=r.position_id,
+        strategy_id_tag=r.strategy_id_tag,
         instrument_id=r.instrument_id,
         side=r.side,
         quantity=r.quantity,
-        avg_price=r.avg_price,
-        unrealized_pnl=r.unrealized_pnl,
+        signed_qty=r.signed_qty,
+        avg_px_open=r.avg_px_open,
+        avg_px_close=r.avg_px_close,
         realized_pnl=r.realized_pnl,
-        strategy_id=r.strategy_id,
+        unrealized_pnl=r.unrealized_pnl,
+        currency=r.currency,
+        entry_side=r.entry_side,
+        peak_qty=r.peak_qty,
+        ts_opened=r.ts_opened,
+        ts_closed=r.ts_closed,
+        duration=r.duration,
+        is_open=r.is_open,
+        event_count=r.event_count,
         updated_at=r.updated_at.isoformat() if r.updated_at else None,
     )
 
@@ -120,8 +165,9 @@ async def get_position(
 @router.get("/fills", response_model=list[FillItem])
 async def list_fills(
     node_type: str | None = Query(None, description="Filter by node type (sandbox/live)"),
-    order_id: str | None = Query(None, description="Filter by order ID"),
+    client_order_id: str | None = Query(None, description="Filter by client order ID"),
     instrument_id: str | None = Query(None, description="Filter by instrument"),
+    strategy_id_tag: str | None = Query(None, description="Filter by strategy ID tag"),
     limit: int = Query(100, ge=1, le=1000, description="Max results"),
     db: AsyncSession = Depends(get_db),
 ) -> list[FillItem]:
@@ -129,21 +175,29 @@ async def list_fills(
     stmt = select(Fill).order_by(Fill.created_at.desc()).limit(limit)
     if node_type is not None:
         stmt = stmt.where(Fill.node_type == node_type)
-    if order_id is not None:
-        stmt = stmt.where(Fill.order_id == order_id)
+    if client_order_id is not None:
+        stmt = stmt.where(Fill.client_order_id == client_order_id)
     if instrument_id is not None:
         stmt = stmt.where(Fill.instrument_id == instrument_id)
+    if strategy_id_tag is not None:
+        stmt = stmt.where(Fill.strategy_id_tag == strategy_id_tag)
     rows = (await db.execute(stmt)).scalars().all()
     return [
         FillItem(
             id=r.id,
-            node_type=r.node_type.value if hasattr(r.node_type, "value") else str(r.node_type),
-            order_id=r.order_id,
+            node_type=r.node_type,
+            trade_id=r.trade_id,
+            position_id=r.position_id,
+            client_order_id=r.client_order_id,
+            venue_order_id=r.venue_order_id,
+            strategy_id_tag=r.strategy_id_tag,
             instrument_id=r.instrument_id,
-            side=r.side,
-            quantity=r.quantity,
-            price=r.price,
+            order_side=r.order_side,
+            last_qty=r.last_qty,
+            last_px=r.last_px,
             commission=r.commission,
+            liquidity_side=r.liquidity_side,
+            ts_event=r.ts_event,
             created_at=r.created_at.isoformat() if r.created_at else None,
         )
         for r in rows
@@ -162,13 +216,19 @@ async def get_fill(
         raise HTTPException(status_code=404, detail=f"Fill {fill_id} not found")
     return FillItem(
         id=r.id,
-        node_type=r.node_type.value if hasattr(r.node_type, "value") else str(r.node_type),
-        order_id=r.order_id,
+        node_type=r.node_type,
+        trade_id=r.trade_id,
+        position_id=r.position_id,
+        client_order_id=r.client_order_id,
+        venue_order_id=r.venue_order_id,
+        strategy_id_tag=r.strategy_id_tag,
         instrument_id=r.instrument_id,
-        side=r.side,
-        quantity=r.quantity,
-        price=r.price,
+        order_side=r.order_side,
+        last_qty=r.last_qty,
+        last_px=r.last_px,
         commission=r.commission,
+        liquidity_side=r.liquidity_side,
+        ts_event=r.ts_event,
         created_at=r.created_at.isoformat() if r.created_at else None,
     )
 
@@ -183,37 +243,33 @@ async def trading_summary(
     total_pos_stmt = select(func.count(Position.id)).where(Position.node_type == node_type)
     total_positions = (await db.execute(total_pos_stmt)).scalar_one()
 
-    # Open positions: quantity > 0 (non-zero means still open)
+    # Open positions: use the is_open boolean column
     open_pos_stmt = select(func.count(Position.id)).where(
         Position.node_type == node_type,
-        Position.quantity != "0",
-        Position.quantity != "0.0",
+        Position.is_open == True,  # noqa: E712
     )
     open_positions = (await db.execute(open_pos_stmt)).scalar_one()
 
     # Open instruments
-    open_instr_stmt = select(Position.instrument_id).where(
-        Position.node_type == node_type,
-        Position.quantity != "0",
-        Position.quantity != "0.0",
-    ).distinct()
+    open_instr_stmt = (
+        select(Position.instrument_id)
+        .where(
+            Position.node_type == node_type,
+            Position.is_open == True,  # noqa: E712
+        )
+        .distinct()
+    )
     open_instruments = list((await db.execute(open_instr_stmt)).scalars().all())
 
     # Total fills
     total_fills_stmt = select(func.count(Fill.id)).where(Fill.node_type == node_type)
     total_fills = (await db.execute(total_fills_stmt)).scalar_one()
 
-    # Sum realized PnL (stored as string, cast to float in Python)
-    pnl_stmt = select(Position.realized_pnl).where(Position.node_type == node_type)
-    pnl_rows = (await db.execute(pnl_stmt)).scalars().all()
-    total_realized_pnl = 0.0
-    for pnl_str in pnl_rows:
-        try:
-            # Handle strings like "114.60 USDT" — take numeric part only
-            val = pnl_str.split()[0] if pnl_str else "0"
-            total_realized_pnl += float(val)
-        except (ValueError, IndexError):
-            pass
+    # Sum realized PnL (Float column, sum directly in DB)
+    pnl_stmt = select(func.coalesce(func.sum(Position.realized_pnl), 0.0)).where(
+        Position.node_type == node_type
+    )
+    total_realized_pnl = float((await db.execute(pnl_stmt)).scalar_one())
 
     return TradingSummary(
         node_type=node_type,
