@@ -38,6 +38,7 @@ pub(crate) enum DataCmd {
     Positions(anyhow::Result<Vec<TradingPosition>>),
     Fills(anyhow::Result<Vec<TradingFill>>),
     TradingSummary(anyhow::Result<TradingSummary>),
+    LifecycleState(anyhow::Result<serde_json::Value>),
 }
 
 /// Run the interactive TUI dashboard.
@@ -714,6 +715,10 @@ fn centered_rect(width: u16, height: u16, parent: ratatui::layout::Rect) -> rata
     )
 }
 
+fn is_sandbox_online(app: &App) -> bool {
+    workspaces::nodes::overview::is_sandbox_online(app)
+}
+
 /// Handle a key press. Returns true if the app should quit.
 async fn handle_key(
     app: &mut App,
@@ -761,6 +766,8 @@ async fn handle_key(
             fire_load_node_status(client, app, tx);
             workspaces::nodes::fire_load_positions(client, app, tx);
             workspaces::nodes::fire_load_fills(client, app, tx);
+            fire_load_lifecycle_state(client, app, tx);
+            fire_load_trading_summary(client, app, tx);
         }
         KeyCode::F(5) | KeyCode::Char('5') => {
             app.switch_workspace(Workspace::Data);
@@ -842,6 +849,18 @@ async fn handle_key(
             if app.workspace == Workspace::Backtest && !app.backtests.is_empty() {
                 fire_load_detail_result(client, app, tx);
                 app.panel_focus = app::PanelFocus::Right;
+            } else if app.workspace == Workspace::Nodes
+                && app.node_view == app::NodeView::Overview
+            {
+                // Drill into selected position's strategy
+                if let Some(pos) = app.positions.get(app.trading_selected) {
+                    let tag = pos.strategy_id_tag.clone();
+                    app.selected_strategy_tag = Some(tag.clone());
+                    app.node_view = app::NodeView::StrategyDetail;
+                    // Fire filtered data loads for this strategy
+                    fire_load_positions_filtered(client, app, tx, &tag);
+                    fire_load_fills_filtered(client, app, tx, &tag);
+                }
             }
         }
 
@@ -1001,16 +1020,171 @@ async fn handle_key(
             }
         }
 
-        // Fetch data form
+        // Fetch data form / instrument filter
         KeyCode::Char('f') => {
             if app.workspace == Workspace::Data {
                 app.open_popup(PopupKind::DataFetchForm);
+            } else if app.workspace == Workspace::Nodes {
+                // Cycle instrument filter: None -> instrument1 -> instrument2 -> ... -> None
+                let mut instruments: Vec<String> = app
+                    .positions
+                    .iter()
+                    .map(|p| {
+                        p.instrument_id
+                            .strip_suffix(".BINANCE")
+                            .unwrap_or(&p.instrument_id)
+                            .to_string()
+                    })
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                instruments.sort();
+
+                if instruments.is_empty() {
+                    app.sandbox_filter_instrument = None;
+                } else {
+                    let current = app.sandbox_filter_instrument.as_deref();
+                    let next = match current {
+                        None => Some(instruments[0].clone()),
+                        Some(c) => {
+                            let idx = instruments.iter().position(|s| s == c);
+                            match idx {
+                                Some(i) if i + 1 < instruments.len() => {
+                                    Some(instruments[i + 1].clone())
+                                }
+                                _ => None, // Wrap back to ALL
+                            }
+                        }
+                    };
+                    app.sandbox_filter_instrument = next;
+                }
             }
         }
 
-        // Esc — close popup or go to dashboard
+        // Group by strategy toggle
+        KeyCode::Char('g') => {
+            if app.workspace == Workspace::Nodes {
+                app.sandbox_group_by_strategy = !app.sandbox_group_by_strategy;
+            }
+        }
+
+        // Lifecycle: pause (p)
+        KeyCode::Char('p') => {
+            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
+                let sid = if app.node_view == app::NodeView::StrategyDetail {
+                    app.selected_strategy_tag.as_deref()
+                } else {
+                    None
+                };
+                match client.lifecycle_command("pause", "sandbox", sid).await {
+                    Ok(_) => {
+                        app.push_alert(
+                            app::AlertKind::Info,
+                            format!("Paused {}", sid.unwrap_or("all")),
+                        );
+                        fire_load_lifecycle_state(client, app, tx);
+                    }
+                    Err(e) => app.set_error(format!("Pause failed: {}", e)),
+                }
+            }
+        }
+
+        // Lifecycle: resume (P = Shift+p)
+        KeyCode::Char('P') => {
+            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
+                let sid = if app.node_view == app::NodeView::StrategyDetail {
+                    app.selected_strategy_tag.as_deref()
+                } else {
+                    None
+                };
+                match client.lifecycle_command("resume", "sandbox", sid).await {
+                    Ok(_) => {
+                        app.push_alert(
+                            app::AlertKind::Success,
+                            format!("Resumed {}", sid.unwrap_or("all")),
+                        );
+                        fire_load_lifecycle_state(client, app, tx);
+                    }
+                    Err(e) => app.set_error(format!("Resume failed: {}", e)),
+                }
+            }
+        }
+
+        // Lifecycle: flatten (F = Shift+f) — with confirmation
+        KeyCode::Char('F') => {
+            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
+                let sid = if app.node_view == app::NodeView::StrategyDetail {
+                    app.selected_strategy_tag.clone()
+                } else {
+                    None
+                };
+                let target = sid.as_deref().unwrap_or("ALL").to_string();
+                app.pending_action = Some(app::PendingAction::LifecycleAction {
+                    action: "flatten".to_string(),
+                    mode: "sandbox".to_string(),
+                    strategy_id: sid,
+                });
+                app.open_popup(PopupKind::Confirm {
+                    message: format!("Flatten {} positions?", target),
+                });
+            }
+        }
+
+        // Lifecycle: halt (H = Shift+h) — with confirmation
+        KeyCode::Char('H') => {
+            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
+                app.pending_action = Some(app::PendingAction::LifecycleAction {
+                    action: "halt".to_string(),
+                    mode: "sandbox".to_string(),
+                    strategy_id: None,
+                });
+                app.open_popup(PopupKind::Confirm {
+                    message: "Halt all trading on sandbox?".to_string(),
+                });
+            }
+        }
+
+        // Lifecycle: unhalt (U = Shift+u) — immediate
+        KeyCode::Char('U') => {
+            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
+                match client.lifecycle_command("unhalt", "sandbox", None).await {
+                    Ok(_) => {
+                        app.push_alert(
+                            app::AlertKind::Success,
+                            "Trading unhalted".to_string(),
+                        );
+                        fire_load_lifecycle_state(client, app, tx);
+                    }
+                    Err(e) => app.set_error(format!("Unhalt failed: {}", e)),
+                }
+            }
+        }
+
+        // Lifecycle: shutdown (X = Shift+x) — with confirmation
+        KeyCode::Char('X') => {
+            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
+                app.pending_action = Some(app::PendingAction::LifecycleAction {
+                    action: "shutdown".to_string(),
+                    mode: "sandbox".to_string(),
+                    strategy_id: None,
+                });
+                app.open_popup(PopupKind::Confirm {
+                    message: "Shutdown sandbox node?".to_string(),
+                });
+            }
+        }
+
+        // Esc — return from detail or go to dashboard
         KeyCode::Esc => {
-            if app.workspace != Workspace::Dashboard {
+            if app.workspace == Workspace::Nodes
+                && app.node_view == app::NodeView::StrategyDetail
+            {
+                app.node_view = app::NodeView::Overview;
+                app.selected_strategy_tag = None;
+                // Reload full (unfiltered) positions after leaving detail view
+                workspaces::nodes::fire_load_positions(client, app, tx);
+                workspaces::nodes::fire_load_fills(client, app, tx);
+            } else if app.workspace != Workspace::Dashboard {
                 app.switch_workspace(Workspace::Dashboard);
             }
         }
@@ -1174,6 +1348,36 @@ async fn handle_popup_key(app: &mut App, client: &ApiClient, tx: &mpsc::Unbounde
                                 Err(e) => app.set_error(format!("Delete failed: {}", e)),
                             }
                         }
+                        app::PendingAction::LifecycleAction {
+                            action,
+                            mode,
+                            strategy_id,
+                        } => {
+                            match client
+                                .lifecycle_command(&action, &mode, strategy_id.as_deref())
+                                .await
+                            {
+                                Ok(_) => {
+                                    let msg = match action.as_str() {
+                                        "flatten" => format!(
+                                            "Flattening {}",
+                                            strategy_id.as_deref().unwrap_or("all")
+                                        ),
+                                        "halt" => "Trading HALTED".to_string(),
+                                        "shutdown" => {
+                                            app.sandbox_shutting_down = true;
+                                            "Shutdown initiated".to_string()
+                                        }
+                                        _ => format!("{} done", action),
+                                    };
+                                    app.push_alert(app::AlertKind::Warning, msg);
+                                    fire_load_lifecycle_state(client, app, tx);
+                                }
+                                Err(e) => {
+                                    app.set_error(format!("{} failed: {}", action, e))
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1232,6 +1436,12 @@ fn handle_nav_down(app: &mut App) {
                     (app.strategy_selected + 1).min(app.strategies.len() - 1);
             }
         }
+        Workspace::Nodes => {
+            if !app.positions.is_empty() {
+                app.trading_selected =
+                    (app.trading_selected + 1).min(app.positions.len() - 1);
+            }
+        }
         Workspace::Data => {
             if let Some(catalog) = app.data_catalog.as_ref().and_then(|c| c.as_array()) {
                 if !catalog.is_empty() {
@@ -1240,7 +1450,6 @@ fn handle_nav_down(app: &mut App) {
                 }
             }
         }
-        _ => {}
     }
 }
 
@@ -1252,10 +1461,12 @@ fn handle_nav_up(app: &mut App) {
         Workspace::Strategy => {
             app.strategy_selected = app.strategy_selected.saturating_sub(1);
         }
+        Workspace::Nodes => {
+            app.trading_selected = app.trading_selected.saturating_sub(1);
+        }
         Workspace::Data => {
             app.data_selected = app.data_selected.saturating_sub(1);
         }
-        _ => {}
     }
 }
 
@@ -1336,6 +1547,70 @@ fn fire_load_detail_result(
     });
 }
 
+fn fire_load_lifecycle_state(
+    client: &ApiClient,
+    _app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
+    let client = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = client.lifecycle_state("sandbox").await;
+        let _ = tx.send(DataCmd::LifecycleState(result));
+    });
+}
+
+fn fire_load_trading_summary(
+    client: &ApiClient,
+    _app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
+    let client = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = client.trading_summary("sandbox").await;
+        let _ = tx.send(DataCmd::TradingSummary(result));
+    });
+}
+
+fn fire_load_positions_filtered(
+    client: &ApiClient,
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+    strategy_id_tag: &str,
+) {
+    if app.trading_loading {
+        return;
+    }
+    app.trading_loading = true;
+    let client = client.clone();
+    let tx = tx.clone();
+    let tag = strategy_id_tag.to_string();
+    tokio::spawn(async move {
+        let positions = client
+            .list_positions(Some("sandbox"), None, Some(&tag))
+            .await;
+        let _ = tx.send(DataCmd::Positions(positions));
+    });
+}
+
+fn fire_load_fills_filtered(
+    client: &ApiClient,
+    _app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+    strategy_id_tag: &str,
+) {
+    let client = client.clone();
+    let tx = tx.clone();
+    let tag = strategy_id_tag.to_string();
+    tokio::spawn(async move {
+        let fills = client
+            .list_fills(Some("sandbox"), 100, Some(&tag))
+            .await;
+        let _ = tx.send(DataCmd::Fills(fills));
+    });
+}
+
 fn fire_load_workspace_data(
     client: &ApiClient,
     app: &mut App,
@@ -1352,6 +1627,8 @@ fn fire_load_workspace_data(
             fire_load_node_status(client, app, tx);
             workspaces::nodes::fire_load_positions(client, app, tx);
             workspaces::nodes::fire_load_fills(client, app, tx);
+            fire_load_lifecycle_state(client, app, tx);
+            fire_load_trading_summary(client, app, tx);
         }
         Workspace::Data => fire_load_data_catalog(client, app, tx),
     }
@@ -1435,6 +1712,12 @@ fn handle_data_cmd(app: &mut App, cmd: DataCmd) {
             match result {
                 Ok(summary) => app.trading_summary = Some(summary),
                 Err(e) => app.set_error(format!("Failed to load trading summary: {}", e)),
+            }
+        }
+        DataCmd::LifecycleState(result) => {
+            match result {
+                Ok(state) => app.lifecycle_state = Some(state),
+                Err(_) => {} // Silently ignore — lifecycle state is optional
             }
         }
     }
