@@ -34,6 +34,75 @@ pub enum NodeCmd {
         #[arg(long, short, default_value = "3")]
         level: u8,
     },
+    /// Lifecycle control commands
+    Lifecycle {
+        #[command(subcommand)]
+        command: LifecycleCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LifecycleCmd {
+    /// Pause strategies (all or specific)
+    Pause {
+        /// Node mode: sandbox or live
+        #[arg(long, default_value = "sandbox")]
+        mode: String,
+        /// Strategy ID (omit to pause all)
+        #[arg(long)]
+        strategy_id: Option<String>,
+    },
+    /// Resume strategies (all or specific)
+    Resume {
+        /// Node mode: sandbox or live
+        #[arg(long, default_value = "sandbox")]
+        mode: String,
+        /// Strategy ID (omit to resume all)
+        #[arg(long)]
+        strategy_id: Option<String>,
+    },
+    /// Flatten positions (close all open positions)
+    Flatten {
+        /// Node mode: sandbox or live
+        #[arg(long, default_value = "sandbox")]
+        mode: String,
+        /// Strategy ID (omit to flatten all)
+        #[arg(long)]
+        strategy_id: Option<String>,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Halt trading (reject all new orders)
+    Halt {
+        /// Node mode: sandbox or live
+        #[arg(long, default_value = "sandbox")]
+        mode: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Unhalt trading (resume order flow)
+    Unhalt {
+        /// Node mode: sandbox or live
+        #[arg(long, default_value = "sandbox")]
+        mode: String,
+    },
+    /// Shutdown node gracefully
+    Shutdown {
+        /// Node mode: sandbox or live
+        #[arg(long, default_value = "sandbox")]
+        mode: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show current lifecycle state
+    State {
+        /// Node mode: sandbox or live
+        #[arg(long, default_value = "sandbox")]
+        mode: String,
+    },
 }
 
 pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: &str) -> Result<()> {
@@ -132,6 +201,137 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: &str) -> Result<
                 format!("{}", level.to_string().with(NEG).bold())
             };
             kv("Level", &level_str, 14);
+            println!();
+        }
+        NodeCmd::Lifecycle { command } => {
+            dispatch_lifecycle(command, client, format).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn dispatch_lifecycle(cmd: LifecycleCmd, client: &ApiClient, format: &str) -> Result<()> {
+    match cmd {
+        LifecycleCmd::Pause { mode, strategy_id } => {
+            let result = client.lifecycle_command("pause", &mode, strategy_id.as_deref()).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                let target = strategy_id.as_deref().unwrap_or("all strategies");
+                println!("  {} Pausing {} on {} node", "\u{25CF}".yellow(), target, mode_label(&mode));
+            }
+        }
+        LifecycleCmd::Resume { mode, strategy_id } => {
+            let result = client.lifecycle_command("resume", &mode, strategy_id.as_deref()).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                let target = strategy_id.as_deref().unwrap_or("all strategies");
+                println!("  {} Resuming {} on {} node", "\u{25CF}".green(), target, mode_label(&mode));
+            }
+        }
+        LifecycleCmd::Flatten { mode, strategy_id, yes } => {
+            if !yes {
+                let target = strategy_id.as_deref().unwrap_or("ALL");
+                eprint!("  Flatten positions for {}? [y/N] ", target);
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("  Cancelled.");
+                    return Ok(());
+                }
+            }
+            let result = client.lifecycle_command("flatten", &mode, strategy_id.as_deref()).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("  {} Flatten command sent", "\u{25CF}".yellow());
+            }
+        }
+        LifecycleCmd::Halt { mode, yes } => {
+            if !yes {
+                eprint!("  Halt all trading on {} node? [y/N] ", mode);
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("  Cancelled.");
+                    return Ok(());
+                }
+            }
+            let result = client.lifecycle_command("halt", &mode, None).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("  {} Trading HALTED on {} node", "\u{25CF}".red(), mode_label(&mode));
+            }
+        }
+        LifecycleCmd::Unhalt { mode } => {
+            let result = client.lifecycle_command("unhalt", &mode, None).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("  {} Trading resumed on {} node", "\u{25CF}".green(), mode_label(&mode));
+            }
+        }
+        LifecycleCmd::Shutdown { mode, yes } => {
+            if !yes {
+                eprint!("  Shutdown {} node? [y/N] ", mode);
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("  Cancelled.");
+                    return Ok(());
+                }
+            }
+            let result = client.lifecycle_command("shutdown", &mode, None).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("  {} Shutdown command sent to {} node", "\u{25CF}".red(), mode_label(&mode));
+            }
+        }
+        LifecycleCmd::State { mode } => {
+            let result = client.lifecycle_state(&mode).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+            header(&format!("Lifecycle State  {}", mode_label(&mode)));
+            divider(50);
+
+            let trading_state = result.get("trading_state").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let ts_colored = match trading_state {
+                "active" => format!("{}", trading_state.green().bold()),
+                "halted" => format!("{}", trading_state.red().bold()),
+                "reducing" => format!("{}", trading_state.yellow().bold()),
+                _ => trading_state.to_string(),
+            };
+            kv("Trading", &ts_colored, 14);
+
+            if let Some(paused) = result.get("paused").and_then(|v| v.as_array()) {
+                if paused.is_empty() {
+                    kv("Paused", &muted("none"), 14);
+                } else {
+                    let names: Vec<&str> = paused.iter().filter_map(|v| v.as_str()).collect();
+                    kv("Paused", &names.join(", "), 14);
+                }
+            }
+
+            if let Some(states) = result.get("strategy_states").and_then(|v| v.as_object()) {
+                if !states.is_empty() {
+                    println!();
+                    println!("    {}", bold("Strategies:"));
+                    for (name, state) in states {
+                        let st = state.as_str().unwrap_or("unknown");
+                        let colored = match st {
+                            "running" => format!("{}", st.green()),
+                            "paused" => format!("{}", st.yellow()),
+                            _ => st.to_string(),
+                        };
+                        println!("      {} {} {}", "-".cyan(), name, colored);
+                    }
+                }
+            }
             println!();
         }
     }
