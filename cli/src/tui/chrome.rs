@@ -214,10 +214,9 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
         }
         (None, Workspace::Nodes) => {
             vec![
+                ("Tab", "panel"),
                 ("j/k", "nav"),
-                ("Enter", "drill"),
-                ("f", "filter"),
-                ("g", "group"),
+                ("Enter", "select"),
                 ("p", "pause"),
                 ("F", "flatten"),
                 ("r", "refresh"),

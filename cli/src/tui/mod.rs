@@ -23,9 +23,8 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::api::ApiClient;
-use crate::types::{BacktestRunList, Strategy, TradingFill, TradingPosition, TradingSummary};
+use crate::types::{BacktestRunList, Strategy, TradingFill, TradingOrder, TradingPosition, TradingSummary};
 use app::{App, PopupKind, Workspace, WsState};
-use workspaces::nodes::overview::is_sandbox_online;
 use ws::WsClientEvent;
 
 /// Async data command — results from background API calls.
@@ -39,6 +38,7 @@ pub(crate) enum DataCmd {
     Fills(anyhow::Result<Vec<TradingFill>>),
     TradingSummary(anyhow::Result<TradingSummary>),
     LifecycleState(anyhow::Result<serde_json::Value>),
+    Orders(anyhow::Result<Vec<TradingOrder>>),
 }
 
 /// Run the interactive TUI dashboard.
@@ -144,6 +144,18 @@ async fn run_app(
             app.trading_dirty = false;
             workspaces::nodes::fire_load_positions(&client, &mut app, &data_tx);
             workspaces::nodes::fire_load_fills(&client, &mut app, &data_tx);
+        }
+
+        // Orders polling (10s interval, no WS event for orders)
+        if app.workspace == Workspace::Nodes {
+            let should_poll = app
+                .last_orders_poll
+                .map(|t| t.elapsed().as_secs() >= 10)
+                .unwrap_or(true);
+            if should_poll && !app.orders_loading {
+                workspaces::nodes::fire_load_orders(&client, &mut app, &data_tx);
+                app.last_orders_poll = Some(std::time::Instant::now());
+            }
         }
 
         app.tick();
@@ -769,6 +781,7 @@ async fn handle_key(
             fire_load_node_status(client, app, tx);
             workspaces::nodes::fire_load_positions(client, app, tx);
             workspaces::nodes::fire_load_fills(client, app, tx);
+            workspaces::nodes::fire_load_orders(client, app, tx);
             fire_load_lifecycle_state(client, app, tx);
             fire_load_trading_summary(client, app, tx);
         }
@@ -782,17 +795,27 @@ async fn handle_key(
             app.open_popup(PopupKind::Help);
         }
 
-        // Tab — cycle to next workspace
+        // Tab — cycle panels in Nodes workspace, otherwise cycle workspaces
         KeyCode::Tab => {
-            let next = match app.workspace {
-                Workspace::Dashboard => Workspace::Backtest,
-                Workspace::Backtest => Workspace::Strategy,
-                Workspace::Strategy => Workspace::Nodes,
-                Workspace::Nodes => Workspace::Data,
-                Workspace::Data => Workspace::Dashboard,
-            };
-            app.switch_workspace(next);
-            fire_load_workspace_data(client, app, tx);
+            if app.workspace == Workspace::Nodes {
+                app.node_panel_focus = match app.node_panel_focus {
+                    app::NodePanel::Sidebar => app::NodePanel::Positions,
+                    app::NodePanel::Positions => app::NodePanel::Chart,
+                    app::NodePanel::Chart => app::NodePanel::Fills,
+                    app::NodePanel::Fills => app::NodePanel::Orders,
+                    app::NodePanel::Orders => app::NodePanel::Sidebar,
+                };
+            } else {
+                let next = match app.workspace {
+                    Workspace::Dashboard => Workspace::Backtest,
+                    Workspace::Backtest => Workspace::Strategy,
+                    Workspace::Strategy => Workspace::Nodes,
+                    Workspace::Nodes => Workspace::Data,
+                    Workspace::Data => Workspace::Dashboard,
+                };
+                app.switch_workspace(next);
+                fire_load_workspace_data(client, app, tx);
+            }
         }
 
         // Shift+Tab — cycle to previous workspace
@@ -847,22 +870,50 @@ async fn handle_key(
             }
         }
 
-        // Enter — open detail / load detail data
+        // Enter — open detail / load detail data / sidebar selection
         KeyCode::Enter => {
             if app.workspace == Workspace::Backtest && !app.backtests.is_empty() {
                 fire_load_detail_result(client, app, tx);
                 app.panel_focus = app::PanelFocus::Right;
-            } else if app.workspace == Workspace::Nodes
-                && app.node_view == app::NodeView::Overview
-            {
-                // Drill into selected position's strategy
-                if let Some(pos) = app.positions.get(app.trading_selected) {
-                    let tag = pos.strategy_id_tag.clone();
-                    app.selected_strategy_tag = Some(tag.clone());
-                    app.node_view = app::NodeView::StrategyDetail;
-                    // Fire filtered data loads for this strategy
-                    fire_load_positions_filtered(client, app, tx, &tag);
-                    fire_load_fills_filtered(client, app, tx, &tag);
+            } else if app.workspace == Workspace::Nodes {
+                match app.node_panel_focus {
+                    app::NodePanel::Sidebar => {
+                        match app.node_sidebar_section {
+                            app::NodeSidebarSection::NodeSelector => {
+                                // Switch active node type
+                                let new_type = if app.node_sidebar_idx == 0 {
+                                    "sandbox"
+                                } else {
+                                    "live"
+                                };
+                                if app.active_node_type != new_type {
+                                    app.active_node_type = new_type.to_string();
+                                    app.selected_strategy = None;
+                                    app.trading_selected = 0;
+                                    // Reload all data for new node type
+                                    workspaces::nodes::fire_load_positions(client, app, tx);
+                                    workspaces::nodes::fire_load_fills(client, app, tx);
+                                    workspaces::nodes::fire_load_orders(client, app, tx);
+                                    fire_load_trading_summary(client, app, tx);
+                                    fire_load_lifecycle_state(client, app, tx);
+                                }
+                            }
+                            app::NodeSidebarSection::StrategyList => {
+                                if app.node_sidebar_idx == 0 {
+                                    app.selected_strategy = None; // ALL
+                                } else if let Some(item) =
+                                    app.strategy_list.get(app.node_sidebar_idx - 1)
+                                {
+                                    app.selected_strategy = Some(item.tag.clone());
+                                }
+                                app.rebuild_equity_curve();
+                                app.trading_selected = 0;
+                                app.fills_selected = 0;
+                                app.orders_selected = 0;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -896,6 +947,9 @@ async fn handle_key(
                 fire_load_node_status(client, app, tx);
                 workspaces::nodes::fire_load_positions(client, app, tx);
                 workspaces::nodes::fire_load_fills(client, app, tx);
+                workspaces::nodes::fire_load_orders(client, app, tx);
+                fire_load_lifecycle_state(client, app, tx);
+                fire_load_trading_summary(client, app, tx);
             }
             Workspace::Data => {
                 fire_load_data_catalog(client, app, tx);
@@ -989,63 +1043,19 @@ async fn handle_key(
             }
         }
 
-        // Fetch data form / instrument filter
+        // Fetch data form
         KeyCode::Char('f') => {
             if app.workspace == Workspace::Data {
                 app.open_popup(PopupKind::DataFetchForm);
-            } else if app.workspace == Workspace::Nodes {
-                // Cycle instrument filter: None -> instrument1 -> instrument2 -> ... -> None
-                let mut instruments: Vec<String> = app
-                    .positions
-                    .iter()
-                    .map(|p| {
-                        p.instrument_id
-                            .strip_suffix(".BINANCE")
-                            .unwrap_or(&p.instrument_id)
-                            .to_string()
-                    })
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-                instruments.sort();
-
-                if instruments.is_empty() {
-                    app.sandbox_filter_instrument = None;
-                } else {
-                    let current = app.sandbox_filter_instrument.as_deref();
-                    let next = match current {
-                        None => Some(instruments[0].clone()),
-                        Some(c) => {
-                            let idx = instruments.iter().position(|s| s == c);
-                            match idx {
-                                Some(i) if i + 1 < instruments.len() => {
-                                    Some(instruments[i + 1].clone())
-                                }
-                                _ => None, // Wrap back to ALL
-                            }
-                        }
-                    };
-                    app.sandbox_filter_instrument = next;
-                }
-            }
-        }
-
-        // Group by strategy toggle
-        KeyCode::Char('g') => {
-            if app.workspace == Workspace::Nodes {
-                app.sandbox_group_by_strategy = !app.sandbox_group_by_strategy;
             }
         }
 
         // Lifecycle: pause (p)
         KeyCode::Char('p') => {
-            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
-                let sid = if app.node_view == app::NodeView::StrategyDetail {
-                    app.selected_strategy_tag.as_deref()
-                } else {
-                    None
-                };
-                match client.lifecycle_command("pause", "sandbox", sid).await {
+            if app.workspace == Workspace::Nodes && app.is_active_node_online() {
+                let sid = app.selected_strategy.as_deref();
+                let mode = app.active_node_type.clone();
+                match client.lifecycle_command("pause", &mode, sid).await {
                     Ok(_) => {
                         app.push_alert(
                             app::AlertKind::Info,
@@ -1060,13 +1070,10 @@ async fn handle_key(
 
         // Lifecycle: resume (P = Shift+p)
         KeyCode::Char('P') => {
-            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
-                let sid = if app.node_view == app::NodeView::StrategyDetail {
-                    app.selected_strategy_tag.as_deref()
-                } else {
-                    None
-                };
-                match client.lifecycle_command("resume", "sandbox", sid).await {
+            if app.workspace == Workspace::Nodes && app.is_active_node_online() {
+                let sid = app.selected_strategy.as_deref();
+                let mode = app.active_node_type.clone();
+                match client.lifecycle_command("resume", &mode, sid).await {
                     Ok(_) => {
                         app.push_alert(
                             app::AlertKind::Success,
@@ -1081,16 +1088,13 @@ async fn handle_key(
 
         // Lifecycle: flatten (F = Shift+f) — with confirmation
         KeyCode::Char('F') => {
-            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
-                let sid = if app.node_view == app::NodeView::StrategyDetail {
-                    app.selected_strategy_tag.clone()
-                } else {
-                    None
-                };
+            if app.workspace == Workspace::Nodes && app.is_active_node_online() {
+                let sid = app.selected_strategy.clone();
+                let mode = app.active_node_type.clone();
                 let target = sid.as_deref().unwrap_or("ALL").to_string();
                 app.pending_action = Some(app::PendingAction::LifecycleAction {
                     action: "flatten".to_string(),
-                    mode: "sandbox".to_string(),
+                    mode,
                     strategy_id: sid,
                 });
                 app.open_popup(PopupKind::Confirm {
@@ -1101,22 +1105,24 @@ async fn handle_key(
 
         // Lifecycle: halt (H = Shift+h) — with confirmation
         KeyCode::Char('H') => {
-            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
+            if app.workspace == Workspace::Nodes && app.is_active_node_online() {
+                let mode = app.active_node_type.clone();
                 app.pending_action = Some(app::PendingAction::LifecycleAction {
                     action: "halt".to_string(),
-                    mode: "sandbox".to_string(),
+                    mode: mode.clone(),
                     strategy_id: None,
                 });
                 app.open_popup(PopupKind::Confirm {
-                    message: "Halt all trading on sandbox?".to_string(),
+                    message: format!("Halt all trading on {}?", mode),
                 });
             }
         }
 
         // Lifecycle: unhalt (U = Shift+u) — immediate
         KeyCode::Char('U') => {
-            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
-                match client.lifecycle_command("unhalt", "sandbox", None).await {
+            if app.workspace == Workspace::Nodes && app.is_active_node_online() {
+                let mode = app.active_node_type.clone();
+                match client.lifecycle_command("unhalt", &mode, None).await {
                     Ok(_) => {
                         app.push_alert(
                             app::AlertKind::Success,
@@ -1131,28 +1137,25 @@ async fn handle_key(
 
         // Lifecycle: shutdown (X = Shift+x) — with confirmation
         KeyCode::Char('X') => {
-            if app.workspace == Workspace::Nodes && is_sandbox_online(app) {
+            if app.workspace == Workspace::Nodes && app.is_active_node_online() {
+                let mode = app.active_node_type.clone();
                 app.pending_action = Some(app::PendingAction::LifecycleAction {
                     action: "shutdown".to_string(),
-                    mode: "sandbox".to_string(),
+                    mode: mode.clone(),
                     strategy_id: None,
                 });
                 app.open_popup(PopupKind::Confirm {
-                    message: "Shutdown sandbox node?".to_string(),
+                    message: format!("Shutdown {} node?", mode),
                 });
             }
         }
 
-        // Esc — return from detail or go to dashboard
+        // Esc — return focus to sidebar or go to dashboard
         KeyCode::Esc => {
             if app.workspace == Workspace::Nodes
-                && app.node_view == app::NodeView::StrategyDetail
+                && app.node_panel_focus != app::NodePanel::Sidebar
             {
-                app.node_view = app::NodeView::Overview;
-                app.selected_strategy_tag = None;
-                // Reload full (unfiltered) positions after leaving detail view
-                workspaces::nodes::fire_load_positions(client, app, tx);
-                workspaces::nodes::fire_load_fills(client, app, tx);
+                app.node_panel_focus = app::NodePanel::Sidebar;
             } else if app.workspace != Workspace::Dashboard {
                 app.switch_workspace(Workspace::Dashboard);
             }
@@ -1406,9 +1409,43 @@ fn handle_nav_down(app: &mut App) {
             }
         }
         Workspace::Nodes => {
-            if !app.positions.is_empty() {
-                app.trading_selected =
-                    (app.trading_selected + 1).min(app.positions.len() - 1);
+            match app.node_panel_focus {
+                app::NodePanel::Sidebar => {
+                    match app.node_sidebar_section {
+                        app::NodeSidebarSection::NodeSelector => {
+                            if app.node_sidebar_idx < 1 {
+                                app.node_sidebar_idx += 1;
+                            } else {
+                                // Move to strategy list section
+                                app.node_sidebar_section = app::NodeSidebarSection::StrategyList;
+                                app.node_sidebar_idx = 0;
+                            }
+                        }
+                        app::NodeSidebarSection::StrategyList => {
+                            let max = app.strategy_list.len(); // 0 = ALL, 1..n = strategies
+                            app.node_sidebar_idx = (app.node_sidebar_idx + 1).min(max);
+                        }
+                    }
+                }
+                app::NodePanel::Positions => {
+                    if !app.positions.is_empty() {
+                        app.trading_selected =
+                            (app.trading_selected + 1).min(app.positions.len().saturating_sub(1));
+                    }
+                }
+                app::NodePanel::Fills => {
+                    if !app.fills.is_empty() {
+                        app.fills_selected =
+                            (app.fills_selected + 1).min(app.fills.len().saturating_sub(1));
+                    }
+                }
+                app::NodePanel::Orders => {
+                    if !app.orders.is_empty() {
+                        app.orders_selected =
+                            (app.orders_selected + 1).min(app.orders.len().saturating_sub(1));
+                    }
+                }
+                _ => {}
             }
         }
         Workspace::Data => {
@@ -1431,7 +1468,34 @@ fn handle_nav_up(app: &mut App) {
             app.strategy_selected = app.strategy_selected.saturating_sub(1);
         }
         Workspace::Nodes => {
-            app.trading_selected = app.trading_selected.saturating_sub(1);
+            match app.node_panel_focus {
+                app::NodePanel::Sidebar => {
+                    match app.node_sidebar_section {
+                        app::NodeSidebarSection::NodeSelector => {
+                            app.node_sidebar_idx = app.node_sidebar_idx.saturating_sub(1);
+                        }
+                        app::NodeSidebarSection::StrategyList => {
+                            if app.node_sidebar_idx == 0 {
+                                // Move back to node selector
+                                app.node_sidebar_section = app::NodeSidebarSection::NodeSelector;
+                                app.node_sidebar_idx = 1; // last node item
+                            } else {
+                                app.node_sidebar_idx = app.node_sidebar_idx.saturating_sub(1);
+                            }
+                        }
+                    }
+                }
+                app::NodePanel::Positions => {
+                    app.trading_selected = app.trading_selected.saturating_sub(1);
+                }
+                app::NodePanel::Fills => {
+                    app.fills_selected = app.fills_selected.saturating_sub(1);
+                }
+                app::NodePanel::Orders => {
+                    app.orders_selected = app.orders_selected.saturating_sub(1);
+                }
+                _ => {}
+            }
         }
         Workspace::Data => {
             app.data_selected = app.data_selected.saturating_sub(1);
@@ -1518,65 +1582,29 @@ fn fire_load_detail_result(
 
 fn fire_load_lifecycle_state(
     client: &ApiClient,
-    _app: &mut App,
+    app: &mut App,
     tx: &mpsc::UnboundedSender<DataCmd>,
 ) {
     let client = client.clone();
     let tx = tx.clone();
+    let node_type = app.active_node_type.clone();
     tokio::spawn(async move {
-        let result = client.lifecycle_state("sandbox").await;
+        let result = client.lifecycle_state(&node_type).await;
         let _ = tx.send(DataCmd::LifecycleState(result));
     });
 }
 
 fn fire_load_trading_summary(
     client: &ApiClient,
-    _app: &mut App,
-    tx: &mpsc::UnboundedSender<DataCmd>,
-) {
-    let client = client.clone();
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let result = client.trading_summary("sandbox").await;
-        let _ = tx.send(DataCmd::TradingSummary(result));
-    });
-}
-
-fn fire_load_positions_filtered(
-    client: &ApiClient,
     app: &mut App,
     tx: &mpsc::UnboundedSender<DataCmd>,
-    strategy_id_tag: &str,
-) {
-    if app.trading_loading {
-        return;
-    }
-    app.trading_loading = true;
-    let client = client.clone();
-    let tx = tx.clone();
-    let tag = strategy_id_tag.to_string();
-    tokio::spawn(async move {
-        let positions = client
-            .list_positions(Some("sandbox"), None, Some(&tag))
-            .await;
-        let _ = tx.send(DataCmd::Positions(positions));
-    });
-}
-
-fn fire_load_fills_filtered(
-    client: &ApiClient,
-    _app: &mut App,
-    tx: &mpsc::UnboundedSender<DataCmd>,
-    strategy_id_tag: &str,
 ) {
     let client = client.clone();
     let tx = tx.clone();
-    let tag = strategy_id_tag.to_string();
+    let node_type = app.active_node_type.clone();
     tokio::spawn(async move {
-        let fills = client
-            .list_fills(Some("sandbox"), 100, Some(&tag))
-            .await;
-        let _ = tx.send(DataCmd::Fills(fills));
+        let result = client.trading_summary(&node_type).await;
+        let _ = tx.send(DataCmd::TradingSummary(result));
     });
 }
 
@@ -1596,6 +1624,7 @@ fn fire_load_workspace_data(
             fire_load_node_status(client, app, tx);
             workspaces::nodes::fire_load_positions(client, app, tx);
             workspaces::nodes::fire_load_fills(client, app, tx);
+            workspaces::nodes::fire_load_orders(client, app, tx);
             fire_load_lifecycle_state(client, app, tx);
             fire_load_trading_summary(client, app, tx);
         }
@@ -1666,6 +1695,8 @@ fn handle_data_cmd(app: &mut App, cmd: DataCmd) {
                     if app.trading_selected >= app.positions.len() && !app.positions.is_empty() {
                         app.trading_selected = app.positions.len() - 1;
                     }
+                    app.rebuild_strategy_list();
+                    app.rebuild_equity_curve();
                 }
                 Err(e) => app.set_error(format!("Failed to load positions: {}", e)),
             }
@@ -1673,7 +1704,12 @@ fn handle_data_cmd(app: &mut App, cmd: DataCmd) {
         DataCmd::Fills(result) => {
             app.trading_loading = false;
             match result {
-                Ok(list) => app.fills = list,
+                Ok(list) => {
+                    app.fills = list;
+                    if app.fills_selected >= app.fills.len() && !app.fills.is_empty() {
+                        app.fills_selected = app.fills.len() - 1;
+                    }
+                }
                 Err(e) => app.set_error(format!("Failed to load fills: {}", e)),
             }
         }
@@ -1687,6 +1723,18 @@ fn handle_data_cmd(app: &mut App, cmd: DataCmd) {
             match result {
                 Ok(state) => app.lifecycle_state = Some(state),
                 Err(_) => {} // Silently ignore — lifecycle state is optional
+            }
+        }
+        DataCmd::Orders(result) => {
+            app.orders_loading = false;
+            match result {
+                Ok(orders) => {
+                    app.orders = orders;
+                    if app.orders_selected >= app.orders.len() && !app.orders.is_empty() {
+                        app.orders_selected = app.orders.len() - 1;
+                    }
+                }
+                Err(e) => app.set_error(format!("Orders: {}", e)),
             }
         }
     }

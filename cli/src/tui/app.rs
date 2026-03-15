@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::types::{BacktestRunItem, Strategy, TradingFill, TradingPosition, TradingSummary, WsEvent};
+use crate::types::{BacktestRunItem, Strategy, TradingFill, TradingOrder, TradingPosition, TradingSummary, WsEvent};
 
 /// Bloomberg-style workspace model — each F-key opens a dedicated workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,11 +47,30 @@ pub enum WsState {
     Connected,
 }
 
-/// Which view is active in the Nodes workspace.
+/// Which panel is focused in the Nodes workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeView {
-    Overview,
-    StrategyDetail,
+pub enum NodePanel {
+    Sidebar,
+    Positions,
+    Chart,
+    Fills,
+    Orders,
+}
+
+/// Which section of the sidebar is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeSidebarSection {
+    NodeSelector,
+    StrategyList,
+}
+
+/// An item in the strategy sidebar list.
+#[derive(Debug, Clone)]
+pub struct StrategyListItem {
+    pub tag: String,
+    pub name: String,
+    pub realized_pnl: f64,
+    pub position_count: u32,
 }
 
 /// An alert for the ticker bar.
@@ -134,12 +153,28 @@ pub struct App {
     pub sandbox_uptime: Option<String>,
     pub live_last_heartbeat: Option<std::time::Instant>,
     pub live_uptime: Option<String>,
-    pub node_view: NodeView,
     pub lifecycle_state: Option<serde_json::Value>,
-    pub sandbox_filter_instrument: Option<String>,
-    pub selected_strategy_tag: Option<String>,
     pub sandbox_shutting_down: bool,
-    pub sandbox_group_by_strategy: bool,
+
+    // ── Node workspace: sidebar + panel focus ─────────────────────────
+    pub active_node_type: String,               // "sandbox" or "live"
+    pub node_panel_focus: NodePanel,
+    pub node_sidebar_section: NodeSidebarSection,
+    pub node_sidebar_idx: usize,                // index within current sidebar section
+    pub strategy_list: Vec<StrategyListItem>,    // derived from positions + heartbeat
+    pub selected_strategy: Option<String>,       // None = ALL, Some(tag) = filtered
+
+    // ── Orders ────────────────────────────────────────────────────────
+    pub orders: Vec<TradingOrder>,
+    pub orders_loading: bool,
+    pub last_orders_poll: Option<std::time::Instant>,
+
+    // ── Panel scroll indices ──────────────────────────────────────────
+    pub fills_selected: usize,
+    pub orders_selected: usize,
+
+    // ── Equity curve ──────────────────────────────────────────────────
+    pub equity_curve: Vec<(f64, f64)>,          // (index, cumulative_pnl)
 
     // ── Data catalog state ──────────────────────────────────────────────
     pub data_catalog: Option<serde_json::Value>,
@@ -210,12 +245,24 @@ impl App {
             sandbox_uptime: None,
             live_last_heartbeat: None,
             live_uptime: None,
-            node_view: NodeView::Overview,
             lifecycle_state: None,
-            sandbox_filter_instrument: None,
-            selected_strategy_tag: None,
             sandbox_shutting_down: false,
-            sandbox_group_by_strategy: false,
+
+            active_node_type: "sandbox".to_string(),
+            node_panel_focus: NodePanel::Sidebar,
+            node_sidebar_section: NodeSidebarSection::StrategyList,
+            node_sidebar_idx: 0,
+            strategy_list: Vec::new(),
+            selected_strategy: None,
+
+            orders: Vec::new(),
+            orders_loading: false,
+            last_orders_poll: None,
+
+            fills_selected: 0,
+            orders_selected: 0,
+
+            equity_curve: Vec::new(),
 
             data_catalog: None,
             data_selected: 0,
@@ -243,9 +290,11 @@ impl App {
         self.workspace = ws;
         self.panel_focus = PanelFocus::Left;
         self.popup = None;
-        self.node_view = NodeView::Overview;
-        self.selected_strategy_tag = None;
-        self.sandbox_filter_instrument = None;
+        // Reset node workspace focus
+        self.node_panel_focus = NodePanel::Sidebar;
+        self.node_sidebar_section = NodeSidebarSection::NodeSelector;
+        self.node_sidebar_idx = 0;
+        self.selected_strategy = None;
     }
 
     /// Open a popup overlay.
@@ -322,6 +371,85 @@ impl App {
         }
     }
 
+    /// Rebuild the strategy list from current positions + heartbeat data.
+    pub fn rebuild_strategy_list(&mut self) {
+        use std::collections::HashMap;
+        let mut map: HashMap<String, (f64, u32)> = HashMap::new();
+        for pos in &self.positions {
+            let entry = map.entry(pos.strategy_id_tag.clone()).or_insert((0.0, 0));
+            entry.0 += pos.realized_pnl.unwrap_or(0.0);
+            if pos.is_open {
+                entry.1 += 1;
+            }
+        }
+        self.strategy_list = map
+            .into_iter()
+            .map(|(tag, (pnl, count))| {
+                let name = tag.split('-').last().unwrap_or(&tag).to_string();
+                StrategyListItem {
+                    tag,
+                    name,
+                    realized_pnl: pnl,
+                    position_count: count,
+                }
+            })
+            .collect();
+        self.strategy_list.sort_by(|a, b| {
+            b.realized_pnl
+                .partial_cmp(&a.realized_pnl)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    /// Rebuild the equity curve from closed positions.
+    pub fn rebuild_equity_curve(&mut self) {
+        let mut closed: Vec<&TradingPosition> = self
+            .positions
+            .iter()
+            .filter(|p| !p.is_open)
+            .filter(|p| match &self.selected_strategy {
+                Some(tag) => p.strategy_id_tag == *tag,
+                None => true,
+            })
+            .collect();
+        closed.sort_by(|a, b| {
+            let a_ts = a.ts_closed.as_deref().unwrap_or("");
+            let b_ts = b.ts_closed.as_deref().unwrap_or("");
+            a_ts.cmp(b_ts)
+        });
+        let mut cumulative = 0.0;
+        self.equity_curve = closed
+            .iter()
+            .enumerate()
+            .map(|(i, pos)| {
+                cumulative += pos.realized_pnl.unwrap_or(0.0);
+                (i as f64, cumulative)
+            })
+            .collect();
+    }
+
+    /// Check if the active node is online based on heartbeat.
+    pub fn is_active_node_online(&self) -> bool {
+        let last_hb = if self.active_node_type == "sandbox" {
+            self.sandbox_last_heartbeat
+        } else {
+            self.live_last_heartbeat
+        };
+        match last_hb {
+            Some(t) => std::time::Instant::now().duration_since(t).as_secs() < 30,
+            None => false,
+        }
+    }
+
+    /// Get active node uptime string.
+    pub fn active_node_uptime(&self) -> Option<&str> {
+        if self.active_node_type == "sandbox" {
+            self.sandbox_uptime.as_deref()
+        } else {
+            self.live_uptime.as_deref()
+        }
+    }
+
     /// Adaptive tick rate in milliseconds.
     pub fn tick_rate_ms(&self) -> u64 {
         if !self.boot_complete {
@@ -348,6 +476,7 @@ impl App {
             || self.node_loading
             || self.data_loading
             || self.trading_loading
+            || self.orders_loading
             || self.sandbox_last_heartbeat.is_some()
             || self.live_last_heartbeat.is_some()
             || matches!(self.ws_state, WsState::Connected | WsState::Connecting)
@@ -508,6 +637,9 @@ impl App {
                     } else {
                         self.positions.push(pos);
                     }
+                    // Keep sidebar PnL and equity curve in sync with real-time updates
+                    self.rebuild_strategy_list();
+                    self.rebuild_equity_curve();
                 } else {
                     // Fallback to full refresh
                     self.trading_dirty = true;
