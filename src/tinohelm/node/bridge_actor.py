@@ -157,9 +157,11 @@ class BridgeActor(Actor):
                 continue
 
             try:
-                if action in ("pause", "resume") and not strategy_id:
-                    self.log.warning(f"Command '{action}' requires strategy_id")
-                    self._publish("commands_ack", {"cmd": action, "status": "error", "reason": "strategy_id required"})
+                if action == "pause" and not strategy_id:
+                    self._lifecycle.pause_all()
+                    continue
+                if action == "resume" and not strategy_id:
+                    self._lifecycle.resume_all()
                     continue
 
                 if action == "pause":
@@ -438,13 +440,22 @@ class BridgeActor(Actor):
             self.log.error(f"DB persist fill error: {e}")
 
     def _build_position_payload(self, pos: Any, event_type: str, ts_event: int) -> dict:
-        """Build a rich position payload for Redis publish."""
+        """Build a rich position payload for Redis publish.
+
+        Field names match the REST PositionItem schema so the Rust TUI can
+        deserialize with the same ``TradingPosition`` struct.  Legacy field
+        names (``strategy_id``, ``duration_ns``, ``ts``) are kept for
+        backward compatibility with older consumers.
+        """
+        strategy_id_str = str(pos.strategy_id) if pos.strategy_id else ""
         return {
             "type": "position.update",
             "event": event_type,
             "node_type": self._node_type,
+            "id": 0,  # sentinel — DB auto-increment not available in WS
             "position_id": str(pos.id),
-            "strategy_id": str(pos.strategy_id) if pos.strategy_id else None,
+            "strategy_id": strategy_id_str,
+            "strategy_id_tag": strategy_id_str,
             "instrument_id": str(pos.instrument_id),
             "side": pos.side.name,
             "quantity": str(pos.quantity),
@@ -452,32 +463,43 @@ class BridgeActor(Actor):
             "avg_px_open": float(pos.avg_px_open),
             "avg_px_close": float(pos.avg_px_close) if pos.avg_px_close else None,
             "realized_pnl": pos.realized_pnl.as_double() if pos.realized_pnl else 0.0,
+            "unrealized_pnl": None,
+            "currency": str(pos.realized_pnl.currency) if pos.realized_pnl else None,
             "entry_side": pos.entry.name,
             "peak_qty": str(pos.peak_qty),
             "is_open": pos.is_open,
             "event_count": pos.event_count,
             "ts_opened": _ts_ns_to_iso(pos.ts_opened),
             "ts_closed": _ts_ns_to_iso(pos.ts_closed) if pos.ts_closed and pos.ts_closed > 0 else None,
+            "duration": str(pos.duration_ns) if pos.duration_ns else None,
             "duration_ns": pos.duration_ns if pos.duration_ns else None,
             "ts": _ts_ns_to_iso(ts_event),
         }
 
     def _build_fill_payload(self, event: OrderFilled) -> dict:
-        """Build a rich fill payload for Redis publish."""
+        """Build a rich fill payload for Redis publish.
+
+        Field names match the REST FillItem schema so the Rust TUI can
+        deserialize with the same ``TradingFill`` struct.
+        """
+        strategy_id_str = str(event.strategy_id) if event.strategy_id else None
         return {
             "type": "fill.new",
+            "id": 0,  # sentinel — DB auto-increment not available in WS
             "node_type": self._node_type,
             "trade_id": str(event.trade_id),
             "position_id": str(event.position_id) if event.position_id else None,
             "client_order_id": str(event.client_order_id),
             "venue_order_id": str(event.venue_order_id) if event.venue_order_id else None,
-            "strategy_id": str(event.strategy_id) if event.strategy_id else None,
+            "strategy_id": strategy_id_str,
+            "strategy_id_tag": strategy_id_str,
             "instrument_id": str(event.instrument_id),
             "order_side": event.order_side.name,
             "last_qty": str(event.last_qty),
             "last_px": str(event.last_px),
-            "commission": event.commission.as_double() if event.commission else 0.0,
+            "commission": str(event.commission.as_double()) if event.commission else None,
             "liquidity_side": str(event.liquidity_side.name) if event.liquidity_side else None,
+            "ts_event": _ts_ns_to_iso(event.ts_event),
             "ts": _ts_ns_to_iso(event.ts_event),
         }
 

@@ -74,6 +74,29 @@ class LifecycleController:
             {"cmd": "resume", "strategy_id": str(sid), "status": "ok"},
         )
 
+    def pause_all(self) -> None:
+        """Pause all registered strategies."""
+        for strategy in self._trader.strategies():
+            sid = str(strategy.id)
+            self._msgbus.publish(f"{LIFECYCLE_PAUSE}.{sid}", "pause")
+            self._paused_strategies.add(sid)
+        self._log.warning("L1 Pause: all strategies")
+        self._publish_ack(
+            "commands_ack",
+            {"cmd": "pause", "strategy_id": "all", "status": "ok"},
+        )
+
+    def resume_all(self) -> None:
+        """Resume all paused strategies."""
+        for sid in list(self._paused_strategies):
+            self._msgbus.publish(f"{LIFECYCLE_RESUME}.{sid}", "resume")
+        self._paused_strategies.clear()
+        self._log.info("L1 Resume: all strategies")
+        self._publish_ack(
+            "commands_ack",
+            {"cmd": "resume", "strategy_id": "all", "status": "ok"},
+        )
+
     # ------------------------------------------------------------------
     # L2 — Flatten
     # ------------------------------------------------------------------
