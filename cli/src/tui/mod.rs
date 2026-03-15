@@ -1,7 +1,6 @@
 pub mod app;
 pub mod chrome;
 pub mod theme;
-pub mod views;
 pub mod widgets;
 pub mod workspaces;
 pub mod ws;
@@ -26,6 +25,7 @@ use tokio::sync::mpsc;
 use crate::api::ApiClient;
 use crate::types::{BacktestRunList, Strategy, TradingFill, TradingPosition, TradingSummary};
 use app::{App, PopupKind, Workspace, WsState};
+use workspaces::nodes::overview::is_sandbox_online;
 use ws::WsClientEvent;
 
 /// Async data command — results from background API calls.
@@ -713,10 +713,6 @@ fn centered_rect(width: u16, height: u16, parent: ratatui::layout::Rect) -> rata
         width.min(parent.width),
         height.min(parent.height),
     )
-}
-
-fn is_sandbox_online(app: &App) -> bool {
-    workspaces::nodes::overview::is_sandbox_online(app)
 }
 
 /// Handle a key press. Returns true if the app should quit.

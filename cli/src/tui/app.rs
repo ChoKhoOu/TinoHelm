@@ -551,14 +551,8 @@ fn chrono_lite_now() -> String {
 
 /// Get current UTC time as HH:MM for display.
 pub fn utc_clock() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let h = (secs % 86400) / 3600;
-    let m = (secs % 3600) / 60;
-    format!("{:02}:{:02} UTC", h, m)
+    let hms = chrono_lite_now();
+    format!("{} UTC", &hms[..5])
 }
 
 /// Return (today, 3_months_ago) as YYYY-MM-DD strings.

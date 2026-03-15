@@ -16,5 +16,4 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-// Re-export data loading functions from overview for backward compatibility
 pub use overview::{fire_load_fills, fire_load_positions};
