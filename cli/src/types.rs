@@ -181,13 +181,16 @@ pub struct DataCompactRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TradingPosition {
+    #[serde(default)]
     pub id: u64,
     pub node_type: String,
     pub position_id: String,
+    #[serde(alias = "strategy_id")]
     pub strategy_id_tag: String,
     pub instrument_id: String,
     pub side: String,           // "LONG", "SHORT", "FLAT"
     pub quantity: String,
+    #[serde(default)]
     pub signed_qty: f64,
     pub avg_px_open: Option<f64>,
     pub avg_px_close: Option<f64>,
@@ -198,19 +201,26 @@ pub struct TradingPosition {
     pub peak_qty: Option<String>,
     pub ts_opened: Option<String>,
     pub ts_closed: Option<String>,
+    #[serde(alias = "duration_ns")]
     pub duration: Option<String>,
+    #[serde(default)]
     pub is_open: bool,
+    #[serde(default)]
     pub event_count: u32,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TradingFill {
+    #[serde(default)]
     pub id: u64,
     pub node_type: String,
     pub trade_id: String,
     pub position_id: Option<String>,
+    #[serde(default)]
     pub client_order_id: String,
     pub venue_order_id: Option<String>,
+    #[serde(alias = "strategy_id")]
     pub strategy_id_tag: Option<String>,
     pub instrument_id: String,
     pub order_side: String,     // "BUY", "SELL"
@@ -218,7 +228,9 @@ pub struct TradingFill {
     pub last_px: String,
     pub commission: Option<String>,
     pub liquidity_side: Option<String>,
+    #[serde(alias = "ts")]
     pub ts_event: String,
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -259,6 +271,10 @@ pub enum WsEvent {
     NodeHeartbeat {
         node_type: String,
         ts: Option<String>,
+        strategies: Option<u32>,
+        positions: Option<u32>,
+        trading_state: Option<String>,
+        strategy_states: Option<std::collections::HashMap<String, String>>,
     },
     #[serde(rename = "system.error")]
     SystemError { message: String },

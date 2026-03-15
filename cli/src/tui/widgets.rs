@@ -144,6 +144,26 @@ pub fn stat_pair(l1: &str, v1: Option<f64>, l2: &str, v2: Option<f64>) -> Line<'
     ]
 }
 
+// ── Shared display helpers ─────────────────────────────────────────────
+
+/// Strip venue suffix (e.g., ".BINANCE") from instrument ID for display.
+pub fn strip_venue(id: &str) -> &str {
+    id.strip_suffix(".BINANCE").unwrap_or(id)
+}
+
+/// Extract HH:MM:SS from a timestamp string.
+/// Handles ISO 8601 ("2025-01-15T15:32:01Z") or falls back to first 8 chars.
+pub fn extract_time(ts: &str) -> String {
+    if let Some(t_pos) = ts.find('T') {
+        let after_t = &ts[t_pos + 1..];
+        let time_part: String = after_t.chars().take(8).collect();
+        if time_part.len() >= 8 {
+            return time_part;
+        }
+    }
+    ts.get(..8).unwrap_or(ts).to_string()
+}
+
 /// Two stats side by side with neutral (non-colored) values — for counts and non-PnL fields.
 pub fn stat_pair_neutral(l1: &str, v1: Option<f64>, l2: &str, v2: Option<f64>) -> Line<'static> {
     let v1_span = match v1 {
