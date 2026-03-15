@@ -54,13 +54,17 @@ pub enum NodeView {
     StrategyDetail,
 }
 
-/// An alert for the scrolling ticker.
+/// An alert for the ticker bar.
 #[derive(Debug, Clone)]
 pub struct Alert {
     pub timestamp: String,
     pub message: String,
     pub kind: AlertKind,
+    pub created_at: std::time::Instant,
 }
+
+/// How long alerts stay visible before auto-pruning (seconds).
+const ALERT_TTL_SECS: u64 = 5;
 
 /// A single entry in the real-time event log.
 #[derive(Debug, Clone)]
@@ -263,11 +267,17 @@ impl App {
             timestamp: ts,
             message,
             kind,
+            created_at: std::time::Instant::now(),
         });
         // Keep last 50 alerts
         while self.alerts.len() > 50 {
             self.alerts.pop_front();
         }
+    }
+
+    /// Most recent alert (for ticker display).
+    pub fn latest_alert(&self) -> Option<&Alert> {
+        self.alerts.back()
     }
 
     /// Initialize backtest form with defaults and strategy suggestions.
@@ -355,7 +365,9 @@ impl App {
             }
         }
 
-        // Scroll ticker
+        // Prune expired alerts, then advance ticker offset
+        self.alerts
+            .retain(|a| a.created_at.elapsed().as_secs() < ALERT_TTL_SECS);
         if !self.alerts.is_empty() {
             self.ticker_offset = self.ticker_offset.wrapping_add(1);
         }

@@ -259,6 +259,49 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(p, area);
 }
 
+/// Render the alert ticker (most recent alert, auto-fades).
+pub fn render_alert_ticker(f: &mut Frame, area: Rect, app: &App) {
+    use super::app::AlertKind;
+
+    if let Some(alert) = app.latest_alert() {
+        let (icon, color) = match alert.kind {
+            AlertKind::Info => ("\u{25CF}", theme::FG_HINT),       // ● cyan
+            AlertKind::Success => ("\u{2714}", theme::FG_POSITIVE), // ✔ green
+            AlertKind::Warning => ("\u{25B2}", theme::FG_QUEUED),  // ▲ yellow
+            AlertKind::Error => ("\u{2718}", theme::FG_NEGATIVE),  // ✘ red
+        };
+
+        let age = alert.created_at.elapsed().as_secs();
+        let msg_style = if age >= 3 {
+            // Fade to dim in the last 2 seconds
+            Style::default().fg(theme::FG_DIM)
+        } else {
+            Style::default().fg(color)
+        };
+
+        let count = app.alerts.len();
+        let mut spans = vec![
+            Span::styled(format!(" {} ", icon), Style::default().fg(color)),
+            Span::styled(&alert.timestamp, Style::default().fg(theme::FG_DIM)),
+            Span::raw(" "),
+            Span::styled(alert.message.as_str(), msg_style),
+        ];
+
+        if count > 1 {
+            spans.push(Span::styled(
+                format!("  (+{})", count - 1),
+                Style::default().fg(theme::FG_DIM),
+            ));
+        }
+
+        let line = Line::from(spans);
+        f.render_widget(
+            Paragraph::new(line).style(Style::default().bg(theme::BG_HEADER)),
+            area,
+        );
+    }
+}
+
 /// Render the error banner (if present).
 pub fn render_error(f: &mut Frame, area: Rect, app: &App) {
     if let Some(ref msg) = app.error_banner {
