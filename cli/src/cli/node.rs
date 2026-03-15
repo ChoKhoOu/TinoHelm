@@ -10,21 +10,6 @@ use crate::cli::style::*;
 pub enum NodeCmd {
     /// Show node status
     Status,
-    /// Start a node
-    Start {
-        /// Node type: sandbox or live
-        #[arg(default_value = "sandbox")]
-        node_type: String,
-        /// Strategy name(s) to run
-        #[arg(long = "strategy", short = 's')]
-        strategies: Vec<String>,
-    },
-    /// Stop a node
-    Stop {
-        /// Node type: sandbox or live
-        #[arg(default_value = "sandbox")]
-        node_type: String,
-    },
     /// Force-kill a node
     Kill {
         /// Node type: sandbox or live
@@ -143,47 +128,6 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: &str) -> Result<
                 // Unified table view
                 render_nodes_table(&nodes, &risk, &workers);
             }
-        }
-        NodeCmd::Start {
-            node_type,
-            strategies,
-        } => {
-            let result = client.node_start(&node_type, &strategies).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
-            }
-
-            header(&format!("Node Starting  {}", mode_label(&node_type)));
-            divider(50);
-            kv("Mode", &mode_label(&node_type), 14);
-            kv("Status", &node_status_color("starting"), 14);
-
-            if !strategies.is_empty() {
-                println!();
-                println!("    {}", bold("Strategies:"));
-                for s in &strategies {
-                    println!("      {} {}", "-".cyan(), s);
-                }
-            }
-            println!();
-        }
-        NodeCmd::Stop { node_type } => {
-            let result = client.node_stop(&node_type).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
-            }
-
-            header(&format!("Node Stopping  {}", mode_label(&node_type)));
-            divider(50);
-            kv("Mode", &mode_label(&node_type), 14);
-            kv(
-                "Status",
-                &format!("{}", "graceful stop".yellow().bold()),
-                14,
-            );
-            println!();
         }
         NodeCmd::Kill { node_type, level } => {
             let result = client.node_kill(&node_type, level).await?;

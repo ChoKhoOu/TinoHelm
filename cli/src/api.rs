@@ -344,30 +344,6 @@ impl ApiClient {
         Ok(body)
     }
 
-    pub async fn node_start(&self, node_type: &str, strategies: &[String]) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(format!("{}/api/node/start", self.base_url))
-            .json(&serde_json::json!({"mode": node_type, "strategies": strategies}))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
-    }
-
-    pub async fn node_stop(&self, node_type: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(format!("{}/api/node/stop", self.base_url))
-            .json(&serde_json::json!({"mode": node_type}))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
-    }
-
     pub async fn node_kill(&self, node_type: &str, level: u8) -> Result<serde_json::Value> {
         let resp = self
             .client

@@ -182,12 +182,6 @@ fn render_sandbox_card(f: &mut Frame, area: Rect, app: &App) {
             span!(Style::default().fg(theme::FG_PRIMARY); "{}", strategy_count),
             paused_span,
         ],
-        line![
-            span!(theme::style_hint_key(); " [s]"),
-            span!(theme::style_hint_desc(); " start "),
-            span!(theme::style_hint_key(); "[x]"),
-            span!(theme::style_hint_desc(); " stop"),
-        ],
     ];
 
     let block = titled_block(" SANDBOX ", true);
@@ -245,13 +239,6 @@ fn render_node_card(
         line![
             span!(Style::default().fg(theme::FG_AMBER); " Restart "),
             span!(Style::default().fg(theme::FG_PRIMARY); "{}", restart_count),
-        ],
-        Line::from(""),
-        line![
-            span!(theme::style_hint_key(); " [s]"),
-            span!(theme::style_hint_desc(); " start "),
-            span!(theme::style_hint_key(); "[x]"),
-            span!(theme::style_hint_desc(); " stop"),
         ],
     ];
 
@@ -325,7 +312,7 @@ fn render_node_stopped(f: &mut Frame, area: Rect) {
             Style::default().fg(theme::FG_DIM),
         )),
         Line::from(Span::styled(
-            "Press 's' to start",
+            "Start via: docker compose --profile sandbox up -d",
             Style::default().fg(theme::FG_HINT),
         )),
     ];

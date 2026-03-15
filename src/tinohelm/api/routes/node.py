@@ -24,20 +24,6 @@ router = APIRouter(prefix="/api/node", tags=["node"])
 
 # ---- request / response schemas ----
 
-class StartNodeRequest(BaseModel):
-    """Request body for POST /start."""
-
-    mode: Literal["sandbox", "live"]
-    strategies: list[str] = []
-    portfolio_config: str | None = None
-
-
-class StopNodeRequest(BaseModel):
-    """Request body for POST /stop."""
-
-    mode: Literal["sandbox", "live"]
-
-
 class KillSwitchRequest(BaseModel):
     """Request body for POST /kill."""
 
@@ -55,42 +41,6 @@ class LifecycleRequest(BaseModel):
 
 
 # ---- routes ----
-
-@router.post("/start")
-async def start_node(
-    body: StartNodeRequest,
-    pm: ProcessManager = Depends(get_process_manager),
-) -> dict:
-    """Write trading node config to Redis.
-
-    The node Docker container must be started separately:
-      docker compose --profile {mode} up -d
-    """
-    try:
-        result = await asyncio.to_thread(
-            pm.start_node, body.mode, body.strategies,
-            portfolio_config=body.portfolio_config,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    return {
-        "status": result["status"],
-        "mode": body.mode,
-        "config_version": result["config_version"],
-        "message": f"Config written. Start node: docker compose --profile {body.mode} up -d",
-    }
-
-
-@router.post("/stop")
-async def stop_node(
-    body: StopNodeRequest,
-    pm: ProcessManager = Depends(get_process_manager),
-) -> dict:
-    """Stop a TradingNode subprocess gracefully."""
-    await asyncio.to_thread(pm.stop_node, body.mode)
-    return {"status": "ok", "mode": body.mode, "message": f"{body.mode} node stopped"}
-
 
 @router.post("/kill")
 async def kill_switch(

@@ -43,62 +43,6 @@ class ProcessManager:
         self._ephemeral_idle_timeout: int = 60
 
     # ------------------------------------------------------------------
-    # Node lifecycle (Redis config + commands — no process management)
-    # ------------------------------------------------------------------
-
-    def start_node(
-        self,
-        node_type: str,
-        strategies: list[str],
-        portfolio_config: str | None = None,
-    ) -> dict:
-        """Write node config to Redis. Docker manages actual process lifecycle."""
-        if node_type not in VALID_NODE_TYPES:
-            raise ValueError(f"Invalid node_type {node_type!r}; must be one of {VALID_NODE_TYPES}")
-
-        from tinohelm.core.config import get_settings
-        from tinohelm.node.factory import build_trading_node_config
-
-        settings = get_settings()
-        config = build_trading_node_config(
-            node_type, strategies, settings,
-            portfolio_config=portfolio_config, for_redis=True,
-        )
-
-        # Write config (credentials excluded) to Redis
-        self._redis.set(
-            f"tino:node:config:{node_type}",
-            json.dumps(config),
-            ex=3600,  # 1h TTL — node reads once at startup
-        )
-
-        # Update state
-        self._redis.set(f"tino:node:state:{node_type}", json.dumps({
-            "status": "config_ready",
-            "config_version": config["config_version"],
-            "requested_at": time.time(),
-        }))
-
-        logger.info("Wrote %s node config to Redis (version=%s)", node_type, config["config_version"])
-        return {"status": "config_ready", "config_version": config["config_version"]}
-
-    def stop_node(self, node_type: str) -> None:
-        """Stop a trading node via Redis shutdown command."""
-        channel = f"tino:{node_type}:commands"
-        self._redis.publish(channel, json.dumps({"cmd": "shutdown"}))
-        logger.info("Published shutdown command to %s; waiting up to 15s for node to stop", channel)
-
-        # Poll heartbeat — wait for node to stop
-        for _ in range(15):
-            if not self._redis.exists(f"tino:heartbeat:{node_type}"):
-                logger.info("Node %s confirmed stopped (heartbeat gone)", node_type)
-                self._redis.delete(f"tino:node:state:{node_type}")
-                return
-            time.sleep(1)
-
-        logger.warning("Node %s heartbeat still present after 15s; Docker will manage", node_type)
-
-    # ------------------------------------------------------------------
     # Lifecycle commands
     # ------------------------------------------------------------------
 

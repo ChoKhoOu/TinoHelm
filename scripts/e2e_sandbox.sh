@@ -17,10 +17,10 @@ fail() { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 cleanup() {
     echo ""
     step "Cleanup: stopping sandbox..."
-    $TINO sandbox stop --format json 2>/dev/null || \
-        curl -sf -X POST "${API_URL}/api/node/stop" \
+    $TINO node lifecycle shutdown --mode sandbox --yes 2>/dev/null || \
+        curl -sf -X POST "${API_URL}/api/node/lifecycle" \
         -H "Content-Type: application/json" \
-        -d '{"mode":"sandbox"}' || true
+        -d '{"action":"shutdown","mode":"sandbox"}' || true
     pass "Sandbox stopped"
 }
 
@@ -40,14 +40,10 @@ NODE_STATUS=$($TINO node status --format json 2>/dev/null || curl -sf "${API_URL
 echo "$NODE_STATUS" | python3 -m json.tool 2>/dev/null || echo "$NODE_STATUS"
 pass "Node status retrieved"
 
-# 3. Start sandbox with strategy
-step "Starting sandbox with ema_cross_demo..."
+# 3. Start sandbox (requires Docker — cannot be started via API)
+step "Starting sandbox via Docker..."
 trap cleanup EXIT
-START_RESULT=$($TINO sandbox start --strategy ema_cross_demo --format json 2>/dev/null || \
-               curl -sf -X POST "${API_URL}/api/node/start" \
-               -H "Content-Type: application/json" \
-               -d '{"mode":"sandbox","strategies":["ema_cross_demo"]}')
-echo "$START_RESULT" | python3 -m json.tool 2>/dev/null || echo "$START_RESULT"
+docker compose --profile sandbox up -d 2>/dev/null || echo "Sandbox container may already be running"
 pass "Sandbox start command sent"
 
 # 4. Wait for sandbox to start
@@ -83,14 +79,14 @@ ORDERS=$(curl -sf "${API_URL}/api/orders" 2>/dev/null || echo '{"orders":[]}')
 echo "$ORDERS" | python3 -m json.tool 2>/dev/null || echo "$ORDERS"
 pass "Orders endpoint accessible"
 
-# 8. Stop sandbox (handled by cleanup trap, but also test explicit stop)
+# 8. Stop sandbox via lifecycle shutdown
 step "Stopping sandbox..."
-STOP_RESULT=$($TINO sandbox stop --format json 2>/dev/null || \
-              curl -sf -X POST "${API_URL}/api/node/stop" \
+STOP_RESULT=$($TINO node lifecycle shutdown --mode sandbox --yes --format json 2>/dev/null || \
+              curl -sf -X POST "${API_URL}/api/node/lifecycle" \
               -H "Content-Type: application/json" \
-              -d '{"mode":"sandbox"}')
+              -d '{"action":"shutdown","mode":"sandbox"}')
 echo "$STOP_RESULT" | python3 -m json.tool 2>/dev/null || echo "$STOP_RESULT"
-pass "Sandbox stop command sent"
+pass "Sandbox shutdown command sent"
 
 # 9. Verify stopped
 step "Verifying sandbox stopped (max 15s)..."

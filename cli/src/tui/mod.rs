@@ -158,24 +158,21 @@ async fn run_app(
 fn render(f: &mut ratatui::Frame, app: &App) {
     let size = f.area();
 
-    // Global layout: [header(3)] [gap(1)] [content(fill)] [hints(1)] [error?(1)]
+    // Global layout: [header(3)] [gap(1)] [content(fill)] [alert?(1)] [hints(1)] [error?(1)]
     let has_error = app.error_banner.is_some();
-    let constraints = if has_error {
-        vec![
-            Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ]
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Min(5),
-            Constraint::Length(1),
-        ]
-    };
+    let has_alert = !app.alerts.is_empty();
+    let mut constraints = vec![
+        Constraint::Length(3), // header
+        Constraint::Length(1), // gap
+        Constraint::Min(5),    // content
+    ];
+    if has_alert {
+        constraints.push(Constraint::Length(1)); // alert ticker
+    }
+    constraints.push(Constraint::Length(1)); // hints
+    if has_error {
+        constraints.push(Constraint::Length(1)); // error banner
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -205,12 +202,22 @@ fn render(f: &mut ratatui::Frame, app: &App) {
             Workspace::Data => workspaces::data::render(f, chunks[2], app),
         }
 
+        // Dynamic indices after content
+        let mut idx = 3;
+
+        // Alert ticker
+        if has_alert {
+            chrome::render_alert_ticker(f, chunks[idx], app);
+            idx += 1;
+        }
+
         // Hint bar
-        chrome::render_hints(f, chunks[3], app);
+        chrome::render_hints(f, chunks[idx], app);
+        idx += 1;
 
         // Error banner
         if has_error {
-            chrome::render_error(f, chunks[4], app);
+            chrome::render_error(f, chunks[idx], app);
         }
     }
 
@@ -912,43 +919,9 @@ async fn handle_key(
                         });
                     }
                 }
-            } else if app.workspace == Workspace::Nodes {
-                let node_type = match app.panel_focus {
-                    app::PanelFocus::Left => "sandbox",
-                    app::PanelFocus::Right => "live",
-                };
-                match client.node_stop(node_type).await {
-                    Ok(_) => {
-                        app.push_alert(
-                            app::AlertKind::Info,
-                            format!("{} node stopping…", node_type),
-                        );
-                        fire_load_node_status(client, app, tx);
-                    }
-                    Err(e) => app.set_error(format!("Failed to stop {}: {}", node_type, e)),
-                }
             }
         }
 
-        // Node start
-        KeyCode::Char('s') => {
-            if app.workspace == Workspace::Nodes {
-                let node_type = match app.panel_focus {
-                    app::PanelFocus::Left => "sandbox",
-                    app::PanelFocus::Right => "live",
-                };
-                match client.node_start(node_type, &[]).await {
-                    Ok(_) => {
-                        app.push_alert(
-                            app::AlertKind::Info,
-                            format!("{} node starting…", node_type),
-                        );
-                        fire_load_node_status(client, app, tx);
-                    }
-                    Err(e) => app.set_error(format!("Failed to start {}: {}", node_type, e)),
-                }
-            }
-        }
 
         // Strategy validate
         KeyCode::Char('v') => {
