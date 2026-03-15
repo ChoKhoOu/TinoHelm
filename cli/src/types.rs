@@ -242,6 +242,25 @@ pub struct TradingSummary {
     pub open_instruments: Vec<String>,
 }
 
+// ---- Trading (orders) ----
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TradingOrder {
+    #[serde(default)]
+    pub id: u64,
+    pub node_type: String,
+    pub order_id: String,
+    pub instrument_id: String,
+    pub side: String,              // "BUY", "SELL"
+    pub order_type: String,        // "LIMIT", "STOP_MARKET", etc.
+    pub quantity: String,
+    pub price: Option<String>,
+    pub status: String,            // "ACCEPTED", "SUBMITTED", "PARTIALLY_FILLED"
+    #[serde(alias = "strategy_id")]
+    pub strategy_id_tag: Option<String>,
+    pub created_at: Option<String>,
+}
+
 // ---- WebSocket events ----
 
 #[derive(Debug, Deserialize, Clone)]

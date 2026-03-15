@@ -331,6 +331,26 @@ impl ApiClient {
         Ok(body)
     }
 
+    // ---- Orders ----
+
+    pub async fn list_orders(
+        &self,
+        node_type: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<TradingOrder>> {
+        let mut url = format!("{}/api/orders?limit={}", self.base_url, limit);
+        if let Some(nt) = node_type {
+            url.push_str(&format!("&node_type={}", Self::url_encode(nt)));
+        }
+        if let Some(s) = status {
+            url.push_str(&format!("&status={}", Self::url_encode(s)));
+        }
+        let resp = self.client.get(&url).send().await.context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
     // ---- Node ----
 
     pub async fn node_status(&self) -> Result<serde_json::Value> {
