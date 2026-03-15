@@ -188,14 +188,14 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
         }
         (None, Workspace::Dashboard) => {
             vec![
-                ("j/k", "nav"),
+                ("\u{2191}/\u{2193}", "nav"),
                 ("Enter", "detail"),
                 ("r", "refresh"),
             ]
         }
         (None, Workspace::Backtest) => {
             vec![
-                ("j/k", "nav"),
+                ("\u{2191}/\u{2193}", "nav"),
                 ("\u{2190}/\u{2192}", "panel"),
                 ("n", "new"),
                 ("x", "delete"),
@@ -206,7 +206,7 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
         }
         (None, Workspace::Strategy) => {
             vec![
-                ("j/k", "nav"),
+                ("\u{2191}/\u{2193}", "nav"),
                 ("\u{2190}/\u{2192}", "panel"),
                 ("v", "validate"),
                 ("r", "rescan"),
@@ -214,8 +214,8 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
         }
         (None, Workspace::Nodes) => {
             vec![
-                ("Tab", "panel"),
-                ("j/k", "nav"),
+                ("\u{2190}/\u{2192}", "panel"),
+                ("\u{2191}/\u{2193}", "nav"),
                 ("Enter", "select"),
                 ("p", "pause"),
                 ("F", "flatten"),
@@ -224,7 +224,7 @@ pub fn render_hints(f: &mut Frame, area: Rect, app: &App) {
         }
         (None, Workspace::Data) => {
             vec![
-                ("j/k", "nav"),
+                ("\u{2191}/\u{2193}", "nav"),
                 ("f", "fetch"),
                 ("r", "refresh"),
             ]

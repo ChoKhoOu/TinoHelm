@@ -656,14 +656,15 @@ fn render_help(f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         Line::from(Span::styled("  KEYBOARD SHORTCUTS", theme::style_header())),
         Line::from(""),
         help_line("  F1-F5 / 1-5", "Switch workspace"),
-        help_line("  j / \u{2193}     ", "Move cursor down"),
-        help_line("  k / \u{2191}     ", "Move cursor up"),
+        help_line("  Tab        ", "Next workspace"),
+        help_line("  \u{2191}/\u{2193}       ", "Navigate / scroll"),
+        help_line("  \u{2190}/\u{2192}       ", "Switch panel"),
         help_line("  Enter      ", "Open detail / select"),
-        help_line("  Tab        ", "Switch panel focus"),
+        help_line("  Esc        ", "Back / Dashboard"),
         help_line("  n          ", "New backtest (F2)"),
         help_line("  r          ", "Refresh / rescan"),
         help_line("  v          ", "Validate strategy (F3)"),
-        help_line("  s / x      ", "Start / stop node (F4)"),
+        help_line("  p / F / H  ", "Pause / Flatten / Halt (F4)"),
         help_line("  f          ", "Fetch data (F5)"),
         help_line("  ?          ", "Toggle this help"),
         help_line("  q / Ctrl+C ", "Quit"),
@@ -795,27 +796,17 @@ async fn handle_key(
             app.open_popup(PopupKind::Help);
         }
 
-        // Tab — cycle panels in Nodes workspace, otherwise cycle workspaces
+        // Tab — always cycle workspaces
         KeyCode::Tab => {
-            if app.workspace == Workspace::Nodes {
-                app.node_panel_focus = match app.node_panel_focus {
-                    app::NodePanel::Sidebar => app::NodePanel::Positions,
-                    app::NodePanel::Positions => app::NodePanel::Chart,
-                    app::NodePanel::Chart => app::NodePanel::Fills,
-                    app::NodePanel::Fills => app::NodePanel::Orders,
-                    app::NodePanel::Orders => app::NodePanel::Sidebar,
-                };
-            } else {
-                let next = match app.workspace {
-                    Workspace::Dashboard => Workspace::Backtest,
-                    Workspace::Backtest => Workspace::Strategy,
-                    Workspace::Strategy => Workspace::Nodes,
-                    Workspace::Nodes => Workspace::Data,
-                    Workspace::Data => Workspace::Dashboard,
-                };
-                app.switch_workspace(next);
-                fire_load_workspace_data(client, app, tx);
-            }
+            let next = match app.workspace {
+                Workspace::Dashboard => Workspace::Backtest,
+                Workspace::Backtest => Workspace::Strategy,
+                Workspace::Strategy => Workspace::Nodes,
+                Workspace::Nodes => Workspace::Data,
+                Workspace::Data => Workspace::Dashboard,
+            };
+            app.switch_workspace(next);
+            fire_load_workspace_data(client, app, tx);
         }
 
         // Shift+Tab — cycle to previous workspace
@@ -831,16 +822,36 @@ async fn handle_key(
             fire_load_workspace_data(client, app, tx);
         }
 
-        // Left/Right — toggle panel focus in split views
+        // Left/Right — panel focus (split views) or column nav (Nodes grid)
         KeyCode::Left => {
-            app.panel_focus = app::PanelFocus::Left;
+            if app.workspace == Workspace::Nodes {
+                let col = app.node_grid_col();
+                if col > 0 {
+                    app.node_last_row[col] = app.node_grid_row();
+                    let new_col = col - 1;
+                    let row = app.node_last_row[new_col];
+                    app.node_panel_focus = app.node_panel_from_grid(new_col, row);
+                }
+            } else {
+                app.panel_focus = app::PanelFocus::Left;
+            }
         }
         KeyCode::Right => {
-            app.panel_focus = app::PanelFocus::Right;
+            if app.workspace == Workspace::Nodes {
+                let col = app.node_grid_col();
+                if col < 2 {
+                    app.node_last_row[col] = app.node_grid_row();
+                    let new_col = col + 1;
+                    let row = app.node_last_row[new_col];
+                    app.node_panel_focus = app.node_panel_from_grid(new_col, row);
+                }
+            } else {
+                app.panel_focus = app::PanelFocus::Right;
+            }
         }
 
-        // Navigation — j/k with context-sensitive behavior
-        KeyCode::Char('j') | KeyCode::Down => {
+        // Navigation — arrow keys with context-sensitive behavior
+        KeyCode::Down => {
             // Right panel focused in Backtest → scroll detail
             if app.workspace == Workspace::Backtest
                 && app.panel_focus == app::PanelFocus::Right
@@ -855,7 +866,7 @@ async fn handle_key(
                 }
             }
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        KeyCode::Up => {
             if app.workspace == Workspace::Backtest
                 && app.panel_focus == app::PanelFocus::Right
             {
@@ -1150,12 +1161,16 @@ async fn handle_key(
             }
         }
 
-        // Esc — return focus to sidebar or go to dashboard
+        // Esc — return focus to sidebar/left panel, or go to dashboard
         KeyCode::Esc => {
             if app.workspace == Workspace::Nodes
                 && app.node_panel_focus != app::NodePanel::Sidebar
             {
                 app.node_panel_focus = app::NodePanel::Sidebar;
+            } else if (app.workspace == Workspace::Backtest || app.workspace == Workspace::Strategy)
+                && app.panel_focus == app::PanelFocus::Right
+            {
+                app.panel_focus = app::PanelFocus::Left;
             } else if app.workspace != Workspace::Dashboard {
                 app.switch_workspace(Workspace::Dashboard);
             }
@@ -1428,24 +1443,37 @@ fn handle_nav_down(app: &mut App) {
                     }
                 }
                 app::NodePanel::Positions => {
-                    if !app.positions.is_empty() {
-                        app.trading_selected =
-                            (app.trading_selected + 1).min(app.positions.len().saturating_sub(1));
+                    if app.positions.is_empty() {
+                        // Empty list — no-op (use ↓ from Sidebar or ← → to navigate)
+                    } else if app.trading_selected >= app.positions.len() - 1 {
+                        // At bottom of list — boundary jump to Fills
+                        app.node_panel_focus = app::NodePanel::Fills;
+                        app.node_last_row[1] = 1;
+                        app.fills_selected = 0;
+                    } else {
+                        app.trading_selected += 1;
                     }
                 }
+                app::NodePanel::Chart => {
+                    // No list — jump directly to Orders
+                    app.node_panel_focus = app::NodePanel::Orders;
+                    app.node_last_row[2] = 1;
+                    app.orders_selected = 0;
+                }
                 app::NodePanel::Fills => {
+                    // Bottom of grid col 1 — scroll within only
                     if !app.fills.is_empty() {
                         app.fills_selected =
                             (app.fills_selected + 1).min(app.fills.len().saturating_sub(1));
                     }
                 }
                 app::NodePanel::Orders => {
+                    // Bottom of grid col 2 — scroll within only
                     if !app.orders.is_empty() {
                         app.orders_selected =
                             (app.orders_selected + 1).min(app.orders.len().saturating_sub(1));
                     }
                 }
-                _ => {}
             }
         }
         Workspace::Data => {
@@ -1486,15 +1514,30 @@ fn handle_nav_up(app: &mut App) {
                     }
                 }
                 app::NodePanel::Positions => {
+                    // Top of grid col 1 — scroll within only
                     app.trading_selected = app.trading_selected.saturating_sub(1);
                 }
                 app::NodePanel::Fills => {
-                    app.fills_selected = app.fills_selected.saturating_sub(1);
+                    if app.fills_selected == 0 || app.fills.is_empty() {
+                        // Boundary jump: Fills → Positions
+                        app.node_panel_focus = app::NodePanel::Positions;
+                        app.node_last_row[1] = 0;
+                    } else {
+                        app.fills_selected = app.fills_selected.saturating_sub(1);
+                    }
                 }
                 app::NodePanel::Orders => {
-                    app.orders_selected = app.orders_selected.saturating_sub(1);
+                    if app.orders_selected == 0 || app.orders.is_empty() {
+                        // Boundary jump: Orders → Chart
+                        app.node_panel_focus = app::NodePanel::Chart;
+                        app.node_last_row[2] = 0;
+                    } else {
+                        app.orders_selected = app.orders_selected.saturating_sub(1);
+                    }
                 }
-                _ => {}
+                app::NodePanel::Chart => {
+                    // Top of grid col 2, no list — no-op
+                }
             }
         }
         Workspace::Data => {

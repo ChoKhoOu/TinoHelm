@@ -163,6 +163,7 @@ pub struct App {
     pub node_sidebar_idx: usize,                // index within current sidebar section
     pub strategy_list: Vec<StrategyListItem>,    // derived from positions + heartbeat
     pub selected_strategy: Option<String>,       // None = ALL, Some(tag) = filtered
+    pub node_last_row: [usize; 3],               // last focused row per column (col0=always 0)
 
     // ── Orders ────────────────────────────────────────────────────────
     pub orders: Vec<TradingOrder>,
@@ -254,6 +255,7 @@ impl App {
             node_sidebar_idx: 0,
             strategy_list: Vec::new(),
             selected_strategy: None,
+            node_last_row: [0, 0, 0],
 
             orders: Vec::new(),
             orders_loading: false,
@@ -295,6 +297,36 @@ impl App {
         self.node_sidebar_section = NodeSidebarSection::NodeSelector;
         self.node_sidebar_idx = 0;
         self.selected_strategy = None;
+        self.node_last_row = [0, 0, 0];
+    }
+
+    /// Return the grid column (0-2) for the current node panel focus.
+    pub fn node_grid_col(&self) -> usize {
+        match self.node_panel_focus {
+            NodePanel::Sidebar => 0,
+            NodePanel::Positions | NodePanel::Fills => 1,
+            NodePanel::Chart | NodePanel::Orders => 2,
+        }
+    }
+
+    /// Return the grid row (0 or 1) for the current node panel focus.
+    pub fn node_grid_row(&self) -> usize {
+        match self.node_panel_focus {
+            NodePanel::Sidebar | NodePanel::Positions | NodePanel::Chart => 0,
+            NodePanel::Fills | NodePanel::Orders => 1,
+        }
+    }
+
+    /// Map grid coordinates to a NodePanel variant.
+    pub fn node_panel_from_grid(&self, col: usize, row: usize) -> NodePanel {
+        match (col, row) {
+            (0, _) => NodePanel::Sidebar,
+            (1, 0) => NodePanel::Positions,
+            (1, _) => NodePanel::Fills,
+            (2, 0) => NodePanel::Chart,
+            (2, _) => NodePanel::Orders,
+            _ => NodePanel::Sidebar,
+        }
     }
 
     /// Open a popup overlay.
