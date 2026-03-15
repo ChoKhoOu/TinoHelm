@@ -3,13 +3,17 @@
 Since NT Actor is a Cython extension class that can't be easily instantiated
 in isolation, we test the command-handling logic using a lightweight stand-in
 that replicates the same attributes and methods.
+
+Updated for the command-queue pattern: _handle_command() appends to
+_pending_commands deque, _drain_pending_commands() dispatches on NT thread.
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 import signal
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
@@ -17,158 +21,216 @@ import pytest
 class _BridgeActorStub:
     """Lightweight stand-in for BridgeActor that replicates command-handling logic.
 
-    Copies the exact same _handle_command / on_event logic from bridge_actor.py
-    but without requiring the NT Actor Cython base class.
+    Mirrors the deque-based command queue from bridge_actor.py.
     """
 
     def __init__(self, node_type: str = "sandbox"):
         self._node_type = node_type
-        self._flatten_requested = False
         self._running = True
+        self._pending_commands: collections.deque = collections.deque()
 
         # Mock NT and Redis surfaces
         self.log = MagicMock()
         self.msgbus = MagicMock()
 
+        # LifecycleController mock (None = not initialized)
+        self._lifecycle = None
+
         # Track Redis publishes: list of (channel_suffix, payload_dict)
         self._published: list[tuple[str, dict]] = []
-
-    # --- Mirrors BridgeActor._publish ---
 
     def _publish(self, channel_suffix: str, data: dict) -> None:
         self._published.append((channel_suffix, data))
 
-    # --- Mirrors BridgeActor._handle_command ---
-
     def _handle_command(self, cmd: dict) -> None:
+        """Mirrors BridgeActor._handle_command — enqueues for NT thread dispatch."""
         action = cmd.get("cmd")
         self.log.info(f"Received command: {action}")
+        self._pending_commands.append(cmd)
 
-        if action == "pause":
-            self._publish("commands_ack", {"cmd": "pause", "status": "received"})
+    def _drain_pending_commands(self) -> None:
+        """Mirrors BridgeActor._drain_pending_commands."""
+        while self._pending_commands:
+            cmd = self._pending_commands.popleft()
+            action = cmd.get("cmd")
+            strategy_id = cmd.get("strategy_id")
 
-        elif action == "flatten":
-            self.log.warning("FLATTEN command received - scheduling position exit")
-            self._flatten_requested = True
-            self._publish("commands_ack", {"cmd": "flatten", "status": "scheduled"})
+            if self._lifecycle is None:
+                self.log.warning(f"Command '{action}' ignored: LifecycleController not initialized")
+                self._publish("commands_ack", {"cmd": action, "status": "error", "reason": "no_lifecycle"})
+                continue
 
-        elif action == "shutdown":
-            self.log.warning("SHUTDOWN command received - initiating node shutdown")
-            self._publish("commands_ack", {"cmd": "shutdown", "status": "received"})
-            os.kill(os.getpid(), signal.SIGTERM)
-
-        elif action == "stop":
-            self.log.info("STOP command received")
-            self._publish("commands_ack", {"cmd": "stop", "status": "received"})
-
-    # --- Mirrors BridgeActor.on_event (timer callback portion only) ---
-
-    def _dispatch_flatten_if_requested(self) -> None:
-        """Simulates the bridge_cmd_dispatch timer callback in on_event()."""
-        if self._flatten_requested:
-            self._flatten_requested = False
-            self.log.warning("Executing flatten — closing all positions via msgbus")
-            self.msgbus.publish("risk.flatten", "flatten_all")
+            try:
+                if action == "pause":
+                    self._lifecycle.pause_strategy(strategy_id or "")
+                elif action == "resume":
+                    self._lifecycle.resume_strategy(strategy_id or "")
+                elif action == "flatten":
+                    self._lifecycle.flatten(strategy_id)
+                elif action == "halt":
+                    self._lifecycle.halt()
+                elif action == "unhalt":
+                    self._lifecycle.unhalt()
+                elif action == "shutdown":
+                    self._lifecycle.shutdown()
+                else:
+                    self.log.warning(f"Unknown command: {action}")
+            except ValueError as e:
+                self.log.error(f"Command '{action}' failed: {e}")
+                self._publish("commands_ack", {"cmd": action, "status": "error", "reason": str(e)})
+            except Exception as e:
+                self.log.error(f"Command '{action}' error: {e}")
+                self._publish("commands_ack", {"cmd": action, "status": "error", "reason": str(e)})
 
 
 # ---------------------------------------------------------------------------
-# Shutdown command tests
+# Command enqueue tests
 # ---------------------------------------------------------------------------
 
-class TestShutdownCommand:
-    """Test the 'shutdown' command path."""
+class TestCommandEnqueue:
+    """Test that _handle_command appends to deque."""
 
-    def test_shutdown_command_sends_sigterm(self):
+    def test_handle_command_enqueues(self):
         stub = _BridgeActorStub()
-        with patch("os.kill") as mock_kill:
-            stub._handle_command({"cmd": "shutdown"})
-        mock_kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+        stub._handle_command({"cmd": "pause", "strategy_id": "MyStrategy-000"})
+        assert len(stub._pending_commands) == 1
+        assert stub._pending_commands[0] == {"cmd": "pause", "strategy_id": "MyStrategy-000"}
 
-    def test_shutdown_command_publishes_ack_before_sigterm(self):
-        """Ack must be published before os.kill() is called."""
+    def test_multiple_commands_enqueued_in_order(self):
         stub = _BridgeActorStub()
-        publish_calls: list[tuple[str, dict]] = []
-        kill_called_after_publish = False
+        stub._handle_command({"cmd": "pause", "strategy_id": "S-000"})
+        stub._handle_command({"cmd": "flatten"})
+        stub._handle_command({"cmd": "halt"})
+        assert len(stub._pending_commands) == 3
+        assert [c["cmd"] for c in stub._pending_commands] == ["pause", "flatten", "halt"]
 
-        original_publish = stub._publish
 
-        def tracking_publish(suffix, data):
-            publish_calls.append((suffix, data))
-            original_publish(suffix, data)
+# ---------------------------------------------------------------------------
+# Command dispatch tests (with LifecycleController)
+# ---------------------------------------------------------------------------
 
-        stub._publish = tracking_publish
+class TestCommandDispatch:
+    """Test _drain_pending_commands delegates to LifecycleController."""
 
-        with patch("os.kill") as mock_kill:
-            def assert_ack_published(*args, **kwargs):
-                # By the time os.kill is called, the ack must already be recorded
-                assert len(publish_calls) == 1
-                assert publish_calls[0] == (
-                    "commands_ack",
-                    {"cmd": "shutdown", "status": "received"},
-                )
+    def _make_stub_with_lifecycle(self):
+        stub = _BridgeActorStub()
+        stub._lifecycle = MagicMock()
+        return stub
 
-            mock_kill.side_effect = assert_ack_published
-            stub._handle_command({"cmd": "shutdown"})
+    def test_pause_dispatches_to_lifecycle(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "pause", "strategy_id": "MyStrategy-000"})
+        stub._drain_pending_commands()
+        stub._lifecycle.pause_strategy.assert_called_once_with("MyStrategy-000")
 
-        mock_kill.assert_called_once()
-        # Confirm ack is present in published list
+    def test_resume_dispatches_to_lifecycle(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "resume", "strategy_id": "MyStrategy-000"})
+        stub._drain_pending_commands()
+        stub._lifecycle.resume_strategy.assert_called_once_with("MyStrategy-000")
+
+    def test_flatten_dispatches_to_lifecycle(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "flatten"})
+        stub._drain_pending_commands()
+        stub._lifecycle.flatten.assert_called_once_with(None)
+
+    def test_flatten_single_strategy(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "flatten", "strategy_id": "S-001"})
+        stub._drain_pending_commands()
+        stub._lifecycle.flatten.assert_called_once_with("S-001")
+
+    def test_halt_dispatches_to_lifecycle(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "halt"})
+        stub._drain_pending_commands()
+        stub._lifecycle.halt.assert_called_once()
+
+    def test_unhalt_dispatches_to_lifecycle(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "unhalt"})
+        stub._drain_pending_commands()
+        stub._lifecycle.unhalt.assert_called_once()
+
+    def test_shutdown_dispatches_to_lifecycle(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "shutdown"})
+        stub._drain_pending_commands()
+        stub._lifecycle.shutdown.assert_called_once()
+
+    def test_multiple_commands_dispatched_in_order(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "pause", "strategy_id": "S-000"})
+        stub._handle_command({"cmd": "flatten"})
+        stub._handle_command({"cmd": "halt"})
+
+        stub._drain_pending_commands()
+
+        # Verify call order
+        expected_calls = [
+            call.pause_strategy("S-000"),
+            call.flatten(None),
+            call.halt(),
+        ]
+        stub._lifecycle.assert_has_calls(expected_calls)
+
+    def test_queue_drained_after_dispatch(self):
+        stub = self._make_stub_with_lifecycle()
+        stub._handle_command({"cmd": "halt"})
+        stub._drain_pending_commands()
+        assert len(stub._pending_commands) == 0
+
+
+# ---------------------------------------------------------------------------
+# No lifecycle fallback tests
+# ---------------------------------------------------------------------------
+
+class TestNoLifecycleFallback:
+    """Test behavior when LifecycleController is not initialized."""
+
+    def test_command_ignored_without_lifecycle(self):
+        stub = _BridgeActorStub()
+        assert stub._lifecycle is None
+        stub._handle_command({"cmd": "halt"})
+        stub._drain_pending_commands()
+
+        # Should publish error ack
         assert any(
-            suffix == "commands_ack" and data.get("cmd") == "shutdown"
+            suffix == "commands_ack" and data.get("status") == "error"
             for suffix, data in stub._published
         )
 
-
-# ---------------------------------------------------------------------------
-# Flatten command tests
-# ---------------------------------------------------------------------------
-
-class TestFlattenCommand:
-    """Test the 'flatten' command path."""
-
-    def test_flatten_command_sets_flag(self):
+    def test_error_ack_includes_reason(self):
         stub = _BridgeActorStub()
-        assert stub._flatten_requested is False
-        stub._handle_command({"cmd": "flatten"})
-        assert stub._flatten_requested is True
+        stub._handle_command({"cmd": "pause", "strategy_id": "S-000"})
+        stub._drain_pending_commands()
 
-    def test_flatten_command_publishes_ack_with_scheduled_status(self):
-        stub = _BridgeActorStub()
-        stub._handle_command({"cmd": "flatten"})
-
-        ack_entries = [
-            data for suffix, data in stub._published if suffix == "commands_ack"
-        ]
-        assert len(ack_entries) == 1
-        assert ack_entries[0] == {"cmd": "flatten", "status": "scheduled"}
+        ack = next(
+            data for suffix, data in stub._published
+            if suffix == "commands_ack"
+        )
+        assert ack["reason"] == "no_lifecycle"
 
 
 # ---------------------------------------------------------------------------
-# Timer dispatch tests (on_event / bridge_cmd_dispatch)
+# ValueError handling tests
 # ---------------------------------------------------------------------------
 
-class TestFlattenDispatch:
-    """Test the timer callback that dispatches flatten to the NT event loop."""
+class TestValueErrorHandling:
+    """Test that ValueError from LifecycleController is caught and reported."""
 
-    def test_flatten_dispatch_publishes_to_risk_flatten(self):
+    def test_value_error_publishes_error_ack(self):
         stub = _BridgeActorStub()
-        stub._flatten_requested = True
+        stub._lifecycle = MagicMock()
+        stub._lifecycle.pause_strategy.side_effect = ValueError("Strategy 'bad' not found")
 
-        stub._dispatch_flatten_if_requested()
+        stub._handle_command({"cmd": "pause", "strategy_id": "bad"})
+        stub._drain_pending_commands()
 
-        stub.msgbus.publish.assert_called_once_with("risk.flatten", "flatten_all")
-
-    def test_flatten_dispatch_resets_flag_after_publish(self):
-        stub = _BridgeActorStub()
-        stub._flatten_requested = True
-
-        stub._dispatch_flatten_if_requested()
-
-        assert stub._flatten_requested is False
-
-    def test_flatten_dispatch_noop_when_flag_is_false(self):
-        stub = _BridgeActorStub()
-        stub._flatten_requested = False
-
-        stub._dispatch_flatten_if_requested()
-
-        stub.msgbus.publish.assert_not_called()
+        ack = next(
+            data for suffix, data in stub._published
+            if suffix == "commands_ack"
+        )
+        assert ack["status"] == "error"
+        assert "not found" in ack["reason"]

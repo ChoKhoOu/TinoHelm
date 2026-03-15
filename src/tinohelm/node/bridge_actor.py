@@ -1,9 +1,9 @@
 """BridgeActor — bridges NautilusTrader events to Redis PubSub and PostgreSQL."""
 from __future__ import annotations
 
+import collections
 import json
 import os
-import signal as _signal
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -61,7 +61,25 @@ class BridgeActor(Actor):
         self._cmd_redis: redis.Redis | None = None
         self._cmd_pubsub: Any = None
         self._running = False
-        self._flatten_requested = False  # Atomic flag for thread-safe flatten dispatch
+
+        # Command queue replaces the old _flatten_requested bool.
+        # Daemon thread appends, NT event loop drains — deque is thread-safe
+        # under CPython GIL (atomic append/popleft).
+        self._pending_commands: collections.deque = collections.deque()
+
+        # LifecycleController — injected after node.build() via set_lifecycle_deps()
+        self._lifecycle: Any = None  # LifecycleController | None
+        self._lifecycle_trader: Any = None  # stored until on_start()
+        self._lifecycle_risk_engine: Any = None  # stored until on_start()
+
+    def set_lifecycle_deps(self, trader: Any, risk_engine: Any) -> None:
+        """Store trader and risk_engine references for LifecycleController.
+
+        Called by ``inject_lifecycle_deps()`` in ``_common.py`` AFTER
+        ``node.build()`` so the kernel is ready.
+        """
+        self._lifecycle_trader = trader
+        self._lifecycle_risk_engine = risk_engine
 
     def on_start(self) -> None:
         self._redis = redis.from_url(self._redis_url)
@@ -77,6 +95,20 @@ class BridgeActor(Actor):
                 self.log.error(f"Failed to init DB engine: {e}")
                 self._db_engine = None
 
+        # Instantiate LifecycleController if deps were injected
+        if self._lifecycle_trader is not None and self._lifecycle_risk_engine is not None:
+            from tinohelm.node.lifecycle_controller import LifecycleController
+            self._lifecycle = LifecycleController(
+                trader=self._lifecycle_trader,
+                risk_engine=self._lifecycle_risk_engine,
+                msgbus=self.msgbus,
+                log=self.log,
+                publish_ack=self._publish,
+            )
+            self.log.info("LifecycleController initialized")
+        else:
+            self.log.warning("LifecycleController NOT initialized (no deps injected)")
+
         # Subscribe to trading events via msgbus wildcard topics
         self.msgbus.subscribe("events.order.*", self._on_order_event)
         self.msgbus.subscribe("events.position.*", self._on_position_event)
@@ -91,9 +123,8 @@ class BridgeActor(Actor):
             callback=self._send_heartbeat,
         )
 
-        # Command dispatch timer — no callback on purpose: fires through on_event()
-        # so the flatten flag (set by daemon thread) is checked on the NT event
-        # loop thread, making msgbus.publish() thread-safe.
+        # Command dispatch timer — fires through on_event() so pending
+        # commands (set by daemon thread) are processed on the NT event loop.
         self.clock.set_timer(
             name="bridge_cmd_dispatch",
             interval=timedelta(seconds=1),
@@ -111,10 +142,43 @@ class BridgeActor(Actor):
     def on_event(self, event: Event) -> None:
         """Handle timer events for command dispatch (runs on NT event loop)."""
         if isinstance(event, TimeEvent) and event.name == "bridge_cmd_dispatch":
-            if self._flatten_requested:
-                self._flatten_requested = False
-                self.log.warning("Executing flatten — closing all positions via msgbus")
-                self.msgbus.publish("risk.flatten", "flatten_all")
+            self._drain_pending_commands()
+
+    def _drain_pending_commands(self) -> None:
+        """Process all queued commands on the NT event loop thread."""
+        while self._pending_commands:
+            cmd = self._pending_commands.popleft()
+            action = cmd.get("cmd")
+            strategy_id = cmd.get("strategy_id")
+
+            if self._lifecycle is None:
+                self.log.warning(f"Command '{action}' ignored: LifecycleController not initialized")
+                self._publish("commands_ack", {"cmd": action, "status": "error", "reason": "no_lifecycle"})
+                continue
+
+            try:
+                if action in ("pause", "resume") and not strategy_id:
+                    self.log.warning(f"Command '{action}' requires strategy_id")
+                    self._publish("commands_ack", {"cmd": action, "status": "error", "reason": "strategy_id required"})
+                    continue
+
+                if action == "pause":
+                    self._lifecycle.pause_strategy(strategy_id)
+                elif action == "resume":
+                    self._lifecycle.resume_strategy(strategy_id)
+                elif action == "flatten":
+                    self._lifecycle.flatten(strategy_id)
+                elif action == "halt":
+                    self._lifecycle.halt()
+                elif action == "unhalt":
+                    self._lifecycle.unhalt()
+                elif action == "shutdown":
+                    self._lifecycle.shutdown()
+                else:
+                    self.log.warning(f"Unknown command: {action}")
+            except Exception as e:
+                self.log.error(f"Command '{action}' failed: {e}")
+                self._publish("commands_ack", {"cmd": action, "status": "error", "reason": str(e)})
 
     def on_stop(self) -> None:
         self._running = False
@@ -157,10 +221,36 @@ class BridgeActor(Actor):
                 "strategies": len(strategies) if strategies else 0,
                 "positions": len(positions) if positions else 0,
             }
+
+            # Enrich with lifecycle state if available
+            lc_state: dict = {}
+            if self._lifecycle is not None:
+                try:
+                    lc_state = self._lifecycle.get_state()
+                    payload["trading_state"] = lc_state.get("trading_state", "active")
+                    payload["strategy_states"] = lc_state.get("strategy_states", {})
+                except Exception:
+                    payload["trading_state"] = "unknown"
+                    payload["strategy_states"] = {}
+            else:
+                payload["trading_state"] = "active"
+                payload["strategy_states"] = {}
+
             self._redis.setex(
                 f"tino:heartbeat:{self._node_type}",
                 self._hb_ttl,
                 json.dumps(payload, default=str),
+            )
+
+            # Also write lifecycle state to a dedicated key for API queries
+            self._redis.setex(
+                f"tino:{self._node_type}:lifecycle_state",
+                self._hb_ttl,
+                json.dumps({
+                    "trading_state": payload["trading_state"],
+                    "strategy_states": payload["strategy_states"],
+                    "paused": lc_state.get("paused", []),
+                }, default=str),
             )
         except Exception as e:
             self.log.error(f"Heartbeat error: {e}")
@@ -194,35 +284,11 @@ class BridgeActor(Actor):
             self.log.error(f"Command listener error: {e}")
 
     def _handle_command(self, cmd: dict) -> None:
-        """Handle incoming commands from API."""
+        """Handle incoming commands from API — append to queue for NT thread dispatch."""
         action = cmd.get("cmd")
         self.log.info(f"Received command: {action}")
-
-        if action == "pause":
-            strategy_id = cmd.get("strategy_id")
-            if strategy_id:
-                # Stop specific strategy
-                for strategy in self.cache.strategies():
-                    if str(strategy.id) == strategy_id:
-                        self.log.info(f"Pausing strategy: {strategy_id}")
-                        # The trader will handle this
-                        break
-            self._publish("commands_ack", {"cmd": "pause", "status": "received"})
-
-        elif action == "flatten":
-            # Schedule flatten on the NT event loop via atomic flag
-            self.log.warning("FLATTEN command received - scheduling position exit")
-            self._flatten_requested = True
-            self._publish("commands_ack", {"cmd": "flatten", "status": "scheduled"})
-
-        elif action == "shutdown":
-            self.log.warning("SHUTDOWN command received - initiating node shutdown")
-            self._publish("commands_ack", {"cmd": "shutdown", "status": "received"})
-            os.kill(os.getpid(), _signal.SIGTERM)
-
-        elif action == "stop":
-            self.log.info("STOP command received")
-            self._publish("commands_ack", {"cmd": "stop", "status": "received"})
+        # Enqueue for dispatch on NT event loop thread
+        self._pending_commands.append(cmd)
 
     # --- DB persistence helpers ---
 
@@ -492,4 +558,3 @@ class BridgeActor(Actor):
             "instrument_id": str(event.instrument_id),
             "ts": str(event.ts_event),
         })
-

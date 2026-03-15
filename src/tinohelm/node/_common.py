@@ -64,13 +64,30 @@ def inject_credentials(
     config["binance"].pop("from_env", None)
 
 
+def inject_lifecycle_deps(node: Any, bridge_actor: Any) -> None:
+    """Inject trader and risk_engine references into BridgeActor.
+
+    MUST be called AFTER ``node.build()`` so that ``node.kernel`` is ready.
+    """
+    try:
+        bridge_actor.set_lifecycle_deps(
+            trader=node.trader,
+            risk_engine=node.kernel.risk_engine,
+        )
+        logger.info("Lifecycle deps injected into BridgeActor")
+    except Exception as e:
+        logger.error("Failed to inject lifecycle deps: %s", e)
+
+
 def load_components(
     node: Any,
     config: dict[str, Any],
-) -> None:
+) -> Any:
     """Load strategies, actors, and BridgeActor onto a TradingNode.
 
     Handles both portfolio-based and legacy strategy-path loading.
+
+    Returns the BridgeActor instance for lifecycle dependency injection.
     """
     from nautilus_trader.config import ImportableStrategyConfig
 
@@ -124,6 +141,8 @@ def load_components(
     )
     bridge_actor = BridgeActor(config=bridge_config)
     node.trader.add_actor(bridge_actor)
+
+    return bridge_actor
 
 
 def run_with_signals(

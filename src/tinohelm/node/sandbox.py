@@ -46,7 +46,7 @@ def run_node(config: dict[str, Any]) -> None:
     )
     from nautilus_trader.live.node import TradingNode
 
-    from tinohelm.node._common import load_components, run_with_signals
+    from tinohelm.node._common import inject_lifecycle_deps, load_components, run_with_signals
 
     instance_id = config["instance_id"]
 
@@ -106,6 +106,7 @@ def run_node(config: dict[str, Any]) -> None:
     node = TradingNode(config=node_config)
     # Sandbox only needs data client (simulated exchange for exec)
     node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
-    load_components(node, config)
+    bridge_actor = load_components(node, config)
     node.build()
+    inject_lifecycle_deps(node, bridge_actor)
     run_with_signals(node, instance_id, "Sandbox")
