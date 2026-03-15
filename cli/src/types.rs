@@ -271,6 +271,7 @@ pub enum WsEvent {
     NodeHeartbeat {
         node_type: String,
         ts: Option<String>,
+        uptime: Option<String>,
         strategies: Option<u32>,
         positions: Option<u32>,
         trading_state: Option<String>,

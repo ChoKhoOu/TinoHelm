@@ -100,13 +100,8 @@ fn render_sandbox_card(f: &mut Frame, area: Rect, app: &App) {
     } else {
         match app.sandbox_last_heartbeat {
             Some(t) if now.duration_since(t).as_secs() < HEARTBEAT_TIMEOUT_SECS => {
-                let ago = now.duration_since(t).as_secs();
-                let color = widgets::pulse_color(
-                    theme::FG_POSITIVE,
-                    ratatui::style::Color::Rgb(0, 100, 0),
-                    app.frame_count,
-                );
-                (format!("Online ({}s)", ago), color, "\u{25CF}") // bullet
+                let uptime = app.sandbox_uptime.as_deref().unwrap_or("--");
+                (format!("Online  {}", uptime), theme::FG_POSITIVE, "\u{25CF}") // bullet
             }
             Some(t) => {
                 let ago = now.duration_since(t).as_secs();
@@ -199,15 +194,10 @@ fn render_node_card(
     app: &App,
 ) {
     let now = std::time::Instant::now();
+    let live_uptime = app.live_uptime.as_deref().unwrap_or("--");
     let (status_text, status_color, dot) = match last_hb {
         Some(t) if now.duration_since(t).as_secs() < HEARTBEAT_TIMEOUT_SECS => {
-            let ago = now.duration_since(t).as_secs();
-            let color = widgets::pulse_color(
-                theme::FG_POSITIVE,
-                ratatui::style::Color::Rgb(0, 100, 0),
-                app.frame_count,
-            );
-            (format!("Online ({}s)", ago), color, "\u{25CF}")
+            (format!("Online  {}", live_uptime), theme::FG_POSITIVE, "\u{25CF}")
         }
         Some(t) => {
             let ago = now.duration_since(t).as_secs();

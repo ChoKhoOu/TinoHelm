@@ -131,7 +131,9 @@ pub struct App {
     pub node_status: Option<serde_json::Value>,
     pub node_loading: bool,
     pub sandbox_last_heartbeat: Option<std::time::Instant>,
+    pub sandbox_uptime: Option<String>,
     pub live_last_heartbeat: Option<std::time::Instant>,
+    pub live_uptime: Option<String>,
     pub node_view: NodeView,
     pub lifecycle_state: Option<serde_json::Value>,
     pub sandbox_filter_instrument: Option<String>,
@@ -205,7 +207,9 @@ impl App {
             node_status: None,
             node_loading: false,
             sandbox_last_heartbeat: None,
+            sandbox_uptime: None,
             live_last_heartbeat: None,
+            live_uptime: None,
             node_view: NodeView::Overview,
             lifecycle_state: None,
             sandbox_filter_instrument: None,
@@ -446,11 +450,12 @@ impl App {
                     bt.progress_pct = None; // Clear progress on completion
                 }
             }
-            WsEvent::NodeHeartbeat { node_type, trading_state, strategy_states, .. } => {
+            WsEvent::NodeHeartbeat { node_type, uptime, trading_state, strategy_states, .. } => {
                 let now = std::time::Instant::now();
                 match node_type.as_str() {
                     "sandbox" => {
                         self.sandbox_last_heartbeat = Some(now);
+                        self.sandbox_uptime = uptime.clone();
                         self.sandbox_shutting_down = false; // heartbeat received = still alive
                         // Update lifecycle state from heartbeat (avoids polling)
                         if trading_state.is_some() || strategy_states.is_some() {
@@ -473,7 +478,10 @@ impl App {
                             self.lifecycle_state = Some(serde_json::Value::Object(state));
                         }
                     }
-                    "live" => self.live_last_heartbeat = Some(now),
+                    "live" => {
+                        self.live_last_heartbeat = Some(now);
+                        self.live_uptime = uptime.clone();
+                    }
                     _ => {}
                 }
                 // Heartbeats are too frequent for the log — skip
