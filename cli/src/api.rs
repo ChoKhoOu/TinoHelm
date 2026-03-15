@@ -295,7 +295,7 @@ impl ApiClient {
 
     // ---- Trading ----
 
-    pub async fn list_positions(&self, node_type: Option<&str>, is_open: Option<bool>) -> Result<Vec<TradingPosition>> {
+    pub async fn list_positions(&self, node_type: Option<&str>, is_open: Option<bool>, strategy_id_tag: Option<&str>) -> Result<Vec<TradingPosition>> {
         let mut url = format!("{}/api/trading/positions?", self.base_url);
         if let Some(nt) = node_type {
             url.push_str(&format!("node_type={}&", nt));
@@ -303,15 +303,21 @@ impl ApiClient {
         if let Some(open) = is_open {
             url.push_str(&format!("is_open={}&", open));
         }
+        if let Some(tag) = strategy_id_tag {
+            url.push_str(&format!("strategy_id_tag={}&", Self::url_encode(tag)));
+        }
         let resp = self.client.get(&url).send().await.context(Self::connect_hint(&self.base_url))?;
         let body = resp.error_for_status()?.json().await?;
         Ok(body)
     }
 
-    pub async fn list_fills(&self, node_type: Option<&str>, limit: u32) -> Result<Vec<TradingFill>> {
+    pub async fn list_fills(&self, node_type: Option<&str>, limit: u32, strategy_id_tag: Option<&str>) -> Result<Vec<TradingFill>> {
         let mut url = format!("{}/api/trading/fills?limit={}", self.base_url, limit);
         if let Some(nt) = node_type {
-            url.push_str(&format!("&node_type={}", nt));
+            url.push_str(&format!("&node_type={}", Self::url_encode(nt)));
+        }
+        if let Some(tag) = strategy_id_tag {
+            url.push_str(&format!("&strategy_id_tag={}", Self::url_encode(tag)));
         }
         let resp = self.client.get(&url).send().await.context(Self::connect_hint(&self.base_url))?;
         let body = resp.error_for_status()?.json().await?;
@@ -372,6 +378,54 @@ impl ApiClient {
             .context(Self::connect_hint(&self.base_url))?;
         let body = resp.error_for_status()?.json().await?;
         Ok(body)
+    }
+
+    pub async fn lifecycle_command(
+        &self,
+        action: &str,
+        mode: &str,
+        strategy_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "action": action,
+            "mode": mode,
+        });
+        if let Some(sid) = strategy_id {
+            body["strategy_id"] = serde_json::Value::String(sid.to_string());
+        }
+        let resp = self
+            .client
+            .post(format!("{}/api/node/lifecycle", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn lifecycle_state(&self, mode: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/node/lifecycle/state?mode={}",
+                self.base_url, Self::url_encode(mode)
+            ))
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    /// Minimal percent-encoding for query parameter values.
+    fn url_encode(s: &str) -> String {
+        s.replace('%', "%25")
+            .replace('&', "%26")
+            .replace('=', "%3D")
+            .replace('+', "%2B")
+            .replace('#', "%23")
+            .replace(' ', "%20")
     }
 
     fn connect_hint(url: &str) -> String {
