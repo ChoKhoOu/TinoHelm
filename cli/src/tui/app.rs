@@ -147,11 +147,9 @@ pub struct App {
     pub trading_loading: bool,
     pub trading_dirty: bool,      // set by WS events to trigger data refresh
     pub trading_selected: usize,  // selected position index
-    pub trading_fill_scroll: u16, // scroll offset for fills panel
 
     // ── Event log ─────────────────────────────────────────────────────
     pub event_log: VecDeque<EventLogEntry>,
-    pub log_scroll: u16,
 
     // ── WebSocket ───────────────────────────────────────────────────────
     pub ws_state: WsState,
@@ -221,10 +219,8 @@ impl App {
             trading_loading: false,
             trading_dirty: false,
             trading_selected: 0,
-            trading_fill_scroll: 0,
 
             event_log: VecDeque::with_capacity(200),
-            log_scroll: 0,
 
             ws_state: WsState::Disconnected,
             ws_reconnect_secs: None,
@@ -242,14 +238,6 @@ impl App {
         self.node_view = NodeView::Overview;
         self.selected_strategy_tag = None;
         self.sandbox_filter_instrument = None;
-    }
-
-    /// Toggle panel focus between left and right.
-    pub fn toggle_panel_focus(&mut self) {
-        self.panel_focus = match self.panel_focus {
-            PanelFocus::Left => PanelFocus::Right,
-            PanelFocus::Right => PanelFocus::Left,
-        };
     }
 
     /// Open a popup overlay.

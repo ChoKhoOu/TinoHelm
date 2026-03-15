@@ -14,14 +14,11 @@ pub const BG_PRIMARY: Color = Color::Rgb(0, 0, 0);
 pub const BG_PANEL: Color = Color::Rgb(18, 18, 22);
 pub const BG_HEADER: Color = Color::Rgb(15, 15, 15);
 pub const BG_SELECTED: Color = Color::Rgb(20, 30, 50);
-pub const BG_INPUT: Color = Color::Rgb(10, 10, 10);
 pub const BG_ERROR: Color = Color::Rgb(180, 30, 30);
-pub const BG_WARN: Color = Color::Rgb(180, 150, 0);
 
 // ── Foreground: Structure ───────────────────────────────────────────────
 
 pub const FG_AMBER: Color = Color::Rgb(255, 176, 0);
-pub const FG_LOGO: Color = Color::Rgb(255, 140, 0);
 pub const FG_BORDER: Color = Color::Rgb(60, 60, 60);
 pub const FG_BORDER_ACTIVE: Color = Color::Rgb(0, 180, 220);
 pub const FG_DIM: Color = Color::Rgb(100, 100, 100);
@@ -39,8 +36,6 @@ pub const FG_BRIGHT: Color = Color::Rgb(255, 255, 255);
 pub const FG_IDENTIFIER: Color = Color::Rgb(100, 170, 255);
 /// Soft purple — tags, categories, types.
 pub const FG_TAG: Color = Color::Rgb(190, 140, 255);
-/// Warm gold — key values, highlights (lighter than amber).
-pub const FG_HIGHLIGHT: Color = Color::Rgb(255, 220, 120);
 
 // ── Foreground: Semantic ────────────────────────────────────────────────
 
@@ -53,7 +48,6 @@ pub const FG_CANCELLED: Color = Color::Rgb(80, 80, 80);
 // ── Special ─────────────────────────────────────────────────────────────
 
 pub const FG_CURSOR: Color = Color::Rgb(255, 220, 0);
-pub const FG_FLASH: Color = Color::Rgb(255, 255, 200);
 
 // ── Style Presets ───────────────────────────────────────────────────────
 
@@ -97,26 +91,6 @@ pub fn style_border() -> Style {
     Style::default().fg(FG_BORDER)
 }
 
-/// Positive value (profit, online, completed).
-pub fn style_positive() -> Style {
-    Style::default().fg(FG_POSITIVE)
-}
-
-/// Negative value (loss, offline, failed).
-pub fn style_negative() -> Style {
-    Style::default().fg(FG_NEGATIVE)
-}
-
-/// Running / in-progress.
-pub fn style_running() -> Style {
-    Style::default().fg(FG_RUNNING)
-}
-
-/// Queued / pending.
-pub fn style_queued() -> Style {
-    Style::default().fg(FG_QUEUED)
-}
-
 /// Error banner.
 pub fn style_error() -> Style {
     Style::default().fg(FG_BRIGHT).bg(BG_ERROR)
@@ -135,13 +109,3 @@ pub fn status_color(status: &str) -> Color {
     }
 }
 
-/// Status indicator dot character.
-pub fn status_dot(status: &str) -> (&'static str, Color) {
-    match status {
-        "online" | "completed" | "connected" => ("\u{25CF}", FG_POSITIVE), // ●
-        "starting" | "connecting" | "queued" => ("\u{25D0}", FG_QUEUED),   // ◐
-        "running" => ("\u{25C9}", FG_RUNNING),                             // ◉
-        "offline" | "stopped" | "failed" => ("\u{25CB}", FG_NEGATIVE),     // ○
-        _ => ("\u{25CC}", FG_DIM),                                         // ◌
-    }
-}
