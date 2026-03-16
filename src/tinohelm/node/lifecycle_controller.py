@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import signal as _signal
+import time
 from typing import Any
 
 from tinohelm.node.topics import (
@@ -44,6 +45,8 @@ class LifecycleController:
         self._log = log
         self._publish_ack = publish_ack  # callable(channel_suffix, data)
         self._paused_strategies: set[str] = set()
+        self._registry: Any = None  # PortfolioRegistry, set by BridgeActor
+        self._flatten_stop_pending: dict[str, dict] = {}
 
         # Subscribe to RiskGuard breach actions for enforcement
         self._msgbus.subscribe(RISK_GUARD_STATE, self._on_risk_guard_breach)
@@ -168,6 +171,187 @@ class LifecycleController:
         os.kill(os.getpid(), _signal.SIGTERM)
 
     # ------------------------------------------------------------------
+    # Portfolio lifecycle operations
+    # ------------------------------------------------------------------
+
+    def start_portfolio(self, name: str) -> None:
+        """Load and start all strategies for a portfolio."""
+        if self._registry is None:
+            raise ValueError("PortfolioRegistry not initialized")
+
+        entry = self._registry.get(name)
+        if entry is None:
+            raise ValueError(f"Portfolio '{name}' not found")
+        if entry.state != "available":
+            raise ValueError(f"Portfolio '{name}' is {entry.state}, not available")
+
+        self._registry.mark_starting(name)
+
+        try:
+            from tinohelm.portfolio.config import load_portfolio_config
+            from tinohelm.portfolio.loader import create_strategies, create_actors
+
+            portfolio_cfg = load_portfolio_config(name)
+
+            # Allocate tags with collision check
+            existing_tags = {str(sid) for sid in self._trader.strategy_ids()}
+            tags = self._registry.allocate_tags(name, len(portfolio_cfg.symbols), existing_tags)
+
+            # Create instances
+            strategy_instances = create_strategies(portfolio_cfg, order_id_tags=tags)
+            actor_instances = create_actors(portfolio_cfg)
+
+            # Atomic registration: rollback on partial failure
+            added_strategies = []
+            try:
+                for strategy in strategy_instances:
+                    if strategy.id in self._trader.strategy_ids():
+                        raise RuntimeError(f"Strategy ID collision: {strategy.id}")
+                    self._trader.add_strategy(strategy)
+                    added_strategies.append(strategy)
+
+                for actor in actor_instances:
+                    self._trader.add_actor(actor)
+
+                for strategy in strategy_instances:
+                    self._trader.start_strategy(strategy.id)
+            except Exception:
+                for s in added_strategies:
+                    try:
+                        self._trader.remove_strategy(s.id)
+                    except Exception:
+                        pass
+                raise
+
+            strategy_ids = [str(s.id) for s in strategy_instances]
+            self._registry.mark_running(name, strategy_ids)
+
+            self._log.info(f"Started portfolio '{name}' with {len(strategy_ids)} strategies")
+            self._publish_ack("commands_ack", {
+                "cmd": "start_portfolio", "name": name,
+                "status": "ok", "strategy_ids": strategy_ids,
+            })
+        except Exception as e:
+            self._registry.mark_stopped(name)
+            self._log.error(f"Failed to start portfolio '{name}': {e}")
+            self._publish_ack("commands_ack", {
+                "cmd": "start_portfolio", "name": name,
+                "status": "error", "reason": str(e),
+            })
+
+    def flatten_stop_portfolio(self, name: str) -> None:
+        """Flatten all positions then stop all strategies for a portfolio."""
+        if self._registry is None:
+            raise ValueError("PortfolioRegistry not initialized")
+
+        entry = self._registry.get(name)
+        if entry is None:
+            raise ValueError(f"Portfolio '{name}' not found")
+        if entry.state not in ("running", "paused"):
+            raise ValueError(f"Portfolio '{name}' is {entry.state}, cannot flatten-stop")
+
+        self._registry.mark_flattening(name)
+
+        for sid_str in entry.strategy_ids:
+            try:
+                sid = self._resolve_strategy_id(sid_str)
+                strategy = self._trader.strategy(sid)
+                if strategy:
+                    strategy.market_exit()
+            except Exception as e:
+                self._log.error(f"market_exit failed for {sid_str}: {e}")
+
+        self._flatten_stop_pending[name] = {
+            "start_ts": time.time(),
+            "strategy_ids": list(entry.strategy_ids),
+        }
+
+        self._publish_ack("commands_ack", {
+            "cmd": "flatten_stop_portfolio", "name": name,
+            "status": "flattening",
+        })
+
+    def check_flatten_stop_completion(self) -> None:
+        """Check if pending flatten-stops are complete. Called from BridgeActor timer."""
+        from nautilus_trader.model.identifiers import StrategyId
+
+        for name, info in list(self._flatten_stop_pending.items()):
+            elapsed = time.time() - info["start_ts"]
+            all_flat = True
+
+            for sid_str in info["strategy_ids"]:
+                try:
+                    sid = StrategyId(sid_str)
+                    positions = self._trader.cache.positions_open(strategy_id=sid)
+                    if positions:
+                        all_flat = False
+                        break
+                except Exception:
+                    all_flat = False
+                    break
+
+            if all_flat:
+                for sid_str in info["strategy_ids"]:
+                    try:
+                        self._trader.remove_strategy(StrategyId(sid_str))
+                    except Exception as e:
+                        self._log.error(f"remove_strategy failed for {sid_str}: {e}")
+                self._registry.mark_stopped(name)
+                del self._flatten_stop_pending[name]
+                self._publish_ack("commands_ack", {
+                    "cmd": "flatten_stop_portfolio", "name": name,
+                    "status": "ok",
+                })
+                self._log.info(f"Portfolio '{name}' fully stopped")
+            elif elapsed > 60:
+                self._log.critical(
+                    f"Portfolio '{name}' flatten-stop timed out after 60s. "
+                    f"Positions still open. Manual intervention required."
+                )
+                del self._flatten_stop_pending[name]
+                self._publish_ack("commands_ack", {
+                    "cmd": "flatten_stop_portfolio", "name": name,
+                    "status": "timeout",
+                    "reason": "Positions not flat after 60s. Manual force-stop required.",
+                })
+
+    def pause_portfolio(self, name: str) -> None:
+        """Pause all strategies in a portfolio via soft pause."""
+        if self._registry is None:
+            raise ValueError("PortfolioRegistry not initialized")
+
+        entry = self._registry.get(name)
+        if entry is None or entry.state != "running":
+            raise ValueError(
+                f"Cannot pause portfolio '{name}' "
+                f"(state: {entry.state if entry else 'not found'})"
+            )
+        for sid_str in entry.strategy_ids:
+            self.pause_strategy(sid_str)
+        self._registry.mark_paused(name)
+        self._publish_ack("commands_ack", {
+            "cmd": "pause_portfolio", "name": name, "status": "ok",
+        })
+
+    def resume_portfolio(self, name: str) -> None:
+        """Resume all strategies in a paused portfolio."""
+        if self._registry is None:
+            raise ValueError("PortfolioRegistry not initialized")
+
+        entry = self._registry.get(name)
+        if entry is None or entry.state != "paused":
+            raise ValueError(
+                f"Cannot resume portfolio '{name}' "
+                f"(state: {entry.state if entry else 'not found'})"
+            )
+        for sid_str in entry.strategy_ids:
+            self.resume_strategy(sid_str)
+        self._registry.mark_running(name, entry.strategy_ids)
+        self._publish_ack("commands_ack", {
+            "cmd": "resume_portfolio", "name": name, "status": "ok",
+        })
+
+    # ------------------------------------------------------------------
     # State query
     # ------------------------------------------------------------------
 
@@ -191,11 +375,17 @@ class LifecycleController:
         except Exception as e:
             self._log.warning(f"Could not enumerate strategy states: {e}")
 
-        return {
+        state_dict = {
             "trading_state": trading_state,
             "paused": sorted(self._paused_strategies),
             "strategy_states": strategy_states,
         }
+
+        # Portfolio states
+        if self._registry is not None:
+            state_dict["portfolios"] = self._registry.get_all_states()
+
+        return state_dict
 
     # ------------------------------------------------------------------
     # RiskGuard integration (Q2)

@@ -6,6 +6,7 @@ import json
 import os
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import redis
@@ -67,6 +68,9 @@ class BridgeActor(Actor):
         # under CPython GIL (atomic append/popleft).
         self._pending_commands: collections.deque = collections.deque()
 
+        self._file_watcher_thread: threading.Thread | None = None
+        self._registry: Any = None  # PortfolioRegistry, set by _common.py
+
         # LifecycleController — injected after node.build() via set_lifecycle_deps()
         self._lifecycle: Any = None  # LifecycleController | None
         self._lifecycle_trader: Any = None  # stored until on_start()
@@ -105,6 +109,9 @@ class BridgeActor(Actor):
                 log=self.log,
                 publish_ack=self._publish,
             )
+            # Inject registry reference into LifecycleController
+            if hasattr(self, '_registry') and self._registry is not None:
+                self._lifecycle._registry = self._registry
             self.log.info("LifecycleController initialized")
         else:
             self.log.warning("LifecycleController NOT initialized (no deps injected)")
@@ -137,12 +144,22 @@ class BridgeActor(Actor):
         )
         self._cmd_thread.start()
 
+        # File watcher thread (polls strategies dir for changes)
+        self._file_watcher_thread = threading.Thread(
+            target=self._file_watcher,
+            daemon=True,
+        )
+        self._file_watcher_thread.start()
+
         self.log.info(f"BridgeActor started for {self._node_type}")
 
     def on_event(self, event: Event) -> None:
         """Handle timer events for command dispatch (runs on NT event loop)."""
         if isinstance(event, TimeEvent) and event.name == "bridge_cmd_dispatch":
             self._drain_pending_commands()
+            # Check flatten-stop completion on the same timer
+            if self._lifecycle and self._lifecycle._flatten_stop_pending:
+                self._lifecycle.check_flatten_stop_completion()
 
     def _drain_pending_commands(self) -> None:
         """Process all queued commands on the NT event loop thread."""
@@ -176,6 +193,14 @@ class BridgeActor(Actor):
                     self._lifecycle.unhalt()
                 elif action == "shutdown":
                     self._lifecycle.shutdown()
+                elif action == "start_portfolio":
+                    self._lifecycle.start_portfolio(cmd.get("portfolio_name", ""))
+                elif action == "flatten_stop_portfolio":
+                    self._lifecycle.flatten_stop_portfolio(cmd.get("portfolio_name", ""))
+                elif action == "pause_portfolio":
+                    self._lifecycle.pause_portfolio(cmd.get("portfolio_name", ""))
+                elif action == "resume_portfolio":
+                    self._lifecycle.resume_portfolio(cmd.get("portfolio_name", ""))
                 else:
                     self.log.warning(f"Unknown command: {action}")
             except Exception as e:
@@ -184,6 +209,8 @@ class BridgeActor(Actor):
 
     def on_stop(self) -> None:
         self._running = False
+        if self._file_watcher_thread and self._file_watcher_thread.is_alive():
+            self._file_watcher_thread.join(timeout=5)
         if self._cmd_pubsub:
             try:
                 self._cmd_pubsub.unsubscribe()
@@ -198,6 +225,26 @@ class BridgeActor(Actor):
             self._redis.delete(f"tino:heartbeat:{self._node_type}")
             self._redis.close()
         self.log.info("BridgeActor stopped")
+
+    def _file_watcher(self) -> None:
+        """Poll strategies directory for new/deleted portfolio folders."""
+        import time
+        strategies_dir = Path(os.environ.get(
+            "TINO_STRATEGIES_DIR",
+            str(Path.home() / ".tino" / "strategies"),
+        ))
+        while self._running:
+            time.sleep(10)
+            if self._registry is not None:
+                try:
+                    changed = self._registry.scan(strategies_dir)
+                    if changed:
+                        self.log.info(f"Portfolio folder change detected: {changed}")
+                        self._publish("portfolio_update", {
+                            "portfolios": self._registry.get_all_states(),
+                        })
+                except Exception as e:
+                    self.log.error(f"File watcher scan error: {e}")
 
     def _publish(self, channel_suffix: str, data: dict) -> None:
         """Publish event data to Redis PubSub channel."""
@@ -238,6 +285,10 @@ class BridgeActor(Actor):
                 payload["trading_state"] = "active"
                 payload["strategy_states"] = {}
 
+            # Portfolio states
+            if hasattr(self, '_registry') and self._registry is not None:
+                payload["portfolios"] = self._registry.get_all_states()
+
             self._redis.setex(
                 f"tino:heartbeat:{self._node_type}",
                 self._hb_ttl,
@@ -254,6 +305,17 @@ class BridgeActor(Actor):
                     "paused": lc_state.get("paused", []),
                 }, default=str),
             )
+
+            # Persist portfolio registry state
+            if hasattr(self, '_registry') and self._registry is not None:
+                try:
+                    self._redis.setex(
+                        f"tino:{self._node_type}:portfolio_registry",
+                        30,  # 2x heartbeat interval
+                        json.dumps(self._registry.to_dict(), default=str),
+                    )
+                except Exception:
+                    pass  # Best-effort persistence
         except Exception as e:
             self.log.error(f"Heartbeat error: {e}")
 
