@@ -23,7 +23,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::api::ApiClient;
-use crate::types::{BacktestRunList, Strategy, TradingFill, TradingOrder, TradingPosition, TradingSummary};
+use crate::types::{BacktestRunList, NodePortfolio, Strategy, TradingFill, TradingOrder, TradingPosition, TradingSummary};
 use app::{App, PopupKind, Workspace, WsState};
 use ws::WsClientEvent;
 
@@ -39,6 +39,7 @@ pub(crate) enum DataCmd {
     TradingSummary(anyhow::Result<TradingSummary>),
     LifecycleState(anyhow::Result<serde_json::Value>),
     Orders(anyhow::Result<Vec<TradingOrder>>),
+    PortfolioList(Vec<(String, NodePortfolio)>),
 }
 
 /// Run the interactive TUI dashboard.
@@ -783,6 +784,7 @@ async fn handle_key(
             workspaces::nodes::fire_load_positions(client, app, tx);
             workspaces::nodes::fire_load_fills(client, app, tx);
             workspaces::nodes::fire_load_orders(client, app, tx);
+            workspaces::nodes::fire_load_portfolios(client, app, tx);
             fire_load_lifecycle_state(client, app, tx);
             fire_load_trading_summary(client, app, tx);
         }
@@ -901,10 +903,12 @@ async fn handle_key(
                                     app.active_node_type = new_type.to_string();
                                     app.selected_strategy = None;
                                     app.trading_selected = 0;
+                                    app.selected_portfolio_idx = None;
                                     // Reload all data for new node type
                                     workspaces::nodes::fire_load_positions(client, app, tx);
                                     workspaces::nodes::fire_load_fills(client, app, tx);
                                     workspaces::nodes::fire_load_orders(client, app, tx);
+                                    workspaces::nodes::fire_load_portfolios(client, app, tx);
                                     fire_load_trading_summary(client, app, tx);
                                     fire_load_lifecycle_state(client, app, tx);
                                 }
@@ -917,10 +921,16 @@ async fn handle_key(
                                 {
                                     app.selected_strategy = Some(item.tag.clone());
                                 }
+                                app.selected_portfolio_idx = None;
                                 app.rebuild_equity_curve();
                                 app.trading_selected = 0;
                                 app.fills_selected = 0;
                                 app.orders_selected = 0;
+                            }
+                            app::NodeSidebarSection::PortfolioList => {
+                                if !app.portfolio_list.is_empty() {
+                                    app.selected_portfolio_idx = Some(app.node_sidebar_idx);
+                                }
                             }
                         }
                     }
@@ -959,6 +969,7 @@ async fn handle_key(
                 workspaces::nodes::fire_load_positions(client, app, tx);
                 workspaces::nodes::fire_load_fills(client, app, tx);
                 workspaces::nodes::fire_load_orders(client, app, tx);
+                workspaces::nodes::fire_load_portfolios(client, app, tx);
                 fire_load_lifecycle_state(client, app, tx);
                 fire_load_trading_summary(client, app, tx);
             }
@@ -1061,56 +1072,136 @@ async fn handle_key(
             }
         }
 
-        // Lifecycle: pause (p)
+        // Portfolio: start (s) — start an available portfolio
+        KeyCode::Char('s') => {
+            if app.workspace == Workspace::Nodes {
+                if let Some(idx) = app.selected_portfolio_idx {
+                    if let Some((name, portfolio)) = app.portfolio_list.get(idx) {
+                        if portfolio.state == "available" {
+                            let name = name.clone();
+                            let mode = app.active_node_type.clone();
+                            match client.start_portfolio(&name, &mode).await {
+                                Ok(_) => {
+                                    app.push_alert(
+                                        app::AlertKind::Info,
+                                        format!("Starting portfolio '{}'", name),
+                                    );
+                                    workspaces::nodes::fire_load_portfolios(client, app, tx);
+                                }
+                                Err(e) => app.set_error(format!("Start failed: {}", e)),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Lifecycle: pause (p) — or pause selected portfolio
         KeyCode::Char('p') => {
             if app.workspace == Workspace::Nodes && app.is_active_node_online() {
-                let sid = app.selected_strategy.as_deref();
-                let mode = app.active_node_type.clone();
-                match client.lifecycle_command("pause", &mode, sid).await {
-                    Ok(_) => {
-                        app.push_alert(
-                            app::AlertKind::Info,
-                            format!("Paused {}", sid.unwrap_or("all")),
-                        );
-                        fire_load_lifecycle_state(client, app, tx);
+                // Portfolio pause takes priority when a portfolio is selected
+                if let Some(idx) = app.selected_portfolio_idx {
+                    if let Some((name, portfolio)) = app.portfolio_list.get(idx) {
+                        if portfolio.state == "running" {
+                            let name = name.clone();
+                            let mode = app.active_node_type.clone();
+                            match client.pause_portfolio(&name, &mode).await {
+                                Ok(_) => {
+                                    app.push_alert(
+                                        app::AlertKind::Info,
+                                        format!("Pausing portfolio '{}'", name),
+                                    );
+                                    workspaces::nodes::fire_load_portfolios(client, app, tx);
+                                }
+                                Err(e) => app.set_error(format!("Pause failed: {}", e)),
+                            }
+                        }
                     }
-                    Err(e) => app.set_error(format!("Pause failed: {}", e)),
+                } else {
+                    let sid = app.selected_strategy.as_deref();
+                    let mode = app.active_node_type.clone();
+                    match client.lifecycle_command("pause", &mode, sid).await {
+                        Ok(_) => {
+                            app.push_alert(
+                                app::AlertKind::Info,
+                                format!("Paused {}", sid.unwrap_or("all")),
+                            );
+                            fire_load_lifecycle_state(client, app, tx);
+                        }
+                        Err(e) => app.set_error(format!("Pause failed: {}", e)),
+                    }
                 }
             }
         }
 
-        // Lifecycle: resume (P = Shift+p)
+        // Lifecycle: resume (P = Shift+p) — or resume selected portfolio
         KeyCode::Char('P') => {
             if app.workspace == Workspace::Nodes && app.is_active_node_online() {
-                let sid = app.selected_strategy.as_deref();
-                let mode = app.active_node_type.clone();
-                match client.lifecycle_command("resume", &mode, sid).await {
-                    Ok(_) => {
-                        app.push_alert(
-                            app::AlertKind::Success,
-                            format!("Resumed {}", sid.unwrap_or("all")),
-                        );
-                        fire_load_lifecycle_state(client, app, tx);
+                if let Some(idx) = app.selected_portfolio_idx {
+                    if let Some((name, portfolio)) = app.portfolio_list.get(idx) {
+                        if portfolio.state == "paused" {
+                            let name = name.clone();
+                            let mode = app.active_node_type.clone();
+                            match client.resume_portfolio(&name, &mode).await {
+                                Ok(_) => {
+                                    app.push_alert(
+                                        app::AlertKind::Success,
+                                        format!("Resuming portfolio '{}'", name),
+                                    );
+                                    workspaces::nodes::fire_load_portfolios(client, app, tx);
+                                }
+                                Err(e) => app.set_error(format!("Resume failed: {}", e)),
+                            }
+                        }
                     }
-                    Err(e) => app.set_error(format!("Resume failed: {}", e)),
+                } else {
+                    let sid = app.selected_strategy.as_deref();
+                    let mode = app.active_node_type.clone();
+                    match client.lifecycle_command("resume", &mode, sid).await {
+                        Ok(_) => {
+                            app.push_alert(
+                                app::AlertKind::Success,
+                                format!("Resumed {}", sid.unwrap_or("all")),
+                            );
+                            fire_load_lifecycle_state(client, app, tx);
+                        }
+                        Err(e) => app.set_error(format!("Resume failed: {}", e)),
+                    }
                 }
             }
         }
 
-        // Lifecycle: flatten (F = Shift+f) — with confirmation
+        // Lifecycle: flatten (F = Shift+f) — or flatten-stop selected portfolio
         KeyCode::Char('F') => {
             if app.workspace == Workspace::Nodes && app.is_active_node_online() {
-                let sid = app.selected_strategy.clone();
-                let mode = app.active_node_type.clone();
-                let target = sid.as_deref().unwrap_or("ALL").to_string();
-                app.pending_action = Some(app::PendingAction::LifecycleAction {
-                    action: "flatten".to_string(),
-                    mode,
-                    strategy_id: sid,
-                });
-                app.open_popup(PopupKind::Confirm {
-                    message: format!("Flatten {} positions?", target),
-                });
+                if let Some(idx) = app.selected_portfolio_idx {
+                    if let Some((name, portfolio)) = app.portfolio_list.get(idx) {
+                        if portfolio.state == "running" || portfolio.state == "paused" {
+                            let name = name.clone();
+                            let mode = app.active_node_type.clone();
+                            app.pending_action = Some(app::PendingAction::LifecycleAction {
+                                action: "flatten-stop-portfolio".to_string(),
+                                mode,
+                                strategy_id: Some(name.clone()),
+                            });
+                            app.open_popup(PopupKind::Confirm {
+                                message: format!("Flatten & stop portfolio '{}'?", name),
+                            });
+                        }
+                    }
+                } else {
+                    let sid = app.selected_strategy.clone();
+                    let mode = app.active_node_type.clone();
+                    let target = sid.as_deref().unwrap_or("ALL").to_string();
+                    app.pending_action = Some(app::PendingAction::LifecycleAction {
+                        action: "flatten".to_string(),
+                        mode,
+                        strategy_id: sid,
+                    });
+                    app.open_popup(PopupKind::Confirm {
+                        message: format!("Flatten {} positions?", target),
+                    });
+                }
             }
         }
 
@@ -1340,28 +1431,48 @@ async fn handle_popup_key(app: &mut App, client: &ApiClient, tx: &mpsc::Unbounde
                             mode,
                             strategy_id,
                         } => {
-                            match client
-                                .lifecycle_command(&action, &mode, strategy_id.as_deref())
-                                .await
-                            {
-                                Ok(_) => {
-                                    let msg = match action.as_str() {
-                                        "flatten" => format!(
-                                            "Flattening {}",
-                                            strategy_id.as_deref().unwrap_or("all")
-                                        ),
-                                        "halt" => "Trading HALTED".to_string(),
-                                        "shutdown" => {
-                                            app.sandbox_shutting_down = true;
-                                            "Shutdown initiated".to_string()
-                                        }
-                                        _ => format!("{} done", action),
-                                    };
-                                    app.push_alert(app::AlertKind::Warning, msg);
-                                    fire_load_lifecycle_state(client, app, tx);
+                            if action == "flatten-stop-portfolio" {
+                                // Portfolio flatten-stop action
+                                let name = strategy_id.as_deref().unwrap_or("");
+                                match client
+                                    .flatten_stop_portfolio(name, &mode)
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        app.push_alert(
+                                            app::AlertKind::Warning,
+                                            format!("Flatten-stop sent for '{}'", name),
+                                        );
+                                        workspaces::nodes::fire_load_portfolios(client, app, tx);
+                                    }
+                                    Err(e) => {
+                                        app.set_error(format!("Flatten-stop failed: {}", e))
+                                    }
                                 }
-                                Err(e) => {
-                                    app.set_error(format!("{} failed: {}", action, e))
+                            } else {
+                                match client
+                                    .lifecycle_command(&action, &mode, strategy_id.as_deref())
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        let msg = match action.as_str() {
+                                            "flatten" => format!(
+                                                "Flattening {}",
+                                                strategy_id.as_deref().unwrap_or("all")
+                                            ),
+                                            "halt" => "Trading HALTED".to_string(),
+                                            "shutdown" => {
+                                                app.sandbox_shutting_down = true;
+                                                "Shutdown initiated".to_string()
+                                            }
+                                            _ => format!("{} done", action),
+                                        };
+                                        app.push_alert(app::AlertKind::Warning, msg);
+                                        fire_load_lifecycle_state(client, app, tx);
+                                    }
+                                    Err(e) => {
+                                        app.set_error(format!("{} failed: {}", action, e))
+                                    }
                                 }
                             }
                         }
@@ -1438,6 +1549,16 @@ fn handle_nav_down(app: &mut App) {
                         }
                         app::NodeSidebarSection::StrategyList => {
                             let max = app.strategy_list.len(); // 0 = ALL, 1..n = strategies
+                            if app.node_sidebar_idx < max {
+                                app.node_sidebar_idx += 1;
+                            } else {
+                                // Move to portfolio list section
+                                app.node_sidebar_section = app::NodeSidebarSection::PortfolioList;
+                                app.node_sidebar_idx = 0;
+                            }
+                        }
+                        app::NodeSidebarSection::PortfolioList => {
+                            let max = app.portfolio_list.len().saturating_sub(1);
                             app.node_sidebar_idx = (app.node_sidebar_idx + 1).min(max);
                         }
                     }
@@ -1507,6 +1628,15 @@ fn handle_nav_up(app: &mut App) {
                                 // Move back to node selector
                                 app.node_sidebar_section = app::NodeSidebarSection::NodeSelector;
                                 app.node_sidebar_idx = 1; // last node item
+                            } else {
+                                app.node_sidebar_idx = app.node_sidebar_idx.saturating_sub(1);
+                            }
+                        }
+                        app::NodeSidebarSection::PortfolioList => {
+                            if app.node_sidebar_idx == 0 {
+                                // Move back to strategy list (last item)
+                                app.node_sidebar_section = app::NodeSidebarSection::StrategyList;
+                                app.node_sidebar_idx = app.strategy_list.len(); // last strategy item
                             } else {
                                 app.node_sidebar_idx = app.node_sidebar_idx.saturating_sub(1);
                             }
@@ -1668,6 +1798,7 @@ fn fire_load_workspace_data(
             workspaces::nodes::fire_load_positions(client, app, tx);
             workspaces::nodes::fire_load_fills(client, app, tx);
             workspaces::nodes::fire_load_orders(client, app, tx);
+            workspaces::nodes::fire_load_portfolios(client, app, tx);
             fire_load_lifecycle_state(client, app, tx);
             fire_load_trading_summary(client, app, tx);
         }
@@ -1778,6 +1909,20 @@ fn handle_data_cmd(app: &mut App, cmd: DataCmd) {
                     }
                 }
                 Err(e) => app.set_error(format!("Orders: {}", e)),
+            }
+        }
+        DataCmd::PortfolioList(list) => {
+            app.portfolio_list = list;
+            app.portfolio_loading = false;
+            // Clamp selected index
+            if let Some(idx) = app.selected_portfolio_idx {
+                if idx >= app.portfolio_list.len() {
+                    app.selected_portfolio_idx = if app.portfolio_list.is_empty() {
+                        None
+                    } else {
+                        Some(app.portfolio_list.len() - 1)
+                    };
+                }
             }
         }
     }

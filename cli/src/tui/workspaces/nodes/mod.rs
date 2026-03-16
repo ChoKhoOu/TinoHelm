@@ -12,4 +12,4 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     overview::render(f, area, app);
 }
 
-pub use overview::{fire_load_fills, fire_load_orders, fire_load_positions};
+pub use overview::{fire_load_fills, fire_load_orders, fire_load_portfolios, fire_load_positions};

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::types::{BacktestRunItem, Strategy, TradingFill, TradingOrder, TradingPosition, TradingSummary, WsEvent};
+use crate::types::{BacktestRunItem, NodePortfolio, Strategy, TradingFill, TradingOrder, TradingPosition, TradingSummary, WsEvent};
 
 /// Bloomberg-style workspace model — each F-key opens a dedicated workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,7 @@ pub enum NodePanel {
 pub enum NodeSidebarSection {
     NodeSelector,
     StrategyList,
+    PortfolioList,
 }
 
 /// An item in the strategy sidebar list.
@@ -165,6 +166,11 @@ pub struct App {
     pub selected_strategy: Option<String>,       // None = ALL, Some(tag) = filtered
     pub node_last_row: [usize; 3],               // last focused row per column (col0=always 0)
 
+    // ── Node portfolios ────────────────────────────────────────────────
+    pub portfolio_list: Vec<(String, NodePortfolio)>,
+    pub portfolio_loading: bool,
+    pub selected_portfolio_idx: Option<usize>,
+
     // ── Orders ────────────────────────────────────────────────────────
     pub orders: Vec<TradingOrder>,
     pub orders_loading: bool,
@@ -257,6 +263,10 @@ impl App {
             selected_strategy: None,
             node_last_row: [0, 0, 0],
 
+            portfolio_list: Vec::new(),
+            portfolio_loading: false,
+            selected_portfolio_idx: None,
+
             orders: Vec::new(),
             orders_loading: false,
             last_orders_poll: None,
@@ -297,6 +307,7 @@ impl App {
         self.node_sidebar_section = NodeSidebarSection::NodeSelector;
         self.node_sidebar_idx = 0;
         self.selected_strategy = None;
+        self.selected_portfolio_idx = None;
         self.node_last_row = [0, 0, 0];
     }
 
@@ -509,6 +520,7 @@ impl App {
             || self.data_loading
             || self.trading_loading
             || self.orders_loading
+            || self.portfolio_loading
             || self.sandbox_last_heartbeat.is_some()
             || self.live_last_heartbeat.is_some()
             || matches!(self.ws_state, WsState::Connected | WsState::Connecting)

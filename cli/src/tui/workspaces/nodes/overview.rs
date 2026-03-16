@@ -264,6 +264,63 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
+    // ── Portfolio list section ───────────────────────────────────────
+    strat_lines.push(Line::from(Span::styled(
+        "\u{2500}".repeat(area.width.saturating_sub(2) as usize),
+        Style::default().fg(theme::FG_BORDER),
+    )));
+    strat_lines.push(Line::from(Span::styled(
+        " PORTFOLIOS",
+        Style::default().fg(theme::FG_AMBER).add_modifier(Modifier::BOLD),
+    )));
+
+    if app.portfolio_loading {
+        strat_lines.push(Line::from(Span::styled(
+            format!(" {} Loading\u{2026}", widgets::spinner(app.frame_count)),
+            Style::default().fg(theme::FG_DIM),
+        )));
+    } else if app.portfolio_list.is_empty() {
+        strat_lines.push(Line::from(Span::styled(
+            " No portfolios",
+            Style::default().fg(theme::FG_DIM),
+        )));
+    } else {
+        for (idx, (name, portfolio)) in app.portfolio_list.iter().enumerate() {
+            let is_cursor = app.node_sidebar_section == NodeSidebarSection::PortfolioList
+                && app.node_sidebar_idx == idx
+                && app.node_panel_focus == NodePanel::Sidebar;
+            let is_selected = app.selected_portfolio_idx == Some(idx);
+            let (state_label, dot_color) = match portfolio.state.as_str() {
+                "running" => ("[R]", theme::FG_RUNNING),
+                "paused" => ("[P]", theme::FG_AMBER),
+                "flattening" => ("[F]", theme::FG_NEGATIVE),
+                "starting" => ("[S]", theme::FG_RUNNING),
+                _ => ("[A]", theme::FG_DIM), // available
+            };
+            let was = if portfolio.was_running { " *" } else { "" };
+            let bg = if is_cursor {
+                theme::BG_SELECTED
+            } else {
+                theme::BG_PRIMARY
+            };
+            let name_style = if is_selected {
+                Style::default().fg(theme::FG_BRIGHT).bg(bg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::FG_PRIMARY).bg(bg)
+            };
+            strat_lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", state_label),
+                    Style::default().fg(dot_color).bg(bg),
+                ),
+                Span::styled(
+                    format!("{}{} ({})", name, was, portfolio.strategy_ids.len()),
+                    name_style,
+                ),
+            ]));
+        }
+    }
+
     f.render_widget(Paragraph::new(strat_lines), strat_area);
 }
 
@@ -758,6 +815,32 @@ fn render_node_stopped(f: &mut Frame, area: Rect) {
 }
 
 // ── Data loading ───────────────────────────────────────────────────────
+
+pub fn fire_load_portfolios(
+    client: &ApiClient,
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<DataCmd>,
+) {
+    if app.portfolio_loading {
+        return;
+    }
+    app.portfolio_loading = true;
+    let client = client.clone();
+    let tx = tx.clone();
+    let mode = app.active_node_type.clone();
+    tokio::spawn(async move {
+        match client.list_portfolios(&mode).await {
+            Ok(resp) => {
+                let mut list: Vec<(String, _)> = resp.portfolios.into_iter().collect();
+                list.sort_by(|a, b| a.0.cmp(&b.0));
+                let _ = tx.send(DataCmd::PortfolioList(list));
+            }
+            Err(_) => {
+                let _ = tx.send(DataCmd::PortfolioList(vec![]));
+            }
+        }
+    });
+}
 
 pub fn fire_load_positions(
     client: &ApiClient,
