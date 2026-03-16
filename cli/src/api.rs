@@ -351,6 +351,84 @@ impl ApiClient {
         Ok(body)
     }
 
+    // ---- Node Portfolios ----
+
+    pub async fn list_portfolios(&self, mode: &str) -> Result<PortfoliosResponse> {
+        let resp = self
+            .client
+            .get(format!("{}/api/node/portfolios", self.base_url))
+            .query(&[("mode", mode)])
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn start_portfolio(&self, name: &str, mode: &str) -> Result<serde_json::Value> {
+        let body = PortfolioActionRequest {
+            name: name.to_string(),
+            mode: mode.to_string(),
+        };
+        let resp = self
+            .client
+            .post(format!("{}/api/node/portfolio/start", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn pause_portfolio(&self, name: &str, mode: &str) -> Result<serde_json::Value> {
+        let body = PortfolioActionRequest {
+            name: name.to_string(),
+            mode: mode.to_string(),
+        };
+        let resp = self
+            .client
+            .post(format!("{}/api/node/portfolio/pause", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn resume_portfolio(&self, name: &str, mode: &str) -> Result<serde_json::Value> {
+        let body = PortfolioActionRequest {
+            name: name.to_string(),
+            mode: mode.to_string(),
+        };
+        let resp = self
+            .client
+            .post(format!("{}/api/node/portfolio/resume", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn flatten_stop_portfolio(&self, name: &str, mode: &str) -> Result<serde_json::Value> {
+        let body = PortfolioActionRequest {
+            name: name.to_string(),
+            mode: mode.to_string(),
+        };
+        let resp = self
+            .client
+            .post(format!("{}/api/node/portfolio/flatten-stop", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .context(Self::connect_hint(&self.base_url))?;
+        let body = resp.error_for_status()?.json().await?;
+        Ok(body)
+    }
+
     // ---- Node ----
 
     pub async fn node_status(&self) -> Result<serde_json::Value> {

@@ -261,6 +261,33 @@ pub struct TradingOrder {
     pub created_at: Option<String>,
 }
 
+// ---- Node Portfolios ----
+
+/// Portfolio state on a trading node
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NodePortfolio {
+    pub state: String, // "available", "starting", "running", "paused", "flattening"
+    pub strategy_ids: Vec<String>,
+    pub source_path: Option<String>,
+    pub order_id_tag_prefix: Option<String>,
+    #[serde(default)]
+    pub was_running: bool,
+}
+
+/// Request body for portfolio lifecycle commands
+#[derive(Debug, Serialize)]
+pub struct PortfolioActionRequest {
+    pub name: String,
+    pub mode: String,
+}
+
+/// Response from GET /api/node/portfolios
+#[derive(Debug, Clone, Deserialize)]
+pub struct PortfoliosResponse {
+    #[serde(default)]
+    pub portfolios: std::collections::HashMap<String, NodePortfolio>,
+}
+
 // ---- WebSocket events ----
 
 #[derive(Debug, Deserialize, Clone)]

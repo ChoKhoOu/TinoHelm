@@ -24,6 +24,51 @@ pub enum NodeCmd {
         #[command(subcommand)]
         command: LifecycleCmd,
     },
+    /// Portfolio management on a running node
+    Portfolio {
+        #[command(subcommand)]
+        command: PortfolioCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PortfolioCmd {
+    /// List all portfolios and their states
+    List {
+        #[arg(long, default_value = "live")]
+        mode: String,
+    },
+    /// Start a portfolio's strategies
+    Start {
+        /// Portfolio folder name
+        name: String,
+        #[arg(long, default_value = "live")]
+        mode: String,
+    },
+    /// Pause a running portfolio
+    Pause {
+        /// Portfolio folder name
+        name: String,
+        #[arg(long, default_value = "live")]
+        mode: String,
+    },
+    /// Resume a paused portfolio
+    Resume {
+        /// Portfolio folder name
+        name: String,
+        #[arg(long, default_value = "live")]
+        mode: String,
+    },
+    /// Flatten positions and stop a portfolio
+    FlattenStop {
+        /// Portfolio folder name
+        name: String,
+        #[arg(long, default_value = "live")]
+        mode: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -149,6 +194,9 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: &str) -> Result<
         }
         NodeCmd::Lifecycle { command } => {
             dispatch_lifecycle(command, client, format).await?;
+        }
+        NodeCmd::Portfolio { command } => {
+            dispatch_portfolio(command, client, format).await?;
         }
     }
     Ok(())
@@ -277,6 +325,94 @@ async fn dispatch_lifecycle(cmd: LifecycleCmd, client: &ApiClient, format: &str)
                 }
             }
             println!();
+        }
+    }
+    Ok(())
+}
+
+async fn dispatch_portfolio(cmd: PortfolioCmd, client: &ApiClient, format: &str) -> Result<()> {
+    match cmd {
+        PortfolioCmd::List { mode } => {
+            let resp = client.list_portfolios(&mode).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!(resp.portfolios))?);
+                return Ok(());
+            }
+            if resp.portfolios.is_empty() {
+                println!("  No portfolios found on {} node", mode);
+            } else {
+                header(&format!("Portfolios  {}", mode_label(&mode)));
+                let t = Table::new(&[
+                    ("Name", 25, "left"),
+                    ("State", 12, "left"),
+                    ("Strategies", 8, "right"),
+                    ("Prefix", 8, "left"),
+                ]);
+                t.header();
+                let mut names: Vec<_> = resp.portfolios.keys().collect();
+                names.sort();
+                for name in names {
+                    let p = &resp.portfolios[name];
+                    let was = if p.was_running { " (*)" } else { "" };
+                    let state_colored = match p.state.as_str() {
+                        "running" => format!("{}", p.state.clone().green()),
+                        "paused" => format!("{}", p.state.clone().yellow()),
+                        "flattening" => format!("{}", p.state.clone().with(NEG)),
+                        "starting" => format!("{}", p.state.clone().cyan()),
+                        _ => p.state.clone(),
+                    };
+                    t.row(&[
+                        &format!("{}{}", name, was),
+                        &state_colored,
+                        &p.strategy_ids.len().to_string(),
+                        &p.order_id_tag_prefix.as_deref().unwrap_or("").to_string(),
+                    ]);
+                }
+                t.footer();
+            }
+        }
+        PortfolioCmd::Start { name, mode } => {
+            let resp = client.start_portfolio(&name, &mode).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            } else {
+                println!("  {} Starting portfolio '{}'", "\u{25CF}".green(), name);
+            }
+        }
+        PortfolioCmd::Pause { name, mode } => {
+            let resp = client.pause_portfolio(&name, &mode).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            } else {
+                println!("  {} Pausing portfolio '{}'", "\u{25CF}".yellow(), name);
+            }
+        }
+        PortfolioCmd::Resume { name, mode } => {
+            let resp = client.resume_portfolio(&name, &mode).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            } else {
+                println!("  {} Resuming portfolio '{}'", "\u{25CF}".green(), name);
+            }
+        }
+        PortfolioCmd::FlattenStop { name, mode, yes } => {
+            if !yes {
+                eprint!("  Flatten and stop portfolio '{}'? This will close all positions. [y/N] ", name);
+                use std::io::Write;
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("  Cancelled.");
+                    return Ok(());
+                }
+            }
+            let resp = client.flatten_stop_portfolio(&name, &mode).await?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            } else {
+                println!("  {} Flatten-stop sent for portfolio '{}'", "\u{25CF}".with(NEG), name);
+            }
         }
     }
     Ok(())
