@@ -51,10 +51,13 @@ class ProcessManager:
         action: str,
         node_type: str = "live",
         strategy_id: str | None = None,
+        portfolio_name: str | None = None,
     ) -> None:
         """Publish a lifecycle command to the node via Redis PubSub.
 
-        Actions: pause, resume, flatten, halt, unhalt, shutdown.
+        Actions: pause, resume, flatten, halt, unhalt, shutdown,
+                 start_portfolio, pause_portfolio, resume_portfolio,
+                 flatten_stop_portfolio.
         """
         if node_type not in VALID_NODE_TYPES:
             raise ValueError(f"Invalid node_type {node_type!r}; must be one of {VALID_NODE_TYPES}")
@@ -62,6 +65,8 @@ class ProcessManager:
         cmd: dict[str, Any] = {"cmd": action}
         if strategy_id:
             cmd["strategy_id"] = strategy_id
+        if portfolio_name:
+            cmd["portfolio_name"] = portfolio_name
 
         self._redis.publish(channel, json.dumps(cmd))
         logger.warning("Lifecycle command: %s on %s (strategy=%s)", action, node_type, strategy_id)

@@ -40,6 +40,12 @@ class LifecycleRequest(BaseModel):
     strategy_id: str | None = None
 
 
+class PortfolioLifecycleRequest(BaseModel):
+    """Request body for portfolio lifecycle commands."""
+    name: str
+    mode: Literal["sandbox", "live"] = "live"
+
+
 # ---- routes ----
 
 @router.post("/kill")
@@ -87,6 +93,100 @@ async def lifecycle_state(
         return {"trading_state": "unknown", "strategy_states": {}, "paused": []}
     finally:
         r.close()
+
+
+@router.get("/portfolios")
+async def list_portfolios(
+    mode: Literal["sandbox", "live"] = "live",
+) -> dict:
+    """Return all portfolios with their state."""
+    settings = get_settings()
+    r = redis_lib.Redis.from_url(settings.redis.url, decode_responses=True)
+    try:
+        raw = r.get(f"tino:{mode}:portfolio_registry")
+        if raw:
+            data = json.loads(raw)
+            return {"portfolios": data.get("portfolios", {})}
+        # Fallback: try heartbeat
+        hb_raw = r.get(f"tino:heartbeat:{mode}")
+        if hb_raw:
+            hb = json.loads(hb_raw)
+            return {"portfolios": hb.get("portfolios", {})}
+        return {"portfolios": {}}
+    finally:
+        r.close()
+
+
+@router.post("/portfolio/start")
+async def start_portfolio(
+    body: PortfolioLifecycleRequest,
+    pm: ProcessManager = Depends(get_process_manager),
+) -> dict:
+    """Start a portfolio's strategies on the node."""
+    try:
+        await asyncio.to_thread(
+            pm.lifecycle_command,
+            action="start_portfolio",
+            node_type=body.mode,
+            portfolio_name=body.name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "action": "start_portfolio", "name": body.name}
+
+
+@router.post("/portfolio/pause")
+async def pause_portfolio(
+    body: PortfolioLifecycleRequest,
+    pm: ProcessManager = Depends(get_process_manager),
+) -> dict:
+    """Pause a running portfolio."""
+    try:
+        await asyncio.to_thread(
+            pm.lifecycle_command,
+            action="pause_portfolio",
+            node_type=body.mode,
+            portfolio_name=body.name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "action": "pause_portfolio", "name": body.name}
+
+
+@router.post("/portfolio/resume")
+async def resume_portfolio(
+    body: PortfolioLifecycleRequest,
+    pm: ProcessManager = Depends(get_process_manager),
+) -> dict:
+    """Resume a paused portfolio."""
+    try:
+        await asyncio.to_thread(
+            pm.lifecycle_command,
+            action="resume_portfolio",
+            node_type=body.mode,
+            portfolio_name=body.name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "action": "resume_portfolio", "name": body.name}
+
+
+@router.post("/portfolio/flatten-stop")
+async def flatten_stop_portfolio(
+    body: PortfolioLifecycleRequest,
+    pm: ProcessManager = Depends(get_process_manager),
+) -> dict:
+    """Flatten positions and stop a portfolio."""
+    try:
+        await asyncio.to_thread(
+            pm.lifecycle_command,
+            action="flatten_stop_portfolio",
+            node_type=body.mode,
+            portfolio_name=body.name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "action": "flatten_stop_portfolio", "name": body.name}
 
 
 @router.get("/status")
