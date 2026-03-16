@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import threading
+from pathlib import Path
 from typing import Any
 
 import redis
@@ -92,20 +93,40 @@ def load_components(
     from nautilus_trader.config import ImportableStrategyConfig
 
     from tinohelm.node.bridge_actor import BridgeActor, BridgeActorConfig
+    from tinohelm.node.portfolio_registry import PortfolioRegistry
     from tinohelm.portfolio.config import load_portfolio_config
     from tinohelm.portfolio.loader import create_actors, create_strategies
 
     node_type = config["node_type"]
 
+    # ---- Portfolio Registry setup ----------------------------------------
+    registry = PortfolioRegistry()
+    strategies_dir = Path(os.environ.get(
+        "TINO_STRATEGIES_DIR",
+        str(Path.home() / ".tino" / "strategies"),
+    ))
+
     # ---- Strategies and actors via portfolio_loader -----------------------
     portfolio_config_name = config.get("portfolio_config")
     if portfolio_config_name:
         portfolio_cfg = load_portfolio_config(portfolio_config_name)
-        strategy_instances = create_strategies(portfolio_cfg)
+        # Register boot-time portfolio and allocate prefixed tags
+        registry.register(
+            portfolio_config_name,
+            portfolio_cfg.source_path or Path(""),
+        )
+        tags = registry.allocate_tags(
+            portfolio_config_name,
+            len(portfolio_cfg.symbols),
+            existing_tags=set(),
+        )
+        strategy_instances = create_strategies(portfolio_cfg, order_id_tags=tags)
         actor_instances = create_actors(portfolio_cfg)
     else:
-        # Legacy: load from strategy paths list
+        # No boot-time portfolio — discover available portfolios
         strategy_instances = []
+        actor_instances = []
+        # Legacy: load from strategy paths list
         for strat_path in config.get("strategies", []):
             if ":" not in strat_path:
                 logger.error("Invalid strategy path format (expected 'module:Class'): %s", strat_path)
@@ -120,7 +141,11 @@ def load_components(
                     config_path=f"{module_path}:{class_name}Config",
                 ).create()
             )
-        actor_instances = []
+
+    # Scan for available portfolios (both paths)
+    if strategies_dir.exists():
+        registry.scan(strategies_dir)
+        logger.info("Discovered %d available portfolio(s)", len(registry.get_all_states()))
 
     for strategy in strategy_instances:
         node.trader.add_strategy(strategy)
@@ -131,6 +156,13 @@ def load_components(
     if actor_instances:
         logger.info("Added %d actor(s)", len(actor_instances))
 
+    # Mark boot-time portfolio as running
+    if portfolio_config_name:
+        registry.mark_running(
+            portfolio_config_name,
+            [str(s.id) for s in strategy_instances],
+        )
+
     # ---- BridgeActor for Redis event bridging and commands ----------------
     redis_url = config["redis_url"]
     redis_db = config.get("redis_db", 0)
@@ -140,7 +172,24 @@ def load_components(
         db_url=config.get("db_url", ""),
     )
     bridge_actor = BridgeActor(config=bridge_config)
+    # Attach registry for lifecycle operations and file watcher
+    bridge_actor._registry = registry
     node.trader.add_actor(bridge_actor)
+
+    # Restore was_running state from Redis (best-effort)
+    try:
+        r = redis.Redis.from_url(
+            f"{redis_url}/{redis_db}" if "/" not in redis_url.split("//")[-1] else redis_url,
+            decode_responses=True,
+        )
+        saved = r.get(f"tino:{node_type}:portfolio_registry")
+        if saved:
+            saved_state = json.loads(saved)
+            registry.restore_was_running(saved_state)
+            logger.info("Restored portfolio registry state from Redis")
+        r.close()
+    except Exception:
+        pass  # Best-effort restore
 
     return bridge_actor
 

@@ -1,8 +1,8 @@
 """Sandbox TradingNode entry-point.
 
-Spawned as a Docker container via ``sandbox_main.py``.  The node uses Binance
-*demo* data with a **simulated** execution client so no real orders are
-sent.
+Spawned as a Docker container via ``sandbox_main.py``.  The node connects to
+Binance Demo (demo.binance.com) for both market data **and** order execution.
+No real money is at risk — the balance comes from the Binance Demo account.
 
 Strategy/actor loading, BridgeActor wiring, and signal-based shutdown are
 handled by the shared ``_common`` module.
@@ -30,13 +30,18 @@ def run_node(config: dict[str, Any]) -> None:
         BinanceAccountType,
         BinanceEnvironment,
     )
-    from nautilus_trader.adapters.binance.config import BinanceDataClientConfig
+    from nautilus_trader.adapters.binance.config import (
+        BinanceDataClientConfig,
+        BinanceExecClientConfig,
+    )
     from nautilus_trader.adapters.binance.factories import (
         BinanceLiveDataClientFactory,
+        BinanceLiveExecClientFactory,
     )
     from nautilus_trader.config import (
         CacheConfig,
         DatabaseConfig,
+        ImportableControllerConfig,
         InstrumentProviderConfig,
         LiveDataEngineConfig,
         LiveExecEngineConfig,
@@ -63,6 +68,11 @@ def run_node(config: dict[str, Any]) -> None:
     node_config = TradingNodeConfig(
         trader_id=config["trader_id"],
         logging=LoggingConfig(log_level="INFO"),
+        controller=ImportableControllerConfig(
+            controller_path="tinohelm.node.controller:TinoController",
+            config_path="nautilus_trader.config:ActorConfig",
+            config={},
+        ),
         cache=CacheConfig(
             database=DatabaseConfig(
                 type="redis",
@@ -72,13 +82,21 @@ def run_node(config: dict[str, Any]) -> None:
             ),
             encoding="msgpack",
             buffer_interval_ms=100,
-            flush_on_start=True,  # Clean slate each restart — sandbox uses simulated execution
+            flush_on_start=True,  # Clean slate each restart for paper trading
             use_trader_prefix=True,
         ),
         data_engine=LiveDataEngineConfig(),
         exec_engine=LiveExecEngineConfig(
-            # Sandbox uses simulated exchange — no reconciliation needed
-            reconciliation=False,
+            # Reconcile with Binance Demo on startup
+            reconciliation=True,
+            reconciliation_lookback_mins=1440,  # 24h lookback
+            # Overfill protection (WebSocket reconnect can replay fills)
+            allow_overfills=True,
+            # Continuous reconciliation
+            inflight_check_interval_ms=2000,
+            open_check_interval_secs=10.0,
+            open_check_lookback_mins=60,
+            reconciliation_startup_delay_secs=10.0,
             # Memory management for long paper-trading sessions
             purge_closed_orders_interval_mins=15,
             purge_closed_orders_buffer_mins=60,
@@ -98,14 +116,23 @@ def run_node(config: dict[str, Any]) -> None:
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
         },
-        # Sandbox uses simulated exec -- no exec_clients configured, which
-        # causes NautilusTrader to use the built-in simulated exchange.
-        exec_clients={},
+        exec_clients={
+            "BINANCE": BinanceExecClientConfig(
+                api_key=config["binance"]["api_key"],
+                api_secret=config["binance"]["api_secret"],
+                account_type=BinanceAccountType[config["binance"]["account_type"]],
+                environment=BinanceEnvironment.DEMO,
+                # NT 1.224.0 maps DEMO to testnet URLs for futures — override manually
+                base_url_http="https://demo-fapi.binance.com",
+                base_url_ws="wss://demo-fstream.binance.com",
+                instrument_provider=InstrumentProviderConfig(load_all=True),
+            ),
+        },
     )
 
     node = TradingNode(config=node_config)
-    # Sandbox only needs data client (simulated exchange for exec)
     node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
+    node.add_exec_client_factory(BINANCE, BinanceLiveExecClientFactory)
     bridge_actor = load_components(node, config)
     node.build()
     inject_lifecycle_deps(node, bridge_actor)

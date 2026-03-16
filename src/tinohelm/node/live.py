@@ -39,6 +39,7 @@ def run_node(config: dict[str, Any]) -> None:
     from nautilus_trader.config import (
         CacheConfig,
         DatabaseConfig,
+        ImportableControllerConfig,
         InstrumentProviderConfig,
         LiveDataEngineConfig,
         LiveExecEngineConfig,
@@ -69,6 +70,11 @@ def run_node(config: dict[str, Any]) -> None:
     node_config = TradingNodeConfig(
         trader_id=config["trader_id"],
         logging=LoggingConfig(log_level="INFO"),
+        controller=ImportableControllerConfig(
+            controller_path="tinohelm.node.controller:TinoController",
+            config_path="nautilus_trader.config:ActorConfig",
+            config={},
+        ),
         cache=CacheConfig(
             database=DatabaseConfig(
                 type="redis",

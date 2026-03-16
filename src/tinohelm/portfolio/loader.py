@@ -23,7 +23,11 @@ _DEFAULT_ACTORS_DIR = Path.home() / ".tino" / "actors"
 _BUILTIN_ACTORS_DIR = Path(__file__).resolve().parent.parent / "actors"
 
 
-def create_strategies(config: PortfolioConfig) -> list[Any]:
+def create_strategies(
+    config: PortfolioConfig,
+    *,
+    order_id_tags: list[str] | None = None,
+) -> list[Any]:
     """Create one strategy instance per symbol from a PortfolioConfig.
 
     Each instance gets its own ``instrument_id`` and ``bar_type`` injected
@@ -42,6 +46,12 @@ def create_strategies(config: PortfolioConfig) -> list[Any]:
     # Determine accepted config fields
     config_fields = get_config_field_names(config_cls)
 
+    if order_id_tags is not None and len(order_id_tags) != len(config.symbols):
+        raise ValueError(
+            f"order_id_tags length ({len(order_id_tags)}) must match "
+            f"symbols length ({len(config.symbols)})"
+        )
+
     strategies = []
     for i, symbol in enumerate(config.symbols):
         # Build per-symbol params
@@ -58,7 +68,9 @@ def create_strategies(config: PortfolioConfig) -> list[Any]:
             per_symbol_params["bar_type"] = _make_bar_type_str(symbol, config.interval)
 
         # Unique order_id_tag per instance — required for multi-strategy portfolios
-        if "order_id_tag" not in per_symbol_params:
+        if order_id_tags is not None:
+            per_symbol_params["order_id_tag"] = order_id_tags[i]
+        elif "order_id_tag" not in per_symbol_params:
             per_symbol_params["order_id_tag"] = f"{i:03d}"
 
         # Auto-exit on stop for safety (cancel orders + close positions)
