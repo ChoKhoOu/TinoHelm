@@ -1093,7 +1093,7 @@ fn print_optimize_result(data: &serde_json::Value) {
         if !wf.is_empty() {
             header("Walk-Forward Folds");
             for (i, fold) in wf.iter().enumerate() {
-                if let Some(obj) = fold.as_object() {
+                if fold.is_object() {
                     let tv = jf64(fold, "test_value");
                     let ts = jstr(fold, "test_start");
                     let te = jstr(fold, "test_end");
@@ -1104,7 +1104,6 @@ fn print_optimize_result(data: &serde_json::Value) {
                         te,
                         tv.map(|v| color_value(Some(v), ".4f")).unwrap_or_else(|| muted("-")),
                     );
-                    let _ = obj; // suppress unused warning
                 }
             }
         }

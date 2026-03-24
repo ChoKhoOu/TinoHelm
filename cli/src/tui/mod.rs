@@ -27,6 +27,21 @@ use crate::types::{BacktestRunList, NodePortfolio, Strategy, TradingFill, Tradin
 use app::{App, PopupKind, Workspace, WsState};
 use ws::WsClientEvent;
 
+/// Open a file or directory in the OS default handler.
+fn open_in_os(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(target_os = "linux")]
+    let opener = "xdg-open";
+    #[cfg(target_os = "windows")]
+    let opener = "cmd";
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = std::process::Command::new(opener).arg(path).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new(opener).args(["/C", "start"]).arg(path).spawn();
+}
+
 /// Async data command — results from background API calls.
 pub(crate) enum DataCmd {
     Backtests(anyhow::Result<BacktestRunList>),
@@ -1034,22 +1049,7 @@ async fn handle_key(
                             .join(&bt.run_id)
                             .join("tearsheet.html");
                         if path.exists() {
-                            #[cfg(target_os = "macos")]
-                            let opener = "open";
-                            #[cfg(target_os = "linux")]
-                            let opener = "xdg-open";
-                            #[cfg(target_os = "windows")]
-                            let opener = "cmd";
-
-                            #[cfg(not(target_os = "windows"))]
-                            let _ = std::process::Command::new(opener)
-                                .arg(&path)
-                                .spawn();
-                            #[cfg(target_os = "windows")]
-                            let _ = std::process::Command::new(opener)
-                                .args(["/C", "start"])
-                                .arg(&path)
-                                .spawn();
+                            open_in_os(&path);
                         } else {
                             app.set_error("Tearsheet not found".to_string());
                         }
@@ -1067,22 +1067,7 @@ async fn handle_key(
                             .join(".tino/data/artifacts")
                             .join(&bt.run_id);
                         if path.exists() {
-                            #[cfg(target_os = "macos")]
-                            let opener = "open";
-                            #[cfg(target_os = "linux")]
-                            let opener = "xdg-open";
-                            #[cfg(target_os = "windows")]
-                            let opener = "cmd";
-
-                            #[cfg(not(target_os = "windows"))]
-                            let _ = std::process::Command::new(opener)
-                                .arg(&path)
-                                .spawn();
-                            #[cfg(target_os = "windows")]
-                            let _ = std::process::Command::new(opener)
-                                .args(["/C", "start"])
-                                .arg(&path)
-                                .spawn();
+                            open_in_os(&path);
                         } else {
                             app.set_error("Artifacts directory not found".to_string());
                         }

@@ -77,66 +77,11 @@ class TradingSummary(BaseModel):
     open_instruments: list[str]
 
 
-# ---- routes ----
+# ---- helpers ----
 
 
-@router.get("/positions", response_model=list[PositionItem])
-async def list_positions(
-    node_type: str | None = Query(None, description="Filter by node type (sandbox/live)"),
-    instrument_id: str | None = Query(None, description="Filter by instrument"),
-    strategy_id_tag: str | None = Query(None, description="Filter by strategy ID tag"),
-    is_open: bool | None = Query(None, description="Filter by open/closed status"),
-    db: AsyncSession = Depends(get_db),
-) -> list[PositionItem]:
-    """List all positions, optionally filtered."""
-    stmt = select(Position).order_by(Position.updated_at.desc())
-    if node_type is not None:
-        stmt = stmt.where(Position.node_type == node_type)
-    if instrument_id is not None:
-        stmt = stmt.where(Position.instrument_id == instrument_id)
-    if strategy_id_tag is not None:
-        stmt = stmt.where(Position.strategy_id_tag == strategy_id_tag)
-    if is_open is not None:
-        stmt = stmt.where(Position.is_open == is_open)  # noqa: E712
-    rows = (await db.execute(stmt)).scalars().all()
-    return [
-        PositionItem(
-            id=r.id,
-            node_type=r.node_type,
-            position_id=r.position_id,
-            strategy_id_tag=r.strategy_id_tag,
-            instrument_id=r.instrument_id,
-            side=r.side,
-            quantity=r.quantity,
-            signed_qty=r.signed_qty,
-            avg_px_open=r.avg_px_open,
-            avg_px_close=r.avg_px_close,
-            realized_pnl=r.realized_pnl,
-            unrealized_pnl=r.unrealized_pnl,
-            currency=r.currency,
-            entry_side=r.entry_side,
-            peak_qty=r.peak_qty,
-            ts_opened=r.ts_opened,
-            ts_closed=r.ts_closed,
-            duration=r.duration,
-            is_open=r.is_open,
-            event_count=r.event_count,
-            updated_at=r.updated_at.isoformat() if r.updated_at else None,
-        )
-        for r in rows
-    ]
-
-
-@router.get("/positions/{position_id:int}", response_model=PositionItem)
-async def get_position(
-    position_id: int,
-    db: AsyncSession = Depends(get_db),
-) -> PositionItem:
-    """Get a single position by its database ID."""
-    stmt = select(Position).where(Position.id == position_id)
-    r = (await db.execute(stmt)).scalar_one_or_none()
-    if r is None:
-        raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
+def _position_to_item(r: Position) -> PositionItem:
+    """Map a Position DB row to its API response model."""
     return PositionItem(
         id=r.id,
         node_type=r.node_type,
@@ -162,6 +107,65 @@ async def get_position(
     )
 
 
+def _fill_to_item(r: Fill) -> FillItem:
+    """Map a Fill DB row to its API response model."""
+    return FillItem(
+        id=r.id,
+        node_type=r.node_type,
+        trade_id=r.trade_id,
+        position_id=r.position_id,
+        client_order_id=r.client_order_id,
+        venue_order_id=r.venue_order_id,
+        strategy_id_tag=r.strategy_id_tag,
+        instrument_id=r.instrument_id,
+        order_side=r.order_side,
+        last_qty=r.last_qty,
+        last_px=r.last_px,
+        commission=r.commission,
+        liquidity_side=r.liquidity_side,
+        ts_event=r.ts_event,
+        created_at=r.created_at.isoformat() if r.created_at else None,
+    )
+
+
+# ---- routes ----
+
+
+@router.get("/positions", response_model=list[PositionItem])
+async def list_positions(
+    node_type: str | None = Query(None, description="Filter by node type (sandbox/live)"),
+    instrument_id: str | None = Query(None, description="Filter by instrument"),
+    strategy_id_tag: str | None = Query(None, description="Filter by strategy ID tag"),
+    is_open: bool | None = Query(None, description="Filter by open/closed status"),
+    db: AsyncSession = Depends(get_db),
+) -> list[PositionItem]:
+    """List all positions, optionally filtered."""
+    stmt = select(Position).order_by(Position.updated_at.desc())
+    if node_type is not None:
+        stmt = stmt.where(Position.node_type == node_type)
+    if instrument_id is not None:
+        stmt = stmt.where(Position.instrument_id == instrument_id)
+    if strategy_id_tag is not None:
+        stmt = stmt.where(Position.strategy_id_tag == strategy_id_tag)
+    if is_open is not None:
+        stmt = stmt.where(Position.is_open == is_open)  # noqa: E712
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_position_to_item(r) for r in rows]
+
+
+@router.get("/positions/{position_id:int}", response_model=PositionItem)
+async def get_position(
+    position_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> PositionItem:
+    """Get a single position by its database ID."""
+    stmt = select(Position).where(Position.id == position_id)
+    r = (await db.execute(stmt)).scalar_one_or_none()
+    if r is None:
+        raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
+    return _position_to_item(r)
+
+
 @router.get("/fills", response_model=list[FillItem])
 async def list_fills(
     node_type: str | None = Query(None, description="Filter by node type (sandbox/live)"),
@@ -182,26 +186,7 @@ async def list_fills(
     if strategy_id_tag is not None:
         stmt = stmt.where(Fill.strategy_id_tag == strategy_id_tag)
     rows = (await db.execute(stmt)).scalars().all()
-    return [
-        FillItem(
-            id=r.id,
-            node_type=r.node_type,
-            trade_id=r.trade_id,
-            position_id=r.position_id,
-            client_order_id=r.client_order_id,
-            venue_order_id=r.venue_order_id,
-            strategy_id_tag=r.strategy_id_tag,
-            instrument_id=r.instrument_id,
-            order_side=r.order_side,
-            last_qty=r.last_qty,
-            last_px=r.last_px,
-            commission=r.commission,
-            liquidity_side=r.liquidity_side,
-            ts_event=r.ts_event,
-            created_at=r.created_at.isoformat() if r.created_at else None,
-        )
-        for r in rows
-    ]
+    return [_fill_to_item(r) for r in rows]
 
 
 @router.get("/fills/{fill_id:int}", response_model=FillItem)
@@ -214,23 +199,7 @@ async def get_fill(
     r = (await db.execute(stmt)).scalar_one_or_none()
     if r is None:
         raise HTTPException(status_code=404, detail=f"Fill {fill_id} not found")
-    return FillItem(
-        id=r.id,
-        node_type=r.node_type,
-        trade_id=r.trade_id,
-        position_id=r.position_id,
-        client_order_id=r.client_order_id,
-        venue_order_id=r.venue_order_id,
-        strategy_id_tag=r.strategy_id_tag,
-        instrument_id=r.instrument_id,
-        order_side=r.order_side,
-        last_qty=r.last_qty,
-        last_px=r.last_px,
-        commission=r.commission,
-        liquidity_side=r.liquidity_side,
-        ts_event=r.ts_event,
-        created_at=r.created_at.isoformat() if r.created_at else None,
-    )
+    return _fill_to_item(r)
 
 
 @router.get("/summary", response_model=TradingSummary)

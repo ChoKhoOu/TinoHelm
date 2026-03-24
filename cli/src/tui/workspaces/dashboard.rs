@@ -14,8 +14,6 @@ use crate::tui::app::App;
 use crate::tui::theme;
 use crate::tui::widgets::{self, titled_block};
 
-const HEARTBEAT_TIMEOUT_SECS: u64 = widgets::HEARTBEAT_TIMEOUT_SECS;
-
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // Split into top half + active jobs + equity curve
     let rows = Layout::default()
@@ -80,7 +78,7 @@ fn render_system_status(f: &mut Frame, area: Rect, app: &App) {
 
 fn heartbeat_status(last_hb: Option<std::time::Instant>, now: std::time::Instant) -> (&'static str, ratatui::style::Color) {
     match last_hb {
-        Some(t) if now.duration_since(t).as_secs() < HEARTBEAT_TIMEOUT_SECS => {
+        Some(t) if now.duration_since(t).as_secs() < widgets::HEARTBEAT_TIMEOUT_SECS => {
             ("Online", theme::FG_POSITIVE)
         }
         Some(_) => ("Stale", theme::FG_QUEUED),

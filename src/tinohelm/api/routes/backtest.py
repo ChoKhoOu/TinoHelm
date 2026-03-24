@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import re
 from datetime import date
 from pathlib import Path
@@ -19,6 +18,7 @@ import redis.asyncio as aioredis
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
 from tinohelm.core.audit import log_audit
 from tinohelm.core.config import Settings
+from tinohelm.core.utils import sanitize_for_json
 from tinohelm.db.models import BacktestRun, RunStatus, Strategy, StrategyVersion
 
 logger = logging.getLogger(__name__)
@@ -125,19 +125,6 @@ class BacktestDeleteResponse(BaseModel):
 
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 _HEX_RE = re.compile(r'^[0-9a-f]+$')
-
-
-def _sanitize_json(obj: object) -> object:
-    """Replace NaN/Infinity with None recursively."""
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, dict):
-        return {k: _sanitize_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_json(v) for v in obj]
-    return obj
 
 
 async def resolve_run_id(prefix: str, db: AsyncSession) -> str:
@@ -383,7 +370,7 @@ async def get_backtest_result(
         raise HTTPException(status_code=404, detail="Artifact file not found (run may still be in progress)")
 
     content = await asyncio.to_thread(artifact_path.read_text)
-    data = _sanitize_json(json.loads(content))
+    data = sanitize_for_json(json.loads(content))
     return data
 
 

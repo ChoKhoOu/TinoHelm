@@ -599,7 +599,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                     let ret = m.get("return_pct").and_then(|r| r.as_f64());
                     if let Some(r) = ret {
                         let bar_len = (r.abs() * 3.0).min(15.0) as usize;
-                        let bar_char = if r >= 0.0 { "\u{2588}" } else { "\u{2588}" };
+                        let bar_char = "\u{2588}";
                         let bar_color = if r >= 0.0 {
                             theme::FG_POSITIVE
                         } else {

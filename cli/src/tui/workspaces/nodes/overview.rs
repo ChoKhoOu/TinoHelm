@@ -16,8 +16,6 @@ use crate::tui::theme;
 use crate::tui::widgets::{self, colored_val, header_cell, strip_venue, titled_block};
 use crate::tui::DataCmd;
 
-const HEARTBEAT_TIMEOUT_SECS: u64 = widgets::HEARTBEAT_TIMEOUT_SECS;
-
 // ── Helpers ────────────────────────────────────────────────────────────
 
 fn filtered_positions(app: &App) -> Vec<(usize, &crate::types::TradingPosition)> {
@@ -123,7 +121,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
     let mut node_lines = Vec::new();
     for (i, (name, last_hb, uptime)) in nodes.iter().enumerate() {
         let online = match last_hb {
-            Some(t) => std::time::Instant::now().duration_since(*t).as_secs() < HEARTBEAT_TIMEOUT_SECS,
+            Some(t) => std::time::Instant::now().duration_since(*t).as_secs() < widgets::HEARTBEAT_TIMEOUT_SECS,
             None => false,
         };
         let is_active = app.active_node_type == *name;
@@ -561,9 +559,9 @@ fn render_positions(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_pnl_chart(f: &mut Frame, area: Rect, app: &App) {
     let focused = app.node_panel_focus == NodePanel::Chart;
-    let block = titled_block(" EQUITY ", focused);
 
     if app.equity_curve.is_empty() {
+        let block = titled_block(" EQUITY ", focused);
         let p = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -597,8 +595,9 @@ fn render_pnl_chart(f: &mut Frame, area: Rect, app: &App) {
 
     let x_max = (data_points.len() as f64 - 1.0).max(1.0);
 
+    let block = titled_block(" EQUITY ", focused);
     let chart = Chart::new(datasets)
-        .block(titled_block(" EQUITY ", focused))
+        .block(block)
         .x_axis(
             Axis::default()
                 .bounds([0.0, x_max])

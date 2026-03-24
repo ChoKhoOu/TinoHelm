@@ -14,6 +14,8 @@ from typing import Any
 import pandas as pd
 from nautilus_trader.analysis.statistic import PortfolioStatistic
 
+from tinohelm.backtest.result import _format_duration_ns
+
 
 # ---------------------------------------------------------------------------
 # Returns-based statistics (fallbacks for Rust versions that return None)
@@ -235,7 +237,7 @@ class AvgTradeDuration(PortfolioStatistic):
         if not durations:
             return None
         avg_ns = sum(durations) / len(durations)
-        return _format_duration(avg_ns)
+        return _format_duration_ns(avg_ns)
 
 
 class AvgWinningDuration(PortfolioStatistic):
@@ -258,7 +260,7 @@ class AvgWinningDuration(PortfolioStatistic):
                     durations.append(int(dur))
         if not durations:
             return None
-        return _format_duration(sum(durations) / len(durations))
+        return _format_duration_ns(sum(durations) / len(durations))
 
 
 class AvgLosingDuration(PortfolioStatistic):
@@ -281,7 +283,7 @@ class AvgLosingDuration(PortfolioStatistic):
                     durations.append(int(dur))
         if not durations:
             return None
-        return _format_duration(sum(durations) / len(durations))
+        return _format_duration_ns(sum(durations) / len(durations))
 
 
 # ---------------------------------------------------------------------------
@@ -331,28 +333,6 @@ class TotalCommission(PortfolioStatistic):
             except Exception:
                 pass
         return round(total, 4)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _format_duration(ns: float) -> str:
-    """Convert nanoseconds to human-readable duration."""
-    total_seconds = int(ns) // 1_000_000_000
-    days, remainder = divmod(total_seconds, 86400)
-    hours, remainder = divmod(remainder, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    parts: list[str] = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes:
-        parts.append(f"{minutes}m")
-    if seconds or not parts:
-        parts.append(f"{seconds}s")
-    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import signal
 import sys
 import time
@@ -13,20 +12,8 @@ import redis
 
 logger = logging.getLogger(__name__)
 
+from tinohelm.core.utils import sanitize_for_json
 from tinohelm.db.sync_engine import get_sync_engine
-
-
-def _deep_sanitize(obj):
-    """Recursively replace NaN/Infinity with None in nested structures."""
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, dict):
-        return {k: _deep_sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_deep_sanitize(v) for v in obj]
-    return obj
 
 
 def _publish_progress(
@@ -208,7 +195,7 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 r.setex(f"tino:backtest:progress:{run_id}", 86400, "95")
 
                 # Sanitize NaN/Infinity before any serialization
-                results = _deep_sanitize(results)
+                results = sanitize_for_json(results)
 
                 # Save artifact JSON
                 artifact_path = artifact_dir / "results.json"
@@ -277,11 +264,6 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
     logger.info("Backtest worker stopped")
 
 
-# Alias used by process_manager and watchdog
-def run_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_url: str, idle_timeout: int = 0) -> None:
-    """Entry-point alias for backtest_worker (used by ProcessManager)."""
-    backtest_worker(redis_url, catalog_path, artifacts_path, db_url, idle_timeout)
-
 
 def _update_db_status(
     db_url: str,
@@ -308,17 +290,7 @@ def _update_db_status(
                 "completed_at": datetime.utcnow(),
             }
             if result_summary is not None:
-                # Sanitize for JSON: replace NaN/Infinity with None
-                import math
-                def _sanitize(obj):
-                    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-                        return None
-                    if isinstance(obj, dict):
-                        return {k: _sanitize(v) for k, v in obj.items()}
-                    if isinstance(obj, list):
-                        return [_sanitize(v) for v in obj]
-                    return obj
-                values["result_summary_json"] = _sanitize(result_summary)
+                values["result_summary_json"] = sanitize_for_json(result_summary)
             if error_msg is not None:
                 values["error"] = error_msg
             session.execute(

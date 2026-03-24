@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
-use crate::cli::style::{POS, NEG};
 
 use crate::api::ApiClient;
 use crate::cli::style::*;

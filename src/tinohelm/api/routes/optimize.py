@@ -5,9 +5,7 @@ import logging
 import multiprocessing
 from datetime import date
 from pathlib import Path
-from typing import Any
-
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field

@@ -120,6 +120,14 @@ def extract_backtest_results(
     """
     analyzer = engine.portfolio.analyzer
 
+    # Fetch returns series once; reused across equity curve, periodic
+    # returns, drawdown analysis, and fallback risk metrics.
+    try:
+        returns_series: pd.Series = analyzer.returns()
+    except Exception:
+        returns_series = None
+        logger.warning("Failed to get returns series from analyzer", exc_info=True)
+
     # ------------------------------------------------------------------
     # 1. Performance stats from analyzer
     # ------------------------------------------------------------------
@@ -158,17 +166,16 @@ def extract_backtest_results(
     # Fallback: compute max_drawdown / CAGR / Calmar from returns series
     # when NT custom statistics registration fails or key names mismatch.
     try:
-        returns_series_fb: pd.Series = analyzer.returns()
-        if returns_series_fb is not None and len(returns_series_fb) > 0:
+        if returns_series is not None and len(returns_series) > 0:
             if max_drawdown is None:
-                cum = (1 + returns_series_fb).cumprod()
+                cum = (1 + returns_series).cumprod()
                 peak = cum.cummax()
                 dd = (cum - peak) / peak
                 max_drawdown = _safe_float(dd.min())
             if cagr is None:
-                cum_all = (1 + returns_series_fb).cumprod()
+                cum_all = (1 + returns_series).cumprod()
                 total_ret = float(cum_all.iloc[-1])
-                n_days = len(returns_series_fb)
+                n_days = len(returns_series)
                 if n_days > 0 and total_ret > 0:
                     cagr = _safe_float(total_ret ** (252.0 / n_days) - 1.0)
             if calmar is None and cagr is not None and max_drawdown is not None and max_drawdown != 0:
@@ -306,7 +313,6 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     equity_curve: list[dict[str, Any]] = []
     try:
-        returns_series: pd.Series = analyzer.returns()
         if returns_series is not None and len(returns_series) > 0:
             cumulative = (1 + returns_series).cumprod() * starting_balance
             peak = cumulative.cummax()
@@ -497,9 +503,8 @@ def extract_backtest_results(
     monthly_returns: list[dict[str, Any]] = []
     weekly_returns: list[dict[str, Any]] = []
     try:
-        returns_series_raw: pd.Series = analyzer.returns()
-        if returns_series_raw is not None and len(returns_series_raw) > 0:
-            rs = returns_series_raw.copy()
+        if returns_series is not None and len(returns_series) > 0:
+            rs = returns_series.copy()
             rs.index = pd.to_datetime(rs.index)
 
             # Monthly
@@ -525,9 +530,8 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     drawdown_periods: list[dict[str, Any]] = []
     try:
-        returns_series_dd: pd.Series = analyzer.returns()
-        if returns_series_dd is not None and len(returns_series_dd) > 0:
-            rs_dd = returns_series_dd.copy()
+        if returns_series is not None and len(returns_series) > 0:
+            rs_dd = returns_series.copy()
             rs_dd.index = pd.to_datetime(rs_dd.index)
             cum = (1 + rs_dd).cumprod()
             peak = cum.cummax()

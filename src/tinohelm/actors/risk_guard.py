@@ -14,6 +14,7 @@ from enum import Enum
 from nautilus_trader.common.actor import Actor, ActorConfig
 from nautilus_trader.model.data import Bar
 
+from tinohelm.data.instruments import _resolve_currency
 from tinohelm.node.topics import RISK_GUARD_FLATTEN, RISK_GUARD_STATE
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ class RiskGuardActor(Actor):
 
         # Resolve NT objects once
         self._venue = Venue(self._venue_name)
-        self._currency_obj = self._resolve_currency(self._currency_str)
+        self._currency_obj = _resolve_currency(self._currency_str)
 
         # Subscribe to every bar type the engine has loaded so on_bar() fires
         for bar_type in self.cache.bar_types():
@@ -139,20 +140,6 @@ class RiskGuardActor(Actor):
 
         # Run all risk checks
         self._check_risks()
-
-    @staticmethod
-    def _resolve_currency(currency_str: str):
-        """Resolve a currency string to an NT Currency object."""
-        from nautilus_trader.model.currencies import USDT, USD, BTC, ETH
-
-        _CURRENCY_MAP = {
-            "USDT": USDT, "USD": USD, "BTC": BTC, "ETH": ETH,
-        }
-        currency = _CURRENCY_MAP.get(currency_str)
-        if currency is None:
-            logger.warning("Unknown currency: %s, falling back to USDT", currency_str)
-            return USDT
-        return currency
 
     def _get_equity(self) -> float:
         """Get current portfolio equity including unrealized PnL via NT Portfolio API."""
