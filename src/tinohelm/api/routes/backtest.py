@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 from datetime import date
 from pathlib import Path
@@ -126,6 +127,19 @@ _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 _HEX_RE = re.compile(r'^[0-9a-f]+$')
 
 
+def _sanitize_json(obj: object) -> object:
+    """Replace NaN/Infinity with None recursively."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
 async def resolve_run_id(prefix: str, db: AsyncSession) -> str:
     """Resolve a short run_id prefix to a full UUID, git-style.
 
@@ -233,7 +247,7 @@ async def create_backtest_run(
 @router.get("/runs", response_model=BacktestRunList)
 async def list_backtest_runs(
     limit: int = Query(default=20, ge=1, le=100),
-    offset: int = 0,
+    offset: int = Query(default=0, ge=0),
     strategy: str | None = None,
     status: str | None = None,
     start_date: date | None = None,
@@ -369,7 +383,8 @@ async def get_backtest_result(
         raise HTTPException(status_code=404, detail="Artifact file not found (run may still be in progress)")
 
     content = await asyncio.to_thread(artifact_path.read_text)
-    return json.loads(content)
+    data = _sanitize_json(json.loads(content))
+    return data
 
 
 @router.post("/{run_id}/cancel", response_model=BacktestCancelResponse)

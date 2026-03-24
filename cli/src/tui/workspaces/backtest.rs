@@ -641,7 +641,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
                             .map(|pnl| (t, pnl))
                     })
                     .collect();
-                trades_with_pnl.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                trades_with_pnl.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 // Best 3
                 for (t, pnl) in trades_with_pnl.iter().take(3) {

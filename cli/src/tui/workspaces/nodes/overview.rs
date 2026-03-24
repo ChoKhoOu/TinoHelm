@@ -426,7 +426,7 @@ fn render_summary_bar(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(filter_label, Style::default().fg(theme::FG_TAG)),
     ];
     // Pad to fill width
-    let used: usize = spans.iter().map(|s| s.content.len()).sum();
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     if (area.width as usize) > used {
         spans.push(Span::raw(" ".repeat(area.width as usize - used)));
     }

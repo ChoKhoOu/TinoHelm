@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use reqwest::Client;
 
@@ -13,7 +15,11 @@ impl ApiClient {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.to_string(),
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 

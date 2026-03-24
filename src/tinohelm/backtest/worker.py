@@ -3,16 +3,30 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 import redis
 
 logger = logging.getLogger(__name__)
 
 from tinohelm.db.sync_engine import get_sync_engine
+
+
+def _deep_sanitize(obj):
+    """Recursively replace NaN/Infinity with None in nested structures."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _deep_sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_deep_sanitize(v) for v in obj]
+    return obj
 
 
 def _publish_progress(
@@ -193,6 +207,9 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 _publish_progress(r, run_id, 95, elapsed_secs=elapsed)
                 r.setex(f"tino:backtest:progress:{run_id}", 86400, "95")
 
+                # Sanitize NaN/Infinity before any serialization
+                results = _deep_sanitize(results)
+
                 # Save artifact JSON
                 artifact_path = artifact_dir / "results.json"
                 with open(artifact_path, "w") as f:
@@ -288,7 +305,7 @@ def _update_db_status(
         with Session(engine) as session:
             values: dict = {
                 "status": RunStatus(status),
-                "completed_at": datetime.now(timezone.utc),
+                "completed_at": datetime.utcnow(),
             }
             if result_summary is not None:
                 # Sanitize for JSON: replace NaN/Infinity with None

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import datetime, date, timezone, timedelta
+from datetime import datetime, date, timedelta
 from typing import Any
 
 try:
@@ -747,7 +747,7 @@ class BacktestOptimizer:
                         best_value=best_value,
                         trials_completed=trials_completed,
                         result_json=result_json,
-                        completed_at=datetime.now(timezone.utc),
+                        completed_at=datetime.utcnow(),
                     )
                 )
                 session.commit()
@@ -773,7 +773,7 @@ class BacktestOptimizer:
                     .values(
                         status=OptimizationStatus.failed,
                         error=error_msg,
-                        completed_at=datetime.now(timezone.utc),
+                        completed_at=datetime.utcnow(),
                     )
                 )
                 session.commit()

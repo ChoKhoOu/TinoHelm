@@ -217,11 +217,12 @@ class RiskGuardActor(Actor):
                 return
 
         # 4. Position count check
+        # Breach when exceeding max, not at exactly max
         if self._max_positions is not None:
             position_count = len(self.portfolio.positions_open())
-            if position_count >= self._max_positions:
+            if position_count > self._max_positions:
                 logger.warning(
-                    "RISK BREACH: positions %d >= limit %d",
+                    "RISK BREACH: positions %d > limit %d",
                     position_count, self._max_positions,
                 )
                 self._trigger_breach("position_count")

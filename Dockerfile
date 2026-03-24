@@ -34,4 +34,9 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
-CMD ["sh", "-c", "alembic upgrade head || echo 'WARNING: Migration failed, continuing...' && uvicorn tinohelm.api.app:app --host 0.0.0.0 --port 8000"]
+# Add non-root user
+RUN groupadd -r tino && useradd -r -g tino -d /app tino
+RUN chown -R tino:tino /app
+USER tino
+
+CMD ["sh", "-c", "alembic upgrade head && uvicorn tinohelm.api.app:app --host 0.0.0.0 --port 8000"]

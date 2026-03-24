@@ -1034,7 +1034,20 @@ async fn handle_key(
                             .join(&bt.run_id)
                             .join("tearsheet.html");
                         if path.exists() {
-                            let _ = std::process::Command::new("open")
+                            #[cfg(target_os = "macos")]
+                            let opener = "open";
+                            #[cfg(target_os = "linux")]
+                            let opener = "xdg-open";
+                            #[cfg(target_os = "windows")]
+                            let opener = "cmd";
+
+                            #[cfg(not(target_os = "windows"))]
+                            let _ = std::process::Command::new(opener)
+                                .arg(&path)
+                                .spawn();
+                            #[cfg(target_os = "windows")]
+                            let _ = std::process::Command::new(opener)
+                                .args(["/C", "start"])
                                 .arg(&path)
                                 .spawn();
                         } else {
@@ -1054,7 +1067,20 @@ async fn handle_key(
                             .join(".tino/data/artifacts")
                             .join(&bt.run_id);
                         if path.exists() {
-                            let _ = std::process::Command::new("open")
+                            #[cfg(target_os = "macos")]
+                            let opener = "open";
+                            #[cfg(target_os = "linux")]
+                            let opener = "xdg-open";
+                            #[cfg(target_os = "windows")]
+                            let opener = "cmd";
+
+                            #[cfg(not(target_os = "windows"))]
+                            let _ = std::process::Command::new(opener)
+                                .arg(&path)
+                                .spawn();
+                            #[cfg(target_os = "windows")]
+                            let _ = std::process::Command::new(opener)
+                                .args(["/C", "start"])
                                 .arg(&path)
                                 .spawn();
                         } else {
@@ -1583,9 +1609,13 @@ fn handle_nav_down(app: &mut App) {
                 }
                 app::NodePanel::Fills => {
                     // Bottom of grid col 1 — scroll within only
-                    if !app.fills.is_empty() {
+                    let filtered_count = app.fills.iter().filter(|f| match &app.selected_strategy {
+                        Some(tag) => f.strategy_id_tag.as_deref() == Some(tag.as_str()),
+                        None => true,
+                    }).take(50).count();
+                    if filtered_count > 0 {
                         app.fills_selected =
-                            (app.fills_selected + 1).min(app.fills.len().saturating_sub(1));
+                            (app.fills_selected + 1).min(filtered_count.saturating_sub(1));
                     }
                 }
                 app::NodePanel::Orders => {
@@ -1648,7 +1678,11 @@ fn handle_nav_up(app: &mut App) {
                     app.trading_selected = app.trading_selected.saturating_sub(1);
                 }
                 app::NodePanel::Fills => {
-                    if app.fills_selected == 0 || app.fills.is_empty() {
+                    let filtered_empty = app.fills.iter().filter(|f| match &app.selected_strategy {
+                        Some(tag) => f.strategy_id_tag.as_deref() == Some(tag.as_str()),
+                        None => true,
+                    }).next().is_none();
+                    if app.fills_selected == 0 || filtered_empty {
                         // Boundary jump: Fills → Positions
                         app.node_panel_focus = app::NodePanel::Positions;
                         app.node_last_row[1] = 0;

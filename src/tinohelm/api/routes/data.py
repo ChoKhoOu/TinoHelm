@@ -301,7 +301,7 @@ async def validate_data(
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.exception("Validation failed for %s %s: %s", symbol, interval, exc)
-        raise HTTPException(status_code=500, detail=f"Validation failed: {exc}")
+        raise HTTPException(status_code=500, detail="Internal validation error")
 
     return result
 

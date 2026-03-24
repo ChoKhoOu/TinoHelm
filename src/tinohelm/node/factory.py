@@ -73,8 +73,8 @@ def build_trading_node_config(
         }
     else:
         binance_config = {
-            "api_key": settings.binance.api_key,
-            "api_secret": settings.binance.api_secret,
+            "api_key": settings.binance.api_key.get_secret_value(),
+            "api_secret": settings.binance.api_secret.get_secret_value(),
             "account_type": settings.binance.account_type,
         }
 

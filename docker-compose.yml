@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tinohelm_secret}
       POSTGRES_DB: ${POSTGRES_DB:-tinohelm}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - ~/.tino/data/postgres:/var/lib/postgresql/data
     healthcheck:
@@ -19,13 +19,13 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme}
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - ~/.tino/data/redis:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -54,7 +54,7 @@ services:
         required: false
     environment:
       TINO_DATABASE__URL: "postgresql+asyncpg://${POSTGRES_USER:-tinohelm}:${POSTGRES_PASSWORD:-tinohelm_secret}@postgres:5432/${POSTGRES_DB:-tinohelm}"
-      TINO_REDIS__URL: "redis://redis:6379"
+      TINO_REDIS__URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
       BINANCE_API_KEY: "${BINANCE_API_KEY:-}"
       BINANCE_API_SECRET: "${BINANCE_API_SECRET:-}"
 
@@ -80,12 +80,12 @@ services:
         required: false
     environment:
       TINO_DATABASE__URL: "postgresql+asyncpg://${POSTGRES_USER:-tinohelm}:${POSTGRES_PASSWORD:-tinohelm_secret}@postgres:5432/${POSTGRES_DB:-tinohelm}"
-      TINO_REDIS__URL: "redis://redis:6379"
+      TINO_REDIS__URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
       BINANCE_API_KEY: "${BINANCE_API_KEY:-}"
       BINANCE_API_SECRET: "${BINANCE_API_SECRET:-}"
     healthcheck:
       test: ["CMD", "python", "-c",
-        "import redis; r=redis.Redis.from_url('redis://redis:6379'); assert r.exists('tino:heartbeat:sandbox')"]
+        "import redis; r=redis.Redis.from_url('redis://:${REDIS_PASSWORD:-changeme}@redis:6379'); assert r.exists('tino:heartbeat:sandbox')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -113,12 +113,12 @@ services:
         required: false
     environment:
       TINO_DATABASE__URL: "postgresql+asyncpg://${POSTGRES_USER:-tinohelm}:${POSTGRES_PASSWORD:-tinohelm_secret}@postgres:5432/${POSTGRES_DB:-tinohelm}"
-      TINO_REDIS__URL: "redis://redis:6379"
+      TINO_REDIS__URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
       BINANCE_API_KEY: "${BINANCE_API_KEY:-}"
       BINANCE_API_SECRET: "${BINANCE_API_SECRET:-}"
     healthcheck:
       test: ["CMD", "python", "-c",
-        "import redis; r=redis.Redis.from_url('redis://redis:6379'); assert r.exists('tino:heartbeat:live')"]
+        "import redis; r=redis.Redis.from_url('redis://:${REDIS_PASSWORD:-changeme}@redis:6379'); assert r.exists('tino:heartbeat:live')"]
       interval: 30s
       timeout: 5s
       retries: 3

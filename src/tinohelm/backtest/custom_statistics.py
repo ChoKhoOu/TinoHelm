@@ -119,7 +119,7 @@ class LosingTrades(PortfolioStatistic):
     def calculate_from_realized_pnls(self, realized_pnls: pd.Series) -> Any | None:
         if realized_pnls is None or realized_pnls.empty:
             return 0
-        return int((realized_pnls <= 0).sum())
+        return int((realized_pnls < 0).sum())
 
 
 class GrossProfit(PortfolioStatistic):

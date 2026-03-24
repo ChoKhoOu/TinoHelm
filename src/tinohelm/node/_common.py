@@ -8,10 +8,19 @@ import signal
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import redis
 
 logger = logging.getLogger(__name__)
+
+
+def _redis_url_with_db(url: str, db: int) -> str:
+    """Append database number to Redis URL if not already present."""
+    parsed = urlparse(url)
+    if parsed.path and parsed.path != "/":
+        return url  # Already has a DB path
+    return f"{url.rstrip('/')}/{db}"
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +176,7 @@ def load_components(
     redis_url = config["redis_url"]
     redis_db = config.get("redis_db", 0)
     bridge_config = BridgeActorConfig(
-        redis_url=f"{redis_url}/{redis_db}" if "/" not in redis_url.split("//")[-1] else redis_url,
+        redis_url=_redis_url_with_db(redis_url, redis_db),
         node_type=node_type,
         db_url=config.get("db_url", ""),
     )
@@ -179,7 +188,7 @@ def load_components(
     # Restore was_running state from Redis (best-effort)
     try:
         r = redis.Redis.from_url(
-            f"{redis_url}/{redis_db}" if "/" not in redis_url.split("//")[-1] else redis_url,
+            _redis_url_with_db(redis_url, redis_db),
             decode_responses=True,
         )
         saved = r.get(f"tino:{node_type}:portfolio_registry")
@@ -189,7 +198,7 @@ def load_components(
             logger.info("Restored portfolio registry state from Redis")
         r.close()
     except Exception:
-        pass  # Best-effort restore
+        logger.debug("Best-effort portfolio registry restore failed", exc_info=True)
 
     return bridge_actor
 

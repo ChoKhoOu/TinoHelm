@@ -6,13 +6,13 @@ import json
 import logging
 from typing import Literal
 
-import redis as redis_lib
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tinohelm.api.deps import get_db, get_process_manager
+from tinohelm.api.deps import get_db, get_process_manager, get_redis
 from tinohelm.core.config import get_settings
 from tinohelm.core.process_manager import ProcessManager
 from tinohelm.db.models import Position
@@ -82,39 +82,37 @@ async def lifecycle_command(
 @router.get("/lifecycle/state")
 async def lifecycle_state(
     mode: Literal["sandbox", "live"] = "live",
+    rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Return lifecycle state (trading_state, strategy_states, paused list)."""
-    settings = get_settings()
-    r = redis_lib.Redis.from_url(settings.redis.url, decode_responses=True)
-    try:
-        raw = r.get(f"tino:{mode}:lifecycle_state")
-        if raw:
-            return json.loads(raw)
-        return {"trading_state": "unknown", "strategy_states": {}, "paused": []}
-    finally:
-        r.close()
+    raw = await rds.get(f"tino:{mode}:lifecycle_state")
+    if raw:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        return json.loads(raw)
+    return {"trading_state": "unknown", "strategy_states": {}, "paused": []}
 
 
 @router.get("/portfolios")
 async def list_portfolios(
     mode: Literal["sandbox", "live"] = "live",
+    rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Return all portfolios with their state."""
-    settings = get_settings()
-    r = redis_lib.Redis.from_url(settings.redis.url, decode_responses=True)
-    try:
-        raw = r.get(f"tino:{mode}:portfolio_registry")
-        if raw:
-            data = json.loads(raw)
-            return {"portfolios": data.get("portfolios", {})}
-        # Fallback: try heartbeat
-        hb_raw = r.get(f"tino:heartbeat:{mode}")
-        if hb_raw:
-            hb = json.loads(hb_raw)
-            return {"portfolios": hb.get("portfolios", {})}
-        return {"portfolios": {}}
-    finally:
-        r.close()
+    raw = await rds.get(f"tino:{mode}:portfolio_registry")
+    if raw:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        data = json.loads(raw)
+        return {"portfolios": data.get("portfolios", {})}
+    # Fallback: try heartbeat
+    hb_raw = await rds.get(f"tino:heartbeat:{mode}")
+    if hb_raw:
+        if isinstance(hb_raw, bytes):
+            hb_raw = hb_raw.decode()
+        hb = json.loads(hb_raw)
+        return {"portfolios": hb.get("portfolios", {})}
+    return {"portfolios": {}}
 
 
 @router.post("/portfolio/start")
@@ -200,11 +198,11 @@ async def node_status(
     # Compute risk metrics from positions
     total_exposure = 0.0
     try:
-        stmt = select(Position.quantity, Position.avg_price)
+        stmt = select(Position.quantity, Position.avg_px_open)
         rows = (await db.execute(stmt)).all()
         for row in rows:
             qty = float(row.quantity)
-            price = float(row.avg_price)
+            price = float(row.avg_px_open) if row.avg_px_open is not None else 0.0
             total_exposure += abs(qty * price)
     except Exception as exc:
         logger.error("Failed to compute risk metrics: %s", exc)
@@ -214,8 +212,8 @@ async def node_status(
     var_multiplier = cfg.risk.var_multiplier
     status["risk_metrics"] = {
         "total_exposure": round(total_exposure, 2),
-        "margin_used_pct": round(total_exposure / base_capital * 100, 2),
-        "leverage": round(total_exposure / base_capital, 4) if total_exposure > 0 else 0.0,
+        "margin_used_pct": round(total_exposure / base_capital * 100, 2) if base_capital > 0 else 0.0,
+        "leverage": round(total_exposure / base_capital, 2) if base_capital > 0 else 0.0,
         "max_drawdown": 0.0,
         "daily_var": round(total_exposure * var_multiplier, 2),
     }

@@ -36,7 +36,7 @@ class AllocationItem(BaseModel):
     instrument_id: str
     side: str
     quantity: str
-    avg_price: str
+    avg_px_open: float | None = None
     unrealized_pnl: str
     node_type: str
 
@@ -68,9 +68,9 @@ async def dashboard_summary(
     agg = await db.execute(
         select(
             func.count(Position.id).label("count"),
-            func.coalesce(func.sum(cast(Position.quantity, Float) * cast(Position.avg_price, Float)), 0).label("equity"),
+            func.coalesce(func.sum(cast(Position.quantity, Float) * cast(Position.avg_px_open, Float)), 0).label("equity"),
             func.coalesce(func.sum(cast(Position.unrealized_pnl, Float)), 0).label("pnl"),
-        )
+        ).where(Position.is_open == True)
     )
     row = agg.one()
     open_positions = row.count
@@ -106,9 +106,9 @@ async def portfolio_allocation(
             instrument_id=p.instrument_id,
             side=p.side,
             quantity=p.quantity,
-            avg_price=p.avg_price,
+            avg_px_open=p.avg_px_open,
             unrealized_pnl=p.unrealized_pnl,
-            node_type=p.node_type.value,
+            node_type=p.node_type,
         )
         for p in rows
     ]

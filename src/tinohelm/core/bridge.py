@@ -140,7 +140,7 @@ class EventBridge:
                     await self._relay(payload, self._clients.get("*", set()))
 
                     # Send to channel-specific subscribers
-                    for pattern, clients in self._clients.items():
+                    for pattern, clients in list(self._clients.items()):
                         if pattern != "*" and not channel.startswith(pattern):
                             continue
                         if pattern != "*":
@@ -188,7 +188,7 @@ class EventBridge:
                     # Relay to all WS clients (wildcard)
                     await self._relay(payload, self._clients.get("*", set()))
                     # Relay to channel-specific subscribers
-                    for pattern, clients in self._clients.items():
+                    for pattern, clients in list(self._clients.items()):
                         if pattern != "*" and f"tino:heartbeat:{node_type}".startswith(pattern):
                             await self._relay(payload, clients)
 

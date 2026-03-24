@@ -8,7 +8,7 @@ from pathlib import Path
 from functools import lru_cache
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -29,8 +29,8 @@ class RedisSettings(BaseModel):
 
 
 class BinanceSettings(BaseModel):
-    api_key: str = ""
-    api_secret: str = ""
+    api_key: SecretStr = SecretStr("")
+    api_secret: SecretStr = SecretStr("")
     account_type: str = "USDT_FUTURES"
     testnet: bool = True
 
@@ -100,12 +100,19 @@ def load_settings() -> Settings:
             data = yaml.safe_load(f) or {}
             merged = _deep_merge(merged, data)
 
-    # Strip YAML sections that have env var overrides so that
+    # Strip specific YAML keys that have env var overrides so that
     # pydantic-settings can pick up env vars (TINO_REDIS__URL etc.)
     # instead of being overridden by YAML constructor kwargs.
+    # Only delete the specific nested key, not the entire section.
     for section in list(merged.keys()):
         env_prefix = f"TINO_{section.upper()}__"
-        if any(k.startswith(env_prefix) for k in os.environ):
+        matching_env_keys = [k for k in os.environ if k.startswith(env_prefix)]
+        if matching_env_keys and isinstance(merged.get(section), dict):
+            for env_key in matching_env_keys:
+                # e.g. TINO_DATABASE__URL -> nested key "url"
+                nested_key = env_key[len(env_prefix):].lower().split("__")[0]
+                merged[section].pop(nested_key, None)
+        elif matching_env_keys:
             del merged[section]
 
     return Settings(**merged)

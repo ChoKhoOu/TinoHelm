@@ -1,14 +1,17 @@
 """FastAPI application with lifespan handler for TinoHelm."""
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 
 from tinohelm.api import deps
 from tinohelm.api.routes import backtest, dashboard, data, node, optimize, settings, strategy, trading, watchlist
@@ -22,6 +25,17 @@ from tinohelm.db.session import get_engine, get_session_factory
 from tinohelm.strategy.registry import persist_strategies, scan_strategies
 
 logger = logging.getLogger(__name__)
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Security(_api_key_header)):
+    """Verify the API key if TINO_API_KEY is configured."""
+    expected = os.environ.get("TINO_API_KEY", "")
+    if not expected:
+        return  # No key configured = auth disabled (dev mode)
+    if not api_key or not hmac.compare_digest(api_key, expected):
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 
 @asynccontextmanager
@@ -78,6 +92,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ---- shutdown ----
     logger.info("TinoHelm API shutting down")
 
+    from .routes.optimize import cleanup_optimizer_processes
+    cleanup_optimizer_processes()
+
     await watchdog.stop()
     pm.shutdown_all()
     await bridge.stop()
@@ -97,24 +114,32 @@ def create_app() -> FastAPI:
 
     # CORS — origins configurable via settings (default: ["*"])
     cfg = get_settings()
+    if "*" in cfg.server.cors_origins:
+        allow_credentials = False
+    else:
+        allow_credentials = True
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cfg.server.cors_origins,
-        allow_credentials=True,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
     # Include all route modules
-    app.include_router(backtest.router)
-    app.include_router(optimize.router)
-    app.include_router(node.router)
+    # State-changing routers require API key authentication
+    _auth_deps = [Depends(verify_api_key)]
+    app.include_router(backtest.router, dependencies=_auth_deps)
+    app.include_router(optimize.router, dependencies=_auth_deps)
+    app.include_router(node.router, dependencies=_auth_deps)
+    app.include_router(settings.router, dependencies=_auth_deps)
+    app.include_router(watchlist.router, dependencies=_auth_deps)
+    # Read-only routers — no auth required
     app.include_router(strategy.router)
     app.include_router(data.router)
     app.include_router(trading.router)
     app.include_router(dashboard.router)
-    app.include_router(settings.router)
-    app.include_router(watchlist.router)
     app.include_router(hub.router)
 
     return app

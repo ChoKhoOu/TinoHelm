@@ -226,26 +226,34 @@ def klines_to_parquet(
     catalog.write_data([instrument])
 
     # Merge with existing bars to deduplicate by timestamp (keep latest)
+    existing_files: list[Path] = []
     try:
         existing_bars = catalog.bars(bar_types=[str(bar_type)])
         if existing_bars:
+            # Track old files before writing new data
+            bar_dir = catalog_path / "data" / "bar" / str(bar_type)
+            if bar_dir.exists():
+                existing_files = list(bar_dir.glob("*.parquet"))
+
             seen: dict[int, Any] = {b.ts_event: b for b in existing_bars}
             for b in bars:
                 seen[b.ts_event] = b  # newer overwrites older
             bars = sorted(seen.values(), key=lambda b: b.ts_event)
             logger.info("Merged with %d existing bars, total %d after dedup", len(existing_bars), len(bars))
-
-            # Remove old parquet files before rewriting (NT requires disjoint intervals)
-            bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-            if bar_dir.exists():
-                for old_file in bar_dir.glob("*.parquet"):
-                    old_file.unlink()
-                logger.info("Cleared old parquet files in %s before rewrite", bar_dir)
     except Exception:
-        logger.debug("No existing bars for %s %s, writing fresh", symbol, interval)
+        logger.warning("Failed to read existing bars for %s %s", symbol, interval, exc_info=True)
 
-    # Write bars (must be sorted by ts_init — wrangler ensures this)
+    if not bars:
+        logger.warning("No bars to write for %s %s after merge", symbol, interval)
+        return []
+
+    # Write merged bars first (write-before-delete for safety)
     catalog.write_data(bars)
+
+    # Remove old parquet files after successful write (NT requires disjoint intervals)
+    for old_file in existing_files:
+        if old_file.exists():
+            old_file.unlink()
 
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
 
@@ -319,29 +327,34 @@ def write_bars(
     bar_type = _make_bar_type(instrument.id, interval)
 
     # Merge with existing bars if present (incremental update case)
+    existing_files: list[Path] = []
     try:
         catalog = ParquetDataCatalog(str(catalog_path))
         existing_bars = catalog.bars(bar_types=[str(bar_type)])
         if existing_bars:
+            # Track old files before writing new data
+            bar_dir = catalog_path / "data" / "bar" / str(bar_type)
+            if bar_dir.exists():
+                existing_files = list(bar_dir.glob("*.parquet"))
+
             seen: dict[int, Any] = {b.ts_event: b for b in existing_bars}
             for b in bars:
                 seen[b.ts_event] = b
             bars = sorted(seen.values(), key=lambda b: b.ts_event)
             logger.info("Merged %d existing + %d new bars = %d total",
                         len(existing_bars), len(bars) - len(existing_bars), len(bars))
-
-            # Remove old parquet files (NT requires disjoint intervals)
-            bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-            if bar_dir.exists():
-                for old_file in bar_dir.glob("*.parquet"):
-                    old_file.unlink()
     except Exception:
-        logger.debug("No existing bars for %s %s, writing fresh", symbol, interval)
+        logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
 
-    # Write all bars in a single call to satisfy NT's disjoint constraint
+    # Write all bars in a single call to satisfy NT's disjoint constraint (write-before-delete)
     catalog = ParquetDataCatalog(str(catalog_path))
     catalog.write_data([instrument])
     catalog.write_data(bars)
+
+    # Remove old parquet files after successful write
+    for old_file in existing_files:
+        if old_file.exists():
+            old_file.unlink()
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
 
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)

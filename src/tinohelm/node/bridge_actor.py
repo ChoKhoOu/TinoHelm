@@ -168,6 +168,25 @@ class BridgeActor(Actor):
             action = cmd.get("cmd")
             strategy_id = cmd.get("strategy_id")
 
+            # Internal command: rescan portfolio folders (enqueued by file watcher)
+            if action == "_rescan_portfolios":
+                if self._registry is not None:
+                    try:
+                        strategies_dir = Path(os.environ.get(
+                            "TINO_STRATEGIES_DIR",
+                            str(Path.home() / ".tino" / "strategies"),
+                        ))
+                        if strategies_dir.exists():
+                            changed = self._registry.scan(strategies_dir)
+                            if changed:
+                                self.log.info(f"Portfolio folder change detected: {changed}")
+                                self._publish("portfolio_update", {
+                                    "portfolios": self._registry.get_all_states(),
+                                })
+                    except Exception as e:
+                        self.log.error(f"Rescan portfolios error: {e}")
+                continue  # Internal command, no ack needed
+
             if self._lifecycle is None:
                 self.log.warning(f"Command '{action}' ignored: LifecycleController not initialized")
                 self._publish("commands_ack", {"cmd": action, "status": "error", "reason": "no_lifecycle"})
@@ -229,22 +248,11 @@ class BridgeActor(Actor):
     def _file_watcher(self) -> None:
         """Poll strategies directory for new/deleted portfolio folders."""
         import time
-        strategies_dir = Path(os.environ.get(
-            "TINO_STRATEGIES_DIR",
-            str(Path.home() / ".tino" / "strategies"),
-        ))
         while self._running:
             time.sleep(10)
             if self._registry is not None:
-                try:
-                    changed = self._registry.scan(strategies_dir)
-                    if changed:
-                        self.log.info(f"Portfolio folder change detected: {changed}")
-                        self._publish("portfolio_update", {
-                            "portfolios": self._registry.get_all_states(),
-                        })
-                except Exception as e:
-                    self.log.error(f"File watcher scan error: {e}")
+                # Enqueue rescan to run on the NT event loop thread (thread-safe)
+                self._pending_commands.append({"cmd": "_rescan_portfolios"})
 
     def _publish(self, channel_suffix: str, data: dict) -> None:
         """Publish event data to Redis PubSub channel."""
@@ -260,7 +268,7 @@ class BridgeActor(Actor):
         if not self._redis:
             return
         try:
-            # Gather status info from cache
+            # Use cache (actual trader state) rather than registry for live accuracy
             strategies = self.cache.strategy_ids()
             positions = self.cache.positions()
 

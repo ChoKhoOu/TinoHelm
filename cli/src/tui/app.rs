@@ -302,13 +302,6 @@ impl App {
         self.workspace = ws;
         self.panel_focus = PanelFocus::Left;
         self.popup = None;
-        // Reset node workspace focus
-        self.node_panel_focus = NodePanel::Sidebar;
-        self.node_sidebar_section = NodeSidebarSection::NodeSelector;
-        self.node_sidebar_idx = 0;
-        self.selected_strategy = None;
-        self.selected_portfolio_idx = None;
-        self.node_last_row = [0, 0, 0];
     }
 
     /// Return the grid column (0-2) for the current node panel focus.
@@ -521,8 +514,8 @@ impl App {
             || self.trading_loading
             || self.orders_loading
             || self.portfolio_loading
-            || self.sandbox_last_heartbeat.is_some()
-            || self.live_last_heartbeat.is_some()
+            || self.sandbox_last_heartbeat.map(|t| t.elapsed().as_secs() < 30).unwrap_or(false)
+            || self.live_last_heartbeat.map(|t| t.elapsed().as_secs() < 30).unwrap_or(false)
             || matches!(self.ws_state, WsState::Connected | WsState::Connecting)
     }
 

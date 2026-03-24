@@ -27,6 +27,15 @@ router = APIRouter(prefix="/api/backtest/optimize", tags=["optimize"])
 _optimizer_processes: dict[int, multiprocessing.Process] = {}
 
 
+def cleanup_optimizer_processes() -> None:
+    """Clean up running optimizer processes on shutdown."""
+    for key, proc in list(_optimizer_processes.items()):
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=5)
+        del _optimizer_processes[key]
+
+
 # ---- request / response schemas ----
 
 class ParamRangeSpec(BaseModel):

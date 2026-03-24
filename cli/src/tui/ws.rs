@@ -1,4 +1,4 @@
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
@@ -24,7 +24,7 @@ pub async fn run_ws_client(
                 let _ = event_tx.send(WsClientEvent::Connected);
                 backoff_secs = 1; // Reset backoff on successful connect
 
-                let (mut _sink, mut read) = stream.split();
+                let (mut sink, mut read) = stream.split();
 
                 loop {
                     match read.next().await {
@@ -41,8 +41,9 @@ pub async fn run_ws_client(
                         Some(Ok(Message::Ping(_))) => {
                             // Tungstenite handles pong automatically
                         }
-                        Some(Ok(Message::Close(_))) => {
+                        Some(Ok(Message::Close(frame))) => {
                             debug!("WebSocket server sent close frame");
+                            let _ = sink.send(Message::Close(frame)).await;
                             break;
                         }
                         Some(Ok(_)) => {}

@@ -203,6 +203,7 @@ class LifecycleController:
 
             # Atomic registration: rollback on partial failure
             added_strategies = []
+            added_actors = []
             try:
                 for strategy in strategy_instances:
                     if strategy.id in self._trader.strategy_ids():
@@ -212,10 +213,16 @@ class LifecycleController:
 
                 for actor in actor_instances:
                     self._trader.add_actor(actor)
+                    added_actors.append(actor)
 
                 for strategy in strategy_instances:
                     self._trader.start_strategy(strategy.id)
             except Exception:
+                for a in added_actors:
+                    try:
+                        self._trader.remove_actor(a.id)
+                    except Exception:
+                        pass
                 for s in added_strategies:
                     try:
                         self._trader.remove_strategy(s.id)
@@ -251,6 +258,11 @@ class LifecycleController:
             raise ValueError(f"Portfolio '{name}' is {entry.state}, cannot flatten-stop")
 
         self._registry.mark_flattening(name)
+
+        # Resume any paused strategies before flattening so market_exit works
+        for sid_str in entry.strategy_ids:
+            if sid_str in self._paused_strategies:
+                self._resume_strategy(sid_str)
 
         for sid_str in entry.strategy_ids:
             try:
@@ -296,6 +308,9 @@ class LifecycleController:
                         self._trader.remove_strategy(StrategyId(sid_str))
                     except Exception as e:
                         self._log.error(f"remove_strategy failed for {sid_str}: {e}")
+                # Clean up paused strategies set
+                for sid_str in info["strategy_ids"]:
+                    self._paused_strategies.discard(sid_str)
                 self._registry.mark_stopped(name)
                 del self._flatten_stop_pending[name]
                 self._publish_ack("commands_ack", {
@@ -304,6 +319,15 @@ class LifecycleController:
                 })
                 self._log.info(f"Portfolio '{name}' fully stopped")
             elif elapsed > 60:
+                # Timeout -- still remove strategies to prevent orphans
+                for sid_str in info["strategy_ids"]:
+                    try:
+                        self._trader.remove_strategy(StrategyId(sid_str))
+                    except Exception as e:
+                        self._log.error(f"Failed to remove strategy {sid_str} on timeout: {e}")
+                # Clean up paused strategies set
+                for sid_str in info["strategy_ids"]:
+                    self._paused_strategies.discard(sid_str)
                 self._log.critical(
                     f"Portfolio '{name}' flatten-stop timed out after 60s. "
                     f"Positions still open. Manual intervention required."
@@ -414,6 +438,16 @@ class LifecycleController:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _resume_strategy(self, sid_str: str) -> None:
+        """Internal resume — no ack published. Used before flatten-stop."""
+        try:
+            sid = self._resolve_strategy_id(sid_str)
+            self._msgbus.publish(f"{LIFECYCLE_RESUME}.{sid}", "resume")
+            self._paused_strategies.discard(str(sid))
+            self._log.info(f"L1 Resume (internal): strategy {sid}")
+        except Exception as e:
+            self._log.error(f"Failed to resume strategy {sid_str}: {e}")
 
     def _resolve_strategy_id(self, strategy_id_str: str) -> Any:
         """Validate and convert a string to a StrategyId.

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -168,14 +170,21 @@ def fetch_exchange_info(testnet: bool = False) -> dict:
         logger.exception("Failed to fetch exchangeInfo from %s", url)
         raise
 
-    # --- Write cache ---
+    # --- Write cache (atomic: write to temp file, then rename) ---
     data["fetched_at"] = time.time()
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _CACHE_FILE.write_text(
-            json.dumps(data, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(_CACHE_FILE.parent), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp_path, str(_CACHE_FILE))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         logger.debug("Wrote exchangeInfo cache to %s", _CACHE_FILE)
     except OSError:
         logger.warning("Could not write instruments cache to %s", _CACHE_FILE)

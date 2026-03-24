@@ -65,7 +65,7 @@ class PortfolioRegistry:
         for name in list(self._portfolios.keys()):
             if name not in current_folders:
                 entry = self._portfolios[name]
-                if entry.state in ("available",):
+                if entry.state in ("available", "starting"):
                     del self._portfolios[name]
                     # Clean up prefix mapping
                     if entry.order_id_tag_prefix in self._used_prefixes:
@@ -122,6 +122,11 @@ class PortfolioRegistry:
         tags = []
 
         for i in range(count):
+            if offset + i > 999:
+                raise ValueError(
+                    f"Tag offset overflow: {offset + i} exceeds 3-digit format. "
+                    f"Too many cumulative strategy allocations. Consider restarting the node."
+                )
             tag = f"{prefix}{offset + i:03d}"
             # Check for collision with existing strategy IDs
             # Strategy ID format: "{ClassName}-{tag}"

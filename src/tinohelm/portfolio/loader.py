@@ -160,6 +160,16 @@ def _load_single_actor(
             # Absolute-style module:ClassName
             module_part, class_name = ref.class_path.rsplit(":", 1)
             module_file = Path(module_part + ".py")
+            # Validate path is within allowed directories
+            resolved = module_file.resolve()
+            allowed_dirs = [Path.home() / ".tino"]
+            if config.source_path:
+                allowed_dirs.append(config.source_path.resolve())
+            if not any(resolved.is_relative_to(d) for d in allowed_dirs):
+                raise ValueError(
+                    f"Actor class_path '{ref.class_path}' resolves to {resolved} "
+                    f"which is outside allowed directories"
+                )
 
         if not module_file.exists():
             raise FileNotFoundError(f"Actor module not found: {module_file}")
