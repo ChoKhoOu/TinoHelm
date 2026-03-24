@@ -168,6 +168,7 @@ class PortfolioRegistry:
                 self._strategy_to_portfolio.pop(sid, None)
             entry.strategy_ids = []
             entry.state = "available"
+            entry.was_running = False
 
     def get(self, name: str) -> PortfolioEntry | None:
         return self._portfolios.get(name)

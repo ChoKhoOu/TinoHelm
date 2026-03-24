@@ -308,6 +308,7 @@ class LifecycleController:
                     f"Portfolio '{name}' flatten-stop timed out after 60s. "
                     f"Positions still open. Manual intervention required."
                 )
+                self._registry.mark_stopped(name)
                 del self._flatten_stop_pending[name]
                 self._publish_ack("commands_ack", {
                     "cmd": "flatten_stop_portfolio", "name": name,
