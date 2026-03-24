@@ -73,7 +73,6 @@ export function ActionBar({ nodeType, riskMetrics }: Props) {
     <>
       <div
         className="h-14 shrink-0 flex items-center px-4 gap-6 border-t border-[var(--border-gray)] bg-[var(--bg-sidebar)]"
-        style={{ minHeight: 56 }}
       >
         {/* Risk metrics */}
         <div className="flex items-center gap-5">

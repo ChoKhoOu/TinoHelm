@@ -15,7 +15,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import { Grid3x3, TrendingDown, BarChart3, Activity, Download } from "lucide-react";
+import { Grid3x3, TrendingDown, BarChart3, Activity } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { FadeIn } from "@/components/motion/FadeIn";
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
@@ -156,12 +156,6 @@ export default function AnalyticsPage() {
               // 深度绩效分析 — 全部策略
             </span>
           </div>
-          <button
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] px-4 py-[9px] text-[11px] font-bold tracking-wide text-[var(--text-secondary)] hover:border-[var(--border-light)] transition-colors duration-150"
-          >
-            <Download className="w-3 h-3" />
-            导出 CSV
-          </button>
         </div>
       </FadeIn>
 

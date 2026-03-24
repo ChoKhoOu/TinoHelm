@@ -16,8 +16,7 @@ import {
 import { ChevronUp, ChevronDown, ChevronsUpDown, Download } from "lucide-react";
 import { Input, Select } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { API_BASE } from "@/lib/api";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */

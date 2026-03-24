@@ -12,8 +12,7 @@ import {
 } from "recharts";
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
 import { Skeleton } from "@/components/ui/skeleton";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { API_BASE } from "@/lib/api";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */

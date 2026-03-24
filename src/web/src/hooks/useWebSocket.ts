@@ -81,7 +81,6 @@ export function useWebSocket({
   maxRetries = 10,
 }: UseWebSocketOptions = {}) {
   const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState<WsEventMessage | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -108,7 +107,6 @@ export function useWebSocket({
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as WsEventMessage;
-        setLastMessage(msg);
         onMessageRef.current?.(msg);
       } catch {
         // ignore non-JSON messages
@@ -156,5 +154,5 @@ export function useWebSocket({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connect, maxRetries, channelsKey]);
 
-  return { connected, lastMessage, send, disconnect };
+  return { connected, send, disconnect };
 }

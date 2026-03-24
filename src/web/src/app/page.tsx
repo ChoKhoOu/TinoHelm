@@ -95,7 +95,6 @@ function useCountUp(target: number, duration = 800): number {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-const TIME_RANGES = ["1D", "1W", "1M", "3M", "1Y", "ALL"];
 
 interface KpiCardProps {
   label: string;
@@ -262,7 +261,6 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedRange, setSelectedRange] = useState("1Y");
 
   const fetchAll = useCallback(async () => {
     try {
@@ -433,21 +431,7 @@ export default function DashboardPage() {
               <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
                 {t("dashboard.equityCurve")}
               </span>
-              <div className="flex items-center gap-1">
-                {TIME_RANGES.map((range) => (
-                  <button
-                    key={range}
-                    onClick={() => setSelectedRange(range)}
-                    className={`px-2.5 py-1 rounded text-[10px] font-semibold tracking-[0.5px] transition-colors ${
-                      range === selectedRange
-                        ? "bg-[var(--accent-blue-20)] text-[var(--accent-blue)]"
-                        : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-                    }`}
-                  >
-                    {range}
-                  </button>
-                ))}
-              </div>
+              <span className="text-[10px] font-mono text-[var(--text-muted)]">ALL</span>
             </div>
             <div className="h-px bg-[var(--border-gray)]" />
             <div className="flex-1 px-3 py-4" style={{ minHeight: 280 }}>

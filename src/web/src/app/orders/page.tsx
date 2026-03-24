@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Search, Download, ChevronLeft, ChevronRight } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { FadeIn } from "@/components/motion/FadeIn";
 
@@ -43,12 +43,12 @@ const STATUS_ZH: Record<string, string> = {
 };
 
 const STATUS_BADGE: Record<string, string> = {
-  ACCEPTED: "bg-[#1a3a5c] text-[#4C9EEB]",
-  FILLED: "bg-[#0d2e1c] text-[#26D97F]",
+  ACCEPTED: "bg-[var(--accent-blue-20)] text-[var(--accent-blue)]",
+  FILLED: "bg-[var(--accent-green-20)] text-[var(--accent-green)]",
   CANCELED: "bg-[var(--bg-elevated)] text-[var(--text-muted)]",
-  REJECTED: "bg-[#3a1a1a] text-[#EF5350]",
-  EXPIRED: "bg-[#2a2010] text-[#f5a623]",
-  PARTIALLY_FILLED: "bg-[#162a1a] text-[#26D97F]",
+  REJECTED: "bg-[var(--accent-red-20)] text-[var(--accent-red)]",
+  EXPIRED: "bg-[var(--accent-amber-20)] text-[var(--accent-amber)]",
+  PARTIALLY_FILLED: "bg-[var(--accent-purple-20)] text-[var(--accent-purple)]",
 };
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
@@ -130,12 +130,6 @@ export default function OrdersPage() {
               // 全部交易所订单 — 可筛选
             </span>
           </div>
-          <button
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] px-4 py-[9px] text-[11px] font-bold tracking-wide text-[var(--text-secondary)] hover:border-[var(--border-light)] transition-colors duration-150"
-          >
-            <Download className="w-3 h-3" />
-            导出
-          </button>
         </div>
       </FadeIn>
 

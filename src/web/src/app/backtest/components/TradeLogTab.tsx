@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -153,7 +153,7 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
   });
 
   // Sync external pageSize state → table
-  useMemo(() => {
+  useEffect(() => {
     table.setPageSize(pageSize);
   }, [pageSize, table]);
 

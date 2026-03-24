@@ -132,7 +132,11 @@ function WatchCard({ item, onDelete }: { item: WatchlistItem; onDelete: (id: num
   async function handleDelete() {
     if (!confirming) { setConfirming(true); return; }
     setDeleting(true);
-    onDelete(item.id);
+    try {
+      await onDelete(item.id);
+    } catch {
+      setDeleting(false);
+    }
   }
 
   return (

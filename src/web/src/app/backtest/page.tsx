@@ -24,8 +24,6 @@ import { TearsheetTab } from "./components/TearsheetTab";
 import { TradeLogTab } from "./components/TradeLogTab";
 import { ReportsTab } from "./components/ReportsTab";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
@@ -362,11 +360,8 @@ export default function BacktestPage() {
     const run = runs.find((r) => r.run_id === selectedRunId);
     if (run?.status !== "completed") return;
 
-    fetch(`${API_BASE}/api/backtest/${selectedRunId}/result`, {
-      headers: { ...(process.env.NEXT_PUBLIC_API_KEY ? { "X-API-Key": process.env.NEXT_PUBLIC_API_KEY } : {}) },
-    })
-      .then((r) => r.ok ? r.json() : null)
-      .then((data: BacktestResult | null) => {
+    apiGet<BacktestResult>(`/api/backtest/${selectedRunId}/result`)
+      .then((data) => {
         if (data) {
           resultCacheRef.current[selectedRunId] = data;
           setTradeLog(data.trade_log ?? []);
@@ -469,8 +464,10 @@ export default function BacktestPage() {
                 selected={selectedRunId === run.run_id}
                 progress={progressMap[run.run_id] ?? null}
                 onClick={() => {
-                  setSelectedRunId(run.run_id);
-                  setActiveTab("overview");
+                  if (selectedRunId !== run.run_id) {
+                    setSelectedRunId(run.run_id);
+                    setActiveTab("overview");
+                  }
                 }}
               />
             ))

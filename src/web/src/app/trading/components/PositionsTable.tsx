@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -48,16 +48,16 @@ export function PositionsTable({ positions }: Props) {
       }
     });
 
+    // Always update previous positions map
+    const newMap = new Map<string, Position>();
+    positions.forEach((p) => newMap.set(p.position_id, p));
+    prevPositionsRef.current = newMap;
+
     if (Object.keys(newFlash).length > 0) {
       setFlashMap(newFlash);
       const timer = setTimeout(() => setFlashMap({}), 350);
       return () => clearTimeout(timer);
     }
-
-    // Update previous positions map
-    const newMap = new Map<string, Position>();
-    positions.forEach((p) => newMap.set(p.position_id, p));
-    prevPositionsRef.current = newMap;
   }, [positions]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

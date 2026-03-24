@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   BarChart,
   Bar,
@@ -264,19 +264,23 @@ export default function OptimizationPage() {
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  const hasAutoSelected = useRef(false);
   const loadRuns = useCallback(async () => {
     try {
       const data = await apiGet<OptRun[]>("/api/backtest/optimize/runs");
       if (data) {
         setRuns(data);
-        if (data.length > 0 && !selectedId) setSelectedId(data[0].id);
+        if (data.length > 0 && !hasAutoSelected.current) {
+          hasAutoSelected.current = true;
+          setSelectedId(data[0].id);
+        }
       }
     } catch {
       setError("加载优化记录失败");
     } finally {
       setLoading(false);
     }
-  }, [selectedId]);
+  }, []);
 
   useEffect(() => { loadRuns(); }, [loadRuns]);
 
