@@ -630,32 +630,31 @@ impl App {
                         self.sandbox_last_heartbeat = Some(now);
                         self.sandbox_uptime = uptime.clone();
                         self.sandbox_shutting_down = false; // heartbeat received = still alive
-                        // Update lifecycle state from heartbeat (avoids polling)
-                        if trading_state.is_some() || strategy_states.is_some() {
-                            let mut state = serde_json::Map::new();
-                            if let Some(ts) = &trading_state {
-                                state.insert("trading_state".to_string(), serde_json::Value::String(ts.clone()));
-                            }
-                            if let Some(ss) = &strategy_states {
-                                let ss_val: serde_json::Map<String, serde_json::Value> = ss.iter()
-                                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                                    .collect();
-                                state.insert("strategy_states".to_string(), serde_json::Value::Object(ss_val));
-                                // Derive paused list
-                                let paused: Vec<serde_json::Value> = ss.iter()
-                                    .filter(|(_, v)| v.as_str() == "paused")
-                                    .map(|(k, _)| serde_json::Value::String(k.clone()))
-                                    .collect();
-                                state.insert("paused".to_string(), serde_json::Value::Array(paused));
-                            }
-                            self.lifecycle_state = Some(serde_json::Value::Object(state));
-                        }
                     }
                     "live" => {
                         self.live_last_heartbeat = Some(now);
                         self.live_uptime = uptime.clone();
                     }
                     _ => {}
+                }
+                // Update lifecycle state only from the active node type (avoids interleaving)
+                if node_type == self.active_node_type && (trading_state.is_some() || strategy_states.is_some()) {
+                    let mut state = serde_json::Map::new();
+                    if let Some(ts) = &trading_state {
+                        state.insert("trading_state".to_string(), serde_json::Value::String(ts.clone()));
+                    }
+                    if let Some(ss) = &strategy_states {
+                        let ss_val: serde_json::Map<String, serde_json::Value> = ss.iter()
+                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                            .collect();
+                        state.insert("strategy_states".to_string(), serde_json::Value::Object(ss_val));
+                        let paused: Vec<serde_json::Value> = ss.iter()
+                            .filter(|(_, v)| v.as_str() == "paused")
+                            .map(|(k, _)| serde_json::Value::String(k.clone()))
+                            .collect();
+                        state.insert("paused".to_string(), serde_json::Value::Array(paused));
+                    }
+                    self.lifecycle_state = Some(serde_json::Value::Object(state));
                 }
                 // Heartbeats are too frequent for the log — skip
             }
