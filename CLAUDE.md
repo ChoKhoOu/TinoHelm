@@ -99,7 +99,35 @@ Everything is a portfolio. Single `.py` strategies are auto-wrapped as implicit 
 
 **RiskGuardActor** (`actors/risk_guard.py`) is a cross-strategy portfolio risk overlay. It subscribes to all bar types via `self.cache.bar_types()` in `on_start()`, and communicates via NT msgbus (`self.msgbus.publish("risk.guard.state", action)`). Strategies subscribe to these topics to honor risk signals.
 
-**BridgeActor** (`node/bridge_actor.py`) bridges NT internal msgbus events to Redis PubSub for cross-process communication. Used by both sandbox and live nodes.
+**BridgeActor** (`node/bridge_actor.py`) bridges NT internal msgbus events to Redis PubSub for cross-process communication. Used by both sandbox and live nodes. Also drives portfolio lifecycle by hosting `LifecycleController` and `PortfolioRegistry` after `node.build()`.
+
+### Multi-Portfolio Lifecycle
+
+Runtime portfolio management is layered across three components in `node/`:
+
+**PortfolioRegistry** (`node/portfolio_registry.py`) — pure Python, no NT deps. Tracks portfolio state machine:
+```
+available → starting → running → paused → available
+                         ↓                    ↑
+                      flattening ─────────────┘
+```
+- Scans `~/.tino/strategies/` for `portfolio.yaml` folders
+- Allocates globally unique `order_id_tag` prefixes (2-char hex: `"00"`, `"01"`, …) to avoid strategy ID collisions across portfolios
+- Maps `strategy_id → portfolio_name` for reverse lookups
+
+**LifecycleController** (`node/lifecycle_controller.py`) — 4-level control, called on NT event loop thread:
+- **L1 Soft Pause**: publishes `lifecycle.pause.{strategy_id}` on msgbus — strategy honors voluntarily
+- **L2 Flatten**: `trader.market_exit_strategy(strategy_id)` — cancel orders + close positions
+- **L3 Halt**: `risk_engine.set_trading_state(TradingState.HALTED)` — system-wide order block
+- **L4 Shutdown**: `os.kill(SIGTERM)` — graceful process termination
+
+**TinoController** (`node/controller.py`) — NT Actor registered on the node. Provides `has_controller` check and periodic health reporting.
+
+**Topics** (`node/topics.py`) — defines msgbus topic constants: `LIFECYCLE_PAUSE`, `LIFECYCLE_RESUME`, `LIFECYCLE_FLATTEN`, `RISK_GUARD_STATE`.
+
+**Portfolio lifecycle API**: `GET /api/node/portfolios`, `POST /api/node/portfolio/{start,pause,resume,flatten-stop}` (see `api/routes/node.py`).
+
+**Portfolio CLI**: `tino node portfolio list|start|pause|resume|flatten-stop --mode sandbox|live`.
 
 **DB design**: The `strategies` table is ephemeral (rebuilt on `tino strategy rescan`). `backtest_runs` uses `strategy_name` (string column) instead of FK for decoupling. `positions` stores live/sandbox position snapshots (upserted by `position_id`). `fills` stores immutable fill records (deduped by `trade_id`). Both written by BridgeActor in the TradingNode subprocess via sync DB engine.
 
@@ -140,6 +168,9 @@ Priority: ENV vars (`TINO_` prefix, `__` nested delimiter) > `config/user.yaml` 
 - `tino:heartbeat:{node_type}` — Node heartbeat (15s TTL)
 - `tino:{node_type}:positions` — Position update events (PubSub)
 - `tino:{node_type}:fills` — Fill/trade events (PubSub)
+- `tino:{node_type}:commands_ack` — Lifecycle command acknowledgments (PubSub)
+- `tino:{node_type}:lifecycle_state` — Node lifecycle state snapshot (key)
+- `tino:{node_type}:portfolio_registry` — Portfolio registry JSON snapshot (key, 30s TTL)
 
 ## 用户规则
 - **MUST**: 涉及 NT API 的任何开发，必须先浏览 https://nautilustrader.io/docs/latest/ 对应文档页面，确认 API 签名和行为后再写代码。不要凭记忆或猜测调用 NT API。
@@ -548,7 +579,9 @@ cli/src/
 │   │   ├── dashboard.rs  # F1 — overview
 │   │   ├── backtest.rs   # F2 — master-detail with rich stats
 │   │   ├── strategy.rs   # F3 — strategy list + detail
-│   │   ├── nodes.rs      # F4 — sandbox/live node cards
+│   │   ├── nodes/        # F4 — sandbox/live node management
+│   │   │   ├── mod.rs       # Key handling, render dispatch, sidebar navigation
+│   │   │   └── overview.rs  # Node cards + portfolio sidebar with lifecycle controls
 │   │   └── data.rs       # F5 — data catalog
 │   └── views/       # (legacy) older view implementations, being migrated to workspaces/
 ```
