@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, model_validator
 from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -125,6 +126,22 @@ class BacktestDeleteResponse(BaseModel):
 
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 _HEX_RE = re.compile(r'^[0-9a-f]+$')
+
+_ARTIFACT_WHITELIST = {
+    "tearsheet.html",
+    "results.json",
+    "fills_report.csv",
+    "orders_report.csv",
+    "positions_report.csv",
+    "account_report.csv",
+    "order_fills_report.csv",
+}
+
+_MIME_MAP = {
+    ".html": "text/html",
+    ".csv": "text/csv",
+    ".json": "application/json",
+}
 
 
 async def resolve_run_id(prefix: str, db: AsyncSession) -> str:
@@ -435,3 +452,80 @@ async def delete_backtest_run(
     logger.info("Backtest run deleted: %s", run_id)
 
     return BacktestDeleteResponse(run_id=run_id, deleted=True)
+
+
+@router.get("/{run_id}/artifacts", tags=["backtest"])
+async def list_artifacts(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> list[dict]:
+    """List available artifact files for a backtest run."""
+    run_id = await resolve_run_id(run_id, db)
+
+    stmt = select(BacktestRun).where(BacktestRun.run_id == run_id)
+    run = (await db.execute(stmt)).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+
+    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
+        raise HTTPException(status_code=400, detail="Invalid run_id format")
+
+    artifacts_dir = (Path(settings.paths.artifacts) / run_id).resolve()
+    artifacts_root = Path(settings.paths.artifacts).resolve()
+    if not str(artifacts_dir).startswith(str(artifacts_root)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    if not artifacts_dir.exists():
+        return []
+
+    result = []
+    for f in artifacts_dir.iterdir():
+        if f.name in _ARTIFACT_WHITELIST and f.is_file():
+            result.append({
+                "filename": f.name,
+                "size_bytes": f.stat().st_size,
+            })
+    return sorted(result, key=lambda x: x["filename"])
+
+
+@router.get("/{run_id}/artifacts/{filename}", tags=["backtest"])
+async def get_artifact(
+    run_id: str,
+    filename: str,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """Serve an individual artifact file (HTML, CSV, JSON)."""
+    run_id = await resolve_run_id(run_id, db)
+
+    if filename not in _ARTIFACT_WHITELIST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid filename. Allowed: {', '.join(sorted(_ARTIFACT_WHITELIST))}",
+        )
+
+    stmt = select(BacktestRun).where(BacktestRun.run_id == run_id)
+    run = (await db.execute(stmt)).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+
+    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
+        raise HTTPException(status_code=400, detail="Invalid run_id format")
+
+    artifact_path = (Path(settings.paths.artifacts) / run_id / filename).resolve()
+    artifacts_root = Path(settings.paths.artifacts).resolve()
+    if not str(artifact_path).startswith(str(artifacts_root)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found")
+
+    suffix = artifact_path.suffix.lower()
+    media_type = _MIME_MAP.get(suffix, "application/octet-stream")
+
+    return FileResponse(
+        path=str(artifact_path),
+        media_type=media_type,
+        filename=filename,
+    )
