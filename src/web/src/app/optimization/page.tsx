@@ -10,7 +10,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { FlaskConical, ChevronRight, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { FlaskConical, ChevronRight } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { FadeIn } from "@/components/motion/FadeIn";
 
@@ -44,43 +44,8 @@ interface OptResult {
 
 /* ── Constants ──────────────────────────────────────────────── */
 
-const AXIS_STYLE = { fontSize: 10, fill: "var(--text-muted)", fontFamily: "JetBrains Mono" };
-
-const TOOLTIP_STYLE = {
-  backgroundColor: "var(--bg-elevated)",
-  border: "1px solid var(--border-gray)",
-  borderRadius: 8,
-  fontSize: 11,
-  color: "var(--text-primary)",
-  fontFamily: "JetBrains Mono",
-};
-
-/* ── Status Badge ────────────────────────────────────────────── */
-
-function StatusBadge({ status }: { status: string }) {
-  if (status === "completed") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-[#0d2e1c] px-2 py-[2px] text-[9px] font-bold text-[#26D97F]">
-        <CheckCircle className="w-2.5 h-2.5" />
-        已完成
-      </span>
-    );
-  }
-  if (status === "running") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-[#1a3a5c] px-2 py-[2px] text-[9px] font-bold text-[#4C9EEB]">
-        <Loader2 className="w-2.5 h-2.5 animate-spin" />
-        运行中
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-[#3a1a1a] px-2 py-[2px] text-[9px] font-bold text-[#EF5350]">
-      <XCircle className="w-2.5 h-2.5" />
-      失败
-    </span>
-  );
-}
+import { CHART_AXIS_STYLE as AXIS_STYLE, CHART_TOOLTIP_STYLE as TOOLTIP_STYLE } from "@/lib/chartTheme";
+import { StatusBadge } from "@/components/StatusBadge";
 
 /* ── Detail Panel ────────────────────────────────────────────── */
 

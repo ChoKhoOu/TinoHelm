@@ -13,20 +13,7 @@ import {
 import { ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
 import { Select } from "@/components/ui/input";
 
-/* ------------------------------------------------------------------ */
-/*  Types                                                              */
-/* ------------------------------------------------------------------ */
-
-export interface TradeLogEntry {
-  opened_at: string;
-  instrument: string;
-  side: string;
-  quantity: number;
-  avg_open: number;
-  avg_close: number;
-  realized_pnl: number;
-  duration: string;
-}
+import type { TradeLogEntry } from "../types";
 
 interface TradeLogTabProps {
   tradeLog: TradeLogEntry[];

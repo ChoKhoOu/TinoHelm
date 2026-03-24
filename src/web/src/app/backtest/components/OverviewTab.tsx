@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   AreaChart,
   Area,
@@ -13,96 +13,9 @@ import {
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { API_BASE } from "@/lib/api";
+import { useCountUp } from "@/hooks/useCountUp";
+import type { TradeLogEntry, BacktestResult } from "../types";
 
-/* ------------------------------------------------------------------ */
-/*  Types                                                              */
-/* ------------------------------------------------------------------ */
-
-interface EquityCurvePoint {
-  timestamp: string;
-  equity: number;
-  returns_pct: number;
-  drawdown_pct: number;
-}
-
-interface TradeLogEntry {
-  opened_at: string;
-  instrument: string;
-  side: string;
-  quantity: number;
-  avg_open: number;
-  avg_close: number;
-  realized_pnl: number;
-  duration: string;
-}
-
-interface BacktestStatistics {
-  total_pnl: number;
-  total_return_pct: number;
-  sharpe_ratio: number | null;
-  max_drawdown: number | null;
-  win_rate: number;
-  profit_factor: number | null;
-  total_trades: number;
-  winning_trades: number;
-  losing_trades: number;
-  gross_profit: number;
-  gross_loss: number;
-  final_balance: string | null;
-  annual_return: number | null;
-  sortino_ratio: number | null;
-  calmar_ratio: number | null;
-  expectancy: number | null;
-  total_fees: number;
-  avg_holding_time: string | null;
-}
-
-interface PerInstrumentEntry {
-  instrument: string;
-  total_trades: number;
-  win_rate: number;
-  total_pnl: number;
-  sharpe_ratio: number | null;
-  max_drawdown: number | null;
-}
-
-interface BacktestResult {
-  statistics: BacktestStatistics;
-  equity_curve: EquityCurvePoint[];
-  trade_log: TradeLogEntry[];
-  per_instrument?: PerInstrumentEntry[];
-}
-
-/* ------------------------------------------------------------------ */
-/*  Count-up hook                                                      */
-/* ------------------------------------------------------------------ */
-
-function useCountUp(target: number, duration = 800, enabled = true) {
-  const [value, setValue] = useState(0);
-  const rafRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (!enabled) return;
-    const start = Date.now();
-    const animate = () => {
-      const elapsed = Date.now() - start;
-      const progress = Math.min(elapsed / duration, 1);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      setValue(target * eased);
-      if (progress < 1) {
-        rafRef.current = requestAnimationFrame(animate);
-      } else {
-        setValue(target);
-      }
-    };
-    rafRef.current = requestAnimationFrame(animate);
-    return () => {
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-    };
-  }, [target, duration, enabled]);
-
-  return value;
-}
 
 /* ------------------------------------------------------------------ */
 /*  KPI Card                                                           */
@@ -315,7 +228,7 @@ export function OverviewTab({ runId }: OverviewTabProps) {
   const chartData = equity_curve
     .filter((_, i) => i % step === 0)
     .map((p) => ({
-      t: new Date(p.timestamp).toLocaleDateString("zh-CN", { month: "short", day: "numeric" }),
+      t: new Date(p.timestamp ?? p.date ?? "").toLocaleDateString("zh-CN", { month: "short", day: "numeric" }),
       equity: p.equity,
       drawdown: p.drawdown_pct,
     }));

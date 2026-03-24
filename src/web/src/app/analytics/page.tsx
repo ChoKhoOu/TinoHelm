@@ -24,16 +24,7 @@ import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContai
 
 const MONTHS_ZH = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
 
-const AXIS_STYLE = { fontSize: 10, fill: "var(--text-muted)", fontFamily: "JetBrains Mono" };
-
-const TOOLTIP_STYLE = {
-  backgroundColor: "var(--bg-elevated)",
-  border: "1px solid var(--border-gray)",
-  borderRadius: 8,
-  fontSize: 11,
-  color: "var(--text-primary)",
-  fontFamily: "JetBrains Mono",
-};
+import { CHART_AXIS_STYLE as AXIS_STYLE, CHART_TOOLTIP_STYLE as TOOLTIP_STYLE } from "@/lib/chartTheme";
 
 /* ── Helpers ────────────────────────────────────────────────── */
 

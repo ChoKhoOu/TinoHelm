@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { apiGet } from "@/lib/api";
 import { useWsLastKnown, useWsEvent } from "@/providers/WebSocketProvider";
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
@@ -57,39 +57,7 @@ interface HealthData {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Count-up hook
-// ---------------------------------------------------------------------------
-
-function useCountUp(target: number, duration = 800): number {
-  const [value, setValue] = useState(0);
-  const rafRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    const start = performance.now();
-    const from = 0;
-
-    function tick(now: number) {
-      const elapsed = now - start;
-      const progress = Math.min(elapsed / duration, 1);
-      // ease-out cubic
-      const eased = 1 - Math.pow(1 - progress, 3);
-      setValue(from + (target - from) * eased);
-      if (progress < 1) {
-        rafRef.current = requestAnimationFrame(tick);
-      } else {
-        setValue(target);
-      }
-    }
-
-    rafRef.current = requestAnimationFrame(tick);
-    return () => {
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-    };
-  }, [target, duration]);
-
-  return value;
-}
+import { useCountUp } from "@/hooks/useCountUp";
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -158,21 +126,7 @@ function KpiCardSkeleton() {
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const normalized = status.toLowerCase();
-  const styles: Record<string, string> = {
-    queued: "bg-[var(--accent-amber-20)] text-[var(--accent-amber)]",
-    running: "bg-[var(--accent-blue-20)] text-[var(--accent-blue)]",
-    completed: "bg-[var(--accent-green-20)] text-[var(--accent-green)]",
-    failed: "bg-[var(--accent-red-20)] text-[var(--accent-red)]",
-  };
-  const cls = styles[normalized] ?? "bg-[var(--bg-elevated)] text-[var(--text-muted)]";
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-[9px] font-semibold tracking-[0.5px] uppercase ${cls}`}>
-      {status}
-    </span>
-  );
-}
+import { StatusBadge } from "@/components/StatusBadge";
 
 interface NodeCardProps {
   label: string;

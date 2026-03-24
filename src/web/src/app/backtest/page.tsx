@@ -19,6 +19,8 @@ import {
 } from "@/components/ui/tabs";
 import { apiGet, apiPost } from "@/lib/api";
 import { useWsEvent } from "@/providers/WebSocketProvider";
+import { StatusBadge } from "@/components/StatusBadge";
+import type { RunStatus, TradeLogEntry, BacktestResult } from "./types";
 import { OverviewTab } from "./components/OverviewTab";
 import { TearsheetTab } from "./components/TearsheetTab";
 import { TradeLogTab } from "./components/TradeLogTab";
@@ -27,8 +29,6 @@ import { ReportsTab } from "./components/ReportsTab";
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
-
-type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelling" | "cancelled";
 
 interface BacktestRunSummary {
   run_id: string;
@@ -40,24 +40,6 @@ interface BacktestRunSummary {
   status: RunStatus;
   created_at: string;
   error?: string;
-}
-
-interface TradeLogEntry {
-  opened_at: string;
-  instrument: string;
-  side: string;
-  quantity: number;
-  avg_open: number;
-  avg_close: number;
-  realized_pnl: number;
-  duration: string;
-}
-
-interface BacktestResult {
-  statistics: Record<string, unknown>;
-  equity_curve: unknown[];
-  trade_log: TradeLogEntry[];
-  per_instrument?: unknown[];
 }
 
 interface StrategyInfo {
@@ -77,33 +59,6 @@ interface NewRunForm {
 /*  Status badge                                                       */
 /* ------------------------------------------------------------------ */
 
-const STATUS_LABELS: Record<RunStatus, string> = {
-  queued: "排队中",
-  running: "运行中",
-  completed: "已完成",
-  failed: "失败",
-  cancelling: "取消中",
-  cancelled: "已取消",
-};
-
-const STATUS_CLASSES: Record<RunStatus, string> = {
-  queued: "bg-[var(--accent-amber-20)] text-[var(--accent-amber)]",
-  running: "bg-[var(--accent-blue-20)] text-[var(--accent-blue)]",
-  completed: "bg-[var(--accent-green-20)] text-[var(--accent-green)]",
-  failed: "bg-[var(--accent-red-20)] text-[var(--accent-red)]",
-  cancelling: "bg-[var(--bg-subtle)] text-[var(--text-muted)]",
-  cancelled: "bg-[var(--bg-subtle)] text-[var(--text-muted)]",
-};
-
-function StatusBadge({ status }: { status: RunStatus }) {
-  return (
-    <span
-      className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold ${STATUS_CLASSES[status] ?? STATUS_CLASSES.cancelled}`}
-    >
-      {STATUS_LABELS[status] ?? status}
-    </span>
-  );
-}
 
 /* ------------------------------------------------------------------ */
 /*  Run Row                                                            */
