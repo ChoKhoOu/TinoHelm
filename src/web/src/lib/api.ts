@@ -1,4 +1,5 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || "";
 
 interface ApiOptions extends RequestInit {
   params?: Record<string, string>;
@@ -31,6 +32,7 @@ export async function api<T = unknown>(
     ...fetchOptions,
     headers: {
       ...(fetchOptions.body ? { "Content-Type": "application/json" } : {}),
+      ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
       ...fetchOptions.headers,
     },
   });

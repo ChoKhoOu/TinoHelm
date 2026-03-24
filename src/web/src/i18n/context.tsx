@@ -14,9 +14,9 @@ const I18nContext = createContext<I18nContextValue | null>(null);
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => {
     if (typeof window !== "undefined") {
-      return (localStorage.getItem("tinohelm-locale") as Locale) || "en";
+      return (localStorage.getItem("tinohelm-locale") as Locale) || "zh";
     }
-    return "en";
+    return "zh";
   });
 
   const setLocale = useCallback((newLocale: Locale) => {

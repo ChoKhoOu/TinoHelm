@@ -1,69 +1,81 @@
-import { InputHTMLAttributes, useId } from "react";
-import { Search, ChevronDown } from "lucide-react";
+import * as React from "react"
 
-interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+import { cn } from "@/lib/utils"
+
+interface InputProps extends React.ComponentProps<"input"> {
   label?: string;
-  variant?: "text" | "search";
 }
 
-export function Input({ label, variant = "text", className = "", id: externalId, ...props }: InputProps) {
-  const generatedId = useId();
-  const inputId = externalId ?? generatedId;
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      {label && (
-        <label htmlFor={inputId} className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-          {label}
-        </label>
+function Input({ className, type, label, ...props }: InputProps) {
+  const input = (
+    <input
+      type={type}
+      data-slot="input"
+      className={cn(
+        "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-base transition-colors outline-none file:inline-flex file:h-6 file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-sm dark:bg-input/30 dark:disabled:bg-input/80 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40",
+        className
       )}
-      <div className="flex items-center gap-2 rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] px-[14px] py-[10px] focus-within:border-[var(--accent-green)] transition-colors duration-150">
-        {variant === "search" && <Search className="w-3.5 h-3.5 text-[var(--text-muted)]" />}
-        <input
-          id={inputId}
-          className={`w-full bg-transparent text-[11px] font-medium text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none ${className}`}
-          {...props}
-        />
-      </div>
-    </div>
+      {...props}
+    />
   );
+
+  if (label) {
+    return (
+      <div className="flex flex-col gap-1">
+        <label className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">{label}</label>
+        {input}
+      </div>
+    );
+  }
+  return input;
 }
 
-interface SelectProps {
+interface SelectOption {
+  value: string;
+  label: string;
+}
+
+interface SelectProps extends React.ComponentProps<"select"> {
   label?: string;
-  value?: string;
-  options: { value: string; label: string }[];
-  onChange?: (value: string) => void;
-  className?: string;
-  id?: string;
+  options?: SelectOption[] | string[];
+  onValueChange?: (value: string) => void;
 }
 
-export function Select({ label, value, options, onChange, className = "", id: externalId }: SelectProps) {
-  const generatedId = useId();
-  const selectId = externalId ?? generatedId;
+function Select({ className, label, options, onValueChange, onChange, children, ...props }: SelectProps) {
+  const handleChange: React.ChangeEventHandler<HTMLSelectElement> = (e) => {
+    onValueChange?.(e.target.value);
+    onChange?.(e);
+  };
 
-  return (
-    <div className={`flex flex-col gap-1.5 ${className}`}>
-      {label && (
-        <label htmlFor={selectId} className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-          {label}
-        </label>
+  const select = (
+    <select
+      data-slot="select"
+      className={cn(
+        "h-8 w-full min-w-0 rounded-lg border border-input bg-[var(--bg-card)] px-2.5 py-1 text-base transition-colors outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm",
+        className
       )}
-      <div className="relative">
-        <select
-          id={selectId}
-          value={value}
-          onChange={(e) => onChange?.(e.target.value)}
-          className="w-full appearance-none rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] px-[14px] py-[10px] pr-10 text-[11px] font-medium text-[var(--text-primary)] outline-none focus:border-[var(--accent-green)] transition-colors duration-150"
-        >
-          {options.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-        <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--text-muted)] pointer-events-none" />
-      </div>
-    </div>
+      onChange={onChange ? handleChange : undefined}
+      {...props}
+    >
+      {options
+        ? options.map((opt) => {
+            const val = typeof opt === "string" ? opt : opt.value;
+            const lbl = typeof opt === "string" ? opt : opt.label;
+            return <option key={val} value={val}>{lbl}</option>;
+          })
+        : children}
+    </select>
   );
+
+  if (label) {
+    return (
+      <div className="flex flex-col gap-1">
+        <label className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">{label}</label>
+        {select}
+      </div>
+    );
+  }
+  return select;
 }
+
+export { Input, Select }

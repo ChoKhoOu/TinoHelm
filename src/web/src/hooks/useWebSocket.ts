@@ -4,45 +4,99 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 const WS_BASE = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
 
-interface WebSocketMessage {
+export interface WsEventMessage {
   type: string;
-  channel: string;
+  channel?: string;
   data: Record<string, unknown>;
-  timestamp: string;
+  timestamp?: string;
+}
+
+export interface PositionUpdateEvent extends WsEventMessage {
+  type: 'position.update';
+  data: {
+    event: string;
+    position_id: string;
+    instrument_id: string;
+    side: string;
+    quantity: string;
+    signed_qty: number;
+    avg_px_open: number;
+    realized_pnl: number;
+    unrealized_pnl: number | null;
+    is_open: boolean;
+    [key: string]: unknown;
+  };
+}
+
+export interface FillEvent extends WsEventMessage {
+  type: 'fill.new';
+  data: {
+    trade_id: string;
+    instrument_id: string;
+    order_side: string;
+    last_qty: string;
+    last_px: string;
+    commission: string;
+    [key: string]: unknown;
+  };
+}
+
+export interface HeartbeatEvent extends WsEventMessage {
+  type: 'node.heartbeat';
+  data: {
+    node_type: string;
+    ts: string;
+    strategies: number;
+    positions: number;
+    trading_state: string;
+    strategy_states: Record<string, string>;
+    portfolios?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+}
+
+export interface BacktestProgressEvent extends WsEventMessage {
+  type: 'backtest.progress';
+  data: {
+    run_id: string;
+    pct: number;
+    elapsed_secs?: number;
+    [key: string]: unknown;
+  };
 }
 
 interface UseWebSocketOptions {
   path?: string;
-  subscribe?: string[];
-  onMessage?: (msg: WebSocketMessage) => void;
+  channels?: string[];
+  onMessage?: (msg: WsEventMessage) => void;
   reconnectInterval?: number;
   maxRetries?: number;
 }
 
 export function useWebSocket({
   path = "/ws/events",
-  subscribe = [],
+  channels = [],
   onMessage,
   reconnectInterval = 3000,
   maxRetries = 10,
 }: UseWebSocketOptions = {}) {
   const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null);
+  const [lastMessage, setLastMessage] = useState<WsEventMessage | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const subscribeRef = useRef(subscribe);
-  subscribeRef.current = subscribe;
+  const channelsRef = useRef(channels);
+  channelsRef.current = channels;
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const subs = subscribeRef.current;
-    const params = subs.length
-      ? `?subscribe=${subs.join(",")}`
+    const chans = channelsRef.current;
+    const params = chans.length
+      ? `?channels=${chans.join(",")}`
       : "";
     const ws = new WebSocket(`${WS_BASE}${path}${params}`);
 
@@ -53,7 +107,7 @@ export function useWebSocket({
 
     ws.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data) as WebSocketMessage;
+        const msg = JSON.parse(event.data) as WsEventMessage;
         setLastMessage(msg);
         onMessageRef.current?.(msg);
       } catch {
@@ -90,7 +144,7 @@ export function useWebSocket({
     }
   }, []);
 
-  const subscribeKey = subscribe?.join(",") ?? "";
+  const channelsKey = channels?.join(",") ?? "";
 
   useEffect(() => {
     connect();
@@ -100,7 +154,7 @@ export function useWebSocket({
       wsRef.current?.close();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connect, maxRetries, subscribeKey]);
+  }, [connect, maxRetries, channelsKey]);
 
   return { connected, lastMessage, send, disconnect };
 }

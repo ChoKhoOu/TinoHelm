@@ -2,122 +2,100 @@
 
 import { usePathname } from "next/navigation";
 import Link from "next/link";
+import { motion } from "framer-motion";
 import {
-  LayoutDashboard,
-  Cpu,
-  FlaskConical,
-  Activity,
-  Wallet,
-  ListOrdered,
-  ChartNoAxesColumn,
-  Settings,
-  Database,
-  Eye,
+  LayoutDashboard, TrendingUp, FlaskConical, Cpu, Database,
+  BarChart3, ListOrdered, Eye, Zap, Settings,
 } from "lucide-react";
-import { useI18n } from "@/i18n";
-import type { TranslationKey } from "@/i18n";
+import {
+  Tooltip, TooltipContent, TooltipTrigger,
+} from "@/components/ui/tooltip";
 
-const navItems: { href: string; labelKey: TranslationKey; icon: typeof LayoutDashboard }[] = [
-  { href: "/", labelKey: "nav.dashboard", icon: LayoutDashboard },
-  { href: "/strategies", labelKey: "nav.strategies", icon: Cpu },
-  { href: "/backtest", labelKey: "nav.backtest", icon: FlaskConical },
-  { href: "/live", labelKey: "nav.live", icon: Activity },
-  { href: "/portfolio", labelKey: "nav.portfolio", icon: Wallet },
-  { href: "/orders", labelKey: "nav.orders", icon: ListOrdered },
-  { href: "/watchlist", labelKey: "nav.watchlist", icon: Eye },
-  { href: "/analytics", labelKey: "nav.analytics", icon: ChartNoAxesColumn },
-  { href: "/data-catalog", labelKey: "nav.dataCatalog", icon: Database },
+const navItems = [
+  { href: "/", label: "仪表盘", icon: LayoutDashboard },
+  { href: "/trading", label: "交易", icon: TrendingUp },
+  { href: "/backtest", label: "回测", icon: FlaskConical },
+  { href: "/strategies", label: "策略", icon: Cpu },
+  { href: "/data-catalog", label: "数据", icon: Database },
+  { href: "/analytics", label: "分析", icon: BarChart3 },
+  { href: "/orders", label: "订单", icon: ListOrdered },
+  { href: "/watchlist", label: "观察", icon: Eye },
+  { href: "/optimization", label: "优化", icon: Zap },
 ];
-
-function navLinkClasses(isActive: boolean) {
-  return `flex items-center gap-3 rounded-lg px-3 py-[10px] text-xs font-medium tracking-[0.5px] transition-colors duration-150 ${
-    isActive
-      ? "bg-[var(--accent-green-10)] text-[var(--accent-green)] font-semibold"
-      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
-  }`;
-}
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { locale, setLocale, t } = useI18n();
 
   return (
-    <aside className="hidden md:flex w-[240px] shrink-0 flex-col justify-between bg-[var(--bg-sidebar)] border-r border-[var(--border-gray)] h-full">
-      <div className="flex flex-col gap-2">
+    <aside className="flex flex-col items-center justify-between w-16 shrink-0 h-full bg-[var(--bg-sidebar)] border-r border-[var(--border-gray)]">
+      <div className="flex flex-col items-center w-full">
         {/* Logo */}
-        <div className="flex items-center gap-[10px] px-5 py-6">
-          <div className="w-7 h-7 rounded-lg bg-[var(--accent-green)]" />
-          <span className="font-heading text-lg font-bold tracking-tight text-[var(--text-primary)]">
-            TinoHelm
-          </span>
+        <div className="flex items-center justify-center w-full h-14 mb-2">
+          <div className="w-8 h-8 rounded-lg bg-[var(--accent-blue)] flex items-center justify-center">
+            <span className="text-[11px] font-bold text-white">TH</span>
+          </div>
         </div>
+
+        <div className="w-8 h-px bg-[var(--border-gray)] mb-2" />
+
         {/* Nav */}
-        <nav className="flex flex-col gap-0.5 px-3">
+        <nav className="flex flex-col items-center gap-1 w-full px-2">
           {navItems.map((item) => {
-            const isActive = pathname === item.href;
+            const isActive = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
             return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={navLinkClasses(isActive)}
-              >
-                <item.icon className="w-4 h-4" />
-                {t(item.labelKey)}
-              </Link>
+              <Tooltip key={item.href}>
+                <TooltipTrigger
+                  render={
+                    <Link
+                      href={item.href}
+                      className={`relative flex items-center justify-center w-10 h-10 rounded-lg transition-colors duration-150 ${
+                        isActive
+                          ? "text-[var(--accent-blue)] bg-[var(--accent-blue-20)]"
+                          : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]"
+                      }`}
+                    />
+                  }
+                >
+                  {isActive && (
+                    <motion.div
+                      layoutId="sidebar-active"
+                      className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-[var(--accent-blue)]"
+                      transition={{ type: "spring", stiffness: 350, damping: 30 }}
+                    />
+                  )}
+                  <item.icon className="w-[18px] h-[18px]" />
+                </TooltipTrigger>
+                <TooltipContent side="right" sideOffset={8}>
+                  <p className="text-xs font-medium">{item.label}</p>
+                </TooltipContent>
+              </Tooltip>
             );
           })}
         </nav>
       </div>
-      {/* Bottom */}
-      <div className="flex flex-col gap-2 px-3 pb-4">
-        <Link
-          href="/settings"
-          className={navLinkClasses(pathname === "/settings")}
-        >
-          <Settings className="w-4 h-4" />
-          {t("nav.settings")}
-        </Link>
-        {/* Language Switcher */}
-        <div className="px-1 py-2 border-t border-[var(--border-gray)]">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setLocale("en")}
-              className={`px-2 py-1 rounded text-[10px] font-bold tracking-wide transition-colors ${
-                locale === "en"
-                  ? "bg-[var(--accent-green-20)] text-[var(--accent-green)]"
-                  : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-              }`}
-            >
-              EN
-            </button>
-            <button
-              onClick={() => setLocale("zh")}
-              className={`px-2 py-1 rounded text-[10px] font-bold tracking-wide transition-colors ${
-                locale === "zh"
-                  ? "bg-[var(--accent-green-20)] text-[var(--accent-green)]"
-                  : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-              }`}
-            >
-              中文
-            </button>
-          </div>
-        </div>
-        <div className="h-px bg-[var(--border-gray)]" />
-        <div className="flex items-center gap-3 px-2 py-[10px]">
-          <div className="w-8 h-8 rounded-full bg-[var(--bg-elevated)] flex items-center justify-center">
-            <span className="text-[11px] font-bold text-[var(--accent-green)]">
-              TH
-            </span>
-          </div>
-          <div className="flex flex-col gap-0.5">
-            <span className="text-xs font-semibold text-[var(--text-primary)]">
-              TinoHelm
-            </span>
-            <span className="text-[10px] font-medium text-[var(--text-muted)]">
-              // ADMIN
-            </span>
-          </div>
-        </div>
+
+      {/* Bottom — Settings */}
+      <div className="flex flex-col items-center gap-2 pb-4 px-2 w-full">
+        <div className="w-8 h-px bg-[var(--border-gray)]" />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Link
+                href="/settings"
+                className={`flex items-center justify-center w-10 h-10 rounded-lg transition-colors duration-150 ${
+                  pathname === "/settings"
+                    ? "text-[var(--accent-blue)] bg-[var(--accent-blue-20)]"
+                    : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]"
+                }`}
+              />
+            }
+          >
+            <Settings className="w-[18px] h-[18px]" />
+          </TooltipTrigger>
+          <TooltipContent side="right" sideOffset={8}>
+            <p className="text-xs font-medium">设置</p>
+          </TooltipContent>
+        </Tooltip>
       </div>
     </aside>
   );
