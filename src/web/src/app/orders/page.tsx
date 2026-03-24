@@ -1,214 +1,325 @@
 "use client";
 
-import { Download, Search } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { Search, Download, ChevronLeft, ChevronRight } from "lucide-react";
 import { apiGet } from "@/lib/api";
-import { useI18n } from "@/i18n";
+import { FadeIn } from "@/components/motion/FadeIn";
 
-const STATUS_TABS = ["ALL", "FILLED", "CANCELED", "REJECTED"] as const;
-type StatusTab = (typeof STATUS_TABS)[number];
+/* ── Types ──────────────────────────────────────────────────── */
+
+type NodeType = "all" | "sandbox" | "live";
+type OrderStatus = "ALL" | "ACCEPTED" | "FILLED" | "CANCELED" | "REJECTED" | "EXPIRED";
 
 interface Order {
-  time: string;
-  instrument: string;
-  type: string;
+  id: number;
+  node_type: string;
+  order_id: string;
+  instrument_id: string;
   side: "BUY" | "SELL";
-  price: string;
-  qty: string;
+  order_type: string;
+  quantity: string;
+  price: string | null;
   status: string;
+  created_at: string | null;
 }
 
-const statusBadge: Record<string, string> = {
-  FILLED:
-    "bg-[var(--accent-green-20)] text-[var(--accent-green)]",
-  CANCELED:
-    "bg-[var(--accent-red-20)] text-[var(--accent-red)]",
-  REJECTED:
-    "bg-[var(--accent-orange-20)] text-[var(--accent-orange)]",
+/* ── Constants ──────────────────────────────────────────────── */
+
+const NODE_TYPE_OPTIONS: { value: NodeType; label: string }[] = [
+  { value: "all", label: "全部" },
+  { value: "sandbox", label: "Sandbox" },
+  { value: "live", label: "Live" },
+];
+
+const STATUS_OPTIONS: OrderStatus[] = ["ALL", "ACCEPTED", "FILLED", "CANCELED", "REJECTED", "EXPIRED"];
+
+const STATUS_ZH: Record<string, string> = {
+  ALL: "全部",
+  ACCEPTED: "已接受",
+  FILLED: "已成交",
+  CANCELED: "已撤单",
+  REJECTED: "已拒绝",
+  EXPIRED: "已过期",
 };
 
+const STATUS_BADGE: Record<string, string> = {
+  ACCEPTED: "bg-[#1a3a5c] text-[#4C9EEB]",
+  FILLED: "bg-[#0d2e1c] text-[#26D97F]",
+  CANCELED: "bg-[var(--bg-elevated)] text-[var(--text-muted)]",
+  REJECTED: "bg-[#3a1a1a] text-[#EF5350]",
+  EXPIRED: "bg-[#2a2010] text-[#f5a623]",
+  PARTIALLY_FILLED: "bg-[#162a1a] text-[#26D97F]",
+};
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
+const COL_HEADER = "text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] font-mono uppercase";
+
+/* ── Page ───────────────────────────────────────────────────── */
+
 export default function OrdersPage() {
-  const { t } = useI18n();
-  const [activeTab, setActiveTab] = useState<StatusTab>("ALL");
+  const [nodeType, setNodeType] = useState<NodeType>("all");
+  const [statusFilter, setStatusFilter] = useState<OrderStatus>("ALL");
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState(search);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [pageSize, setPageSize] = useState(25);
+  const [page, setPage] = useState(0);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  /* debounce search */
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search), 300);
-    return () => clearTimeout(timer);
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
   }, [search]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadOrders() {
-      setLoading(true);
-      try {
-        const params: Record<string, string> = {};
-        if (activeTab !== "ALL") params.status = activeTab;
-        if (debouncedSearch) params.instrument = debouncedSearch;
-        const data = await apiGet<{
-          id: number;
-          node_type: string;
-          order_id: string;
-          instrument_id: string;
-          side: string;
-          order_type: string;
-          quantity: string;
-          price: string | null;
-          status: string;
-          created_at: string | null;
-        }[]>("/api/orders", params);
-        if (cancelled || !data) return;
-        setOrders(data.map(o => ({
-          time: o.created_at?.replace("T", " ").slice(0, 16) ?? "",
-          instrument: o.instrument_id,
-          type: o.order_type,
-          side: (o.side === "BUY" || o.side === "SELL") ? o.side : "BUY",
-          price: o.price ?? "—",
-          qty: o.quantity,
-          status: o.status,
-        })));
-      } catch {
-        setError("orders.loadFailed");
-      } finally {
-        if (!cancelled) setLoading(false);
+  /* reset page on filter change */
+  useEffect(() => { setPage(0); }, [nodeType, statusFilter, debouncedSearch, pageSize]);
+
+  const loadOrders = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params: Record<string, string> = {
+        limit: String(pageSize),
+        offset: String(page * pageSize),
+      };
+      if (nodeType !== "all") params.node_type = nodeType;
+      if (statusFilter !== "ALL") params.status = statusFilter;
+      if (debouncedSearch) params.instrument = debouncedSearch;
+
+      const data = await apiGet<{ items: Order[]; total: number } | Order[]>("/api/orders", params);
+      if (!data) { setOrders([]); setTotal(0); return; }
+
+      /* support both {items, total} and bare array */
+      if (Array.isArray(data)) {
+        setOrders(data as Order[]);
+        setTotal((data as Order[]).length);
+      } else {
+        setOrders((data as { items: Order[]; total: number }).items ?? []);
+        setTotal((data as { items: Order[]; total: number }).total ?? 0);
       }
+    } catch {
+      setError("加载订单失败");
+    } finally {
+      setLoading(false);
     }
-    loadOrders();
-    return () => { cancelled = true; };
-  }, [activeTab, debouncedSearch]);
+  }, [nodeType, statusFilter, debouncedSearch, pageSize, page]);
+
+  useEffect(() => { loadOrders(); }, [loadOrders]);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  function formatTime(s: string | null) {
+    if (!s) return "—";
+    return s.replace("T", " ").slice(0, 16);
+  }
 
   return (
-    <div className="flex flex-col gap-6 p-8">
-      {/* Top bar */}
-      <div className="flex items-end justify-between">
-        <div className="flex flex-col gap-1">
-          <h1 className="font-heading text-[28px] font-bold tracking-tight text-[var(--text-primary)]">
-            {t("orders.title")}
-          </h1>
-          <span className="text-[11px] font-medium text-[var(--text-muted)]">
-            {t("orders.subtitle")}
-          </span>
-        </div>
-        <button aria-label="Export orders" className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] px-5 py-[10px] text-[11px] font-bold tracking-wide text-[var(--text-secondary)] hover:border-[var(--border-light)] transition-all duration-150">
-          <Download className="w-3 h-3" />
-          {t("orders.export")}
-        </button>
-      </div>
-
-      {/* Filter bar */}
-      <div className="flex items-center gap-3">
-        {STATUS_TABS.map((tab) => (
+    <div className="flex flex-col h-full p-6 gap-5">
+      {/* Header */}
+      <FadeIn direction="down" duration={0.25}>
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-1">
+            <h1 className="font-heading text-[26px] font-bold tracking-tight text-[var(--text-primary)]">
+              订单记录
+            </h1>
+            <span className="text-[11px] font-mono text-[var(--text-muted)]">
+              // 全部交易所订单 — 可筛选
+            </span>
+          </div>
           <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`rounded-lg px-[14px] py-[6px] text-[11px] font-semibold transition-colors duration-150 ${
-              activeTab === tab
-                ? "bg-[var(--accent-green-10)] text-[var(--accent-green)]"
-                : "bg-[var(--bg-card)] border border-[var(--border-gray)] text-[var(--text-secondary)]"
-            }`}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] px-4 py-[9px] text-[11px] font-bold tracking-wide text-[var(--text-secondary)] hover:border-[var(--border-light)] transition-colors duration-150"
           >
-            {tab}
+            <Download className="w-3 h-3" />
+            导出
           </button>
-        ))}
-        <div className="ml-auto flex items-center gap-2 rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] px-[14px] py-[6px] focus-within:border-[var(--accent-green)] transition-colors duration-150">
-          <Search className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t("orders.filterPlaceholder")}
-            className="w-[160px] bg-transparent text-[11px] font-medium text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none"
-          />
         </div>
-      </div>
+      </FadeIn>
 
-      {/* Order table */}
-      <div className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)]">
-        {/* Header */}
-        <div className="flex items-center px-5 py-3 border-b border-[var(--border-gray)]">
-          <span className="w-[130px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-            TIME
-          </span>
-          <span className="w-[160px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-            INSTRUMENT
-          </span>
-          <span className="w-[100px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-            TYPE
-          </span>
-          <span className="w-[60px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-            SIDE
-          </span>
-          <span className="w-[100px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-            PRICE
-          </span>
-          <span className="w-[80px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-            QTY
-          </span>
-          <span className="w-[100px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-            STATUS
-          </span>
-        </div>
-        {/* Rows */}
-        {error ? (
-          <div className="flex items-center justify-center h-full p-8">
-            <span className="font-mono text-[12px] text-[var(--accent-red)]">{t("orders.loadFailed")}</span>
-          </div>
-        ) : loading ? (
-          <div className="px-5 py-8 text-center text-[11px] text-[var(--text-muted)]">
-            {t("orders.loading")}
-          </div>
-        ) : orders.length === 0 ? (
-          <div className="px-5 py-8 text-center text-[11px] text-[var(--text-muted)]">
-            {t("orders.noOrders")}
-          </div>
-        ) : (
-          orders.map((order, i) => (
-            <div
-              key={`${order.time}-${order.instrument}-${i}`}
-              className={`flex items-center px-5 py-[11px] text-[11px] font-medium ${
-                i < orders.length - 1
-                  ? "border-b border-[var(--border-gray)]"
-                  : ""
-              }`}
-            >
-              <span className="w-[130px] text-[var(--text-secondary)]">
-                {order.time}
-              </span>
-              <span className="w-[160px] text-[var(--text-primary)]">
-                {order.instrument}
-              </span>
-              <span className="w-[100px] text-[var(--text-secondary)]">
-                {order.type}
-              </span>
-              <span
-                className={`w-[60px] font-semibold ${
-                  order.side === "BUY"
-                    ? "text-[var(--accent-green)]"
-                    : "text-[var(--accent-red)]"
+      {/* Filters */}
+      <FadeIn direction="up" duration={0.25} delay={0.05}>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Node type */}
+          <div className="flex items-center rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden">
+            {NODE_TYPE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setNodeType(opt.value)}
+                className={`px-4 py-[7px] text-[11px] font-semibold transition-colors duration-150 ${
+                  nodeType === opt.value
+                    ? "bg-[var(--bg-elevated)] text-[var(--text-primary)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                 }`}
               >
-                {order.side}
-              </span>
-              <span className="w-[100px] text-[var(--text-primary)]">
-                {order.price}
-              </span>
-              <span className="w-[80px] text-[var(--text-secondary)]">
-                {order.qty}
-              </span>
-              <span className="w-[100px]">
-                <span
-                  className={`inline-flex rounded-full px-[10px] py-1 text-[9px] font-bold ${statusBadge[order.status] ?? "bg-[var(--bg-elevated)] text-[var(--text-secondary)]"}`}
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Status multi-select */}
+          <div className="flex items-center gap-1 flex-wrap">
+            {STATUS_OPTIONS.map((s) => (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(s)}
+                className={`rounded-lg px-3 py-[6px] text-[10px] font-semibold tracking-wide transition-colors duration-150 ${
+                  statusFilter === s
+                    ? "bg-[#1a3a5c] text-[#4C9EEB] border border-[#4C9EEB]/40"
+                    : "bg-[var(--bg-card)] border border-[var(--border-gray)] text-[var(--text-secondary)] hover:border-[var(--border-light)]"
+                }`}
+              >
+                {STATUS_ZH[s]}
+              </button>
+            ))}
+          </div>
+
+          {/* Search */}
+          <div className="ml-auto flex items-center gap-2 rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] px-3 py-[7px] focus-within:border-[#4C9EEB] transition-colors duration-150">
+            <Search className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="搜索交易对..."
+              className="w-[160px] bg-transparent text-[11px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none"
+            />
+          </div>
+
+          {/* Page size */}
+          <div className="flex items-center gap-1 rounded-lg bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden">
+            {PAGE_SIZE_OPTIONS.map((n) => (
+              <button
+                key={n}
+                onClick={() => setPageSize(n)}
+                className={`px-3 py-[7px] text-[10px] font-semibold font-mono transition-colors duration-150 ${
+                  pageSize === n
+                    ? "bg-[var(--bg-elevated)] text-[var(--text-primary)]"
+                    : "text-[var(--text-secondary)]"
+                }`}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+        </div>
+      </FadeIn>
+
+      {/* Table */}
+      <FadeIn direction="up" duration={0.25} delay={0.1} className="flex-1 flex flex-col min-h-0">
+        <div className="flex-1 flex flex-col rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden min-h-0">
+          {/* Header row */}
+          <div className="flex items-center px-5 py-3 border-b border-[var(--border-gray)] shrink-0">
+            <span className={`w-[140px] ${COL_HEADER}`}>时间</span>
+            <span className={`w-[180px] ${COL_HEADER}`}>交易对</span>
+            <span className={`w-[60px] ${COL_HEADER}`}>方向</span>
+            <span className={`w-[100px] ${COL_HEADER}`}>类型</span>
+            <span className={`w-[100px] ${COL_HEADER}`}>数量</span>
+            <span className={`w-[110px] ${COL_HEADER}`}>价格</span>
+            <span className={`w-[120px] ${COL_HEADER}`}>状态</span>
+            <span className={`flex-1 ${COL_HEADER}`}>节点</span>
+          </div>
+
+          {/* Body */}
+          <div className="flex-1 overflow-y-auto">
+            {error ? (
+              <div className="flex items-center justify-center h-32">
+                <span className="font-mono text-[12px] text-[#EF5350]">{error}</span>
+              </div>
+            ) : loading ? (
+              <div className="flex flex-col divide-y divide-[var(--border-gray)]">
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <div key={i} className="flex items-center px-5 py-[11px] gap-2 animate-pulse">
+                    <div className="w-[140px] h-3 rounded bg-[var(--border-gray)]" />
+                    <div className="w-[180px] h-3 rounded bg-[var(--border-gray)]" />
+                    <div className="w-[60px] h-3 rounded bg-[var(--border-gray)]" />
+                    <div className="w-[100px] h-3 rounded bg-[var(--border-gray)]" />
+                    <div className="w-[100px] h-3 rounded bg-[var(--border-gray)]" />
+                    <div className="w-[110px] h-3 rounded bg-[var(--border-gray)]" />
+                    <div className="w-[120px] h-5 rounded bg-[var(--border-gray)]" />
+                    <div className="flex-1 h-3 rounded bg-[var(--border-gray)]" />
+                  </div>
+                ))}
+              </div>
+            ) : orders.length === 0 ? (
+              <div className="flex items-center justify-center h-32">
+                <span className="font-mono text-[11px] text-[var(--text-muted)]">没有匹配的订单</span>
+              </div>
+            ) : (
+              orders.map((o, i) => (
+                <div
+                  key={o.id ?? i}
+                  className="flex items-center px-5 py-[11px] text-[11px] font-mono border-b border-[var(--border-gray)] last:border-b-0 hover:bg-[var(--bg-elevated)] transition-colors duration-100"
                 >
-                  {order.status}
-                </span>
-              </span>
+                  <span className="w-[140px] text-[var(--text-secondary)]">{formatTime(o.created_at)}</span>
+                  <span className="w-[180px] text-[var(--text-primary)] font-semibold">{o.instrument_id}</span>
+                  <span
+                    className={`w-[60px] font-bold ${
+                      o.side === "BUY" ? "text-[#26D97F]" : "text-[#EF5350]"
+                    }`}
+                  >
+                    {o.side === "BUY" ? "买入" : "卖出"}
+                  </span>
+                  <span className="w-[100px] text-[var(--text-secondary)]">{o.order_type}</span>
+                  <span className="w-[100px] text-[var(--text-primary)]">{o.quantity}</span>
+                  <span className="w-[110px] text-[var(--text-primary)]">{o.price ?? "市价"}</span>
+                  <span className="w-[120px]">
+                    <span
+                      className={`inline-flex rounded-full px-[10px] py-[3px] text-[9px] font-bold uppercase ${
+                        STATUS_BADGE[o.status] ?? "bg-[var(--bg-elevated)] text-[var(--text-secondary)]"
+                      }`}
+                    >
+                      {STATUS_ZH[o.status] ?? o.status}
+                    </span>
+                  </span>
+                  <span className="flex-1 text-[var(--text-muted)] capitalize">{o.node_type}</span>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Pagination */}
+          <div className="flex items-center justify-between px-5 py-3 border-t border-[var(--border-gray)] shrink-0">
+            <span className="text-[10px] font-mono text-[var(--text-muted)]">
+              共 {total} 条 · 第 {page + 1} / {totalPages} 页
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="flex items-center justify-center w-7 h-7 rounded-lg border border-[var(--border-gray)] text-[var(--text-secondary)] disabled:opacity-30 hover:border-[var(--border-light)] transition-colors duration-150"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+              {Array.from({ length: Math.min(5, totalPages) }).map((_, i) => {
+                const start = Math.max(0, Math.min(page - 2, totalPages - 5));
+                const p = start + i;
+                return (
+                  <button
+                    key={p}
+                    onClick={() => setPage(p)}
+                    className={`w-7 h-7 rounded-lg text-[10px] font-mono font-semibold transition-colors duration-150 ${
+                      p === page
+                        ? "bg-[#4C9EEB] text-white"
+                        : "border border-[var(--border-gray)] text-[var(--text-secondary)] hover:border-[var(--border-light)]"
+                    }`}
+                  >
+                    {p + 1}
+                  </button>
+                );
+              })}
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                disabled={page >= totalPages - 1}
+                className="flex items-center justify-center w-7 h-7 rounded-lg border border-[var(--border-gray)] text-[var(--text-secondary)] disabled:opacity-30 hover:border-[var(--border-light)] transition-colors duration-150"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
             </div>
-          ))
-        )}
-      </div>
+          </div>
+        </div>
+      </FadeIn>
     </div>
   );
 }

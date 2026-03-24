@@ -1,9 +1,10 @@
 "use client";
 
-import { Plus, X } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
+import { Plus, Trash2, Star } from "lucide-react";
 import { apiGet, apiPost, apiDelete } from "@/lib/api";
-import { useI18n } from "@/i18n";
+import { FadeIn } from "@/components/motion/FadeIn";
+import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
 
 /* ── Types ──────────────────────────────────────────────────── */
 
@@ -14,167 +15,280 @@ interface WatchlistItem {
   created_at: string | null;
 }
 
+/* ── Dialog ─────────────────────────────────────────────────── */
+
+function AddDialog({
+  open,
+  onClose,
+  onAdd,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAdd: (symbol: string, source: string) => Promise<void>;
+}) {
+  const [symbol, setSymbol] = useState("");
+  const [source, setSource] = useState("BINANCE");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    if (!open) { setSymbol(""); setSource("BINANCE"); setErr(""); }
+  }, [open]);
+
+  async function submit() {
+    if (!symbol.trim()) { setErr("请输入交易对"); return; }
+    setBusy(true);
+    setErr("");
+    try {
+      await onAdd(symbol.trim(), source.trim() || "BINANCE");
+      onClose();
+    } catch {
+      setErr("添加失败，请重试");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="w-[400px] rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] shadow-2xl overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border-gray)]">
+          <span className="text-[13px] font-bold text-[var(--text-primary)]">添加品种</span>
+          <button
+            onClick={onClose}
+            className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[10px] font-semibold tracking-wide text-[var(--text-muted)] uppercase font-mono">
+              交易对
+            </label>
+            <input
+              value={symbol}
+              onChange={(e) => setSymbol(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+              placeholder="例: BTCUSDT-PERP"
+              autoFocus
+              className="rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-3 py-2.5 text-[12px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[#4C9EEB] transition-colors duration-150"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[10px] font-semibold tracking-wide text-[var(--text-muted)] uppercase font-mono">
+              交易所
+            </label>
+            <input
+              value={source}
+              onChange={(e) => setSource(e.target.value)}
+              placeholder="BINANCE"
+              className="rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-3 py-2.5 text-[12px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[#4C9EEB] transition-colors duration-150"
+            />
+          </div>
+          {err && <p className="text-[11px] text-[#EF5350] font-mono">{err}</p>}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-[var(--border-gray)]">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded-lg text-[11px] font-bold text-[var(--text-secondary)] border border-[var(--border-gray)] hover:border-[var(--border-light)] transition-colors duration-150"
+          >
+            取消
+          </button>
+          <button
+            onClick={submit}
+            disabled={busy || !symbol.trim()}
+            className="px-4 py-2 rounded-lg text-[11px] font-bold bg-[#26D97F] text-black disabled:opacity-50 hover:opacity-90 transition-all duration-150"
+          >
+            {busy ? "添加中..." : "确认添加"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Item Card ──────────────────────────────────────────────── */
+
+function WatchCard({ item, onDelete }: { item: WatchlistItem; onDelete: (id: number) => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  function formatDate(s: string | null) {
+    if (!s) return "—";
+    return s.replace("T", " ").slice(0, 10);
+  }
+
+  async function handleDelete() {
+    if (!confirming) { setConfirming(true); return; }
+    setDeleting(true);
+    onDelete(item.id);
+  }
+
+  return (
+    <div className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] p-5 flex items-center gap-4 group hover:border-[var(--border-light)] transition-colors duration-150">
+      {/* Icon */}
+      <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--bg-elevated)] shrink-0">
+        <Star className="w-4 h-4 text-[#f5a623]" />
+      </div>
+
+      {/* Info */}
+      <div className="flex-1 min-w-0">
+        <div className="text-[13px] font-bold font-mono text-[var(--text-primary)] truncate">
+          {item.instrument_id}
+        </div>
+        <div className="flex items-center gap-2 mt-0.5">
+          <span className="text-[10px] font-mono text-[var(--text-muted)]">
+            添加于 {formatDate(item.created_at)}
+          </span>
+          <span className="inline-flex rounded-full bg-[#0d2e1c] px-[8px] py-[2px] text-[9px] font-bold text-[#26D97F] uppercase">
+            {item.source}
+          </span>
+        </div>
+      </div>
+
+      {/* Delete */}
+      <button
+        onClick={handleDelete}
+        disabled={deleting}
+        onBlur={() => setConfirming(false)}
+        className={`shrink-0 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[10px] font-bold transition-all duration-150 opacity-0 group-hover:opacity-100 ${
+          confirming
+            ? "bg-[#EF5350] text-white"
+            : "border border-[var(--border-gray)] text-[var(--text-muted)] hover:text-[#EF5350] hover:border-[#EF5350]/50"
+        }`}
+      >
+        <Trash2 className="w-3 h-3" />
+        {confirming ? "确认删除" : "删除"}
+      </button>
+    </div>
+  );
+}
+
 /* ── Page ───────────────────────────────────────────────────── */
 
 export default function WatchlistPage() {
-  const { t } = useI18n();
   const [items, setItems] = useState<WatchlistItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [newInstrument, setNewInstrument] = useState("");
-  const [newSource, setNewSource] = useState("BINANCE");
+  const [showAdd, setShowAdd] = useState(false);
 
   const fetchItems = useCallback(async () => {
     try {
       const data = await apiGet<WatchlistItem[]>("/api/watchlist");
       if (data) setItems(data);
     } catch {
-      setError("watchlist.loadFailed");
+      setError("加载数据失败");
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchItems();
-  }, [fetchItems]);
+  useEffect(() => { fetchItems(); }, [fetchItems]);
 
-  async function handleAdd() {
-    if (!newInstrument.trim()) return;
-    try {
-      await apiPost("/api/watchlist", {
-        instrument_id: newInstrument.trim(),
-        source: newSource.trim() || "BINANCE",
-      });
-      setNewInstrument("");
-      setNewSource("BINANCE");
-      setShowAddForm(false);
-      await fetchItems();
-    } catch {
-      setError("watchlist.addFailed");
-    }
+  async function handleAdd(symbol: string, source: string) {
+    await apiPost("/api/watchlist", { instrument_id: symbol, source });
+    await fetchItems();
   }
 
   async function handleDelete(id: number) {
     try {
       await apiDelete(`/api/watchlist/${id}`);
-      setItems((prev) => prev.filter((item) => item.id !== id));
+      setItems((prev) => prev.filter((it) => it.id !== id));
     } catch {
-      setError("watchlist.removeFailed");
+      setError("删除失败");
     }
   }
 
   return (
-    <div className="flex flex-col gap-6 p-8">
-      {/* Top bar */}
-      <div className="flex items-end justify-between">
-        <div className="flex flex-col gap-1">
-          <h1 className="font-heading text-[28px] font-bold tracking-tight text-[var(--text-primary)]">
-            {t("watchlist.title")}
-          </h1>
-          <span className="text-[11px] font-medium text-[var(--text-muted)]">
-            {t("watchlist.subtitle")}
-          </span>
-        </div>
-        <button
-          onClick={() => setShowAddForm((v) => !v)}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-green)] text-[var(--text-on-accent)] px-5 py-[10px] text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150"
-        >
-          <Plus className="w-3 h-3" />
-          {t("watchlist.addInstrument")}
-        </button>
-      </div>
+    <>
+      <AddDialog open={showAdd} onClose={() => setShowAdd(false)} onAdd={handleAdd} />
 
-      {/* Add form */}
-      {showAddForm && (
-        <div className="flex items-center gap-3 p-4 rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)]">
-          <input
-            value={newInstrument}
-            onChange={(e) => setNewInstrument(e.target.value)}
-            placeholder="BTCUSDT-PERP"
-            className="flex-1 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-3 py-2 text-[11px] font-medium text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-green)] transition-colors duration-150"
-          />
-          <input
-            value={newSource}
-            onChange={(e) => setNewSource(e.target.value)}
-            placeholder="BINANCE"
-            className="w-[120px] rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-3 py-2 text-[11px] font-medium text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-green)] transition-colors duration-150"
-          />
-          <button
-            onClick={handleAdd}
-            className="rounded-lg bg-[var(--accent-green)] text-[var(--text-on-accent)] px-4 py-2 text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150"
-          >
-            {t("watchlist.add")}
-          </button>
-        </div>
-      )}
-
-      {/* Cards grid */}
-      {error ? (
-        <div className="flex items-center justify-center h-full p-8">
-          <span className="font-mono text-[12px] text-[var(--accent-red)]">{t(error as "watchlist.loadFailed")}</span>
-        </div>
-      ) : loading ? (
-        <div className="text-center py-12 text-[11px] text-[var(--text-muted)]">
-          {t("watchlist.loading")}
-        </div>
-      ) : items.length === 0 ? (
-        <div className="text-center py-12 text-[11px] text-[var(--text-muted)]">
-          {t("watchlist.noItems")}
-        </div>
-      ) : (
-        <div className="grid grid-cols-3 gap-4">
-          {items.map((item) => (
-            <div
-              key={item.id}
-              className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] p-5 relative group"
-            >
-              {/* Delete button */}
-              <button
-                onClick={() => handleDelete(item.id)}
-                aria-label="Remove from watchlist"
-                className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 rounded-md p-1 text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-20)] transition-all duration-150"
-              >
-                <X className="w-3 h-3" />
-              </button>
-              {/* Top row */}
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium text-[var(--text-secondary)]">
-                  {item.instrument_id}
-                </span>
-                <span className="inline-flex rounded-full bg-[var(--accent-green-20)] px-[8px] py-[2px] text-[9px] font-bold text-[var(--accent-green)]">
-                  {item.source}
-                </span>
-              </div>
-              {/* Price placeholder */}
-              <div className="font-heading text-2xl font-bold mt-3 text-[var(--text-secondary)]">
-                —
-              </div>
-              {/* Change placeholder */}
-              <div className="text-[11px] font-medium mt-1 text-[var(--text-muted)]">
-                — (—)
-              </div>
-              {/* Flat sparkline placeholder */}
-              <svg
-                width="120"
-                height="32"
-                viewBox="0 0 120 32"
-                fill="none"
-                className="mt-2"
-              >
-                <path
-                  d="M0 16 L120 16"
-                  stroke="var(--border-gray)"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeDasharray="4 4"
-                />
-              </svg>
+      <div className="flex flex-col h-full p-6 gap-5">
+        {/* Header */}
+        <FadeIn direction="down" duration={0.25}>
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-1">
+              <h1 className="font-heading text-[26px] font-bold tracking-tight text-[var(--text-primary)]">
+                自选列表
+              </h1>
+              <span className="text-[11px] font-mono text-[var(--text-muted)]">
+                // 自定义品种监控 — 实时
+              </span>
             </div>
-          ))}
-        </div>
-      )}
-    </div>
+            <button
+              onClick={() => setShowAdd(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#26D97F] text-black px-4 py-[9px] text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              添加品种
+            </button>
+          </div>
+        </FadeIn>
+
+        {/* Content */}
+        {error ? (
+          <div className="flex items-center justify-center flex-1">
+            <span className="font-mono text-[12px] text-[#EF5350]">{error}</span>
+          </div>
+        ) : loading ? (
+          <div className="flex flex-col gap-3">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div
+                key={i}
+                className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] p-5 flex items-center gap-4 animate-pulse"
+              >
+                <div className="w-9 h-9 rounded-lg bg-[var(--border-gray)]" />
+                <div className="flex-1 flex flex-col gap-2">
+                  <div className="h-4 w-32 rounded bg-[var(--border-gray)]" />
+                  <div className="h-3 w-20 rounded bg-[var(--border-gray)]" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : items.length === 0 ? (
+          <FadeIn direction="up" duration={0.3} className="flex-1 flex items-center justify-center">
+            <div className="flex flex-col items-center gap-4 text-center">
+              <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-gray)]">
+                <Star className="w-6 h-6 text-[var(--text-muted)]" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <p className="text-[13px] font-semibold text-[var(--text-secondary)]">
+                  观察列表为空
+                </p>
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  点击添加按钮开始
+                </p>
+              </div>
+              <button
+                onClick={() => setShowAdd(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#26D97F] text-black px-4 py-[9px] text-[11px] font-bold hover:opacity-90 transition-all duration-150"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                添加第一个品种
+              </button>
+            </div>
+          </FadeIn>
+        ) : (
+          <StaggerContainer className="flex flex-col gap-2" staggerDelay={0.05}>
+            {items.map((item) => (
+              <StaggerItem key={item.id}>
+                <WatchCard item={item} onDelete={handleDelete} />
+              </StaggerItem>
+            ))}
+          </StaggerContainer>
+        )}
+      </div>
+    </>
   );
 }

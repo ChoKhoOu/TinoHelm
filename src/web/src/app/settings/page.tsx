@@ -1,16 +1,52 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Lock, Bell, Info } from "lucide-react";
-import { Toggle } from "@/components/ui/Toggle";
-import { apiGet } from "@/lib/api";
-import { useI18n } from "@/i18n";
+import { Server, FolderOpen, Shield, Edit3, Save, X } from "lucide-react";
+import { apiGet, apiPut } from "@/lib/api";
+import { Skeleton } from "@/components/ui/skeleton";
+import { FadeIn } from "@/components/motion/FadeIn";
+import { Input } from "@/components/ui/input";
 
-/* ── Types ──────────────────────────────────────────────── */
+/* ── Types ───────────────────────────────────────────────────────── */
 
-interface ApiKeyStatus { label: string; configured: boolean; source: string }
+interface HealthData {
+  status: string;
+  nautilus_version?: string;
+  python_version?: string;
+  redis_version?: string;
+  uptime_seconds?: number;
+  platform_version?: string;
+  postgres_connected?: boolean;
+  redis_connected?: boolean;
+  sandbox_node?: string;
+  live_node?: string;
+}
 
-/* ── Section Card Wrapper ──────────────────────────────────── */
+interface RiskLimits {
+  max_position_size: number;
+  max_daily_loss: number;
+  max_order_value: number;
+  max_leverage: number;
+}
+
+interface SettingsData {
+  risk_limits?: RiskLimits;
+  strategies_dir?: string;
+  data_dir?: string;
+  artifacts_dir?: string;
+  config_dir?: string;
+}
+
+/* ── Helpers ─────────────────────────────────────────────────────── */
+
+function formatUptime(secs: number): string {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = Math.floor(secs % 60);
+  return `${h}h ${m}m ${s}s`;
+}
+
+/* ── Section card ────────────────────────────────────────────────── */
 
 function SectionCard({
   icon,
@@ -22,273 +58,415 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden">
-      <div className="flex items-center gap-2 px-5 py-[14px]">
+    <div className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden">
+      <div className="flex items-center gap-2 px-5 py-3 border-b border-[var(--border-gray)]">
         <span className="text-[var(--text-muted)]">{icon}</span>
-        <span className="text-[11px] font-semibold tracking-[0.5px] text-[var(--text-secondary)]">
+        <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
           {title}
         </span>
       </div>
-      <div className="h-px bg-[var(--border-gray)]" />
       <div className="p-5 flex flex-col gap-4">{children}</div>
     </div>
   );
 }
 
-/* ── Page ───────────────────────────────────────────────────── */
+/* ── Status dot ──────────────────────────────────────────────────── */
+
+function StatusDot({ online }: { online: boolean | undefined }) {
+  return (
+    <span
+      className={`inline-block w-2 h-2 rounded-full ${
+        online === undefined
+          ? "bg-[var(--text-muted)]"
+          : online
+          ? "bg-[var(--accent-green)]"
+          : "bg-[var(--accent-red)]"
+      }`}
+    />
+  );
+}
+
+/* ── Page ────────────────────────────────────────────────────────── */
 
 export default function SettingsPage() {
-  const { t } = useI18n();
-  const [systemInfo, setSystemInfo] = useState<{label: string; value: string}[]>([]);
-  const [riskLimits, setRiskLimits] = useState<{label: string; value: string; key: string}[]>([]);
-  const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus[]>([
-    { label: "BINANCE API KEY", configured: false, source: "env" },
-    { label: "BINANCE SECRET", configured: false, source: "env" },
-  ]);
+  const [health, setHealth] = useState<HealthData | null>(null);
+  const [settings, setSettings] = useState<SettingsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [notifications, setNotifications] = useState({
-    email: true,
-    push: false,
-    sound: true,
-    killSwitch: true,
+  // Risk limits edit state
+  const [editing, setEditing] = useState(false);
+  const [riskForm, setRiskForm] = useState<RiskLimits>({
+    max_position_size: 0,
+    max_daily_loss: 0,
+    max_order_value: 0,
+    max_leverage: 0,
   });
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    async function loadSettings() {
-      try {
-        const [health, settings] = await Promise.all([
-          apiGet<{
-            status: string;
-            nautilus_version?: string;
-            python_version?: string;
-            redis_version?: string;
-            uptime_seconds?: number;
-            platform_version?: string;
-            binance_connected?: boolean;
-          }>("/api/health"),
-          apiGet<{
-            risk_limits?: { max_position_size: number; max_daily_loss: number; max_leverage: number };
-          }>("/api/settings"),
-        ]);
-        if (cancelled) return;
-        if (health) {
-          const uptime = health.uptime_seconds ?? 0;
-          const hours = Math.floor(uptime / 3600);
-          const mins = Math.floor((uptime % 3600) / 60);
-          const secs = Math.floor(uptime % 60);
-          setSystemInfo([
-            { label: "NAUTILUS VERSION", value: health.nautilus_version ?? "unknown" },
-            { label: "PYTHON", value: health.python_version ?? "unknown" },
-            { label: "REDIS", value: health.redis_version ?? "unknown" },
-            { label: "UPTIME", value: `${hours}h ${mins}m ${secs}s` },
-            { label: "PLATFORM", value: `TinoHelm v${health.platform_version ?? "0.1.0"}` },
-          ]);
-          const connected = health.binance_connected ?? health.status === "healthy";
-          setApiKeyStatus([
-            { label: "BINANCE API KEY", configured: connected, source: "env: BINANCE_API_KEY" },
-            { label: "BINANCE SECRET", configured: connected, source: "env: BINANCE_API_SECRET" },
-          ]);
-        }
-        if (settings?.risk_limits) {
-          const rl = settings.risk_limits;
-          setRiskLimits([
-            { label: "MAX POSITION SIZE", value: `$${rl.max_position_size.toLocaleString()}`, key: "max_position_size" },
-            { label: "MAX DAILY LOSS", value: `$${rl.max_daily_loss.toLocaleString()}`, key: "max_daily_loss" },
-            { label: "MAX LEVERAGE", value: `${rl.max_leverage}x`, key: "max_leverage" },
-          ]);
-        }
-      } catch {
-        if (!cancelled) setError("common.loadFailed");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-    loadSettings();
-    return () => { cancelled = true; };
+    loadAll();
   }, []);
 
-  const toggleNotification = (key: keyof typeof notifications) => {
-    setNotifications((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
+  async function loadAll() {
+    setLoading(true);
+    setError(null);
+    try {
+      const [h, s] = await Promise.all([
+        apiGet<HealthData>("/api/health"),
+        apiGet<SettingsData>("/api/settings"),
+      ]);
+      if (h) setHealth(h);
+      if (s) {
+        setSettings(s);
+        if (s.risk_limits) {
+          setRiskForm({
+            max_position_size: s.risk_limits.max_position_size,
+            max_daily_loss: s.risk_limits.max_daily_loss,
+            max_order_value: s.risk_limits.max_order_value ?? 0,
+            max_leverage: s.risk_limits.max_leverage,
+          });
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }
 
-  if (error) {
-    return (
-      <div className="flex items-center justify-center h-full p-8">
-        <span className="font-mono text-[12px] text-[var(--accent-red)]">{t("common.loadFailed")}</span>
-      </div>
-    );
+  async function handleSaveRisk() {
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      await apiPut("/api/settings/risk-limits", riskForm);
+      setSaveMsg("保存成功");
+      setEditing(false);
+      await loadAll();
+    } catch (err) {
+      setSaveMsg(err instanceof Error ? err.message : "保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleCancelEdit() {
+    setEditing(false);
+    setSaveMsg(null);
+    if (settings?.risk_limits) {
+      setRiskForm({
+        max_position_size: settings.risk_limits.max_position_size,
+        max_daily_loss: settings.risk_limits.max_daily_loss,
+        max_order_value: settings.risk_limits.max_order_value ?? 0,
+        max_leverage: settings.risk_limits.max_leverage,
+      });
+    }
   }
 
   if (loading) {
     return (
-      <div className="flex flex-col h-full p-6 gap-5">
-        <div className="flex flex-col gap-1">
-          <h1 className="font-heading text-[28px] font-bold tracking-tight text-[var(--text-primary)]">
-            {t("settings.title")}
+      <div className="flex flex-col gap-5 p-6">
+        <div className="flex flex-col gap-0.5">
+          <h1 className="font-heading text-[22px] font-bold tracking-tight text-[var(--text-primary)]">
+            系统设置
           </h1>
-          <span className="text-[11px] font-medium text-[var(--text-muted)]">
-            {t("settings.loading")}
+          <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+            // 加载中...
           </span>
         </div>
-        <div className="flex items-center justify-center min-h-[300px]">
-          <div className="flex flex-col items-center gap-3">
-            <div className="w-6 h-6 border-2 border-[var(--accent-green)] border-t-transparent rounded-full animate-spin" />
-            <span className="text-xs text-[var(--text-muted)]">{t("settings.loading")}</span>
-          </div>
+        <div className="grid grid-cols-2 gap-5">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] p-5">
+              <Skeleton className="h-3 w-24 mb-4 bg-[var(--bg-elevated)]" />
+              <div className="flex flex-col gap-3">
+                {Array.from({ length: 4 }).map((_, j) => (
+                  <Skeleton key={j} className="h-8 w-full bg-[var(--bg-elevated)]" />
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     );
   }
 
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-full p-8">
+        <span className="text-[11px] text-[var(--accent-red)]">{error}</span>
+      </div>
+    );
+  }
+
+  const uptime = health?.uptime_seconds ?? 0;
+  const isHealthy = health?.status === "healthy" || health?.status === "ok";
+
   return (
-    <div className="flex flex-col h-full p-6 gap-5">
+    <div className="flex flex-col gap-6 p-6 h-full overflow-y-auto">
       {/* Title */}
-      <div className="flex flex-col gap-1">
-        <h1 className="font-heading text-[28px] font-bold tracking-tight text-[var(--text-primary)]">
-          {t("settings.title")}
+      <div className="flex flex-col gap-0.5 shrink-0">
+        <h1 className="font-heading text-[22px] font-bold tracking-tight text-[var(--text-primary)]">
+          系统设置
         </h1>
-        <span className="text-[11px] font-medium text-[var(--text-muted)]">
-          {t("settings.subtitle")}
+        <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+          // TinoHelm v{health?.platform_version ?? "0.1.0"}
         </span>
       </div>
 
-      {/* Two-column layout */}
-      <div className="flex gap-5 flex-1 min-h-0">
-        {/* Left column */}
-        <div className="flex-1 flex flex-col gap-5">
-          {/* API Keys */}
-          <SectionCard
-            icon={<Lock className="w-4 h-4" />}
-            title={t("settings.apiKeys")}
-          >
-            {apiKeyStatus.map((key) => (
-              <div key={key.label} className="flex flex-col gap-1.5">
-                <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-                  {key.label}
+      <div className="grid grid-cols-2 gap-5">
+        {/* ── Section 1: 系统信息 ─────────────────────────────── */}
+        <FadeIn>
+          <SectionCard icon={<Server className="w-4 h-4" />} title="系统信息">
+            {/* Health indicators */}
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                  系统状态
                 </span>
-                <div className="flex items-center justify-between rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-[14px] py-[10px]">
-                  <span className={`text-[11px] font-medium ${key.configured ? "text-[var(--accent-green)]" : "text-[var(--text-muted)]"}`}>
-                    {key.configured ? t("settings.configured") : t("settings.notConfigured")}
-                  </span>
-                  <span className="text-[10px] font-mono text-[var(--text-muted)]">
-                    {key.source}
+                <div className="flex items-center gap-1.5">
+                  <StatusDot online={isHealthy} />
+                  <span
+                    className={`text-[11px] font-medium ${
+                      isHealthy ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"
+                    }`}
+                  >
+                    {isHealthy ? "正常" : "异常"}
                   </span>
                 </div>
               </div>
-            ))}
-          </SectionCard>
 
-          {/* Risk Limits */}
-          <SectionCard
-            icon={
-              <svg
-                className="w-4 h-4"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M8 1L14.5 13H1.5L8 1Z" />
-                <path d="M8 6V9" />
-                <circle cx="8" cy="11" r="0.5" fill="currentColor" />
-              </svg>
-            }
-            title={t("settings.riskLimits")}
-          >
-            {riskLimits.length > 0 ? (
-              riskLimits.map((item) => (
-                <div key={item.key} className="flex flex-col gap-1.5">
-                  <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
-                    {item.label}
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                  PostgreSQL
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <StatusDot online={health?.postgres_connected} />
+                  <span
+                    className={`text-[11px] font-medium ${
+                      health?.postgres_connected
+                        ? "text-[var(--accent-green)]"
+                        : "text-[var(--text-muted)]"
+                    }`}
+                  >
+                    {health?.postgres_connected ? "已连接" : "未连接"}
                   </span>
-                  <div className="flex items-center rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-[14px] py-[10px]">
-                    <span className="text-[11px] font-medium text-[var(--text-primary)]">
-                      {item.value}
-                    </span>
-                  </div>
                 </div>
-              ))
-            ) : (
-              <span className="text-[11px] text-[var(--text-muted)]">
-                {t("settings.noRiskLimits")}
-              </span>
-            )}
-          </SectionCard>
-        </div>
+              </div>
 
-        {/* Right column */}
-        <div className="w-[380px] flex flex-col gap-5">
-          {/* Notifications */}
-          <SectionCard
-            icon={<Bell className="w-4 h-4" />}
-            title={t("settings.notifications")}
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-medium text-[var(--text-secondary)]">
-                {t("settings.emailAlerts")}
-              </span>
-              <Toggle
-                checked={notifications.email}
-                onChange={() => toggleNotification("email")}
-              />
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-medium text-[var(--text-secondary)]">
-                {t("settings.pushNotifications")}
-              </span>
-              <Toggle
-                checked={notifications.push}
-                onChange={() => toggleNotification("push")}
-              />
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-medium text-[var(--text-secondary)]">
-                {t("settings.soundOnFill")}
-              </span>
-              <Toggle
-                checked={notifications.sound}
-                onChange={() => toggleNotification("sound")}
-              />
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-medium text-[var(--text-secondary)]">
-                {t("settings.killSwitchSms")}
-              </span>
-              <Toggle
-                checked={notifications.killSwitch}
-                onChange={() => toggleNotification("killSwitch")}
-              />
-            </div>
-          </SectionCard>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                  Redis
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <StatusDot online={health?.redis_connected ?? (health?.redis_version !== undefined)} />
+                  <span
+                    className={`text-[11px] font-medium ${
+                      health?.redis_connected || health?.redis_version
+                        ? "text-[var(--accent-green)]"
+                        : "text-[var(--text-muted)]"
+                    }`}
+                  >
+                    {health?.redis_connected || health?.redis_version ? "已连接" : "未连接"}
+                  </span>
+                </div>
+              </div>
 
-          {/* System Info */}
-          <SectionCard
-            icon={<Info className="w-4 h-4" />}
-            title={t("settings.systemInfo")}
-          >
-            {systemInfo.length > 0 ? (
-              systemInfo.map((item) => (
+              <div className="h-px bg-[var(--border-gray)]" />
+
+              {[
+                { label: "版本", value: `TinoHelm v${health?.platform_version ?? "0.1.0"}` },
+                { label: "运行时长", value: formatUptime(uptime) },
+                { label: "Nautilus", value: health?.nautilus_version ?? "—" },
+                { label: "Python", value: health?.python_version ?? "—" },
+                { label: "Redis", value: health?.redis_version ?? "—" },
+                {
+                  label: "Sandbox 节点",
+                  value: health?.sandbox_node ?? "—",
+                },
+                {
+                  label: "Live 节点",
+                  value: health?.live_node ?? "—",
+                },
+              ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between">
-                  <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">
+                  <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
                     {item.label}
                   </span>
-                  <span className="text-[11px] font-medium text-[var(--text-primary)]">
+                  <span className="text-[11px] font-mono text-[var(--text-primary)]">
                     {item.value}
                   </span>
                 </div>
-              ))
+              ))}
+            </div>
+          </SectionCard>
+        </FadeIn>
+
+        {/* ── Section 2: 风险限额 ─────────────────────────────── */}
+        <FadeIn delay={0.05}>
+          <SectionCard icon={<Shield className="w-4 h-4" />} title="风险限额">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] text-[var(--text-muted)]">最大持仓/单日亏损/单笔金额/杠杆倍数</span>
+              {!editing ? (
+                <button
+                  onClick={() => setEditing(true)}
+                  className="inline-flex items-center gap-1 text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--accent-green)] transition-colors"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  编辑
+                </button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleCancelEdit}
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                    取消
+                  </button>
+                  <button
+                    onClick={handleSaveRisk}
+                    disabled={saving}
+                    className="inline-flex items-center gap-1 text-[10px] font-bold text-[var(--accent-green)] hover:opacity-80 transition-opacity disabled:opacity-50"
+                  >
+                    {saving ? (
+                      <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Save className="w-3 h-3" />
+                    )}
+                    保存
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {saveMsg && (
+              <div
+                className={`rounded-lg px-3 py-2 text-[11px] font-medium border ${
+                  saveMsg === "保存成功"
+                    ? "bg-[var(--accent-green-20)] border-[var(--accent-green)]/30 text-[var(--accent-green)]"
+                    : "bg-[var(--accent-red-20)] border-[var(--accent-red)]/30 text-[var(--accent-red)]"
+                }`}
+              >
+                {saveMsg}
+              </div>
+            )}
+
+            {settings?.risk_limits === undefined && !editing ? (
+              <span className="text-[11px] text-[var(--text-muted)]">暂无风险限额配置</span>
+            ) : editing ? (
+              <div className="flex flex-col gap-3">
+                <Input
+                  label="最大持仓金额 (USD)"
+                  type="number"
+                  value={String(riskForm.max_position_size)}
+                  onChange={(e) =>
+                    setRiskForm((f) => ({
+                      ...f,
+                      max_position_size: parseFloat(e.target.value) || 0,
+                    }))
+                  }
+                />
+                <Input
+                  label="最大单日亏损 (USD)"
+                  type="number"
+                  value={String(riskForm.max_daily_loss)}
+                  onChange={(e) =>
+                    setRiskForm((f) => ({
+                      ...f,
+                      max_daily_loss: parseFloat(e.target.value) || 0,
+                    }))
+                  }
+                />
+                <Input
+                  label="最大单笔下单金额 (USD)"
+                  type="number"
+                  value={String(riskForm.max_order_value)}
+                  onChange={(e) =>
+                    setRiskForm((f) => ({
+                      ...f,
+                      max_order_value: parseFloat(e.target.value) || 0,
+                    }))
+                  }
+                />
+                <Input
+                  label="最大杠杆倍数"
+                  type="number"
+                  value={String(riskForm.max_leverage)}
+                  onChange={(e) =>
+                    setRiskForm((f) => ({
+                      ...f,
+                      max_leverage: parseFloat(e.target.value) || 0,
+                    }))
+                  }
+                />
+              </div>
             ) : (
-              <span className="text-[11px] text-[var(--text-muted)]">
-                {t("settings.noSystemInfo")}
-              </span>
+              <div className="flex flex-col gap-3">
+                {[
+                  {
+                    label: "最大持仓金额",
+                    value: `$${settings!.risk_limits!.max_position_size.toLocaleString()}`,
+                  },
+                  {
+                    label: "最大单日亏损",
+                    value: `$${settings!.risk_limits!.max_daily_loss.toLocaleString()}`,
+                  },
+                  {
+                    label: "最大单笔下单金额",
+                    value: settings!.risk_limits!.max_order_value
+                      ? `$${settings!.risk_limits!.max_order_value.toLocaleString()}`
+                      : "—",
+                  },
+                  {
+                    label: "最大杠杆倍数",
+                    value: `${settings!.risk_limits!.max_leverage}x`,
+                  },
+                ].map((item) => (
+                  <div
+                    key={item.label}
+                    className="flex items-center justify-between rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-4 py-2.5"
+                  >
+                    <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                      {item.label}
+                    </span>
+                    <span className="text-[11px] font-mono font-semibold text-[var(--text-primary)]">
+                      {item.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
           </SectionCard>
-        </div>
+        </FadeIn>
+
+        {/* ── Section 3: 路径配置 (只读) ──────────────────────── */}
+        <FadeIn delay={0.1} className="col-span-2">
+          <SectionCard icon={<FolderOpen className="w-4 h-4" />} title="路径配置">
+            <div className="grid grid-cols-2 gap-4">
+              {[
+                { label: "策略目录", key: "strategies_dir" },
+                { label: "数据目录", key: "data_dir" },
+                { label: "结果目录", key: "artifacts_dir" },
+                { label: "配置目录", key: "config_dir" },
+              ].map((item) => {
+                const val = settings?.[item.key as keyof SettingsData] as string | undefined;
+                return (
+                  <div key={item.key} className="flex flex-col gap-1.5">
+                    <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                      {item.label}
+                    </span>
+                    <div className="flex items-center rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-4 py-2.5 min-h-[38px]">
+                      <span className="text-[11px] font-mono text-[var(--text-secondary)] break-all">
+                        {val ?? "—"}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </SectionCard>
+        </FadeIn>
       </div>
     </div>
   );
