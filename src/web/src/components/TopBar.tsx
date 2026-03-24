@@ -33,7 +33,9 @@ export function TopBar() {
     return () => clearInterval(id);
   }, []);
 
-  const title = pathTitles[pathname] || pathTitles[Object.keys(pathTitles).find(k => k !== "/" && pathname.startsWith(k)) || "/"] || "TinoHelm";
+  const title = pathTitles[pathname]
+    ?? Object.entries(pathTitles).find(([k]) => k !== "/" && pathname.startsWith(k))?.[1]
+    ?? "TinoHelm";
 
   const wsColor = connected
     ? "bg-[var(--accent-green)]"

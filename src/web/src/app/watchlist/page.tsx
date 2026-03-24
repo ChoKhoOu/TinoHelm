@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Plus, Trash2, Star } from "lucide-react";
 import { apiGet, apiPost, apiDelete } from "@/lib/api";
+import { formatDate } from "@/lib/format";
 import { FadeIn } from "@/components/motion/FadeIn";
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
 
@@ -120,14 +121,10 @@ function AddDialog({
 
 /* ── Item Card ──────────────────────────────────────────────── */
 
-function WatchCard({ item, onDelete }: { item: WatchlistItem; onDelete: (id: number) => void }) {
+function WatchCard({ item, onDelete }: { item: WatchlistItem; onDelete: (id: number) => Promise<void> }) {
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  function formatDate(s: string | null) {
-    if (!s) return "—";
-    return s.replace("T", " ").slice(0, 10);
-  }
 
   async function handleDelete() {
     if (!confirming) { setConfirming(true); return; }

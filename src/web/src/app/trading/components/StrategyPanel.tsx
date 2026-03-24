@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, Play, Pause, RotateCcw, Square } from "lucide-react";
+import { RefreshCw, Play, Pause, RotateCcw, Square, Loader2 } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 
 interface StrategyInfo {
@@ -271,7 +271,7 @@ function PortfolioButton({
       }}
     >
       {loading ? (
-        <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+        <Loader2 className="w-2.5 h-2.5 animate-spin" />
       ) : (
         icon
       )}

@@ -27,9 +27,6 @@ interface Props {
 
 const columnHelper = createColumnHelper<Position>();
 
-function formatDuration(dur: string): string {
-  return dur || "—";
-}
 
 export function PositionsTable({ positions }: Props) {
   // Track which rows were recently updated for flash animation
@@ -121,7 +118,7 @@ export function PositionsTable({ positions }: Props) {
       header: "持仓时长",
       cell: (info) => (
         <span className="text-[11px] font-mono text-[var(--text-muted)]">
-          {formatDuration(info.getValue())}
+          {info.getValue() || "—"}
         </span>
       ),
     }),

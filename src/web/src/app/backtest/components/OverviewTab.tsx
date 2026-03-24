@@ -242,7 +242,7 @@ export function OverviewTab({ runId }: OverviewTabProps) {
             label="总收益率"
             value={s.total_return_pct}
             format="pct"
-            positive={s.total_return_pct >= 0 ? true : false}
+            positive={s.total_return_pct >= 0}
           />
         </StaggerItem>
         <StaggerItem>
@@ -266,7 +266,7 @@ export function OverviewTab({ runId }: OverviewTabProps) {
             label="胜率"
             value={s.win_rate}
             format="pct"
-            positive={s.win_rate >= 50 ? true : false}
+            positive={s.win_rate >= 50}
           />
         </StaggerItem>
         <StaggerItem>
@@ -406,10 +406,10 @@ export function OverviewTab({ runId }: OverviewTabProps) {
           </span>
           <div className="flex flex-col gap-1">
             {[
-              ["盈利笔数", s.winning_trades, null],
-              ["亏损笔数", s.losing_trades, null],
-              ["总手续费", `$${s.total_fees.toFixed(2)}`, null],
-              ["平均持仓", s.avg_holding_time ?? "—", null],
+              ["盈利笔数", s.winning_trades],
+              ["亏损笔数", s.losing_trades],
+              ["总手续费", `$${s.total_fees.toFixed(2)}`],
+              ["平均持仓", s.avg_holding_time ?? "—"],
             ].map(([label, val]) => (
               <div key={label as string} className="flex items-center justify-between py-0.5">
                 <span className="text-xs text-[var(--text-muted)]">{label as string}</span>

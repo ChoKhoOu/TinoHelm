@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Search, ChevronLeft, ChevronRight } from "lucide-react";
 import { apiGet } from "@/lib/api";
+import { formatDateTime } from "@/lib/format";
 import { FadeIn } from "@/components/motion/FadeIn";
 
 /* ── Types ──────────────────────────────────────────────────── */
@@ -112,10 +113,6 @@ export default function OrdersPage() {
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
-  function formatTime(s: string | null) {
-    if (!s) return "—";
-    return s.replace("T", " ").slice(0, 16);
-  }
 
   return (
     <div className="flex flex-col h-full p-6 gap-5">
@@ -246,7 +243,7 @@ export default function OrdersPage() {
                   key={o.id ?? i}
                   className="flex items-center px-5 py-[11px] text-[11px] font-mono border-b border-[var(--border-gray)] last:border-b-0 hover:bg-[var(--bg-elevated)] transition-colors duration-100"
                 >
-                  <span className="w-[140px] text-[var(--text-secondary)]">{formatTime(o.created_at)}</span>
+                  <span className="w-[140px] text-[var(--text-secondary)]">{formatDateTime(o.created_at)}</span>
                   <span className="w-[180px] text-[var(--text-primary)] font-semibold">{o.instrument_id}</span>
                   <span
                     className={`w-[60px] font-bold ${

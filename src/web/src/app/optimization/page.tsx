@@ -11,6 +11,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { FlaskConical, ChevronRight } from "lucide-react";
+import { formatDateTime } from "@/lib/format";
 import { apiGet } from "@/lib/api";
 import { FadeIn } from "@/components/motion/FadeIn";
 
@@ -251,10 +252,6 @@ export default function OptimizationPage() {
 
   const selected = runs.find((r) => r.id === selectedId);
 
-  function formatDate(s: string | null) {
-    if (!s) return "—";
-    return s.replace("T", " ").slice(0, 16);
-  }
 
   return (
     <div className="flex h-full">
@@ -325,7 +322,7 @@ export default function OptimizationPage() {
                       </span>
                     )}
                     <span className="text-[10px] font-mono text-[var(--text-muted)] ml-auto">
-                      {formatDate(run.created_at)}
+                      {formatDateTime(run.created_at)}
                     </span>
                   </div>
                 </div>

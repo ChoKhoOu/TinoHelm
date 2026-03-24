@@ -2,6 +2,7 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import { TrendingUp, TrendingDown, Inbox } from "lucide-react";
+import { formatTime } from "@/lib/format";
 
 export interface Fill {
   trade_id: string;
@@ -17,15 +18,6 @@ interface Props {
   fills: Fill[];
 }
 
-function formatTime(ts: string): string {
-  if (!ts) return "—";
-  try {
-    const d = new Date(ts);
-    return d.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  } catch {
-    return ts.slice(-8) || ts;
-  }
-}
 
 export function FillsStream({ fills }: Props) {
   return (

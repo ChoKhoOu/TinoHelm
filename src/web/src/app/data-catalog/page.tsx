@@ -41,7 +41,7 @@ function formatBytes(bytes: number): string {
 }
 
 function formatNumber(n: number | undefined): string {
-  if (n === undefined || n === null) return "—";
+  if (n === undefined) return "—";
   return n.toLocaleString();
 }
 
