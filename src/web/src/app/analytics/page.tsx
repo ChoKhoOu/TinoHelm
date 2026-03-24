@@ -29,12 +29,12 @@ import { CHART_AXIS_STYLE as AXIS_STYLE, CHART_TOOLTIP_STYLE as TOOLTIP_STYLE } 
 /* ── Helpers ────────────────────────────────────────────────── */
 
 function heatBg(val: number): string {
-  if (val >= 5) return "#1a4731";
-  if (val >= 3) return "#166534";
-  if (val > 0) return "#14532d";
+  if (val >= 5) return "color-mix(in srgb, var(--accent-green) 30%, var(--bg-card))";
+  if (val >= 3) return "color-mix(in srgb, var(--accent-green) 22%, var(--bg-card))";
+  if (val > 0) return "color-mix(in srgb, var(--accent-green) 14%, var(--bg-card))";
   if (val === 0) return "var(--bg-elevated)";
-  if (val > -3) return "#4a1820";
-  return "#7f1d1d";
+  if (val > -3) return "color-mix(in srgb, var(--accent-red) 14%, var(--bg-card))";
+  return "color-mix(in srgb, var(--accent-red) 30%, var(--bg-card))";
 }
 
 function heatFg(val: number): string {

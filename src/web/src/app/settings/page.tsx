@@ -103,6 +103,15 @@ export default function SettingsPage() {
     max_leverage: 0,
   });
   const [saving, setSaving] = useState(false);
+
+  function riskFormFromSettings(rl: RiskLimits): RiskLimits {
+    return {
+      max_position_size: rl.max_position_size,
+      max_daily_loss: rl.max_daily_loss,
+      max_order_value: rl.max_order_value ?? 0,
+      max_leverage: rl.max_leverage,
+    };
+  }
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -121,12 +130,7 @@ export default function SettingsPage() {
       if (s) {
         setSettings(s);
         if (s.risk_limits) {
-          setRiskForm({
-            max_position_size: s.risk_limits.max_position_size,
-            max_daily_loss: s.risk_limits.max_daily_loss,
-            max_order_value: s.risk_limits.max_order_value ?? 0,
-            max_leverage: s.risk_limits.max_leverage,
-          });
+          setRiskForm(riskFormFromSettings(s.risk_limits));
         }
       }
     } catch (err) {
@@ -155,12 +159,7 @@ export default function SettingsPage() {
     setEditing(false);
     setSaveMsg(null);
     if (settings?.risk_limits) {
-      setRiskForm({
-        max_position_size: settings.risk_limits.max_position_size,
-        max_daily_loss: settings.risk_limits.max_daily_loss,
-        max_order_value: settings.risk_limits.max_order_value ?? 0,
-        max_leverage: settings.risk_limits.max_leverage,
-      });
+      setRiskForm(riskFormFromSettings(settings.risk_limits));
     }
   }
 

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { apiGet } from "@/lib/api";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useWsEvent } from "@/providers/WebSocketProvider";
 import { StrategyPanel } from "./components/StrategyPanel";
 import { PositionsTable, type Position } from "./components/PositionsTable";
@@ -216,11 +217,11 @@ function PositionsSkeleton() {
   return (
     <div className="p-4 space-y-3">
       <div className="flex items-center gap-2 mb-4">
-        <div className="h-4 w-16 rounded bg-[var(--bg-elevated)] animate-pulse" />
-        <div className="h-4 w-6 rounded bg-[var(--bg-elevated)] animate-pulse" />
+        <Skeleton className="h-4 w-16" />
+        <Skeleton className="h-4 w-6" />
       </div>
       {[1, 2, 3, 4].map((i) => (
-        <div key={i} className="h-10 rounded bg-[var(--bg-elevated)] animate-pulse" />
+        <Skeleton key={i} className="h-10 w-full" />
       ))}
     </div>
   );

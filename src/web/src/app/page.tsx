@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { apiGet } from "@/lib/api";
 import { useWsLastKnown, useWsEvent } from "@/providers/WebSocketProvider";
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
@@ -215,34 +215,37 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const fetchAll = useCallback(async () => {
-    try {
-      const [summaryData, runsData, healthData] = await Promise.allSettled([
-        apiGet<DashboardSummary>("/api/dashboard/summary"),
-        apiGet<{ runs: BacktestRun[]; total: number }>("/api/backtest/runs", { limit: "10" }),
-        apiGet<HealthData>("/api/health"),
-      ]);
-
-      if (summaryData.status === "fulfilled" && summaryData.value) {
-        setSummary(summaryData.value);
-      }
-      if (runsData.status === "fulfilled" && runsData.value) {
-        setBacktestRuns(runsData.value.runs ?? []);
-      }
-      if (healthData.status === "fulfilled" && healthData.value) {
-        setHealth(healthData.value);
-      }
-    } catch {
-      setError(t("dashboard.loadFailed"));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
+    setLoading(true);
+    setError(null);
+    async function fetchAll() {
+      try {
+        const [summaryData, runsData, healthData] = await Promise.allSettled([
+          apiGet<DashboardSummary>("/api/dashboard/summary"),
+          apiGet<{ runs: BacktestRun[]; total: number }>("/api/backtest/runs", { limit: "10" }),
+          apiGet<HealthData>("/api/health"),
+        ]);
+
+        if (summaryData.status === "fulfilled" && summaryData.value) {
+          setSummary(summaryData.value);
+        }
+        if (runsData.status === "fulfilled" && runsData.value) {
+          setBacktestRuns(runsData.value.runs ?? []);
+        }
+        if (healthData.status === "fulfilled" && healthData.value) {
+          setHealth(healthData.value);
+        }
+      } catch {
+        setError(t("dashboard.loadFailed"));
+      } finally {
+        setLoading(false);
+      }
+    }
     fetchAll();
-  }, [fetchAll]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadKey]);
 
   // Derived KPI values (safe defaults for 0-state display)
   const totalEquity = summary?.total_equity ?? 0;
@@ -305,7 +308,7 @@ export default function DashboardPage() {
         <div className="flex flex-col items-center gap-3">
           <span className="font-mono text-[12px] text-[var(--accent-red)]">{error}</span>
           <button
-            onClick={() => { setError(null); setLoading(true); fetchAll(); }}
+            onClick={() => setReloadKey((k) => k + 1)}
             className="px-4 py-2 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] text-[11px] font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
           >
             重试
