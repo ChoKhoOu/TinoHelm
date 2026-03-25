@@ -25,6 +25,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.trading.strategy import Strategy
 
+from tinohelm.strategy.state import stateful
 from tinohelm.strategy.utils import is_paused, setup_pause_support
 
 
@@ -41,6 +42,10 @@ class {class_name}Config(StrategyConfig):
     trade_size: Decimal = Decimal("0.01")
 
 
+# @stateful persists listed attributes across live restarts via NT Cache.
+# Fields are JSON-serialized by default. For complex types (e.g. deque),
+# supply custom encoders: encoders={{"window": (list, deque)}}
+@stateful("bar_count", "last_signal")
 class {class_name}(Strategy):
     """{name} trading strategy.
 
@@ -54,6 +59,9 @@ class {class_name}(Strategy):
         on_position_opened(event)  — React to new positions
         on_position_changed(event) — React to position updates
         on_position_closed(event)  — React to position closures
+        on_save() -> dict     — Persist state for live restart (auto via @stateful)
+        on_load(state)        — Restore state after restart (auto via @stateful)
+        on_reset()            — Reset between backtest runs (auto via @stateful)
         on_event(event)       — Catch-all event handler
 
     Useful APIs:
@@ -74,7 +82,9 @@ class {class_name}(Strategy):
         self.instrument_id = config.instrument_id
         self.bar_type = config.bar_type
         self.trade_size = config.trade_size
-        # Initialize your state variables here
+        # State variables persisted by @stateful (declare & initialize here)
+        self.bar_count: int = 0
+        self.last_signal: str | None = None
         # NOTE: Do NOT call self.log or self.clock here (not yet registered)
 
     def on_start(self) -> None:
@@ -100,6 +110,8 @@ class {class_name}(Strategy):
         """Called on each new bar. Implement your trading logic here."""
         if is_paused(self):
             return  # L1 soft pause — skip new order logic
+
+        self.bar_count += 1
 
         # Example: Access bar data
         # open_price = bar.open
@@ -135,6 +147,8 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.trading.strategy import Strategy
 
+from tinohelm.strategy.state import stateful
+
 
 class {class_name}Config(StrategyConfig):
     """Configuration for {class_name}."""
@@ -142,6 +156,7 @@ class {class_name}Config(StrategyConfig):
     trade_size: Decimal = Decimal("0.01")
 
 
+@stateful("tick_count")
 class {class_name}(Strategy):
     """{name} tick-based trading strategy."""
 
@@ -149,6 +164,8 @@ class {class_name}(Strategy):
         super().__init__(config)
         self.instrument_id = config.instrument_id
         self.trade_size = config.trade_size
+        # State variables persisted by @stateful
+        self.tick_count: int = 0
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.instrument_id)
@@ -162,6 +179,7 @@ class {class_name}(Strategy):
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
         """Called on each quote tick. Implement your trading logic here."""
+        self.tick_count += 1
         # tick.bid_price, tick.ask_price, tick.bid_size, tick.ask_size
         pass
 
