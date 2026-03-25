@@ -126,3 +126,91 @@ async def fetch_klines(
 
     logger.info(f"Fetched {len(all_klines)} klines for {symbol} {interval}")
     return all_klines
+
+
+async def fetch_funding_rates(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    testnet: bool = False,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    """Fetch historical funding rates from Binance Futures API with pagination.
+
+    Returns list of dicts with keys: funding_time_ms, funding_rate, mark_price.
+    Sorted by funding_time ascending.
+    """
+    base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
+    url = f"{base_url}/fapi/v1/fundingRate"
+
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+
+    all_rates: list[dict[str, Any]] = []
+    current_start = start_ms
+
+    max_retries = 5
+    retry_count = 0
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while current_start < end_ms:
+            params = {
+                "symbol": _strip_to_binance_api_symbol(symbol),
+                "startTime": current_start,
+                "endTime": end_ms,
+                "limit": limit,
+            }
+
+            try:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                raw = resp.json()
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status in (429, 418):
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        raise
+                    wait = min(2 ** retry_count, 60)
+                    logger.warning("Rate limited (HTTP %d), retry %d/%d in %ds", status, retry_count, max_retries, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                elif status >= 500:
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        raise
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    raise
+            except (httpx.RequestError, Exception) as e:
+                retry_count += 1
+                if retry_count > max_retries:
+                    raise
+                logger.warning("Request error: %s, retry %d/%d", e, retry_count, max_retries)
+                await asyncio.sleep(2)
+                continue
+
+            retry_count = 0
+
+            if not raw:
+                break
+
+            for r in raw:
+                all_rates.append({
+                    "funding_time_ms": r["fundingTime"],
+                    "funding_rate": float(r["fundingRate"]),
+                    "mark_price": float(r.get("markPrice", 0)),
+                })
+
+            # Move start past last record
+            last_time = raw[-1]["fundingTime"]
+            current_start = last_time + 1
+
+            if len(raw) < limit:
+                break
+
+            await asyncio.sleep(0.5)
+
+    logger.info("Fetched %d funding rate records for %s", len(all_rates), symbol)
+    return all_rates
