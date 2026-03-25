@@ -3,7 +3,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, Plus, Play, RefreshCw } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Input, Select } from "@/components/ui/input";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -160,14 +161,16 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
             <label className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
               策略
             </label>
-            <Select
-              value={form.strategy_name}
-              onValueChange={set("strategy_name")}
-              options={[
-                { value: "", label: "请选择策略..." },
-                ...strategies.map((s) => ({ value: s.name, label: s.name })),
-              ]}
-            />
+            <Select value={form.strategy_name} onValueChange={(v: string | null) => v && set("strategy_name")(v)}>
+              <SelectTrigger>
+                <SelectValue placeholder="请选择策略..." />
+              </SelectTrigger>
+              <SelectContent>
+                {strategies.map((s) => (
+                  <SelectItem key={s.name} value={s.name}>{s.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="flex flex-col gap-1">
@@ -185,11 +188,16 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
             <label className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
               时间周期
             </label>
-            <Select
-              value={form.interval}
-              onValueChange={set("interval")}
-              options={INTERVAL_OPTIONS}
-            />
+            <Select value={form.interval} onValueChange={(v: string | null) => v && set("interval")(v)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {INTERVAL_OPTIONS.map((opt) => (
+                  <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="grid grid-cols-2 gap-2">
@@ -382,19 +390,19 @@ export default function BacktestPage() {
               className="pl-7 h-7 text-xs"
             />
           </div>
-          <Select
-            value={statusFilter}
-            onValueChange={setStatusFilter}
-            options={[
-              { value: "all", label: "全部状态" },
-              { value: "queued", label: "排队中" },
-              { value: "running", label: "运行中" },
-              { value: "completed", label: "已完成" },
-              { value: "failed", label: "失败" },
-              { value: "cancelled", label: "已取消" },
-            ]}
-            className="h-7 text-xs"
-          />
+          <Select value={statusFilter} onValueChange={(v: string | null) => v && setStatusFilter(v)}>
+            <SelectTrigger className="h-7 text-xs w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部状态</SelectItem>
+              <SelectItem value="queued">排队中</SelectItem>
+              <SelectItem value="running">运行中</SelectItem>
+              <SelectItem value="completed">已完成</SelectItem>
+              <SelectItem value="failed">失败</SelectItem>
+              <SelectItem value="cancelled">已取消</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
         {/* Runs list */}

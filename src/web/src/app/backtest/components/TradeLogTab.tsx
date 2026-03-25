@@ -11,7 +11,7 @@ import {
   type SortingState,
 } from "@tanstack/react-table";
 import { ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
-import { Select } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 import type { TradeLogEntry } from "../types";
 
@@ -224,12 +224,16 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] text-[var(--text-muted)]">每页</span>
-            <Select
-              value={String(pageSize)}
-              options={PAGE_SIZE_OPTIONS}
-              onValueChange={(v) => setPageSize(Number(v))}
-              className="w-16 h-7 text-xs"
-            />
+            <Select value={String(pageSize)} onValueChange={(v: string | null) => v && setPageSize(Number(v))}>
+              <SelectTrigger className="w-16 h-7 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PAGE_SIZE_OPTIONS.map((opt) => (
+                  <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <div className="flex items-center gap-1">
             <button

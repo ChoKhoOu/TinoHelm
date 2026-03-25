@@ -12,7 +12,8 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Input, Select } from "@/components/ui/input";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
@@ -101,12 +102,19 @@ function FetchDialog({
             value={symbol}
             onChange={(e) => setSymbol(e.target.value)}
           />
-          <Select
-            label="周期"
-            value={interval}
-            options={INTERVAL_OPTIONS}
-            onChange={(e) => setInterval(e.target.value)}
-          />
+          <div className="flex flex-col gap-1">
+            <label className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">周期</label>
+            <Select value={interval} onValueChange={(v: string | null) => v && setInterval(v)}>
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {INTERVAL_OPTIONS.map((opt) => (
+                  <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <Input
               label="开始日期"
