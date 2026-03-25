@@ -328,6 +328,130 @@ class BacktestRunner:
             cancel_latency_nanos=int(config.get("cancel_latency_nanos", 0)),
         )
 
+    def _load_auxiliary_price_data(
+        self, engine: BacktestEngine, nt_symbols: list[str],
+    ) -> None:
+        """Load mark price and index price data for all symbols.
+
+        Fetches from Binance API and injects as MarkPriceUpdate / IndexPriceUpdate
+        so strategies can subscribe via ``subscribe_data(DataType(MarkPriceUpdate))``.
+        Uses the same interval as the primary bar data.
+        """
+        import asyncio
+        from tinohelm.data.providers.binance import (
+            fetch_mark_price_klines,
+            fetch_index_price_klines,
+        )
+
+        ivl = self.intervals[0] if self.intervals else "1h"
+        total_mark = 0
+        total_index = 0
+
+        for sym, nt_sym in zip(self.symbols, nt_symbols):
+            # Mark price
+            try:
+                mark_klines = asyncio.run(fetch_mark_price_klines(
+                    symbol=sym, interval=ivl, start=self.start, end=self.end,
+                ))
+                if mark_klines:
+                    updates = self._build_mark_price_updates(mark_klines, nt_sym)
+                    if updates:
+                        engine.add_data(updates, sort=False)
+                        total_mark += len(updates)
+            except Exception:
+                logger.debug("Failed to load mark price for %s", sym, exc_info=True)
+
+            # Index price
+            try:
+                index_klines = asyncio.run(fetch_index_price_klines(
+                    symbol=sym, interval=ivl, start=self.start, end=self.end,
+                ))
+                if index_klines:
+                    updates = self._build_index_price_updates(index_klines, nt_sym)
+                    if updates:
+                        engine.add_data(updates, sort=False)
+                        total_index += len(updates)
+            except Exception:
+                logger.debug("Failed to load index price for %s", sym, exc_info=True)
+
+        if total_mark or total_index:
+            logger.info(
+                "Auxiliary price data loaded: %d MarkPriceUpdate, %d IndexPriceUpdate",
+                total_mark, total_index,
+            )
+
+    @staticmethod
+    def _build_mark_price_updates(klines: list[dict], nt_symbol: str) -> list:
+        """Convert mark price klines to NT MarkPriceUpdate objects."""
+        try:
+            from nautilus_trader.model.data import MarkPriceUpdate
+            from nautilus_trader.model.identifiers import InstrumentId
+            from nautilus_trader.model.objects import Price
+
+            inst_id = InstrumentId.from_str(nt_symbol)
+            updates = []
+            for k in klines:
+                close_time_ns = int(k["close_time"]) * 1_000_000  # ms → ns
+                updates.append(MarkPriceUpdate(
+                    instrument_id=inst_id,
+                    value=Price.from_str(str(k["close"])),
+                    ts_event=close_time_ns,
+                    ts_init=close_time_ns,
+                ))
+            return updates
+        except Exception:
+            logger.warning("Failed to build MarkPriceUpdate objects", exc_info=True)
+            return []
+
+    @staticmethod
+    def _build_index_price_updates(klines: list[dict], nt_symbol: str) -> list:
+        """Convert index price klines to NT IndexPriceUpdate objects."""
+        try:
+            from nautilus_trader.model.data import IndexPriceUpdate
+            from nautilus_trader.model.identifiers import InstrumentId
+            from nautilus_trader.model.objects import Price
+
+            inst_id = InstrumentId.from_str(nt_symbol)
+            updates = []
+            for k in klines:
+                close_time_ns = int(k["close_time"]) * 1_000_000
+                updates.append(IndexPriceUpdate(
+                    instrument_id=inst_id,
+                    value=Price.from_str(str(k["close"])),
+                    ts_event=close_time_ns,
+                    ts_init=close_time_ns,
+                ))
+            return updates
+        except Exception:
+            logger.warning("Failed to build IndexPriceUpdate objects", exc_info=True)
+            return []
+
+    @staticmethod
+    def _build_funding_rate_updates(funding_events: list[dict]) -> list:
+        """Convert funding events to NT FundingRateUpdate objects.
+
+        These are injected into the engine so strategies can subscribe via
+        ``subscribe_data(DataType(FundingRateUpdate))`` and receive them
+        in ``on_data()``.
+        """
+        try:
+            from decimal import Decimal as _Decimal
+            from nautilus_trader.model.data import FundingRateUpdate
+            from nautilus_trader.model.identifiers import InstrumentId
+
+            updates = []
+            for ev in funding_events:
+                updates.append(FundingRateUpdate(
+                    instrument_id=InstrumentId.from_str(ev["symbol"]),
+                    rate=_Decimal(str(ev["rate"])),
+                    ts_event=ev["timestamp_ns"],
+                    ts_init=ev["timestamp_ns"],
+                ))
+            return updates
+        except Exception:
+            logger.warning("Failed to build FundingRateUpdate objects", exc_info=True)
+            return []
+
     def _load_funding_rates(self, nt_symbols: list[str]) -> list[dict]:
         """Load historical funding rates for all symbols with local caching.
 
@@ -568,7 +692,7 @@ class BacktestRunner:
         except Exception:
             logger.warning("Failed to register custom statistics", exc_info=True)
 
-        # Add funding cost tracker for perpetual futures
+        # Add funding cost tracker + inject FundingRateUpdate data for perpetual futures
         self._funding_enabled = False
         if self.symbols and self.start and self.end:
             funding_events = self._load_funding_rates(nt_symbols)
@@ -582,10 +706,21 @@ class BacktestRunner:
                 tracker = _FundingCostTracker(config=_FundingCostTrackerConfig())
                 engine.add_actor(tracker)
                 self._funding_enabled = True
+
+                # Inject NT-native FundingRateUpdate so strategies can
+                # subscribe via subscribe_data(DataType(FundingRateUpdate))
+                funding_updates = self._build_funding_rate_updates(funding_events)
+                if funding_updates:
+                    engine.add_data(funding_updates, sort=False)
+
                 logger.info(
-                    "Funding cost tracker enabled: %d events across %d symbols",
-                    len(funding_events), len(nt_symbols),
+                    "Funding cost tracker enabled: %d events, %d FundingRateUpdate injected",
+                    len(funding_events), len(funding_updates),
                 )
+
+        # Load mark price and index price data for strategies
+        if self.symbols and self.start and self.end:
+            self._load_auxiliary_price_data(engine, nt_symbols)
 
         # Add progress reporter actor for bar-level progress tracking
         if self._redis_client and self._run_id and total_bar_count > 0:
