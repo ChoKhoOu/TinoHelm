@@ -40,6 +40,7 @@ class _RiskGuardStub:
         self._day_start_equity = starting_balance
         self._current_day = None
         self._breached = False
+        self._breach_reason = ""
         self._equity_value = starting_balance
 
         # Mock NT methods
@@ -56,10 +57,11 @@ class _RiskGuardStub:
     def _get_equity(self) -> float:
         return self._equity_value
 
-    def on_bar(self, bar):
-        bar_dt = bar.ts_event
-        bar_date = datetime.fromtimestamp(bar_dt / 1e9, tz=timezone.utc)
-        day_of_year = bar_date.timetuple().tm_yday + bar_date.year * 1000
+    def on_event(self, event):
+        """Mirrors production: timer-driven risk checks."""
+        event_ns = event.ts_event
+        event_date = datetime.fromtimestamp(event_ns / 1e9, tz=timezone.utc)
+        day_of_year = event_date.timetuple().tm_yday + event_date.year * 1000
 
         if self._current_day is None:
             self._current_day = day_of_year
@@ -68,8 +70,15 @@ class _RiskGuardStub:
             equity = self._get_equity()
             if equity > 0:
                 self._day_start_equity = equity
+            if self._breached and self._breach_reason == "daily_pnl":
+                self._breached = False
+                self._breach_reason = ""
 
         self._check_risks()
+
+    # Backward compat alias for tests that use on_bar()
+    def on_bar(self, bar):
+        self.on_event(bar)
 
     def _check_risks(self):
         if self._breached:
@@ -102,7 +111,7 @@ class _RiskGuardStub:
 
         if self._max_positions is not None:
             position_count = len(self.portfolio.positions_open())
-            if position_count >= self._max_positions:
+            if position_count > self._max_positions:
                 self._trigger_breach("position_count")
                 return
 
@@ -118,6 +127,7 @@ class _RiskGuardStub:
 
     def _trigger_breach(self, reason: str):
         self._breached = True
+        self._breach_reason = reason
         action = self._breach_action.value
         self.msgbus.publish(RISK_GUARD_STATE, action)
         if self._breach_action == BreachAction.FLATTEN_ALL:
@@ -242,11 +252,22 @@ class TestPositionCount:
         actor = _RiskGuardStub(max_positions=10, starting_balance=10000)
         actor.set_equity(10000)
 
-        actor.portfolio.positions_open.return_value = [MagicMock()] * 10
+        actor.portfolio.positions_open.return_value = [MagicMock()] * 11  # > 10
 
         actor._check_risks()
 
         assert actor._breached is True
+
+    def test_position_count_at_limit_no_breach(self):
+        """Exactly at max_positions should NOT breach (only exceeding does)."""
+        actor = _RiskGuardStub(max_positions=10, starting_balance=10000)
+        actor.set_equity(10000)
+
+        actor.portfolio.positions_open.return_value = [MagicMock()] * 10
+
+        actor._check_risks()
+
+        assert actor._breached is False
 
     def test_position_count_within_limit(self):
         actor = _RiskGuardStub(max_positions=10, starting_balance=10000)

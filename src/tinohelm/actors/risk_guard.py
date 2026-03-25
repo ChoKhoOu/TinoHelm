@@ -3,6 +3,10 @@
 Monitors daily PnL, max drawdown, total exposure, and position count.
 Communicates with strategies exclusively via NT msgbus.
 
+Risk checks are triggered by a fixed-interval timer (default 10s) rather
+than bar events, ensuring checks fire even during market-quiet periods or
+with low-frequency bar data (e.g. 4h/1d bars).
+
 This Actor is fully optional — strategies work without it.
 """
 from __future__ import annotations
@@ -11,8 +15,8 @@ import logging
 from datetime import datetime, timezone
 from enum import Enum
 
+import pandas as pd
 from nautilus_trader.common.actor import Actor, ActorConfig
-from nautilus_trader.model.data import Bar
 
 from tinohelm.data.instruments import _resolve_currency
 from tinohelm.node.topics import RISK_GUARD_FLATTEN, RISK_GUARD_STATE
@@ -49,6 +53,9 @@ class RiskGuardConfig(ActorConfig, frozen=True):
     # Action to take on breach
     breach_action: str = BreachAction.REDUCE_ONLY.value
 
+    # Risk check interval in seconds (decoupled from bar frequency)
+    check_interval_secs: int = 10
+
     # Account settings for equity calculation
     venue_name: str = "BINANCE"
     currency: str = "USDT"
@@ -82,6 +89,7 @@ class RiskGuardActor(Actor):
         self._max_total_exposure = config.max_total_exposure
         self._max_positions = config.max_positions
         self._breach_action = BreachAction(config.breach_action)
+        self._check_interval_secs = config.check_interval_secs
 
         # NT objects resolved in on_start() (not available in __init__)
         self._venue = None
@@ -94,34 +102,45 @@ class RiskGuardActor(Actor):
         self._breached: bool = False
         self._breach_reason: str = ""
 
+    _TIMER_NAME: str = "risk_guard_check"
+
     def on_start(self) -> None:
-        """Initialize equity tracking and subscribe to all bar types."""
+        """Initialize equity tracking and start periodic risk-check timer."""
         from nautilus_trader.model.identifiers import Venue
 
         # Resolve NT objects once
         self._venue = Venue(self._venue_name)
         self._currency_obj = _resolve_currency(self._currency_str)
 
-        # Subscribe to every bar type the engine has loaded so on_bar() fires
-        for bar_type in self.cache.bar_types():
-            self.subscribe_bars(bar_type)
+        # Fixed-interval timer — fires every N seconds regardless of bar arrival.
+        # This ensures risk checks happen even between 4h/1d bars or during
+        # market-quiet periods.
+        self.clock.set_timer(
+            name=self._TIMER_NAME,
+            interval=pd.Timedelta(seconds=self._check_interval_secs),
+        )
 
         equity = self._get_equity()
         if equity > 0:
             self._peak_equity = equity
             self._day_start_equity = equity
         logger.info(
-            "RiskGuardActor started: equity=%.2f, breach_action=%s, bar_subscriptions=%d",
+            "RiskGuardActor started: equity=%.2f, breach_action=%s, check_interval=%ds",
             self._peak_equity, self._breach_action.value,
-            len(self.cache.bar_types()),
+            self._check_interval_secs,
         )
 
-    def on_bar(self, bar: Bar) -> None:
-        """Check risk limits on every bar event."""
-        # Detect day boundary via bar.ts_event (UTC)
-        bar_dt = bar.ts_event  # nanosecond timestamp
-        bar_date = datetime.fromtimestamp(bar_dt / 1e9, tz=timezone.utc)
-        day_of_year = bar_date.timetuple().tm_yday + bar_date.year * 1000
+    def on_event(self, event) -> None:
+        """Handle timer events for periodic risk checks."""
+        from nautilus_trader.common.events import TimeEvent
+
+        if not isinstance(event, TimeEvent):
+            return
+
+        # Detect day boundary via event timestamp (UTC)
+        event_ns = event.ts_event
+        event_date = datetime.fromtimestamp(event_ns / 1e9, tz=timezone.utc)
+        day_of_year = event_date.timetuple().tm_yday + event_date.year * 1000
 
         if self._current_day is None:
             self._current_day = day_of_year
@@ -142,7 +161,12 @@ class RiskGuardActor(Actor):
         self._check_risks()
 
     def _get_equity(self) -> float:
-        """Get current portfolio equity including unrealized PnL via NT Portfolio API."""
+        """Get current portfolio equity: balance + unrealized PnL.
+
+        ``balance_total`` may not include unrealized PnL under certain account
+        models.  We explicitly add the sum of unrealized PnLs from the
+        Portfolio API to ensure accurate equity calculation.
+        """
         try:
             account = self.portfolio.account(self._venue)
             if account is None:
@@ -152,7 +176,18 @@ class RiskGuardActor(Actor):
             if balance is None:
                 return self._starting_balance
 
-            return float(balance.as_double())
+            equity = float(balance.as_double())
+
+            # Add unrealized PnL from all open positions
+            try:
+                unrealized_pnls = self.portfolio.unrealized_pnls(self._venue)
+                if unrealized_pnls:
+                    for _currency, pnl_money in unrealized_pnls.items():
+                        equity += float(pnl_money.as_double())
+            except Exception:
+                pass  # Fallback to balance-only if unrealized_pnls fails
+
+            return equity
         except Exception as e:
             logger.debug("Could not get equity: %s", e)
             return self._starting_balance
