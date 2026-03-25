@@ -59,8 +59,12 @@ export function StrategyPanel({ nodeType }: Props) {
         apiGet<{ portfolios: PortfolioInfo[] }>("/api/node/portfolios", { mode: nodeType }),
         apiGet<{ strategies: StrategyInfo[] }>("/api/node/lifecycle/state", { mode: nodeType }),
       ]);
+      const raw = portfoliosRes?.portfolios;
+      const portfolios: PortfolioInfo[] = raw && !Array.isArray(raw)
+        ? Object.entries(raw).map(([name, info]) => ({ name, ...(info as Record<string, unknown>) } as PortfolioInfo))
+        : (raw ?? []);
       setData({
-        portfolios: portfoliosRes?.portfolios ?? [],
+        portfolios,
         strategies: stateRes?.strategies ?? [],
       });
     } catch {

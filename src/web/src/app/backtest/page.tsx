@@ -281,8 +281,8 @@ export default function BacktestPage() {
   // Load runs list
   const loadRuns = useCallback(async () => {
     try {
-      const data = await apiGet<BacktestRunSummary[]>("/api/backtest/list");
-      if (data) setRuns(data);
+      const data = await apiGet<{ runs: BacktestRunSummary[]; total: number }>("/api/backtest/runs");
+      if (data) setRuns(data.runs ?? []);
     } catch {
       // ignore
     } finally {

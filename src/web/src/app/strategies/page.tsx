@@ -8,6 +8,15 @@ import { FadeIn } from "@/components/motion/FadeIn";
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
+interface RawStrategyItem {
+  name: string;
+  strategy_class?: string;
+  file_path?: string;
+  type?: string;
+  version?: string;
+  description?: string;
+}
+
 interface StrategyListItem {
   name: string;
   class_name?: string;
@@ -359,8 +368,15 @@ export default function StrategiesPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await apiGet<StrategyListItem[]>("/api/strategies");
-      if (data) setStrategies(data);
+      const raw = await apiGet<RawStrategyItem[]>("/api/strategies");
+      if (raw) setStrategies(raw.map((s) => ({
+        name: s.name,
+        class_name: s.strategy_class,
+        file_path: s.file_path,
+        is_portfolio: s.type === "portfolio",
+        version: s.version,
+        description: s.description,
+      })));
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {

@@ -363,7 +363,7 @@ export default function DashboardPage() {
             label={t("dashboard.activePositions")}
             value={openPositions}
             decimals={0}
-            change={`${activeStrategies} 个策略运行中`}
+            change={`${activeStrategies} 个策略已注册`}
             icon={<Activity className="w-3.5 h-3.5" />}
           />
         </StaggerItem>
