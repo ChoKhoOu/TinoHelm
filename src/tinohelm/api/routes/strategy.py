@@ -227,6 +227,49 @@ async def get_strategy_params(
     }
 
 
+class StrategyDefaults(BaseModel):
+    """Default configuration for a strategy (from portfolio.yaml if applicable)."""
+
+    symbols: list[str] = []
+    interval: str | None = None
+    starting_balance: float | None = None
+
+
+@router.get("/{name}/defaults", response_model=StrategyDefaults)
+async def get_strategy_defaults(
+    name: str,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> StrategyDefaults:
+    """Get default run configuration for a strategy.
+
+    For portfolio strategies, returns symbols, interval, and starting_balance
+    from portfolio.yaml. For single-file strategies, returns empty defaults.
+    """
+    stmt = select(Strategy).where(Strategy.name == name)
+    row = (await db.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
+
+    file_path = Path(row.file_path)
+    if file_path.name == "portfolio.yaml" and file_path.exists():
+        import yaml
+
+        with open(file_path) as f:
+            raw = yaml.safe_load(f) or {}
+        symbols = raw.get("symbols", [])
+        interval = raw.get("interval")
+        account = raw.get("account", {})
+        starting_balance = account.get("starting_balance")
+        return StrategyDefaults(
+            symbols=symbols if isinstance(symbols, list) else [],
+            interval=str(interval) if interval else None,
+            starting_balance=float(starting_balance) if starting_balance else None,
+        )
+
+    return StrategyDefaults()
+
+
 @router.post("/create", response_model=CreateStrategyResponse)
 async def create_strategy(
     body: CreateStrategyRequest,

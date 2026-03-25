@@ -54,6 +54,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
   const [globalFilter, setGlobalFilter] = useState("");
   const [sorting, setSorting] = useState<SortingState>([]);
   const [pageSize, setPageSize] = useState(25);
+  const [pageIndex, setPageIndex] = useState(0);
 
   // Fetch and parse CSV when source or runId changes
   useEffect(() => {
@@ -65,6 +66,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
     setHeaders([]);
     setGlobalFilter("");
     setSorting([]);
+    setPageIndex(0);
 
     const url = `${API_BASE}/api/backtest/${runId}/artifacts/${activeSource}_report.csv`;
     fetch(url, {
@@ -73,11 +75,12 @@ export function ReportsTab({ runId }: ReportsTabProps) {
       },
     })
       .then((r) => {
+        if (r.status === 404) return "";
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();
       })
       .then((text) => {
-        if (cancelled) return;
+        if (cancelled || !text) return;
         const result = Papa.parse<CsvRow>(text, {
           header: true,
           skipEmptyLines: true,
@@ -127,9 +130,14 @@ export function ReportsTab({ runId }: ReportsTabProps) {
   const table = useReactTable({
     data: csvData,
     columns,
-    state: { sorting, globalFilter, pagination: { pageIndex: 0, pageSize } },
+    state: { sorting, globalFilter, pagination: { pageIndex, pageSize } },
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
+    onPaginationChange: (updater) => {
+      const next = typeof updater === "function" ? updater({ pageIndex, pageSize }) : updater;
+      setPageIndex(next.pageIndex);
+      setPageSize(next.pageSize);
+    },
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
@@ -137,11 +145,6 @@ export function ReportsTab({ runId }: ReportsTabProps) {
     globalFilterFn: "includesString",
     manualPagination: false,
   });
-
-  // Sync pageSize
-  useEffect(() => {
-    table.setPageSize(pageSize);
-  }, [pageSize, table]);
 
   const handleExport = () => {
     window.open(
@@ -152,7 +155,6 @@ export function ReportsTab({ runId }: ReportsTabProps) {
   };
 
   const filteredCount = table.getFilteredRowModel().rows.length;
-  const { pageIndex } = table.getState().pagination;
   const from = filteredCount === 0 ? 0 : pageIndex * pageSize + 1;
   const to = Math.min(from + pageSize - 1, filteredCount);
 

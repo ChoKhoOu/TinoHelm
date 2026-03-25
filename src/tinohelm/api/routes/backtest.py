@@ -524,6 +524,10 @@ async def get_artifact(
     suffix = artifact_path.suffix.lower()
     media_type = _MIME_MAP.get(suffix, "application/octet-stream")
 
+    # For HTML files, omit filename to avoid Content-Disposition: attachment
+    # which prevents iframe rendering. CSV/JSON keep the download behavior.
+    if suffix == ".html":
+        return FileResponse(path=str(artifact_path), media_type=media_type)
     return FileResponse(
         path=str(artifact_path),
         media_type=media_type,

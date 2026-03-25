@@ -154,6 +154,8 @@ def extract_backtest_results(
     # 2. Extract individual metrics (safe)
     # ------------------------------------------------------------------
     total_pnl = _safe_float(pnl_stats.get("PnL (total)"), 0.0)
+    # total_return_pct is computed later from equity curve for consistency;
+    # fallback to PnL-based calculation if returns_series is unavailable.
     total_return_pct = round(total_pnl / starting_balance * 100, 4) if starting_balance else 0.0
 
     sharpe = _safe_float(returns_stats.get("Sharpe Ratio (252 days)"))
@@ -188,7 +190,7 @@ def extract_backtest_results(
     if win_rate == 0.0:
         win_rate = _safe_float(general_stats.get("Win Rate"), 0.0)
 
-    profit_factor = _safe_float(pnl_stats.get("Profit Factor"))
+    profit_factor = _safe_float(returns_stats.get("Profit Factor"))
     # profit_factor can be Inf when gross_loss==0; _safe_float converts that
     # to None.  We compute a fallback after positions are tallied (section 3).
     expectancy = _safe_float(pnl_stats.get("Expectancy"))
@@ -318,19 +320,38 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     # 8. Equity curve
     # ------------------------------------------------------------------
+    # Build equity from closed-position PnL accumulated by close date.
+    # This avoids the analyzer.returns() cumprod issue where leveraged
+    # futures accounts produce inflated daily returns that diverge from
+    # the actual account PnL (gross_profit - gross_loss).
     equity_curve: list[dict[str, Any]] = []
     try:
-        if returns_series is not None and len(returns_series) > 0:
-            cumulative = (1 + returns_series).cumprod() * starting_balance
-            peak = cumulative.cummax()
-            drawdown = (cumulative - peak) / peak
+        from collections import defaultdict as _ec_defaultdict
+        from datetime import datetime as _ec_dt, timezone as _ec_tz
 
-            for ts, equity_val in cumulative.items():
-                ret_pct = float(returns_series.get(ts, 0.0)) * 100
-                dd_pct = float(drawdown.get(ts, 0.0)) * 100
+        # Aggregate realized PnL by close date
+        daily_pnl: dict[str, float] = _ec_defaultdict(float)
+        for p in closed_positions:
+            ts_closed = getattr(p, "ts_closed", None)
+            if ts_closed and ts_closed > 0:
+                close_date = _ec_dt.fromtimestamp(
+                    int(ts_closed) / 1e9, tz=_ec_tz.utc
+                ).strftime("%Y-%m-%d")
+                daily_pnl[close_date] += _parse_realized_pnl(p.realized_pnl)
+
+        if daily_pnl:
+            sorted_dates = sorted(daily_pnl.keys())
+            cum_pnl = 0.0
+            peak_equity = starting_balance
+            for d in sorted_dates:
+                cum_pnl += daily_pnl[d]
+                equity_val = starting_balance + cum_pnl
+                peak_equity = max(peak_equity, equity_val)
+                dd_pct = ((equity_val - peak_equity) / peak_equity * 100) if peak_equity > 0 else 0.0
+                ret_pct = (daily_pnl[d] / starting_balance * 100) if starting_balance > 0 else 0.0
                 equity_curve.append({
-                    "timestamp": str(ts),
-                    "equity": round(float(equity_val), 4),
+                    "timestamp": d,
+                    "equity": round(equity_val, 4),
                     "returns_pct": round(ret_pct, 4),
                     "drawdown_pct": round(dd_pct, 4),
                 })

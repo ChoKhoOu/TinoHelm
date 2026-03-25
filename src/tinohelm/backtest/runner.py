@@ -743,6 +743,9 @@ class BacktestRunner:
                 total_bar_count, self._run_id[:8],
             )
 
+        # Final sort — funding/mark/index data may have been added after initial sort
+        engine.sort_data()
+
         # Run
         engine.run()
 
@@ -1007,7 +1010,7 @@ class BacktestRunner:
 
             config = TearsheetConfig(
                 charts=charts,
-                theme="plotly_white",
+                theme="plotly_dark",
             )
 
             output_path = self.artifacts_dir / "tearsheet.html"

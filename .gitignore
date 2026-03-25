@@ -16,6 +16,5 @@ cli/target/
 
 # Claude Code / OMC tooling (session-specific, not project source)
 .omc/
-.claude/
 target/
 .superset/

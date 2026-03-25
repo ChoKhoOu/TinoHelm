@@ -73,32 +73,32 @@ const columns = [
   col.accessor("avg_open", {
     header: "开仓价",
     cell: (info) => {
-      const v = info.getValue();
-      return v != null ? v.toFixed(4) : "—";
+      const v = Number(info.getValue());
+      return !isNaN(v) ? v.toFixed(4) : "—";
     },
     size: 90,
   }),
   col.accessor("avg_close", {
     header: "平仓价",
     cell: (info) => {
-      const v = info.getValue();
-      return v != null ? v.toFixed(4) : "—";
+      const v = Number(info.getValue());
+      return !isNaN(v) ? v.toFixed(4) : "—";
     },
     size: 90,
   }),
   col.accessor("quantity", {
     header: "数量",
     cell: (info) => {
-      const v = info.getValue();
-      return v != null ? v.toFixed(4) : "—";
+      const v = Number(info.getValue());
+      return !isNaN(v) ? v.toFixed(4) : "—";
     },
     size: 80,
   }),
   col.accessor("realized_pnl", {
     header: "盈亏",
     cell: (info) => {
-      const v = info.getValue();
-      if (v == null) return "—";
+      const v = Number(info.getValue());
+      if (isNaN(v)) return "—";
       const positive = v >= 0;
       return (
         <span className={positive ? "text-[var(--accent-green)] font-medium" : "text-[var(--accent-red)] font-medium"}>

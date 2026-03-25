@@ -141,6 +141,67 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Backtest progress ring */
+@keyframes progress-rotate {
+  from { transform: rotate(-90deg); }
+  to { transform: rotate(-90deg); }
+}
+@keyframes ring-glow-pulse {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(76, 158, 235, 0.2)); }
+  50% { filter: drop-shadow(0 0 12px rgba(76, 158, 235, 0.45)); }
+}
+@keyframes shimmer-slide {
+  0% { left: -40%; }
+  100% { left: 140%; }
+}
+@keyframes breathe {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+@keyframes count-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+.progress-ring-glow { animation: ring-glow-pulse 3s ease-in-out infinite; }
+.progress-shimmer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  animation: shimmer-slide 1.8s ease-in-out infinite;
+}
+.progress-breathe { animation: breathe 2.5s ease-in-out infinite; }
+.progress-pop { animation: count-pop 400ms ease-out; }
+
+/* Range Calendar animations */
+.rdp-month {
+  animation: cal-fade-in 250ms ease-out;
+}
+@keyframes cal-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rdp-day_button {
+  transition: all 150ms ease-out;
+}
+.rdp-day_button:hover {
+  transform: scale(1.1);
+}
+.rdp-day_button[data-selected="true"],
+.rdp-day_button[data-range-start="true"],
+.rdp-day_button[data-range-end="true"] {
+  animation: cal-select-pop 200ms ease-out;
+}
+@keyframes cal-select-pop {
+  0% { transform: scale(0.85); }
+  60% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
 /* Real-time data flash animations */
 @keyframes flash-green { 0% { background-color: #26D97F20; } 100% { background-color: transparent; } }
 @keyframes flash-red { 0% { background-color: #EF535020; } 100% { background-color: transparent; } }
