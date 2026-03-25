@@ -81,12 +81,16 @@ def run_node(config: dict[str, Any]) -> None:
                 timeout=2,
             ),
             encoding="msgpack",
+            timestamps_as_iso8601=True,
             buffer_interval_ms=100,
             flush_on_start=True,  # Clean slate each restart for paper trading
             use_trader_prefix=True,
         ),
         data_engine=LiveDataEngineConfig(),
         exec_engine=LiveExecEngineConfig(
+            # State snapshots (crash recovery)
+            snapshot_orders=True,
+            snapshot_positions=True,
             # Reconcile with Binance Demo on startup
             reconciliation=True,
             reconciliation_lookback_mins=1440,  # 24h lookback
