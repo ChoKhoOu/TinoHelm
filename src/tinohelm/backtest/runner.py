@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
-from nautilus_trader.backtest.models import FillModel
+from nautilus_trader.backtest.models import FillModel, LatencyModel
 from nautilus_trader.common.actor import Actor, ActorConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model import TraderId
@@ -266,6 +266,118 @@ class BacktestRunner:
             logger.warning("Failed to download bars for %s %s from Binance", sym, ivl, exc_info=True)
             return None
 
+    # ------------------------------------------------------------------
+    # Fill model & latency model builders
+    # ------------------------------------------------------------------
+
+    _FILL_MODEL_CLASSES: dict[str, str] = {
+        "default": "FillModel",
+        "best_price": "BestPriceFillModel",
+        "one_tick_slippage": "OneTickSlippageFillModel",
+        "three_tier": "ThreeTierFillModel",
+    }
+
+    @staticmethod
+    def _build_fill_model(config: dict[str, Any]) -> FillModel:
+        """Build a FillModel from config dict.
+
+        Supports ``fill_model_type`` key to select model class:
+          - ``"default"`` → FillModel (probabilistic)
+          - ``"best_price"`` → BestPriceFillModel (fills inside spread)
+          - ``"one_tick_slippage"`` → OneTickSlippageFillModel
+          - ``"three_tier"`` → ThreeTierFillModel (50/30/20 distribution)
+        """
+        model_type = config.get("fill_model_type", "default")
+
+        if model_type == "best_price":
+            from nautilus_trader.backtest.models import BestPriceFillModel
+            return BestPriceFillModel()
+        elif model_type == "one_tick_slippage":
+            from nautilus_trader.backtest.models import OneTickSlippageFillModel
+            return OneTickSlippageFillModel()
+        elif model_type == "three_tier":
+            from nautilus_trader.backtest.models import ThreeTierFillModel
+            return ThreeTierFillModel()
+        else:
+            return FillModel(
+                prob_fill_on_limit=config.get("prob_fill_on_limit", 1.0),
+                prob_slippage=config.get("prob_slippage", 0.0),
+                random_seed=config.get("random_seed", None),
+            )
+
+    @staticmethod
+    def _build_latency_model(config: dict[str, Any]) -> LatencyModel | None:
+        """Build a LatencyModel from config dict.
+
+        Reads ``latency_ms`` (base latency in milliseconds, default 30).
+        Set to 0 to disable latency simulation.
+
+        Advanced keys (nanoseconds, additive to base):
+          - ``insert_latency_nanos``
+          - ``update_latency_nanos``
+          - ``cancel_latency_nanos``
+        """
+        latency_ms = config.get("latency_ms", 30)
+        if latency_ms <= 0:
+            return None
+        base_nanos = int(latency_ms * 1_000_000)
+        return LatencyModel(
+            base_latency_nanos=base_nanos,
+            insert_latency_nanos=int(config.get("insert_latency_nanos", 0)),
+            update_latency_nanos=int(config.get("update_latency_nanos", 0)),
+            cancel_latency_nanos=int(config.get("cancel_latency_nanos", 0)),
+        )
+
+    def _load_funding_rates(self, nt_symbols: list[str]) -> list[dict]:
+        """Load historical funding rates for all symbols with local caching.
+
+        Uses ``funding_cache`` for persistent storage and incremental updates —
+        only fetches new data from Binance when the cache doesn't cover the
+        requested date range.
+
+        Returns a list of funding events sorted by timestamp_ns, ready for the
+        FundingCostTracker actor.
+        """
+        from datetime import datetime as _dt, timezone
+        from tinohelm.data.funding_cache import load_funding_rates
+
+        all_events: list[dict] = []
+        for sym, nt_sym in zip(self.symbols, nt_symbols):
+            try:
+                rates = load_funding_rates(
+                    symbol=sym,
+                    start=self.start,
+                    end=self.end,
+                )
+                for r in rates:
+                    ts_ms = r["funding_time_ms"]
+                    mark_price = r["mark_price"]
+                    # If mark_price is missing/zero, skip (can't calculate notional)
+                    if not mark_price:
+                        continue
+                    ts_iso = _dt.fromtimestamp(
+                        ts_ms / 1000, tz=timezone.utc,
+                    ).isoformat()
+                    all_events.append({
+                        "timestamp_ns": ts_ms * 1_000_000,  # ms → ns
+                        "timestamp_iso": ts_iso,
+                        "symbol": nt_sym,
+                        "rate": r["funding_rate"],
+                        "mark_price": mark_price,
+                    })
+                logger.info(
+                    "Loaded %d funding rate events for %s", len(rates), sym,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to load funding rates for %s, skipping", sym,
+                    exc_info=True,
+                )
+
+        # Sort by timestamp for sequential processing in the actor
+        all_events.sort(key=lambda e: e["timestamp_ns"])
+        return all_events
+
     def _build_portfolio_config(self):
         """Build a PortfolioConfig from legacy constructor params if not provided."""
         if self._portfolio_config is not None:
@@ -342,12 +454,11 @@ class BacktestRunner:
         # Build FillModel if config provided
         fill_model_obj: FillModel | None = None
         if self.fill_model_config is not None:
-            fill_model_obj = FillModel(
-                prob_fill_on_limit=self.fill_model_config.get("prob_fill_on_limit", 1.0),
-                prob_fill_on_stop=self.fill_model_config.get("prob_fill_on_stop", 1.0),
-                prob_slippage=self.fill_model_config.get("prob_slippage", 0.0),
-                random_seed=self.fill_model_config.get("random_seed", None),
-            )
+            fill_model_obj = self._build_fill_model(self.fill_model_config)
+
+        # Build LatencyModel — default 30ms base latency for realistic simulation
+        latency_config = self.fill_model_config or {}
+        latency_model_obj = self._build_latency_model(latency_config)
 
         # Add venue — currency is assumed USDT for Binance futures
         from nautilus_trader.model.currencies import USDT
@@ -362,9 +473,13 @@ class BacktestRunner:
             "account_type": AccountType.MARGIN,
             "starting_balances": [Money(starting_balance, USDT)],
             "default_leverage": Decimal(str(leverage)),
+            "bar_execution": True,
+            "trade_execution": True,
         }
         if fill_model_obj is not None:
             venue_kwargs["fill_model"] = fill_model_obj
+        if latency_model_obj is not None:
+            venue_kwargs["latency_model"] = latency_model_obj
         engine.add_venue(**venue_kwargs)
 
         # Load data from catalog
@@ -393,10 +508,14 @@ class BacktestRunner:
                 if bars:
                     total_bar_count += len(bars)
                     loaded_bar_type_strs.append(source_bt_str or bt_str)
-                    engine.add_data(bars)
+                    engine.add_data(bars, sort=False)
                     all_bar_type_strs.append(bt_str)
                 else:
                     logger.warning("No bar data available for %s at %s", sym, ivl)
+
+        # Single efficient sort after all data is loaded (avoids O(n*k) re-sorting)
+        if all_bar_type_strs:
+            engine.sort_data()
 
         # Inject NT-format params for strategy config resolution
         self.strategy_params.setdefault("instrument_id", nt_symbols[0] if nt_symbols else "")
@@ -449,6 +568,25 @@ class BacktestRunner:
         except Exception:
             logger.warning("Failed to register custom statistics", exc_info=True)
 
+        # Add funding cost tracker for perpetual futures
+        self._funding_enabled = False
+        if self.symbols and self.start and self.end:
+            funding_events = self._load_funding_rates(nt_symbols)
+            if funding_events:
+                from tinohelm.backtest.funding import (
+                    _FundingCostTracker,
+                    _FundingCostTrackerConfig,
+                )
+                _FundingCostTracker._funding_events = funding_events
+                _FundingCostTracker._bar_type_strs = loaded_bar_type_strs
+                tracker = _FundingCostTracker(config=_FundingCostTrackerConfig())
+                engine.add_actor(tracker)
+                self._funding_enabled = True
+                logger.info(
+                    "Funding cost tracker enabled: %d events across %d symbols",
+                    len(funding_events), len(nt_symbols),
+                )
+
         # Add progress reporter actor for bar-level progress tracking
         if self._redis_client and self._run_id and total_bar_count > 0:
             _ProgressReporter._redis = self._redis_client
@@ -469,6 +607,19 @@ class BacktestRunner:
         # Extract results
         results = self._extract_results(engine, starting_balance)
 
+        # Merge funding cost data into results
+        if self._funding_enabled:
+            from tinohelm.backtest.funding import _FundingCostTracker
+            funding_data = _FundingCostTracker.get_results()
+            results["funding"] = funding_data
+            # Adjust statistics to reflect funding cost
+            stats = results.get("statistics", {})
+            funding_cost = funding_data["total_funding_cost"]
+            stats["total_funding_cost"] = funding_cost
+            stats["pnl_after_funding"] = round(
+                (stats.get("total_pnl", 0.0) or 0.0) - funding_cost, 4
+            )
+
         # Export raw reports before dispose (if artifacts_dir is set)
         if self.artifacts_dir is not None:
             self._export_reports(engine)
@@ -480,6 +631,158 @@ class BacktestRunner:
 
         logger.info("Backtest complete: %s", self.strategy_path)
         return results
+
+    # ------------------------------------------------------------------
+    # Engine reuse API (for Optuna optimization — avoids reloading data)
+    # ------------------------------------------------------------------
+
+    def prepare_engine(self) -> tuple[BacktestEngine, Any, float]:
+        """Create and configure engine with data loaded, but do NOT run.
+
+        This is the "heavy" setup step — loads instruments, bar data, and
+        configures the venue. Call once, then use :meth:`run_trial` per
+        parameter set with ``engine.reset()`` between trials.
+
+        Returns:
+            (engine, portfolio_config, starting_balance)
+        """
+        portfolio_config = self._build_portfolio_config()
+
+        if not self.symbols and portfolio_config.symbols:
+            self.symbols = portfolio_config.symbols
+            self.symbol = self.symbols[0] if self.symbols else ""
+        if not self.intervals and portfolio_config.interval:
+            self.intervals = [portfolio_config.interval]
+            self.interval = portfolio_config.interval
+
+        engine_config = BacktestEngineConfig(
+            trader_id=TraderId("BACKTESTER-001"),
+            logging=LoggingConfig(log_level="WARNING"),
+        )
+        engine = BacktestEngine(config=engine_config)
+        self._engine = engine
+
+        # Build FillModel / LatencyModel
+        fill_model_obj: FillModel | None = None
+        if self.fill_model_config is not None:
+            fill_model_obj = self._build_fill_model(self.fill_model_config)
+        latency_config = self.fill_model_config or {}
+        latency_model_obj = self._build_latency_model(latency_config)
+
+        from nautilus_trader.model.currencies import USDT
+        from nautilus_trader.model.identifiers import Venue
+        from nautilus_trader.model.objects import Money
+
+        starting_balance = portfolio_config.account.starting_balance
+        leverage = portfolio_config.account.leverage
+        venue_kwargs: dict[str, Any] = {
+            "venue": Venue("BINANCE"),
+            "oms_type": OmsType.HEDGING,
+            "account_type": AccountType.MARGIN,
+            "starting_balances": [Money(starting_balance, USDT)],
+            "default_leverage": Decimal(str(leverage)),
+            "bar_execution": True,
+            "trade_execution": True,
+        }
+        if fill_model_obj is not None:
+            venue_kwargs["fill_model"] = fill_model_obj
+        if latency_model_obj is not None:
+            venue_kwargs["latency_model"] = latency_model_obj
+        engine.add_venue(**venue_kwargs)
+
+        # Load instruments + bar data
+        catalog = ParquetDataCatalog(str(self.catalog_path))
+        nt_symbols: list[str] = []
+        for sym in self.symbols:
+            nt_sym = _normalize_symbol(sym)
+            nt_symbols.append(nt_sym)
+            instruments = catalog.instruments(instrument_ids=[nt_sym])
+            if instruments:
+                for inst in instruments:
+                    engine.add_instrument(inst)
+
+        all_bar_type_strs: list[str] = []
+        for sym in self.symbols:
+            nt_sym = _normalize_symbol(sym)
+            for ivl in self.intervals:
+                bars, bt_str, source_bt_str = self._resolve_bars(
+                    catalog, sym, nt_sym, ivl,
+                )
+                if bars:
+                    engine.add_data(bars, sort=False)
+                    all_bar_type_strs.append(bt_str)
+
+        if all_bar_type_strs:
+            engine.sort_data()
+
+        # Store metadata for run_trial()
+        self._nt_symbols = nt_symbols
+        self._all_bar_type_strs = all_bar_type_strs
+
+        # Inject NT-format defaults into strategy_params
+        self.strategy_params.setdefault("instrument_id", nt_symbols[0] if nt_symbols else "")
+        self.strategy_params.setdefault("instrument_ids", nt_symbols)
+        self.strategy_params.setdefault("bar_type", all_bar_type_strs[0] if all_bar_type_strs else "")
+        self.strategy_params.setdefault("bar_types", all_bar_type_strs)
+
+        # Build bar_type_map
+        bar_type_map: dict[str, str] = {}
+        for bt_str in all_bar_type_strs:
+            for ns in nt_symbols:
+                if bt_str.startswith(ns):
+                    bar_type_map[ns] = bt_str
+                    break
+        portfolio_config.params["_bar_type_map"] = bar_type_map
+
+        logger.info(
+            "Engine prepared: %d symbols, %d bar types",
+            len(nt_symbols), len(all_bar_type_strs),
+        )
+        return engine, portfolio_config, starting_balance
+
+    def run_trial(
+        self,
+        engine: BacktestEngine,
+        portfolio_config: Any,
+        starting_balance: float,
+        trial_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run a single trial on a prepared engine.
+
+        Resets the engine, adds strategies with *trial_params*, runs, and
+        extracts results.  Does NOT dispose the engine — caller owns that.
+        """
+        from copy import deepcopy
+
+        engine.reset()
+
+        # Merge trial params into portfolio config
+        if trial_params:
+            pc = deepcopy(portfolio_config)
+            pc.params.update(trial_params)
+        else:
+            pc = portfolio_config
+
+        # Ensure bar_type_map survives the copy
+        if "_bar_type_map" not in pc.params and hasattr(self, "_all_bar_type_strs"):
+            bar_type_map: dict[str, str] = {}
+            for bt_str in self._all_bar_type_strs:
+                for ns in self._nt_symbols:
+                    if bt_str.startswith(ns):
+                        bar_type_map[ns] = bt_str
+                        break
+            pc.params["_bar_type_map"] = bar_type_map
+
+        strategy_instances = create_strategies(pc)
+        for s in strategy_instances:
+            engine.add_strategy(s)
+
+        actor_instances = create_actors(pc)
+        for a in actor_instances:
+            engine.add_actor(a)
+
+        engine.run()
+        return self._extract_results(engine, starting_balance)
 
     def _export_reports(self, engine: BacktestEngine) -> None:
         """Export all 5 raw reports from the engine to CSV before dispose."""

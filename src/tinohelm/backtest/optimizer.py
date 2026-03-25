@@ -296,6 +296,12 @@ class BacktestOptimizer:
         self.sampler = sampler
         self.patience = max(0, patience)
 
+        # Shared engine state (simple mode only — set in run())
+        self._shared_runner = None
+        self._shared_engine = None
+        self._shared_portfolio_config = None
+        self._shared_starting_balance: float = 0.0
+
     # ------------------------------------------------------------------
     # Parameter suggestion (pure, thread-safe)
     # ------------------------------------------------------------------
@@ -335,15 +341,25 @@ class BacktestOptimizer:
     ) -> float:
         """Objective for simple (non-walk-forward) mode.
 
-        Runs a single backtest on the training window.
+        When a shared engine is available (``_shared_engine``), reuses it via
+        ``engine.reset()`` to avoid reloading data on every trial.  Falls back
+        to full ``_run_backtest()`` otherwise.
         """
         params = self._suggest_params(trial)
         try:
-            result = _run_backtest(
-                self.strategy_path, self.config_path, params,
-                self.catalog_path, self.symbol, self.interval,
-                train_start, train_end,
-            )
+            if self._shared_runner is not None:
+                result = self._shared_runner.run_trial(
+                    self._shared_engine,
+                    self._shared_portfolio_config,
+                    self._shared_starting_balance,
+                    trial_params=params,
+                )
+            else:
+                result = _run_backtest(
+                    self.strategy_path, self.config_path, params,
+                    self.catalog_path, self.symbol, self.interval,
+                    train_start, train_end,
+                )
         except Exception as exc:
             logger.warning("Trial %d failed: %s", trial.number, exc)
             return _FAIL_VALUE
@@ -449,6 +465,36 @@ class BacktestOptimizer:
             self.start_date, self.end_date, self.train_pct,
         )
 
+        # --- Shared engine for simple mode (avoids reloading data per trial) ---
+        if not use_walk_forward:
+            try:
+                from tinohelm.backtest.runner import BacktestRunner
+
+                runner = BacktestRunner(
+                    strategy_path=self.strategy_path,
+                    config_path=self.config_path,
+                    strategy_params=dict(self.strategy_params),
+                    catalog_path=self.catalog_path,
+                    symbol=self.symbol,
+                    interval=self.interval,
+                    start=datetime(train_start.year, train_start.month, train_start.day),
+                    end=datetime(train_end.year, train_end.month, train_end.day),
+                )
+                engine, pc, sb = runner.prepare_engine()
+                self._shared_runner = runner
+                self._shared_engine = engine
+                self._shared_portfolio_config = pc
+                self._shared_starting_balance = sb
+                logger.info(
+                    "Shared engine prepared for simple mode — "
+                    "data loaded once, will reset() between trials"
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to prepare shared engine, falling back to per-trial mode",
+                    exc_info=True,
+                )
+
         # --- Optuna setup ---
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -544,6 +590,11 @@ class BacktestOptimizer:
             )
         except Exception as exc:
             self._fail(str(exc))
+            if self._shared_engine is not None:
+                try:
+                    self._shared_engine.dispose()
+                except Exception:
+                    pass
             r.close()
             return
 
@@ -674,6 +725,15 @@ class BacktestOptimizer:
             )
         except Exception:
             logger.debug("Redis publish failed (non-fatal)")
+
+        # --- Cleanup shared engine ---
+        if self._shared_engine is not None:
+            try:
+                self._shared_engine.dispose()
+            except Exception:
+                pass
+            self._shared_engine = None
+            self._shared_runner = None
 
         r.close()
         logger.info("Optimization %d completed", self.optimization_id)
