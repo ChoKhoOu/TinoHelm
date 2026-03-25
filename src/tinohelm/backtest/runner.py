@@ -670,6 +670,12 @@ class BacktestRunner:
         actor_instances = create_actors(portfolio_config)
         for actor_instance in actor_instances:
             engine.add_actor(actor_instance)
+            # Inject RiskEngine reference into RiskGuardActor for direct
+            # TradingState enforcement (works without LifecycleController)
+            from tinohelm.actors.risk_guard import RiskGuardActor
+            if isinstance(actor_instance, RiskGuardActor):
+                actor_instance._risk_engine = engine.kernel.risk_engine
+                logger.info("Injected RiskEngine reference into RiskGuardActor")
         if actor_instances:
             logger.info("Added %d actor(s) to engine", len(actor_instances))
 
@@ -915,6 +921,9 @@ class BacktestRunner:
         actor_instances = create_actors(pc)
         for a in actor_instances:
             engine.add_actor(a)
+            from tinohelm.actors.risk_guard import RiskGuardActor
+            if isinstance(a, RiskGuardActor):
+                a._risk_engine = engine.kernel.risk_engine
 
         engine.run()
         return self._extract_results(engine, starting_balance)

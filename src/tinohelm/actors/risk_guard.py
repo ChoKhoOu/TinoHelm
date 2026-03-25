@@ -94,6 +94,9 @@ class RiskGuardActor(Actor):
         # NT objects resolved in on_start() (not available in __init__)
         self._venue = None
         self._currency_obj = None
+        # RiskEngine reference — set externally by BacktestRunner for direct
+        # TradingState enforcement without LifecycleController.
+        self._risk_engine = None
 
         # State tracking
         self._peak_equity: float = config.starting_balance
@@ -265,7 +268,7 @@ class RiskGuardActor(Actor):
         return total
 
     def _trigger_breach(self, reason: str) -> None:
-        """Publish breach action to msgbus."""
+        """Publish breach action to msgbus and enforce via RiskEngine if available."""
         self._breached = True
         self._breach_reason = reason
         action = self._breach_action.value
@@ -275,8 +278,26 @@ class RiskGuardActor(Actor):
             action, reason,
         )
 
-        # Publish breach state to msgbus
+        # Publish breach state to msgbus (for LifecycleController / strategies)
         self.msgbus.publish(RISK_GUARD_STATE, action)
+
+        # Direct RiskEngine enforcement — works even without LifecycleController
+        # (e.g. pure backtest mode). This is the authoritative system-level block.
+        if self._risk_engine is not None:
+            try:
+                from nautilus_trader.model.enums import TradingState
+
+                if self._breach_action == BreachAction.HALT_NEW:
+                    self._risk_engine.set_trading_state(TradingState.HALTED)
+                    logger.warning("RiskEngine: TradingState set to HALTED")
+                elif self._breach_action == BreachAction.REDUCE_ONLY:
+                    self._risk_engine.set_trading_state(TradingState.REDUCING)
+                    logger.warning("RiskEngine: TradingState set to REDUCING")
+                elif self._breach_action == BreachAction.FLATTEN_ALL:
+                    self._risk_engine.set_trading_state(TradingState.HALTED)
+                    logger.warning("RiskEngine: TradingState set to HALTED (flatten_all)")
+            except Exception as e:
+                logger.warning("Failed to set TradingState on RiskEngine: %s", e)
 
         # If flatten_all, also publish each instrument for flattening
         if self._breach_action == BreachAction.FLATTEN_ALL:
