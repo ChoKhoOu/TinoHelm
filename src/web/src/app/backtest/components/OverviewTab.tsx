@@ -6,12 +6,33 @@ import {
   Area,
   XAxis,
   YAxis,
-  Tooltip,
+  Tooltip as RechartsTooltip,
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+/** Safely format a number with toFixed, returns fallback for non-numbers */
+function fmt(value: unknown, decimals: number, fallback = "—"): string {
+  if (value === null || value === undefined) return fallback;
+  const num = typeof value === "number" ? value : Number(value);
+  if (isNaN(num)) return fallback;
+  return num.toFixed(decimals);
+}
+
+/** Format number with sign prefix */
+function fmtSigned(value: unknown, decimals: number, fallback = "—"): string {
+  if (value === null || value === undefined) return fallback;
+  const num = typeof value === "number" ? value : Number(value);
+  if (isNaN(num)) return fallback;
+  return `${num >= 0 ? "+" : ""}${num.toFixed(decimals)}`;
+}
 import { API_BASE } from "@/lib/api";
 import { useCountUp } from "@/hooks/useCountUp";
 import type { TradeLogEntry, BacktestResult } from "../types";
@@ -28,9 +49,10 @@ interface KpiCardProps {
   positive?: boolean | null; // null = neutral
   prefix?: string;
   suffix?: string;
+  showSign?: boolean; // whether to show +/- sign for pct format (default: true)
 }
 
-function KpiCard({ label, value, format, positive, prefix = "", suffix = "" }: KpiCardProps) {
+function KpiCard({ label, value, format, positive, prefix = "", suffix = "", showSign = true }: KpiCardProps) {
   const numeric = value ?? 0;
   const animated = useCountUp(numeric, 700, value !== null);
 
@@ -38,13 +60,13 @@ function KpiCard({ label, value, format, positive, prefix = "", suffix = "" }: K
     if (value === null) return "N/A";
     switch (format) {
       case "pct":
-        return `${animated >= 0 ? "+" : ""}${animated.toFixed(2)}%`;
+        return showSign ? `${fmtSigned(animated, 2)}%` : `${fmt(animated, 2)}%`;
       case "ratio":
-        return animated.toFixed(2);
+        return fmt(animated, 2);
       case "number":
         return Math.round(animated).toLocaleString();
       case "currency":
-        return `$${animated.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        return `$${Number(animated).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     }
   })();
 
@@ -109,50 +131,61 @@ function MonthlyHeatmap({ tradeLog }: { tradeLog: TradeLogEntry[] }) {
   };
 
   return (
-    <div className="flex flex-col gap-2">
-      <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-[var(--text-muted)]">
-        月度收益热力图
-      </span>
-      <div className="overflow-x-auto">
-        <table className="text-[10px] border-separate border-spacing-0.5">
-          <thead>
-            <tr>
-              <th className="w-12 text-left text-[var(--text-muted)] font-medium pr-2">年份</th>
-              {MONTHS.map((m) => (
-                <th key={m} className="w-10 text-center text-[var(--text-muted)] font-medium">
-                  {m}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {years.map((yr) => (
-              <tr key={yr}>
-                <td className="text-[var(--text-secondary)] pr-2">{yr}</td>
-                {Array.from({ length: 12 }, (_, m) => {
-                  const val = map[yr][m];
-                  return (
-                    <td
-                      key={m}
-                      title={val !== undefined ? `${val >= 0 ? "+" : ""}${val.toFixed(2)}` : "—"}
-                      style={{ backgroundColor: cellColor(val) }}
-                      className="rounded text-center h-6 cursor-default"
-                    >
-                      {val !== undefined ? (
-                        <span className={val >= 0 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
-                          {val >= 0 ? "+" : ""}
-                          {Math.abs(val) > 999 ? `${(val / 1000).toFixed(1)}k` : val.toFixed(0)}
-                        </span>
-                      ) : null}
-                    </td>
-                  );
-                })}
+    <TooltipProvider>
+      <div className="flex flex-col gap-2">
+        <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-[var(--text-muted)]">
+          月度收益热力图
+        </span>
+        <div className="overflow-x-auto">
+          <table className="text-[10px] border-separate border-spacing-0.5">
+            <thead>
+              <tr>
+                <th className="w-12 text-left text-[var(--text-muted)] font-medium pr-2">年份</th>
+                {MONTHS.map((m) => (
+                  <th key={m} className="w-10 text-center text-[var(--text-muted)] font-medium">
+                    {m}
+                  </th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {years.map((yr) => (
+                <tr key={yr}>
+                  <td className="text-[var(--text-secondary)] pr-2">{yr}</td>
+                  {Array.from({ length: 12 }, (_, m) => {
+                    const val = map[yr][m];
+                    return (
+                      <td
+                        key={m}
+                        style={{ backgroundColor: cellColor(val) }}
+                        className="rounded text-center h-6 cursor-default"
+                      >
+                        {val !== undefined ? (
+                          <Tooltip>
+                            <TooltipTrigger className="w-full h-full flex items-center justify-center">
+                              <span className={val >= 0 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+                                {val >= 0 ? "+" : ""}
+                                {Math.abs(val) > 999 ? `${fmt(val / 1000, 1)}k` : fmt(val, 0)}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              <span className="font-medium">{yr}年{MONTHS[m]}</span>
+                              <span className={val >= 0 ? "text-green-400" : "text-red-400"}>
+                                {" "}{fmtSigned(val, 2)} USDT
+                              </span>
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : null}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
 
@@ -256,17 +289,19 @@ export function OverviewTab({ runId }: OverviewTabProps) {
         <StaggerItem>
           <KpiCard
             label="最大回撤"
-            value={s.max_drawdown !== null ? Math.abs(s.max_drawdown) : null}
+            value={s.max_drawdown !== null ? Math.abs(s.max_drawdown) * 100 : null}
             format="pct"
-            positive={s.max_drawdown !== null ? s.max_drawdown > -20 : null}
+            showSign={false}
+            positive={s.max_drawdown !== null ? s.max_drawdown > -0.2 : null}
           />
         </StaggerItem>
         <StaggerItem>
           <KpiCard
             label="胜率"
-            value={s.win_rate}
+            value={s.win_rate !== null ? s.win_rate * 100 : null}
             format="pct"
-            positive={s.win_rate >= 50}
+            showSign={false}
+            positive={s.win_rate !== null ? s.win_rate >= 0.5 : null}
           />
         </StaggerItem>
         <StaggerItem>
@@ -313,10 +348,10 @@ export function OverviewTab({ runId }: OverviewTabProps) {
                 tick={{ fill: "var(--text-muted)", fontSize: 10 }}
                 tickLine={false}
                 axisLine={false}
-                tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
+                tickFormatter={(v) => `$${fmt(Number(v) / 1000, 0, "0")}k`}
                 width={48}
               />
-              <Tooltip
+              <RechartsTooltip
                 contentStyle={{
                   background: "var(--bg-elevated)",
                   border: "1px solid var(--border-gray)",
@@ -324,7 +359,7 @@ export function OverviewTab({ runId }: OverviewTabProps) {
                   fontSize: 11,
                   color: "var(--text-primary)",
                 }}
-                formatter={(value: unknown) => [`$${(value as number).toLocaleString("en-US", { maximumFractionDigits: 0 })}`, "权益"]}
+                formatter={(value: unknown) => [`$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })}`, "权益"]}
               />
               <Area
                 type="monotone"
@@ -371,22 +406,22 @@ export function OverviewTab({ runId }: OverviewTabProps) {
                     <td className="py-1.5 pr-4 text-[var(--accent-blue)] font-medium">{row.instrument}</td>
                     <td className="py-1.5 pr-4 text-right text-[var(--text-secondary)]">{row.total_trades}</td>
                     <td className="py-1.5 pr-4 text-right">
-                      <span className={row.win_rate >= 50 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
-                        {row.win_rate.toFixed(1)}%
+                      <span className={(row.win_rate ?? 0) >= 0.5 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+                        {fmt((row.win_rate ?? 0) * 100, 1)}%
                       </span>
                     </td>
                     <td className="py-1.5 pr-4 text-right">
-                      <span className={row.total_pnl >= 0 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
-                        {row.total_pnl >= 0 ? "+" : ""}{row.total_pnl.toFixed(2)}
+                      <span className={(row.total_pnl ?? 0) >= 0 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+                        {fmtSigned(row.total_pnl, 2)}
                       </span>
                     </td>
                     <td className="py-1.5 pr-4 text-right text-[var(--text-secondary)]">
-                      {row.sharpe_ratio !== null ? row.sharpe_ratio.toFixed(2) : "—"}
+                      {fmt(row.sharpe_ratio, 2)}
                     </td>
                     <td className="py-1.5 text-right">
                       {row.max_drawdown !== null ? (
                         <span className="text-[var(--accent-red)]">
-                          {row.max_drawdown.toFixed(2)}%
+                          {fmt(row.max_drawdown, 2)}%
                         </span>
                       ) : "—"}
                     </td>
@@ -408,7 +443,7 @@ export function OverviewTab({ runId }: OverviewTabProps) {
             {[
               ["盈利笔数", s.winning_trades],
               ["亏损笔数", s.losing_trades],
-              ["总手续费", `$${s.total_fees.toFixed(2)}`],
+              ["总手续费", `$${fmt(s.total_fees, 2, "0.00")}`],
               ["平均持仓", s.avg_holding_time ?? "—"],
             ].map(([label, val]) => (
               <div key={label as string} className="flex items-center justify-between py-0.5">
@@ -424,10 +459,10 @@ export function OverviewTab({ runId }: OverviewTabProps) {
           </span>
           <div className="flex flex-col gap-1">
             {[
-              ["总盈利", `$${s.gross_profit.toFixed(2)}`],
-              ["总亏损", `$${s.gross_loss.toFixed(2)}`],
-              ["年化收益", s.annual_return !== null ? `${s.annual_return.toFixed(2)}%` : "—"],
-              ["索提诺比率", s.sortino_ratio !== null ? s.sortino_ratio.toFixed(2) : "—"],
+              ["总盈利", `$${fmt(s.gross_profit, 2, "0.00")}`],
+              ["总亏损", `$${fmt(s.gross_loss, 2, "0.00")}`],
+              ["年化收益", s.annual_return !== null ? `${fmt(s.annual_return, 2)}%` : "—"],
+              ["索提诺比率", fmt(s.sortino_ratio, 2)],
             ].map(([label, val]) => (
               <div key={label} className="flex items-center justify-between py-0.5">
                 <span className="text-xs text-[var(--text-muted)]">{label}</span>

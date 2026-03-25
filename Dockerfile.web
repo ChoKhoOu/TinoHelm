@@ -1,13 +1,24 @@
+# syntax=docker/dockerfile:1
 # TinoHelm Web UI - Build Stage
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# 1. Dependencies layer — only re-runs when package*.json changes
 COPY src/web/package*.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
 
-COPY src/web/ ./
-RUN npm run build
+# 2. Config layer — rarely changes, avoids full rebuild on source edits
+COPY src/web/next.config.ts src/web/tsconfig.json src/web/postcss.config.mjs src/web/components.json ./
+
+# 3. Source layer — changes most often
+COPY src/web/src/ ./src/
+COPY src/web/public/ ./public/
+
+# 4. Build with persistent Next.js cache
+RUN --mount=type=cache,target=/app/.next/cache \
+    npm run build
 
 # Production Stage - nginx
 FROM nginx:alpine
