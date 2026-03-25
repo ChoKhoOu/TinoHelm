@@ -189,6 +189,8 @@ def extract_backtest_results(
         win_rate = _safe_float(general_stats.get("Win Rate"), 0.0)
 
     profit_factor = _safe_float(pnl_stats.get("Profit Factor"))
+    # profit_factor can be Inf when gross_loss==0; _safe_float converts that
+    # to None.  We compute a fallback after positions are tallied (section 3).
     expectancy = _safe_float(pnl_stats.get("Expectancy"))
 
     largest_win = _safe_float(pnl_stats.get("Max Winner"))
@@ -229,6 +231,11 @@ def extract_backtest_results(
             losing_trades += 1
             gross_loss += abs(pnl_val)
         # pnl_val == 0 counts as neither win nor loss
+
+    # Fallback: compute profit_factor from manual gross_profit / gross_loss
+    # when the analyzer didn't provide it (NaN, Inf, or missing key).
+    if profit_factor is None and gross_loss > 0:
+        profit_factor = gross_profit / gross_loss
 
     # ------------------------------------------------------------------
     # 4. Total fees from fills report

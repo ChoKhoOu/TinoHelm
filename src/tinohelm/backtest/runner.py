@@ -683,10 +683,11 @@ class BacktestRunner:
         # NT 1.224.0 defaults include Sharpe/Sortino/Volatility etc. but NOT
         # MaxDrawdown, CalmarRatio, CAGR — register them from the Rust builtins.
         try:
-            from nautilus_trader.analysis import MaxDrawdown, CalmarRatio, CAGR
+            from nautilus_trader.analysis import MaxDrawdown, CalmarRatio, CAGR, ProfitFactor
             engine.portfolio.analyzer.register_statistic(MaxDrawdown())
             engine.portfolio.analyzer.register_statistic(CalmarRatio())
             engine.portfolio.analyzer.register_statistic(CAGR())
+            engine.portfolio.analyzer.register_statistic(ProfitFactor())
         except Exception:
             logger.warning("Failed to register MaxDrawdown/Calmar/CAGR statistics", exc_info=True)
 
