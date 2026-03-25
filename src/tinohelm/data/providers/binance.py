@@ -214,3 +214,227 @@ async def fetch_funding_rates(
 
     logger.info("Fetched %d funding rate records for %s", len(all_rates), symbol)
     return all_rates
+
+
+async def fetch_mark_price_klines(
+    symbol: str,
+    interval: str,
+    start: datetime,
+    end: datetime,
+    testnet: bool = False,
+    limit: int = 1500,
+) -> list[dict[str, Any]]:
+    """Fetch mark price klines from Binance ``/fapi/v1/markPriceKlines``.
+
+    Returns list of dicts with: open_time, open, high, low, close, close_time.
+    Volume fields are always 0 for mark price klines.
+    """
+    base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
+    return await _fetch_klines_generic(
+        f"{base_url}/fapi/v1/markPriceKlines",
+        _strip_to_binance_api_symbol(symbol),
+        interval, start, end, limit,
+        label=f"mark price klines for {symbol}",
+    )
+
+
+async def fetch_index_price_klines(
+    symbol: str,
+    interval: str,
+    start: datetime,
+    end: datetime,
+    testnet: bool = False,
+    limit: int = 1500,
+) -> list[dict[str, Any]]:
+    """Fetch index price klines from Binance ``/fapi/v1/indexPriceKlines``.
+
+    Uses ``pair`` param (not ``symbol``).
+    Returns list of dicts with: open_time, open, high, low, close, close_time.
+    """
+    base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
+    return await _fetch_klines_generic(
+        f"{base_url}/fapi/v1/indexPriceKlines",
+        _strip_to_binance_api_symbol(symbol),
+        interval, start, end, limit,
+        param_name="pair",
+        label=f"index price klines for {symbol}",
+    )
+
+
+async def fetch_agg_trades(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    testnet: bool = False,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    """Fetch aggregate trades from Binance ``/fapi/v1/aggTrades``.
+
+    Returns list of dicts with: agg_id, price, quantity, timestamp_ms, is_buyer_maker.
+    """
+    base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
+    url = f"{base_url}/fapi/v1/aggTrades"
+
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+
+    all_trades: list[dict[str, Any]] = []
+    current_start = start_ms
+
+    max_retries = 5
+    retry_count = 0
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while current_start < end_ms:
+            params = {
+                "symbol": _strip_to_binance_api_symbol(symbol),
+                "startTime": current_start,
+                "endTime": end_ms,
+                "limit": limit,
+            }
+
+            try:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                raw = resp.json()
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status in (429, 418):
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        raise
+                    await asyncio.sleep(min(2 ** retry_count, 60))
+                    continue
+                elif status >= 500:
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        raise
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    raise
+            except (httpx.RequestError, Exception) as e:
+                retry_count += 1
+                if retry_count > max_retries:
+                    raise
+                logger.warning("Request error: %s, retry %d/%d", e, retry_count, max_retries)
+                await asyncio.sleep(2)
+                continue
+
+            retry_count = 0
+            if not raw:
+                break
+
+            for t in raw:
+                all_trades.append({
+                    "agg_id": t["a"],
+                    "price": t["p"],
+                    "quantity": t["q"],
+                    "timestamp_ms": t["T"],
+                    "is_buyer_maker": t["m"],
+                })
+
+            last_ts = raw[-1]["T"]
+            current_start = last_ts + 1
+
+            if len(all_trades) % 50000 == 0:
+                logger.info("Progress: %d trades fetched for %s", len(all_trades), symbol)
+
+            if len(raw) < limit:
+                break
+
+            used_weight = int(resp.headers.get("X-MBX-USED-WEIGHT-1M", "0"))
+            if used_weight > 1800:
+                await asyncio.sleep(5)
+            elif used_weight > 1200:
+                await asyncio.sleep(1)
+            else:
+                await asyncio.sleep(0.3)
+
+    logger.info("Fetched %d aggregate trades for %s", len(all_trades), symbol)
+    return all_trades
+
+
+async def _fetch_klines_generic(
+    url: str,
+    symbol: str,
+    interval: str,
+    start: datetime,
+    end: datetime,
+    limit: int,
+    *,
+    param_name: str = "symbol",
+    label: str = "klines",
+) -> list[dict[str, Any]]:
+    """Generic klines-format fetcher shared by mark/index price endpoints."""
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+
+    all_klines: list[dict[str, Any]] = []
+    current_start = start_ms
+
+    max_retries = 5
+    retry_count = 0
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while current_start < end_ms:
+            params = {
+                param_name: symbol,
+                "interval": interval,
+                "startTime": current_start,
+                "endTime": end_ms,
+                "limit": limit,
+            }
+
+            try:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                raw = resp.json()
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status in (429, 418):
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        raise
+                    await asyncio.sleep(min(2 ** retry_count, 60))
+                    continue
+                elif status >= 500:
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        raise
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    raise
+            except (httpx.RequestError, Exception) as e:
+                retry_count += 1
+                if retry_count > max_retries:
+                    raise
+                logger.warning("Request error: %s, retry %d/%d", e, retry_count, max_retries)
+                await asyncio.sleep(2)
+                continue
+
+            retry_count = 0
+            if not raw:
+                break
+
+            for k in raw:
+                all_klines.append({
+                    "open_time": k[0],
+                    "open": k[1],
+                    "high": k[2],
+                    "low": k[3],
+                    "close": k[4],
+                    "close_time": k[6],
+                })
+
+            last_close_time = raw[-1][6]
+            current_start = last_close_time + 1
+
+            if len(raw) < limit:
+                break
+
+            await asyncio.sleep(0.5)
+
+    logger.info("Fetched %d %s", len(all_klines), label)
+    return all_klines

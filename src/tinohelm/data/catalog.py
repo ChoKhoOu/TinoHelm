@@ -147,10 +147,54 @@ def validate_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
         total_missing = sum(g["missing_bars"] for g in gaps)
         issues.append(f"Found {len(gaps)} gap(s) with ~{total_missing} missing bar(s)")
 
+    # OHLC relationship validation
+    ohlc_violations = 0
+    zero_volume_bars = 0
+    price_jumps: list[dict] = []
+
+    prev_close: float | None = None
+    jump_threshold = 0.10  # 10% price change between consecutive bars
+
+    for bar in bars:
+        o = float(bar.open)
+        h = float(bar.high)
+        l = float(bar.low)  # noqa: E741
+        c = float(bar.close)
+        v = float(bar.volume)
+
+        # OHLC invariant: high >= max(open, close), low <= min(open, close)
+        if h < max(o, c) - 1e-10 or l > min(o, c) + 1e-10 or h < l:
+            ohlc_violations += 1
+
+        # Zero volume detection
+        if v == 0:
+            zero_volume_bars += 1
+
+        # Price jump detection (consecutive bars)
+        if prev_close is not None and prev_close > 0:
+            change_pct = abs(c - prev_close) / prev_close
+            if change_pct > jump_threshold:
+                price_jumps.append({
+                    "timestamp": _ns_to_iso(bar.ts_event),
+                    "prev_close": round(prev_close, 4),
+                    "current_close": round(c, 4),
+                    "change_pct": round(change_pct * 100, 2),
+                })
+        prev_close = c
+
+    if ohlc_violations > 0:
+        issues.append(f"Found {ohlc_violations} bar(s) with invalid OHLC relationship (high < max(O,C) or low > min(O,C))")
+    if zero_volume_bars > 0:
+        issues.append(f"Found {zero_volume_bars} zero-volume bar(s)")
+    if price_jumps:
+        issues.append(f"Found {len(price_jumps)} price jump(s) exceeding {jump_threshold*100:.0f}%")
+
     # Determine status
-    if gaps:
+    has_errors = gaps or ohlc_violations > 0
+    has_warnings = duplicates > 0 or zero_volume_bars > 0 or len(price_jumps) > 0
+    if has_errors:
         status = "errors"
-    elif duplicates > 0:
+    elif has_warnings:
         status = "warnings"
     else:
         status = "ok"
@@ -160,6 +204,9 @@ def validate_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
         "date_range": date_range,
         "duplicates": duplicates,
         "gaps": gaps,
+        "ohlc_violations": ohlc_violations,
+        "zero_volume_bars": zero_volume_bars,
+        "price_jumps": price_jumps[:20],  # cap to avoid huge output
         "file_count": file_count,
         "size_bytes": size_bytes,
         "status": status,
@@ -494,3 +541,74 @@ def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
         "size_before": size_before,
         "size_after": size_after,
     }
+
+
+# ---------------------------------------------------------------------------
+# TradeTick support
+# ---------------------------------------------------------------------------
+
+def agg_trades_to_trade_ticks(
+    agg_trades: list[dict[str, Any]],
+    symbol: str,
+) -> list:
+    """Convert Binance aggregate trades to NT TradeTick objects.
+
+    Args:
+        agg_trades: list of dicts from ``fetch_agg_trades()``
+            (keys: agg_id, price, quantity, timestamp_ms, is_buyer_maker)
+        symbol: TinoHelm symbol (e.g. ``BTCUSDT-PERP``)
+
+    Returns:
+        list of ``TradeTick`` objects sorted by ts_event.
+    """
+    from nautilus_trader.model.data import TradeTick
+    from nautilus_trader.model.enums import AggressorSide
+    from nautilus_trader.model.identifiers import InstrumentId, TradeId
+    from nautilus_trader.model.objects import Price, Quantity
+
+    from tinohelm.data.instruments import make_instrument
+
+    instrument = make_instrument(symbol)
+    inst_id = instrument.id
+
+    ticks: list[TradeTick] = []
+    for t in agg_trades:
+        ts_ns = int(t["timestamp_ms"]) * 1_000_000  # ms → ns
+        ticks.append(TradeTick(
+            instrument_id=inst_id,
+            price=instrument.make_price(float(t["price"])),
+            size=instrument.make_qty(float(t["quantity"])),
+            aggressor_side=AggressorSide.SELLER if t["is_buyer_maker"] else AggressorSide.BUYER,
+            trade_id=TradeId(str(t["agg_id"])),
+            ts_event=ts_ns,
+            ts_init=ts_ns,
+        ))
+
+    ticks.sort(key=lambda x: x.ts_event)
+    logger.info("Converted %d aggregate trades to TradeTick for %s", len(ticks), symbol)
+    return ticks
+
+
+def write_trade_ticks(
+    ticks: list,
+    symbol: str,
+    catalog_path: str | Path,
+) -> list[str]:
+    """Write TradeTick objects to the Parquet catalog.
+
+    Returns list of written Parquet file paths.
+    """
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    catalog_path = Path(catalog_path)
+    catalog = ParquetDataCatalog(str(catalog_path))
+
+    catalog.write_data(ticks)
+
+    # Find written files
+    from tinohelm.data.instruments import make_instrument
+    instrument = make_instrument(symbol)
+    tick_dir = catalog_path / "data" / "trade_tick" / str(instrument.id)
+    written = [str(f) for f in tick_dir.glob("*.parquet")] if tick_dir.exists() else []
+    logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(written), symbol)
+    return written
