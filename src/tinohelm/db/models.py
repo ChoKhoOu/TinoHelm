@@ -77,8 +77,8 @@ class BacktestRun(Base):
     strategy_name: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
     strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # legacy, no FK
     strategy_version_id: Mapped[int | None] = mapped_column(ForeignKey("strategy_versions.id"), nullable=True)
-    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
-    interval: Mapped[str] = mapped_column(String(10), nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    interval: Mapped[str] = mapped_column(String(50), nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     params_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -101,8 +101,8 @@ class OptimizationRun(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     strategy_id: Mapped[int] = mapped_column(ForeignKey("strategies.id"), nullable=False)
-    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
-    interval: Mapped[str] = mapped_column(String(10), nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    interval: Mapped[str] = mapped_column(String(50), nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     n_trials: Mapped[int] = mapped_column(Integer, nullable=False)

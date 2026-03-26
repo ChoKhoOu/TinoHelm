@@ -244,7 +244,7 @@ class RiskGuardActor(Actor):
         # 4. Position count check
         # Breach when exceeding max, not at exactly max
         if self._max_positions is not None:
-            position_count = len(self.portfolio.positions_open())
+            position_count = len(self.cache.positions_open())
             if position_count > self._max_positions:
                 logger.warning(
                     "RISK BREACH: positions %d > limit %d",
@@ -305,7 +305,7 @@ class RiskGuardActor(Actor):
 
     def _publish_flatten_all(self) -> None:
         """Publish instrument IDs of all open positions for flattening."""
-        for position in self.portfolio.positions_open():
+        for position in self.cache.positions_open():
             instrument_id = str(position.instrument_id)
             self.msgbus.publish(RISK_GUARD_FLATTEN, instrument_id)
             logger.warning("RiskGuardActor: flatten instrument %s", instrument_id)

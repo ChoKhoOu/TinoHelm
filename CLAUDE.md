@@ -341,7 +341,7 @@ self.portfolio.is_net_long(instrument_id)    # → bool
 self.portfolio.is_net_short(instrument_id)   # → bool
 self.portfolio.is_flat(instrument_id)        # → bool
 self.portfolio.is_completely_flat()          # → bool
-self.portfolio.positions_open()              # → list[Position]
+self.portfolio.positions_open()              # ⚠ DOES NOT EXIST — use self.cache.positions_open()
 
 # Analyzer (available on engine.portfolio.analyzer)
 engine.portfolio.analyzer.register_statistic(stat)    # Register custom statistic
@@ -639,6 +639,65 @@ All API calls use a `DataCmd` channel pattern to avoid blocking the event loop:
 - Keep-alive worker (`idle_timeout=0`): always running, never auto-exits
 - Ephemeral workers (`idle_timeout=60`): auto-spawned on queue demand, self-terminate after idle
 - `ProcessManager.ensure_capacity()`: called by Watchdog every 10s — prunes dead workers, maintains min count, scales up based on `LLEN tino:backtest:queue`
+
+## Frontend Design System (Next.js / src/web)
+
+### Stack & Libraries
+- **UI**: shadcn/ui (base-ui primitives) + Tailwind CSS v4
+- **Charts**: Recharts (AreaChart, RadarChart, etc.)
+- **Animation**: framer-motion (`FadeIn`, `StaggerContainer`, `StaggerItem` in `components/motion/`)
+- **Hooks**: `useCountUp` (animated number counter), `useWebSocket` (real-time events)
+- **Font**: Space Grotesk for headings (`font-heading`), JetBrains Mono for monospace (`font-mono`)
+
+### Design Language — "Overview-Grey" Standard
+All new dashboard/data visualization pages MUST follow this design language:
+
+**Glass Morphism Cards:**
+```
+rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm
+```
+- Hover state: `hover:bg-white/[0.05] transition-all duration-300`
+- Bottom accent line: gradient `linear-gradient(90deg, transparent, {accentColor}, transparent)` with 2px height, 30% → 70% opacity on hover
+
+**Color Semantic Rules:**
+- Green (`--accent-green: #26D97F`) — positive values only (profit, win, growth)
+- Red (`--accent-red: #EF5350`) — negative values only (loss, drawdown, decline)
+- Blue (`--accent-blue: #4C9EEB`) — neutral accent, primary actions, chart lines
+- Purple (`--accent-purple: #A78BFA`) — secondary accent, gradient endpoints
+- Amber (`--accent-amber: #F0B429`) — reference lines, warnings
+- **Never use green/red decoratively** — always semantic
+
+**Metric Values:**
+- Large numbers: `text-2xl+ font-bold font-heading tracking-tight` with `useCountUp` animation
+- Hero numbers: add `textShadow: "0 0 40px rgba(color, 0.25)"` for glow effect
+- Labels: `text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50-60`
+- Sub-labels: `text-[9px] text-muted-foreground/40`
+
+**Chart Design Standards:**
+- Equity curves: gradient fill (`stopOpacity: 0.2 → 0`) + gradient stroke (blue→purple) + SVG Gaussian blur glow layer (`stdDeviation=3-4`, `opacity=0.25`)
+- Drawdown: red gradient fill, placed directly below equity chart
+- Radar/spider charts: `PolarGrid` with `rgba(255,255,255,0.06)` stroke + gradient fill
+- Tooltip style: `background: rgba(15,20,25,0.95)`, `border: rgba(255,255,255,0.08)`, `borderRadius: 10`, `backdropFilter: blur(8px)`
+- Grid lines: `rgba(255,255,255,0.04)`, dashed
+- Axis labels: `rgba(255,255,255,0.3)`, fontSize 9
+- Reference lines (e.g. starting balance): amber `#F0B429`, dashed, `opacity=0.4`
+
+**Animation Standards:**
+- Card entry: framer-motion `initial={{ opacity: 0, y: 16 }}` → `animate={{ opacity: 1, y: 0 }}`, easing `[0.22, 1, 0.36, 1]`
+- Stagger delay: `0.06-0.07s` per card
+- Count-up duration: 800-1200ms, with `useCountUp` hook
+- Chart animation: recharts native `animationDuration={1500-1800}`, `animationEasing="ease-out"`
+- Hero shimmer: CSS `hero-shimmer-sweep` keyframes, 8s cycle (see `globals.css`)
+- Radar entry: scale from 0.92, delay 0.3s
+
+**Layout Patterns:**
+- Hero banner: full-width glass card, left=primary metric, right=secondary metric, embedded mini sparkline
+- KPI grid: `grid-cols-3 gap-3`, each card uniform height
+- Chart + Radar: `grid-cols-[1fr_280px] gap-3` (equity takes majority, radar sidebar)
+- Section padding: `p-5`, gap between sections: `gap-4`
+
+### CSS Variables (globals.css)
+Custom accent colors live in `:root` as plain CSS vars (e.g., `--accent-blue: #4C9EEB`). shadcn system variables use `oklch()` format. When referencing accents in className, use `var(--accent-*)` syntax. When in `style` props, use hex directly.
 
 ## Pitfalls & Lessons Learned
 

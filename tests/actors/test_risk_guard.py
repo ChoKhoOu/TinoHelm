@@ -110,7 +110,7 @@ class _RiskGuardStub:
                 return
 
         if self._max_positions is not None:
-            position_count = len(self.portfolio.positions_open())
+            position_count = len(self.cache.positions_open())
             if position_count > self._max_positions:
                 self._trigger_breach("position_count")
                 return
@@ -134,7 +134,7 @@ class _RiskGuardStub:
             self._publish_flatten_all()
 
     def _publish_flatten_all(self):
-        for position in self.portfolio.positions_open():
+        for position in self.cache.positions_open():
             instrument_id = str(position.instrument_id)
             self.msgbus.publish(RISK_GUARD_FLATTEN, instrument_id)
 
@@ -252,7 +252,7 @@ class TestPositionCount:
         actor = _RiskGuardStub(max_positions=10, starting_balance=10000)
         actor.set_equity(10000)
 
-        actor.portfolio.positions_open.return_value = [MagicMock()] * 11  # > 10
+        actor.cache.positions_open.return_value = [MagicMock()] * 11  # > 10
 
         actor._check_risks()
 
@@ -263,7 +263,7 @@ class TestPositionCount:
         actor = _RiskGuardStub(max_positions=10, starting_balance=10000)
         actor.set_equity(10000)
 
-        actor.portfolio.positions_open.return_value = [MagicMock()] * 10
+        actor.cache.positions_open.return_value = [MagicMock()] * 10
 
         actor._check_risks()
 
@@ -273,7 +273,7 @@ class TestPositionCount:
         actor = _RiskGuardStub(max_positions=10, starting_balance=10000)
         actor.set_equity(10000)
 
-        actor.portfolio.positions_open.return_value = [MagicMock()] * 5
+        actor.cache.positions_open.return_value = [MagicMock()] * 5
 
         actor._check_risks()
 
@@ -310,7 +310,7 @@ class TestBreachActions:
         pos1.instrument_id = "BTCUSDT-PERP.BINANCE"
         pos2 = MagicMock()
         pos2.instrument_id = "ETHUSDT-PERP.BINANCE"
-        actor.portfolio.positions_open.return_value = [pos1, pos2]
+        actor.cache.positions_open.return_value = [pos1, pos2]
 
         actor._check_risks()
 

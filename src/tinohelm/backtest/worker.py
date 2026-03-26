@@ -176,11 +176,12 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 # Enable bar-level progress tracking via ProgressReporter actor
                 runner._redis_client = r
                 runner._run_id = run_id
+                runner._job_start_time = job_start_time
 
-                # Publish progress: engine setup done
+                # Publish progress: runner constructed, data loading next
                 elapsed = round(time.monotonic() - job_start_time, 1)
-                _publish_progress(r, run_id, 10, elapsed_secs=elapsed)
-                r.setex(f"tino:backtest:progress:{run_id}", 86400, "10")
+                _publish_progress(r, run_id, 2, elapsed_secs=elapsed)
+                r.setex(f"tino:backtest:progress:{run_id}", 86400, "2")
 
                 # Create artifact directory and set on runner for report export
                 artifact_dir = Path(artifacts_path) / run_id
