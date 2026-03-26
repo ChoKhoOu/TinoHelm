@@ -107,8 +107,30 @@ def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
 
 # ---- background task ----
 
-async def _run_data_fetch(symbol: str, interval: str, start: date, end: date, settings: Settings | None = None) -> None:
+async def _run_data_fetch(symbol: str, interval: str, start: date, end: date, settings: Settings | None = None, task_id: str | None = None) -> None:
     """Background task to fetch market data, store to Parquet, and register in DB catalog."""
+    import redis.asyncio as aioredis
+
+    redis_url = str(settings.redis.url) if settings else "redis://redis:6379"
+    progress_channel = f"tino:data:progress:{task_id or f'{symbol}:{interval}'}"
+    r = aioredis.from_url(redis_url, decode_responses=True)
+
+    async def _pub(pct: int, msg: str):
+        import json as _json
+        payload: dict = {"symbol": symbol, "interval": interval, "progress": pct, "message": msg}
+        if task_id:
+            payload["task_id"] = task_id
+        await r.publish(progress_channel, _json.dumps(payload))
+
+    # Acquire per-symbol:interval lock to prevent concurrent Parquet writes
+    lock_key = f"tino:data:lock:{symbol}:{interval}"
+    lock = r.lock(lock_key, timeout=3600)  # 1h max hold
+    acquired = await lock.acquire(blocking=False)
+    if not acquired:
+        await _pub(-1, f"{symbol} {interval} 正在下载中，请等待完成后再试")
+        await r.close()
+        return
+
     try:
         from datetime import datetime, timezone
         from tinohelm.data.fetcher import fetch_and_store
@@ -118,7 +140,6 @@ async def _run_data_fetch(symbol: str, interval: str, start: date, end: date, se
         end_dt = datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc)
 
         catalog_path = str(settings.paths.catalog) if settings else "data/catalog"
-        redis_url = str(settings.redis.url) if settings else "redis://redis:6379"
         db_url = str(settings.database.url) if settings else None
 
         result = await fetch_and_store(
@@ -128,8 +149,9 @@ async def _run_data_fetch(symbol: str, interval: str, start: date, end: date, se
             end=end_dt,
             catalog_path=catalog_path,
             redis_url=redis_url,
-            progress_channel=f"tino:data:progress:{symbol}:{interval}",
+            progress_channel=progress_channel,
             db_url=db_url,
+            task_id=task_id,
         )
 
         # Always upsert DB catalog (even if skipped — to expand date range)
@@ -164,6 +186,9 @@ async def _run_data_fetch(symbol: str, interval: str, start: date, end: date, se
                      symbol, interval, result["bars_count"], result.get("skipped", False))
     except Exception as exc:
         logger.exception("Data fetch failed: %s", exc)
+    finally:
+        await lock.release()
+        await r.close()
 
 
 # ---- routes ----
@@ -198,9 +223,12 @@ async def trigger_data_fetch(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Trigger a background data fetch task."""
-    background_tasks.add_task(_run_data_fetch, body.symbol, body.interval, body.start, body.end, settings)
+    import uuid
+    task_id = str(uuid.uuid4())
+    background_tasks.add_task(_run_data_fetch, body.symbol, body.interval, body.start, body.end, settings, task_id)
     return {
         "status": "accepted",
+        "task_id": task_id,
         "message": f"Data fetch for {body.symbol} {body.interval} queued",
         "symbol": body.symbol,
         "interval": body.interval,

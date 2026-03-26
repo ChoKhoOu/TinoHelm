@@ -393,15 +393,15 @@ def write_bars(
     except Exception:
         logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
 
-    # Write all bars in a single call to satisfy NT's disjoint constraint (write-before-delete)
-    catalog = ParquetDataCatalog(str(catalog_path))
-    catalog.write_data([instrument])
-    catalog.write_data(bars)
-
-    # Remove old parquet files after successful write
+    # Delete old parquet files BEFORE writing merged data to avoid
+    # NT's non-disjoint interval error (merged bars are already in memory)
     for old_file in existing_files:
         if old_file.exists():
             old_file.unlink()
+
+    catalog = ParquetDataCatalog(str(catalog_path))
+    catalog.write_data([instrument])
+    catalog.write_data(bars)
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
 
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)

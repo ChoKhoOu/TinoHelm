@@ -107,6 +107,7 @@ async def fetch_and_store(
     testnet: bool = False,
     progress_channel: str | None = None,
     db_url: str | None = None,
+    task_id: str | None = None,
 ) -> dict:
     """Fetch data from Binance and store in Parquet catalog.
 
@@ -121,12 +122,15 @@ async def fetch_and_store(
 
     async def _publish_progress(pct: int, msg: str):
         if r and progress_channel:
-            await r.publish(progress_channel, json.dumps({
+            payload: dict = {
                 "symbol": symbol,
                 "interval": interval,
                 "progress": pct,
                 "message": msg,
-            }))
+            }
+            if task_id:
+                payload["task_id"] = task_id
+            await r.publish(progress_channel, json.dumps(payload))
 
     try:
         await _publish_progress(0, f"Checking existing coverage for {symbol} {interval}...")

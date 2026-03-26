@@ -23,6 +23,7 @@ _CHANNEL_TYPE_MAP: dict[str, str] = {
     "tino:heartbeat:": "node.heartbeat",
     "tino:sandbox:": "node.sandbox.",
     "tino:live:": "node.live.",
+    "tino:data:": "data.",
 }
 
 
