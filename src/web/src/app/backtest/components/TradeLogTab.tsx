@@ -12,6 +12,7 @@ import {
 } from "@tanstack/react-table";
 import { ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 import type { TradeLogEntry } from "../types";
 
@@ -22,6 +23,21 @@ interface TradeLogTabProps {
 /* ------------------------------------------------------------------ */
 /*  Column helper                                                      */
 /* ------------------------------------------------------------------ */
+
+/** Parse duration string like "1d 2h 3m 50s" into total seconds */
+function parseDurationToSeconds(dur: string | null | undefined): number {
+  if (!dur) return 0;
+  let total = 0;
+  const d = dur.match(/(\d+)d/);
+  const h = dur.match(/(\d+)h/);
+  const m = dur.match(/(\d+)m/);
+  const s = dur.match(/(\d+)s/);
+  if (d) total += parseInt(d[1]) * 86400;
+  if (h) total += parseInt(h[1]) * 3600;
+  if (m) total += parseInt(m[1]) * 60;
+  if (s) total += parseInt(s[1]);
+  return total;
+}
 
 const col = createColumnHelper<TradeLogEntry>();
 
@@ -47,7 +63,7 @@ const columns = [
   col.accessor("instrument", {
     header: "品种",
     cell: (info) => (
-      <span className="text-[var(--accent-blue)] font-medium">{info.getValue()}</span>
+      <span className="text-primary font-medium">{info.getValue()}</span>
     ),
     size: 140,
   }),
@@ -70,34 +86,41 @@ const columns = [
     },
     size: 60,
   }),
-  col.accessor("avg_open", {
+  col.accessor((row) => Number(row.avg_open), {
+    id: "avg_open",
     header: "开仓价",
     cell: (info) => {
-      const v = Number(info.getValue());
+      const v = info.getValue();
       return !isNaN(v) ? v.toFixed(4) : "—";
     },
+    sortingFn: "basic",
     size: 90,
   }),
-  col.accessor("avg_close", {
+  col.accessor((row) => Number(row.avg_close), {
+    id: "avg_close",
     header: "平仓价",
     cell: (info) => {
-      const v = Number(info.getValue());
+      const v = info.getValue();
       return !isNaN(v) ? v.toFixed(4) : "—";
     },
+    sortingFn: "basic",
     size: 90,
   }),
-  col.accessor("quantity", {
+  col.accessor((row) => Number(row.quantity), {
+    id: "quantity",
     header: "数量",
     cell: (info) => {
-      const v = Number(info.getValue());
+      const v = info.getValue();
       return !isNaN(v) ? v.toFixed(4) : "—";
     },
+    sortingFn: "basic",
     size: 80,
   }),
-  col.accessor("realized_pnl", {
+  col.accessor((row) => Number(row.realized_pnl), {
+    id: "realized_pnl",
     header: "盈亏",
     cell: (info) => {
-      const v = Number(info.getValue());
+      const v = info.getValue();
       if (isNaN(v)) return "—";
       const positive = v >= 0;
       return (
@@ -107,11 +130,17 @@ const columns = [
         </span>
       );
     },
+    sortingFn: "basic",
     size: 90,
   }),
-  col.accessor("duration", {
+  col.accessor((row) => parseDurationToSeconds(row.duration), {
+    id: "duration",
     header: "持仓时长",
-    cell: (info) => info.getValue() ?? "—",
+    cell: (info) => {
+      const row = info.row.original;
+      return row.duration ?? "—";
+    },
+    sortingFn: "basic",
     size: 100,
   }),
 ];
@@ -152,7 +181,7 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
   if (!tradeLog || tradeLog.length === 0) {
     return (
       <div className="flex items-center justify-center h-48">
-        <span className="text-xs text-[var(--text-muted)]">暂无交易记录</span>
+        <span className="text-xs text-muted-foreground">暂无交易记录</span>
       </div>
     );
   }
@@ -161,26 +190,26 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
     <div className="flex flex-col h-full">
       {/* Table */}
       <div className="flex-1 min-h-0 overflow-auto">
-        <table className="w-full text-xs border-collapse">
-          <thead className="sticky top-0 z-10 bg-[var(--bg-card)]">
+        <Table className="w-full text-xs border-collapse">
+          <TableHeader className="sticky top-0 z-10 bg-card">
             {table.getHeaderGroups().map((hg) => (
-              <tr key={hg.id} className="border-b border-[var(--border-gray)]">
+              <TableRow key={hg.id} className="border-b border-border">
                 {hg.headers.map((header) => {
                   const canSort = header.column.getCanSort();
                   const sorted = header.column.getIsSorted();
                   return (
-                    <th
+                    <TableHead
                       key={header.id}
                       style={{ width: header.column.columnDef.size }}
-                      className={`px-3 py-2 text-left font-semibold text-[var(--text-muted)] tracking-[0.4px] uppercase select-none ${
-                        canSort ? "cursor-pointer hover:text-[var(--text-secondary)]" : ""
+                      className={`px-3 py-2 text-left font-semibold text-muted-foreground tracking-[0.4px] uppercase select-none ${
+                        canSort ? "cursor-pointer hover:text-muted-foreground" : ""
                       }`}
                       onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
                     >
                       <div className="flex items-center gap-1">
                         {flexRender(header.column.columnDef.header, header.getContext())}
                         {canSort && (
-                          <span className="text-[var(--text-muted)]">
+                          <span className="text-muted-foreground">
                             {sorted === "asc" ? (
                               <ChevronUp className="w-3 h-3" />
                             ) : sorted === "desc" ? (
@@ -191,39 +220,39 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
                           </span>
                         )}
                       </div>
-                    </th>
+                    </TableHead>
                   );
                 })}
-              </tr>
+              </TableRow>
             ))}
-          </thead>
-          <tbody>
+          </TableHeader>
+          <TableBody>
             {table.getRowModel().rows.map((row, i) => (
-              <tr
+              <TableRow
                 key={row.id}
-                className={`border-b border-[var(--border-gray)]/30 hover:bg-[var(--bg-subtle)]/50 transition-colors ${
-                  i % 2 === 0 ? "" : "bg-[var(--bg-page)]/30"
+                className={`border-b border-border/30 hover:bg-muted/50 transition-colors ${
+                  i % 2 === 0 ? "" : "bg-background/30"
                 }`}
               >
                 {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} className="px-3 py-1.5 text-[var(--text-secondary)]">
+                  <TableCell key={cell.id} className="px-3 py-1.5 text-muted-foreground">
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
+                  </TableCell>
                 ))}
-              </tr>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       </div>
 
       {/* Pagination bar */}
-      <div className="flex items-center justify-between px-4 py-2 border-t border-[var(--border-gray)] bg-[var(--bg-card)] shrink-0">
-        <span className="text-[11px] text-[var(--text-muted)]">
+      <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-card shrink-0">
+        <span className="text-[11px] text-muted-foreground">
           {from}–{to} / {totalRows} 条记录
         </span>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-[var(--text-muted)]">每页</span>
+            <span className="text-[11px] text-muted-foreground">每页</span>
             <Select value={String(pageSize)} onValueChange={(v: string | null) => v && setPageSize(Number(v))}>
               <SelectTrigger className="w-16 h-7 text-xs">
                 <SelectValue />
@@ -239,17 +268,17 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
             <button
               onClick={() => table.previousPage()}
               disabled={!table.getCanPreviousPage()}
-              className="px-2 py-1 rounded text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               上一页
             </button>
-            <span className="text-[11px] text-[var(--text-muted)] px-1">
+            <span className="text-[11px] text-muted-foreground px-1">
               {pageIndex + 1} / {table.getPageCount()}
             </span>
             <button
               onClick={() => table.nextPage()}
               disabled={!table.getCanNextPage()}
-              className="px-2 py-1 rounded text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               下一页
             </button>

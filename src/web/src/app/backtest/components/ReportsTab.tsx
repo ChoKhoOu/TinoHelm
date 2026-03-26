@@ -17,6 +17,7 @@ import { ChevronUp, ChevronDown, ChevronsUpDown, Download } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { API_BASE } from "@/lib/api";
 
 /* ------------------------------------------------------------------ */
@@ -84,7 +85,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
         const result = Papa.parse<CsvRow>(text, {
           header: true,
           skipEmptyLines: true,
-          transformHeader: (h) => h.trim(),
+          transformHeader: (h) => h.trim() || "datetime",
         });
         setHeaders(result.meta.fields ?? []);
         setCsvData(result.data);
@@ -107,7 +108,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
       header: h,
       cell: (info: { getValue: () => unknown }) => {
         const val = info.getValue() as string;
-        if (!val) return <span className="text-[var(--text-muted)]">—</span>;
+        if (!val) return <span className="text-muted-foreground">—</span>;
         // Color numeric pnl/profit/loss columns
         const lower = h.toLowerCase();
         if (lower.includes("pnl") || lower.includes("profit") || lower.includes("loss")) {
@@ -161,7 +162,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
   return (
     <div className="flex flex-col h-full">
       {/* Source selector + search + export */}
-      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-[var(--border-gray)] bg-[var(--bg-card)] shrink-0 flex-wrap">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border bg-card shrink-0 flex-wrap">
         {/* Pills */}
         <div className="flex items-center gap-1">
           {SOURCES.map(({ key, label }) => (
@@ -170,8 +171,8 @@ export function ReportsTab({ runId }: ReportsTabProps) {
               onClick={() => setActiveSource(key)}
               className={`px-3 py-1 rounded-full text-[11px] font-semibold transition-colors ${
                 activeSource === key
-                  ? "bg-[var(--accent-blue-20)] text-[var(--accent-blue)]"
-                  : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                  ? "bg-[var(--accent-blue-20)] text-primary"
+                  : "text-muted-foreground hover:text-muted-foreground"
               }`}
             >
               {label}
@@ -192,7 +193,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
         {/* Export */}
         <button
           onClick={handleExport}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-[var(--text-secondary)] hover:text-[var(--accent-blue)] hover:bg-[var(--accent-blue-20)] border border-[var(--border-gray)] hover:border-[var(--accent-blue)] transition-colors"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-muted-foreground hover:text-primary hover:bg-[var(--accent-blue-20)] border border-border hover:border-primary transition-colors"
         >
           <Download className="w-3 h-3" />
           导出 CSV
@@ -208,35 +209,35 @@ export function ReportsTab({ runId }: ReportsTabProps) {
         </div>
       ) : error ? (
         <div className="flex items-center justify-center flex-1">
-          <span className="text-xs text-[var(--accent-red)]">加载失败: {error}</span>
+          <span className="text-xs text-destructive">加载失败: {error}</span>
         </div>
       ) : csvData.length === 0 ? (
         <div className="flex items-center justify-center flex-1">
-          <span className="text-xs text-[var(--text-muted)]">暂无数据</span>
+          <span className="text-xs text-muted-foreground">暂无数据</span>
         </div>
       ) : (
         <>
           {/* Table */}
           <div className="flex-1 min-h-0 overflow-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead className="sticky top-0 z-10 bg-[var(--bg-card)]">
+            <Table className="w-full text-xs border-collapse">
+              <TableHeader className="sticky top-0 z-10 bg-card">
                 {table.getHeaderGroups().map((hg) => (
-                  <tr key={hg.id} className="border-b border-[var(--border-gray)]">
+                  <TableRow key={hg.id} className="border-b border-border">
                     {hg.headers.map((header) => {
                       const canSort = header.column.getCanSort();
                       const sorted = header.column.getIsSorted();
                       return (
-                        <th
+                        <TableHead
                           key={header.id}
-                          className={`px-3 py-2 text-left font-semibold text-[var(--text-muted)] tracking-[0.4px] uppercase whitespace-nowrap select-none ${
-                            canSort ? "cursor-pointer hover:text-[var(--text-secondary)]" : ""
+                          className={`px-3 py-2 text-left font-semibold text-muted-foreground tracking-[0.4px] uppercase whitespace-nowrap select-none ${
+                            canSort ? "cursor-pointer hover:text-muted-foreground" : ""
                           }`}
                           onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
                         >
                           <div className="flex items-center gap-1">
                             {flexRender(header.column.columnDef.header, header.getContext())}
                             {canSort && (
-                              <span className="text-[var(--text-muted)]">
+                              <span className="text-muted-foreground">
                                 {sorted === "asc" ? (
                                   <ChevronUp className="w-3 h-3" />
                                 ) : sorted === "desc" ? (
@@ -247,40 +248,40 @@ export function ReportsTab({ runId }: ReportsTabProps) {
                               </span>
                             )}
                           </div>
-                        </th>
+                        </TableHead>
                       );
                     })}
-                  </tr>
+                  </TableRow>
                 ))}
-              </thead>
-              <tbody>
+              </TableHeader>
+              <TableBody>
                 {table.getRowModel().rows.map((row, i) => (
-                  <tr
+                  <TableRow
                     key={row.id}
-                    className={`border-b border-[var(--border-gray)]/30 hover:bg-[var(--bg-subtle)]/50 transition-colors ${
-                      i % 2 === 0 ? "" : "bg-[var(--bg-page)]/30"
+                    className={`border-b border-border/30 hover:bg-muted/50 transition-colors ${
+                      i % 2 === 0 ? "" : "bg-background/30"
                     }`}
                   >
                     {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+                      <TableCell key={cell.id} className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
+                      </TableCell>
                     ))}
-                  </tr>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
 
           {/* Pagination */}
-          <div className="flex items-center justify-between px-4 py-2 border-t border-[var(--border-gray)] bg-[var(--bg-card)] shrink-0">
-            <span className="text-[11px] text-[var(--text-muted)]">
+          <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-card shrink-0">
+            <span className="text-[11px] text-muted-foreground">
               {from}–{to} / {filteredCount} 条
               {globalFilter && ` (筛选自 ${csvData.length} 条)`}
             </span>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-1.5">
-                <span className="text-[11px] text-[var(--text-muted)]">每页</span>
+                <span className="text-[11px] text-muted-foreground">每页</span>
                 <Select value={String(pageSize)} onValueChange={(v: string | null) => v && setPageSize(Number(v))}>
                   <SelectTrigger className="w-16 h-7 text-xs">
                     <SelectValue />
@@ -296,17 +297,17 @@ export function ReportsTab({ runId }: ReportsTabProps) {
                 <button
                   onClick={() => table.previousPage()}
                   disabled={!table.getCanPreviousPage()}
-                  className="px-2 py-1 rounded text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 >
                   上一页
                 </button>
-                <span className="text-[11px] text-[var(--text-muted)] px-1">
+                <span className="text-[11px] text-muted-foreground px-1">
                   {pageIndex + 1} / {table.getPageCount() || 1}
                 </span>
                 <button
                   onClick={() => table.nextPage()}
                   disabled={!table.getCanNextPage()}
-                  className="px-2 py-1 rounded text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 >
                   下一页
                 </button>

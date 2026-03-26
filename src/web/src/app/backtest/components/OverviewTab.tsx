@@ -14,6 +14,7 @@ import {
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { API_BASE } from "@/lib/api";
 import { useCountUp } from "@/hooks/useCountUp";
 import type { BacktestResult, MonthlyReturn, DrawdownPeriod, PerInstrumentEntry } from "../types";
@@ -55,7 +56,7 @@ const pnlColor = (v: number) => (v >= 0 ? "text-[var(--accent-green)]" : "text-[
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-[var(--text-muted)]">
+    <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-muted-foreground">
       {children}
     </span>
   );
@@ -67,7 +68,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={`rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] p-4 ${className}`}>
+    <div className={`rounded-lg bg-popover border border-border p-4 ${className}`}>
       {children}
     </div>
   );
@@ -80,8 +81,8 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
 function StatRow({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div className="flex items-center justify-between py-0.5">
-      <span className="text-xs text-[var(--text-muted)]">{label}</span>
-      <span className={`text-xs font-medium ${color ?? "text-[var(--text-secondary)]"}`}>{value}</span>
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className={`text-xs font-medium ${color ?? "text-muted-foreground"}`}>{value}</span>
     </div>
   );
 }
@@ -121,14 +122,14 @@ function KpiCard({ label, value, format, positive, prefix = "", suffix = "", sho
 
   const colorClass =
     positive === null || positive === undefined
-      ? "text-[var(--text-primary)]"
+      ? "text-foreground"
       : positive
       ? "text-[var(--accent-green)]"
       : "text-[var(--accent-red)]";
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] p-4">
-      <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-[var(--text-muted)]">
+    <div className="flex flex-col gap-1.5 rounded-lg bg-popover border border-border p-4">
+      <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-muted-foreground">
         {label}
       </span>
       <span className={`${small ? "text-lg" : "text-2xl"} font-bold font-heading tracking-tight ${colorClass}`}>
@@ -168,7 +169,7 @@ function HeroBanner({ s }: { s: BacktestResult["statistics"] }) {
       {finalBal !== null && (
         <div className="flex flex-col items-end gap-1">
           <SectionLabel>最终余额</SectionLabel>
-          <span className="text-xl font-bold font-heading text-[var(--text-primary)]">
+          <span className="text-xl font-bold font-heading text-foreground">
             {fmtCurrency(finalBal)}
           </span>
         </div>
@@ -200,7 +201,7 @@ function WinLossBar({ s }: { s: BacktestResult["statistics"] }) {
         </div>
         <span className="text-xs font-medium text-[var(--accent-red)]">{s.losing_trades}L</span>
       </div>
-      <div className="flex items-center justify-between text-[10px] text-[var(--text-muted)]">
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
         <span>总计 {total} 笔 · 胜率 {fmt(winPct, 1)}%</span>
         <span>连胜 {s.winning_streak} / 连负 {s.losing_streak}</span>
       </div>
@@ -221,17 +222,17 @@ function LongShortBar({ s }: { s: BacktestResult["statistics"] }) {
     <Card className="flex flex-col gap-3">
       <SectionLabel>多空分布</SectionLabel>
       <div className="flex items-center gap-3">
-        <span className="text-xs font-medium text-[var(--accent-blue)]">做多</span>
+        <span className="text-xs font-medium text-primary">做多</span>
         <div className="flex-1 h-3 rounded-full overflow-hidden flex">
           <div
-            className="h-full rounded-l-full bg-[var(--accent-blue)]"
+            className="h-full rounded-l-full bg-primary"
             style={{ width: `${longPct}%` }}
           />
           <div className="h-full flex-1 bg-[#D4A843]" />
         </div>
         <span className="text-xs font-medium text-[#D4A843]">做空</span>
       </div>
-      <div className="flex items-center justify-between text-[10px] text-[var(--text-muted)]">
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
         <span>做多 {fmt(longPct, 1)}%</span>
         <span>做空 {fmt(shortPct, 1)}%</span>
       </div>
@@ -268,7 +269,7 @@ function MonthlyHeatmap({ data }: { data: MonthlyReturn[] }) {
   }
 
   const cellColor = (val: number | undefined) => {
-    if (val === undefined || val === 0) return "var(--bg-subtle)";
+    if (val === undefined || val === 0) return "var(--muted)";
     const ratio = Math.min(Math.abs(val) / (maxAbs || 1), 1);
     if (val > 0) {
       const g = Math.round(80 + ratio * 137);
@@ -284,23 +285,23 @@ function MonthlyHeatmap({ data }: { data: MonthlyReturn[] }) {
       <div className="flex flex-col gap-2">
         <SectionLabel>月度收益热力图</SectionLabel>
         <div className="overflow-x-auto">
-          <table className="text-[10px] border-separate border-spacing-0.5">
-            <thead>
-              <tr>
-                <th className="w-12 text-left text-[var(--text-muted)] font-medium pr-2">年份</th>
+          <Table className="text-[10px] border-separate border-spacing-0.5">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-12 text-left text-muted-foreground font-medium pr-2">年份</TableHead>
                 {MONTHS.map((m) => (
-                  <th key={m} className="w-10 text-center text-[var(--text-muted)] font-medium">{m}</th>
+                  <TableHead key={m} className="w-10 text-center text-muted-foreground font-medium">{m}</TableHead>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {years.map((yr) => (
-                <tr key={yr}>
-                  <td className="text-[var(--text-secondary)] pr-2">{yr}</td>
+                <TableRow key={yr}>
+                  <TableCell className="text-muted-foreground pr-2">{yr}</TableCell>
                   {Array.from({ length: 12 }, (_, m) => {
                     const val = map[yr]?.[m];
                     return (
-                      <td
+                      <TableCell
                         key={m}
                         style={{ backgroundColor: cellColor(val) }}
                         className="rounded text-center h-6 cursor-default"
@@ -320,13 +321,13 @@ function MonthlyHeatmap({ data }: { data: MonthlyReturn[] }) {
                             </TooltipContent>
                           </Tooltip>
                         ) : null}
-                      </td>
+                      </TableCell>
                     );
                   })}
-                </tr>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       </div>
     </TooltipProvider>
@@ -349,16 +350,16 @@ function TopTrades({ tradeLog }: { tradeLog: BacktestResult["trade_log"] }) {
   const renderTrade = (t: (typeof tradeLog)[0], idx: number) => {
     const pnl = Number(t.realized_pnl);
     return (
-      <div key={idx} className="flex items-center justify-between py-1 border-b border-[var(--border-gray)]/30 last:border-0">
+      <div key={idx} className="flex items-center justify-between py-1 border-b border-border/30 last:border-0">
         <div className="flex items-center gap-2">
-          <span className="text-xs text-[var(--accent-blue)] font-medium w-28 truncate">{stripVenue(t.instrument)}</span>
+          <span className="text-xs text-primary font-medium w-28 truncate">{stripVenue(t.instrument)}</span>
           <span className={`text-[10px] font-medium ${t.side === "BUY" ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}`}>
             {t.side}
           </span>
         </div>
         <div className="flex items-center gap-3">
           <span className={`text-xs font-semibold ${pnlColor(pnl)}`}>{fmtSigned(pnl, 2)}</span>
-          {t.duration && <span className="text-[10px] text-[var(--text-muted)]">{t.duration}</span>}
+          {t.duration && <span className="text-[10px] text-muted-foreground">{t.duration}</span>}
         </div>
       </div>
     );
@@ -397,34 +398,34 @@ function DrawdownTable({ periods }: { periods: DrawdownPeriod[] }) {
     <Card className="flex flex-col gap-2">
       <SectionLabel>显著回撤</SectionLabel>
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-[var(--border-gray)] text-[var(--text-muted)]">
-              <th className="text-left py-1.5 pr-3 font-medium">开始日期</th>
-              <th className="text-right py-1.5 pr-3 font-medium">最大回撤</th>
-              <th className="text-right py-1.5 pr-3 font-medium">持续天数</th>
-              <th className="text-right py-1.5 font-medium">恢复</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="w-full text-xs">
+          <TableHeader>
+            <TableRow className="border-b border-border text-muted-foreground">
+              <TableHead className="text-left py-1.5 pr-3 font-medium">开始日期</TableHead>
+              <TableHead className="text-right py-1.5 pr-3 font-medium">最大回撤</TableHead>
+              <TableHead className="text-right py-1.5 pr-3 font-medium">持续天数</TableHead>
+              <TableHead className="text-right py-1.5 font-medium">恢复</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {top5.map((dd, i) => (
-              <tr key={i} className="border-b border-[var(--border-gray)]/30">
-                <td className="py-1.5 pr-3 text-[var(--text-secondary)]">{dd.start.slice(0, 10)}</td>
-                <td className="py-1.5 pr-3 text-right text-[var(--accent-red)] font-medium">
+              <TableRow key={i} className="border-b border-border/30">
+                <TableCell className="py-1.5 pr-3 text-muted-foreground">{dd.start.slice(0, 10)}</TableCell>
+                <TableCell className="py-1.5 pr-3 text-right text-[var(--accent-red)] font-medium">
                   {fmt(dd.max_drawdown_pct, 2)}%
-                </td>
-                <td className="py-1.5 pr-3 text-right text-[var(--text-secondary)]">{dd.duration_days}天</td>
-                <td className="py-1.5 text-right">
+                </TableCell>
+                <TableCell className="py-1.5 pr-3 text-right text-muted-foreground">{dd.duration_days}天</TableCell>
+                <TableCell className="py-1.5 text-right">
                   {dd.recovery_days !== null ? (
                     <span className="text-[var(--accent-green)]">{dd.recovery_days}天</span>
                   ) : (
-                    <span className="text-[var(--text-muted)]">未恢复</span>
+                    <span className="text-muted-foreground">未恢复</span>
                   )}
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       </div>
     </Card>
   );
@@ -448,54 +449,54 @@ function InstrumentBreakdown({ data }: { data: Record<string, PerInstrumentEntry
     <Card className="flex flex-col gap-2">
       <SectionLabel>品种分解</SectionLabel>
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-[var(--border-gray)] text-[var(--text-muted)]">
-              <th className="text-left py-2 pr-3 font-medium">品种</th>
-              <th className="text-right py-2 pr-3 font-medium">交易数</th>
-              <th className="text-right py-2 pr-3 font-medium">胜率</th>
-              <th className="text-right py-2 pr-3 font-medium">盈亏</th>
-              <th className="text-left py-2 pr-3 pl-2 font-medium w-24"></th>
-              <th className="text-right py-2 pr-3 font-medium">夏普</th>
-              <th className="text-right py-2 font-medium">最大回撤</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="w-full text-xs">
+          <TableHeader>
+            <TableRow className="border-b border-border text-muted-foreground">
+              <TableHead className="text-left py-2 pr-3 font-medium">品种</TableHead>
+              <TableHead className="text-right py-2 pr-3 font-medium">交易数</TableHead>
+              <TableHead className="text-right py-2 pr-3 font-medium">胜率</TableHead>
+              <TableHead className="text-right py-2 pr-3 font-medium">盈亏</TableHead>
+              <TableHead className="text-left py-2 pr-3 pl-2 font-medium w-24"></TableHead>
+              <TableHead className="text-right py-2 pr-3 font-medium">夏普</TableHead>
+              <TableHead className="text-right py-2 font-medium">最大回撤</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {entries.map((row) => {
               const barWidth = Math.round((Math.abs(row.total_pnl) / maxAbsPnl) * 100);
               return (
-                <tr key={row.instrument} className="border-b border-[var(--border-gray)]/30 hover:bg-[var(--bg-subtle)]/50">
-                  <td className="py-1.5 pr-3 text-[var(--accent-blue)] font-medium">{row.instrument}</td>
-                  <td className="py-1.5 pr-3 text-right text-[var(--text-secondary)]">{row.total_trades}</td>
-                  <td className="py-1.5 pr-3 text-right">
+                <TableRow key={row.instrument} className="border-b border-border/30 hover:bg-muted/50">
+                  <TableCell className="py-1.5 pr-3 text-primary font-medium">{row.instrument}</TableCell>
+                  <TableCell className="py-1.5 pr-3 text-right text-muted-foreground">{row.total_trades}</TableCell>
+                  <TableCell className="py-1.5 pr-3 text-right">
                     <span className={(row.win_rate ?? 0) >= 0.5 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
                       {fmt((row.win_rate ?? 0) * 100, 1)}%
                     </span>
-                  </td>
-                  <td className="py-1.5 pr-3 text-right">
+                  </TableCell>
+                  <TableCell className="py-1.5 pr-3 text-right">
                     <span className={pnlColor(row.total_pnl)}>
                       {fmtSigned(row.total_pnl, 2)}
                     </span>
-                  </td>
-                  <td className="py-1.5 pr-3 pl-2">
-                    <div className="h-2 rounded-full overflow-hidden bg-[var(--bg-subtle)]">
+                  </TableCell>
+                  <TableCell className="py-1.5 pr-3 pl-2">
+                    <div className="h-2 rounded-full overflow-hidden bg-muted">
                       <div
                         className={`h-full rounded-full ${row.total_pnl >= 0 ? "bg-[var(--accent-green)]" : "bg-[var(--accent-red)]"}`}
                         style={{ width: `${barWidth}%` }}
                       />
                     </div>
-                  </td>
-                  <td className="py-1.5 pr-3 text-right text-[var(--text-secondary)]">{fmt(row.sharpe_ratio, 2)}</td>
-                  <td className="py-1.5 text-right">
+                  </TableCell>
+                  <TableCell className="py-1.5 pr-3 text-right text-muted-foreground">{fmt(row.sharpe_ratio, 2)}</TableCell>
+                  <TableCell className="py-1.5 text-right">
                     {row.max_drawdown !== null && Math.abs(row.max_drawdown) > 0.0001 ? (
                       <span className="text-[var(--accent-red)]">{fmt(Math.abs(row.max_drawdown) * 100, 1)}%</span>
                     ) : "—"}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               );
             })}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       </div>
     </Card>
   );
@@ -526,10 +527,10 @@ function CorrelationMatrix({ data }: { data: Record<string, Record<string, numbe
   const bottom = [...pairs].sort((a, b) => a.corr - b.corr).slice(0, 3);
 
   const corrColor = (v: number) => {
-    if (v > 0.7) return "text-[var(--accent-red)]";
-    if (v > 0.3) return "text-[var(--text-secondary)]";
+    if (v > 0.7) return "text-destructive";
+    if (v > 0.3) return "text-muted-foreground";
     if (v < 0) return "text-[var(--accent-green)]";
-    return "text-[var(--accent-blue)]";
+    return "text-primary";
   };
 
   return (
@@ -540,7 +541,7 @@ function CorrelationMatrix({ data }: { data: Record<string, Record<string, numbe
           <span className="text-[10px] font-medium text-[var(--accent-red)] mb-1">高相关 (风险集中)</span>
           {top.map((p, i) => (
             <div key={i} className="flex items-center justify-between py-0.5">
-              <span className="text-xs text-[var(--text-secondary)]">{p.a} / {p.b}</span>
+              <span className="text-xs text-muted-foreground">{p.a} / {p.b}</span>
               <span className={`text-xs font-medium ${corrColor(p.corr)}`}>{fmtSigned(p.corr, 3)}</span>
             </div>
           ))}
@@ -549,7 +550,7 @@ function CorrelationMatrix({ data }: { data: Record<string, Record<string, numbe
           <span className="text-[10px] font-medium text-[var(--accent-green)] mb-1">低相关 (分散化)</span>
           {bottom.map((p, i) => (
             <div key={i} className="flex items-center justify-between py-0.5">
-              <span className="text-xs text-[var(--text-secondary)]">{p.a} / {p.b}</span>
+              <span className="text-xs text-muted-foreground">{p.a} / {p.b}</span>
               <span className={`text-xs font-medium ${corrColor(p.corr)}`}>{fmtSigned(p.corr, 3)}</span>
             </div>
           ))}
@@ -687,12 +688,12 @@ export function OverviewTab({ runId }: OverviewTabProps) {
                   <stop offset="95%" stopColor="#4C9EEB" stopOpacity={0.02} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border-gray)" />
-              <XAxis dataKey="t" tick={{ fill: "var(--text-muted)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-              <YAxis tick={{ fill: "var(--text-muted)", fontSize: 10 }} tickLine={false} axisLine={false}
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="t" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+              <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false}
                 tickFormatter={(v) => `$${fmt(Number(v) / 1000, 0, "0")}k`} width={48} />
               <RechartsTooltip
-                contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-gray)", borderRadius: 8, fontSize: 11, color: "var(--text-primary)" }}
+                contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11, color: "var(--foreground)" }}
                 formatter={(value: unknown) => [`$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })}`, "权益"]}
               />
               <ReferenceLine
@@ -716,12 +717,12 @@ export function OverviewTab({ runId }: OverviewTabProps) {
                   <stop offset="95%" stopColor="#E5534B" stopOpacity={0.02} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border-gray)" />
-              <XAxis dataKey="t" tick={{ fill: "var(--text-muted)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" hide />
-              <YAxis tick={{ fill: "var(--text-muted)", fontSize: 10 }} tickLine={false} axisLine={false}
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="t" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" hide />
+              <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false}
                 tickFormatter={(v) => `${fmt(v, 0)}%`} width={48} />
               <RechartsTooltip
-                contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-gray)", borderRadius: 8, fontSize: 11, color: "var(--text-primary)" }}
+                contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11, color: "var(--foreground)" }}
                 formatter={(value: unknown) => [`${fmt(value, 2)}%`, "回撤"]}
               />
               <Area type="monotone" dataKey="drawdown" stroke="#E5534B" strokeWidth={1} fill="url(#ddGrad)" dot={false} />
@@ -782,8 +783,8 @@ export function OverviewTab({ runId }: OverviewTabProps) {
             <StatRow label="最长连负" value={`${s.losing_streak} 笔`} color="text-[var(--accent-red)]" />
             {hasMultiInst && portfolio_analytics?.diversification_ratio && (
               <>
-                <StatRow label="分散化比率" value={fmt(portfolio_analytics.diversification_ratio, 2)} color="text-[var(--accent-blue)]" />
-                <StatRow label="分散化收益" value={`${fmt(portfolio_analytics.diversification_benefit_pct, 1)}%`} color="text-[var(--accent-blue)]" />
+                <StatRow label="分散化比率" value={fmt(portfolio_analytics.diversification_ratio, 2)} color="text-primary" />
+                <StatRow label="分散化收益" value={`${fmt(portfolio_analytics.diversification_benefit_pct, 1)}%`} color="text-primary" />
               </>
             )}
           </div>

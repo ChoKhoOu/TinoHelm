@@ -1,14 +1,20 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, Plus, Play, RefreshCw, Loader2, Check, Copy, X } from "lucide-react";
+import { Search, Plus, Play, RefreshCw, Loader2, Check, Copy, X, CalendarDays } from "lucide-react";
 import { format, parse } from "date-fns";
+import { toast } from "sonner";
 import { zhCN } from "date-fns/locale";
 import type { DateRange } from "react-day-picker";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Dialog,
   DialogContent,
@@ -24,12 +30,95 @@ import {
 } from "@/components/ui/tabs";
 import { apiGet, apiPost } from "@/lib/api";
 import { useWsEvent } from "@/providers/WebSocketProvider";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { RunStatus, TradeLogEntry, BacktestResult } from "./types";
 import { OverviewTab } from "./components/OverviewTab";
+import { OverviewGreyTab } from "./components/OverviewGreyTab";
 import { TearsheetTab } from "./components/TearsheetTab";
 import { TradeLogTab } from "./components/TradeLogTab";
 import { ReportsTab } from "./components/ReportsTab";
+import { PerformanceTab } from "./components/PerformanceTab";
+
+/* ------------------------------------------------------------------ */
+/*  Progress ring placeholder for running/queued backtests             */
+/* ------------------------------------------------------------------ */
+
+function RunningPlaceholder({ status, pct, fallbackMsg }: { status?: string; pct: number; fallbackMsg?: string }) {
+  const isRunning = status === "running" || status === "queued";
+  if (!isRunning) {
+    return (
+      <div className="flex items-center justify-center h-48">
+        <span className="text-xs text-muted-foreground">
+          {status === "failed" ? "回测失败" : (fallbackMsg ?? "回测完成后可查看")}
+        </span>
+      </div>
+    );
+  }
+  const isQueued = status === "queued";
+  const radius = 80;
+  const stroke = 6;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference - (pct / 100) * circumference;
+
+  return (
+    <div className="flex items-center justify-center h-full">
+      <div className="flex flex-col items-center gap-6 w-80">
+        <div className="relative progress-ring-glow">
+          <svg width="184" height="184" viewBox="0 0 184 184">
+            <circle cx="92" cy="92" r={radius} fill="none" stroke="hsl(var(--muted))" strokeWidth={stroke} />
+            {!isQueued && (
+              <circle cx="92" cy="92" r={radius} fill="none"
+                stroke="url(#ringGradient)" strokeWidth={stroke}
+                strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset}
+                style={{ transform: "rotate(-90deg)", transformOrigin: "center", transition: "stroke-dashoffset 600ms cubic-bezier(0.4, 0, 0.2, 1)" }}
+              />
+            )}
+            {isQueued && (
+              <circle cx="92" cy="92" r={radius} fill="none"
+                stroke="hsl(var(--primary))" strokeWidth={stroke}
+                strokeLinecap="round" opacity="0.6"
+                strokeDasharray={`${circumference * 0.25} ${circumference * 0.75}`}
+                style={{ transform: "rotate(-90deg)", transformOrigin: "center", animation: "spin 1.5s linear infinite" }}
+              />
+            )}
+            {!isQueued && pct > 0 && (
+              <circle cx="92" cy="92" r={radius} fill="none"
+                stroke="url(#ringGradient)" strokeWidth={stroke + 4}
+                strokeLinecap="round" opacity="0.35"
+                strokeDasharray={circumference} strokeDashoffset={offset}
+                filter="url(#arcGlow)"
+                style={{ transform: "rotate(-90deg)", transformOrigin: "center", transition: "stroke-dashoffset 600ms cubic-bezier(0.4, 0, 0.2, 1)" }}
+              />
+            )}
+            <defs>
+              <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="#4C9EEB" />
+                <stop offset="100%" stopColor="#A78BFA" />
+              </linearGradient>
+              <filter id="arcGlow" x="-30%" y="-30%" width="160%" height="160%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="6" />
+              </filter>
+            </defs>
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            {isQueued ? (
+              <span className="text-sm font-medium text-muted-foreground progress-breathe">排队中</span>
+            ) : (
+              <>
+                <span className="text-4xl font-bold font-heading text-foreground progress-pop" key={pct}>{pct}</span>
+                <span className="text-sm font-medium text-muted-foreground -mt-0.5">%</span>
+              </>
+            )}
+          </div>
+        </div>
+        <span className="text-sm font-medium text-muted-foreground">
+          {isQueued ? "等待运行..." : "回测运行中"}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -87,7 +176,7 @@ function CopyableId({ runId }: { runId: string }) {
   };
   return (
     <span
-      className="inline-flex items-center gap-0.5 text-[9px] text-[var(--text-muted)] font-mono opacity-60 cursor-pointer hover:text-[var(--accent-blue)] hover:opacity-100 transition-colors"
+      className="inline-flex items-center gap-0.5 text-[9px] text-muted-foreground font-mono opacity-60 cursor-pointer hover:text-primary hover:opacity-100 transition-colors"
       title={`点击复制: ${runId}`}
       onClick={handleCopy}
     >
@@ -121,40 +210,64 @@ function RunRow({ run, selected, progress, onClick }: RunRowProps) {
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left px-3 py-2.5 border-b border-[var(--border-gray)] transition-colors ${
+      className={`w-full text-left px-3 py-2.5 border-b border-border transition-colors ${
         selected
-          ? "bg-[var(--accent-blue-20)] border-l-2 border-l-[var(--accent-blue)]"
-          : "hover:bg-[var(--bg-subtle)]/60"
+          ? "bg-[var(--accent-blue-20)] border-l-2 border-l-primary"
+          : "hover:bg-muted/60"
       }`}
     >
       <div className="flex items-start justify-between gap-2 mb-1">
-        <span className="text-xs font-medium text-[var(--text-primary)] truncate flex-1">
+        <span className="text-xs font-medium text-foreground truncate flex-1">
           {run.strategy_name}
         </span>
         <StatusBadge status={run.status} />
       </div>
       <div className="flex items-center gap-2 mb-0.5">
-        <span className="text-[10px] text-[var(--accent-blue)] font-medium">{run.symbol}</span>
-        <span className="text-[10px] text-[var(--text-muted)]">{run.interval}</span>
+        {(() => {
+          const syms = run.symbol.split(",").map((s) => s.trim()).filter(Boolean);
+          if (syms.length <= 2) {
+            return <span className="text-[10px] text-primary font-medium truncate">{syms.join(", ")}</span>;
+          }
+          return (
+            <span className="text-[10px] text-primary font-medium truncate">
+              {syms.slice(0, 2).join(", ")}{" "}
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger className="text-[10px] text-primary/70 hover:text-primary cursor-default">
+                    +{syms.length - 2}
+                  </TooltipTrigger>
+                  <TooltipContent side="right" className="max-w-xs">
+                    <div className="flex flex-wrap gap-1">
+                      {syms.map((s) => (
+                        <span key={s} className="text-[10px]">{s}</span>
+                      ))}
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </span>
+          );
+        })()}
+        <span className="text-[10px] text-muted-foreground">{run.interval}</span>
       </div>
-      <div className="text-[10px] text-[var(--text-muted)] mb-0.5">{dateRange}</div>
+      <div className="text-[10px] text-muted-foreground mb-0.5">{dateRange}</div>
       <div className="flex items-center justify-between">
         <CopyableId runId={run.run_id} />
-        {createdAt && <span className="text-[9px] text-[var(--text-muted)] opacity-60">{createdAt}</span>}
+        {createdAt && <span className="text-[9px] text-muted-foreground opacity-60">{createdAt}</span>}
       </div>
       {isRunning && (
         <div className="mt-1.5">
           <div className="flex items-center justify-between mb-0.5">
             <div className="flex items-center gap-1">
-              <Loader2 className="w-2.5 h-2.5 text-[var(--accent-blue)] animate-spin" />
-              <span className="text-[9px] text-[var(--accent-blue)] font-medium">
+              <Loader2 className="w-2.5 h-2.5 text-primary animate-spin" />
+              <span className="text-[9px] text-primary font-medium">
                 {run.status === "queued" ? "排队中" : `${pct}%`}
               </span>
             </div>
           </div>
-          <div className="h-1 rounded-full bg-[var(--bg-subtle)] overflow-hidden">
+          <div className="h-1 rounded-full bg-muted overflow-hidden">
             <div
-              className="h-full rounded-full bg-[var(--accent-blue)] transition-all duration-500 ease-out relative overflow-hidden"
+              className="h-full rounded-full bg-primary transition-all duration-500 ease-out relative overflow-hidden"
               style={{ width: `${pct}%` }}
             >
               <div className="progress-shimmer absolute inset-0" />
@@ -187,12 +300,15 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
     initial_capital: "10000",
   });
   const [submitting, setSubmitting] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
   const [strategySearch, setStrategySearch] = useState("");
   const [strategyDropdownOpen, setStrategyDropdownOpen] = useState(false);
   const [symbolInput, setSymbolInput] = useState("");
   const [isPortfolio, setIsPortfolio] = useState(false);
   const strategyRef = useRef<HTMLDivElement>(null);
+  const [dateRange, setDateRange] = useState<DateRange | undefined>({
+    from: parse("2025-01-01", "yyyy-MM-dd", new Date()),
+    to: parse("2025-03-01", "yyyy-MM-dd", new Date()),
+  });
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -245,24 +361,34 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
   };
 
   const handleSubmit = async () => {
-    if (!form.strategy_name) { setErr("请选择策略"); return; }
+    if (!form.strategy_name) { toast.error("请选择策略"); return; }
+    if (!form.start_date || form.start_date.length < 10) { toast.error("请输入完整的起始日期"); return; }
+    if (!form.end_date || form.end_date.length < 10) { toast.error("请输入完整的结束日期"); return; }
     setSubmitting(true);
-    setErr(null);
     try {
       await onSubmit(form);
+      toast.success("回测已提交");
       onClose();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "提交失败");
+      const msg = e instanceof Error ? e.message : "提交失败";
+      toast.error("提交回测失败", { description: msg });
     } finally {
       setSubmitting(false);
     }
   };
 
-  const labelCls = "text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase";
+  const maskDate = (v: string) => {
+    const d = v.replace(/\D/g, "").slice(0, 8);
+    if (d.length <= 4) return d;
+    if (d.length <= 6) return `${d.slice(0, 4)}-${d.slice(4)}`;
+    return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`;
+  };
+
+  const labelCls = "text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase";
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>新建回测</DialogTitle>
         </DialogHeader>
@@ -273,19 +399,19 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
             <label className={labelCls}>策略</label>
             <div className="relative">
               <div className="relative">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--text-muted)]" />
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
                 <input
                   value={strategyDropdownOpen ? strategySearch : form.strategy_name || ""}
                   onChange={(e) => { setStrategySearch(e.target.value); setStrategyDropdownOpen(true); }}
                   onFocus={() => { setStrategySearch(""); }}
                   placeholder="搜索策略..."
-                  className="w-full h-8 pl-8 pr-3 rounded-md border border-[var(--border-gray)] bg-[var(--bg-elevated)] text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-blue)]/50 transition-all"
+                  className="w-full h-8 pl-8 pr-3 rounded-md border border-input dark:bg-input/30 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring/50 transition-all"
                 />
               </div>
               {strategyDropdownOpen && (
-                <div className="absolute z-50 top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-lg border border-[var(--border-gray)] bg-[var(--bg-elevated)] shadow-xl animate-in fade-in slide-in-from-top-1 duration-150">
+                <div className="absolute z-50 top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-lg border border-border bg-popover shadow-xl animate-in fade-in slide-in-from-top-1 duration-150">
                   {filteredStrategies.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-[var(--text-muted)]">无匹配策略</div>
+                    <div className="px-3 py-2 text-xs text-muted-foreground">无匹配策略</div>
                   ) : (
                     filteredStrategies.map((s) => (
                       <button
@@ -296,8 +422,8 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
                           setStrategyDropdownOpen(false);
                           setStrategySearch("");
                         }}
-                        className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between hover:bg-[var(--bg-subtle)] transition-colors ${
-                          form.strategy_name === s.name ? "text-[var(--accent-blue)]" : "text-[var(--text-primary)]"
+                        className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between hover:bg-muted transition-colors ${
+                          form.strategy_name === s.name ? "text-primary" : "text-foreground"
                         }`}
                       >
                         <span className="font-medium">{s.name}</span>
@@ -306,7 +432,7 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
                             组合
                           </span>
                         )}
-                        {form.strategy_name === s.name && <Check className="w-3.5 h-3.5 text-[var(--accent-blue)]" />}
+                        {form.strategy_name === s.name && <Check className="w-3.5 h-3.5 text-primary" />}
                       </button>
                     ))
                   )}
@@ -323,14 +449,14 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
                 <span className="text-[9px] text-[var(--accent-purple)]">从配置自动填充</span>
               )}
             </div>
-            <div className="flex flex-wrap gap-1.5 p-2 min-h-[36px] rounded-md border border-[var(--border-gray)] bg-[var(--bg-elevated)]">
+            <div className="flex flex-wrap gap-1.5 p-2 min-h-[36px] rounded-md border border-input dark:bg-input/30">
               {form.symbols.map((sym) => (
                 <span
                   key={sym}
                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--accent-blue-20)] text-[var(--accent-blue)] text-[10px] font-medium animate-in fade-in zoom-in-95 duration-150"
                 >
                   {sym}
-                  <button type="button" onClick={() => removeSymbol(sym)} className="hover:text-[var(--accent-red)] transition-colors">
+                  <button type="button" onClick={() => removeSymbol(sym)} className="hover:text-destructive transition-colors">
                     <X className="w-2.5 h-2.5" />
                   </button>
                 </span>
@@ -345,81 +471,135 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
                   }
                 }}
                 placeholder={form.symbols.length === 0 ? "输入交易对，回车添加" : ""}
-                className="flex-1 min-w-[100px] bg-transparent text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+                className="flex-1 min-w-[100px] bg-transparent text-xs text-foreground placeholder:text-muted-foreground focus:outline-none"
               />
             </div>
           </div>
 
-          {/* Interval — free text */}
-          <div className="flex flex-col gap-1">
-            <label className={labelCls}>时间周期</label>
-            <Input
-              value={form.interval}
-              onChange={(e) => setForm((f) => ({ ...f, interval: e.target.value }))}
-              placeholder="5m, 1h, 4h, 1d..."
-              className="h-8 text-xs"
-            />
-          </div>
-
-          {/* Date range — shadcn Range Calendar */}
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between">
-              <label className={labelCls}>回测区间</label>
-              {form.start_date && form.end_date && (
-                <span className="text-[10px] text-[var(--accent-blue)] font-medium animate-in fade-in duration-300">
-                  {form.start_date} → {form.end_date}
-                </span>
-              )}
+          {/* Interval + Initial capital — same row */}
+          <div className="flex gap-3">
+            <div className="flex flex-col gap-1 flex-1">
+              <label className={labelCls}>时间周期</label>
+              <div className="flex gap-2">
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.interval.replace(/[^\d]/g, "") || ""}
+                  onChange={(e) => {
+                    const num = e.target.value;
+                    const unit = form.interval.replace(/[\d]/g, "") || "m";
+                    setForm((f) => ({ ...f, interval: `${num}${unit}` }));
+                  }}
+                  placeholder="5"
+                  className="flex-1 h-8 text-xs"
+                />
+                <Select
+                  value={form.interval.replace(/[\d]/g, "") || "m"}
+                  onValueChange={(unit) => {
+                    const num = form.interval.replace(/[^\d]/g, "") || "5";
+                    setForm((f) => ({ ...f, interval: `${num}${unit}` }));
+                  }}
+                >
+                  <SelectTrigger className="w-[80px] h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="s">秒 (s)</SelectItem>
+                    <SelectItem value="m">分钟 (m)</SelectItem>
+                    <SelectItem value="h">小时 (h)</SelectItem>
+                    <SelectItem value="d">天 (d)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
-            <div className="rounded-lg border border-[var(--border-gray)] bg-[var(--bg-elevated)] flex justify-center overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-300">
-              <Calendar
-                mode="range"
-                numberOfMonths={2}
-                locale={zhCN}
-                selected={{
-                  from: form.start_date ? parse(form.start_date, "yyyy-MM-dd", new Date()) : undefined,
-                  to: form.end_date ? parse(form.end_date, "yyyy-MM-dd", new Date()) : undefined,
-                }}
-                onSelect={(range: DateRange | undefined) => {
-                  setForm((f) => ({
-                    ...f,
-                    start_date: range?.from ? format(range.from, "yyyy-MM-dd") : f.start_date,
-                    end_date: range?.to ? format(range.to, "yyyy-MM-dd") : f.end_date,
-                  }));
-                }}
-                defaultMonth={form.start_date ? parse(form.start_date, "yyyy-MM-dd", new Date()) : undefined}
-                className="p-3"
-              />
-            </div>
-          </div>
-
-          {/* Initial capital */}
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-1 flex-1">
               <label className={labelCls}>初始资金 (USDT)</label>
-              {isPortfolio && (
-                <span className="text-[9px] text-[var(--accent-purple)]">从配置读取</span>
-              )}
+              <Input
+                type="number"
+                value={form.initial_capital}
+                onChange={(e) => setForm((f) => ({ ...f, initial_capital: e.target.value }))}
+                min="100"
+                className="h-8 text-xs"
+              />
             </div>
-            <Input
-              type="number"
-              value={form.initial_capital}
-              onChange={(e) => setForm((f) => ({ ...f, initial_capital: e.target.value }))}
-              min="100"
-              className="h-8 text-xs"
-            />
           </div>
 
-          {err && (
-            <span className="text-xs text-[var(--accent-red)]">{err}</span>
-          )}
+          {/* Date range — editable inputs + Popover Calendar */}
+          <div className="flex flex-col gap-1">
+            <label className={labelCls}>回测区间</label>
+            <div className="flex items-center gap-2">
+              <Input
+                value={form.start_date}
+                onChange={(e) => {
+                  const v = maskDate(e.target.value);
+                  setForm((f) => ({ ...f, start_date: v }));
+                  if (v.length === 10) {
+                    const d = parse(v, "yyyy-MM-dd", new Date());
+                    if (!isNaN(d.getTime())) setDateRange((prev) => ({ from: d, to: prev?.to }));
+                  }
+                }}
+                placeholder="2025-01-01"
+                maxLength={10}
+                className="flex-1 h-8 text-xs font-mono"
+              />
+              <span className="text-[10px] text-muted-foreground shrink-0">→</span>
+              <Input
+                value={form.end_date}
+                onChange={(e) => {
+                  const v = maskDate(e.target.value);
+                  setForm((f) => ({ ...f, end_date: v }));
+                  if (v.length === 10) {
+                    const d = parse(v, "yyyy-MM-dd", new Date());
+                    if (!isNaN(d.getTime())) setDateRange((prev) => ({ from: prev?.from, to: d }));
+                  }
+                }}
+                placeholder="2025-03-01"
+                maxLength={10}
+                className="flex-1 h-8 text-xs font-mono"
+              />
+              <Popover>
+                <PopoverTrigger
+                  className="shrink-0 flex items-center justify-center w-8 h-8 rounded-md border border-input dark:bg-input/30 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors cursor-pointer"
+                >
+                  <CalendarDays className="w-3.5 h-3.5" />
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-3" align="end">
+                  <Calendar
+                    mode="range"
+                    captionLayout="dropdown"
+                    numberOfMonths={2}
+                    showOutsideDays={false}
+                    locale={zhCN}
+                    startMonth={new Date(2020, 0)}
+                    endMonth={new Date(new Date().getFullYear() + 1, 11)}
+                    selected={dateRange}
+                    onSelect={() => {}}
+                    onDayClick={(day: Date) => {
+                      if (!dateRange?.from || (dateRange.from && dateRange.to)) {
+                        setDateRange({ from: day, to: undefined });
+                        setForm((f) => ({ ...f, start_date: format(day, "yyyy-MM-dd"), end_date: "" }));
+                      } else {
+                        const [start, end] = day < dateRange.from
+                          ? [day, dateRange.from]
+                          : [dateRange.from, day];
+                        setDateRange({ from: start, to: end });
+                        setForm((f) => ({ ...f, start_date: format(start, "yyyy-MM-dd"), end_date: format(end, "yyyy-MM-dd") }));
+                      }
+                    }}
+                    defaultMonth={form.start_date ? parse(form.start_date, "yyyy-MM-dd", new Date()) : undefined}
+                  />
+                </PopoverContent>
+              </Popover>
+            </div>
+          </div>
+
         </div>
 
         <DialogFooter>
           <button
             onClick={handleSubmit}
             disabled={submitting}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-blue)] text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
           >
             {submitting ? (
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -458,8 +638,10 @@ export default function BacktestPage() {
 
   // Apply WS progress updates
   useEffect(() => {
-    if (!wsMsg?.data) return;
-    const { run_id, pct } = wsMsg.data as { run_id: string; pct: number };
+    if (!wsMsg) return;
+    const raw = (wsMsg.data ?? wsMsg) as Record<string, unknown>;
+    const run_id = raw.run_id as string;
+    const pct = raw.pct as number;
     if (run_id) {
       setProgressMap((prev) => ({ ...prev, [run_id]: pct }));
       // Update status in run list if running
@@ -548,18 +730,18 @@ export default function BacktestPage() {
   return (
     <div className="flex h-full overflow-hidden">
       {/* ── Left panel ── */}
-      <div className="w-[380px] shrink-0 flex flex-col border-r border-[var(--border-gray)] bg-[var(--bg-sidebar)]">
+      <div className="w-[380px] shrink-0 flex flex-col border-r border-border bg-card">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-gray)]">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <div>
-            <h1 className="font-heading text-sm font-bold text-[var(--text-primary)]">回测</h1>
-            <span className="text-[10px] text-[var(--text-muted)]">
+            <h1 className="font-heading text-sm font-bold text-foreground">回测</h1>
+            <span className="text-[10px] text-muted-foreground">
               {runs.length} 条记录
             </span>
           </div>
           <button
             onClick={() => loadRuns()}
-            className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] transition-colors"
+            className="p-1.5 rounded-md text-muted-foreground hover:text-muted-foreground hover:bg-muted transition-colors"
             title="刷新"
           >
             <RefreshCw className="w-3.5 h-3.5" />
@@ -567,9 +749,9 @@ export default function BacktestPage() {
         </div>
 
         {/* Search + Filter */}
-        <div className="flex flex-col gap-2 px-3 py-2.5 border-b border-[var(--border-gray)]">
+        <div className="flex flex-col gap-2 px-3 py-2.5 border-b border-border">
           <div className="relative">
-            <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--text-muted)]" />
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
             <Input
               placeholder="搜索策略或品种..."
               value={search}
@@ -602,7 +784,7 @@ export default function BacktestPage() {
             </div>
           ) : filteredRuns.length === 0 ? (
             <div className="flex items-center justify-center h-40">
-              <span className="text-xs text-[var(--text-muted)]">
+              <span className="text-xs text-muted-foreground">
                 {runs.length === 0 ? "暂无回测记录" : "无匹配结果"}
               </span>
             </div>
@@ -616,7 +798,7 @@ export default function BacktestPage() {
                 onClick={() => {
                   if (selectedRunId !== run.run_id) {
                     setSelectedRunId(run.run_id);
-                    setActiveTab("overview");
+                    setActiveTab("overview-grey");
                   }
                 }}
               />
@@ -625,10 +807,10 @@ export default function BacktestPage() {
         </div>
 
         {/* New run button */}
-        <div className="p-3 border-t border-[var(--border-gray)]">
+        <div className="p-3 border-t border-border">
           <button
             onClick={() => setDialogOpen(true)}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent-blue)] text-white text-xs font-semibold hover:opacity-90 transition-opacity"
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:opacity-90 transition-opacity"
           >
             <Plus className="w-3.5 h-3.5" />
             新建回测
@@ -637,14 +819,14 @@ export default function BacktestPage() {
       </div>
 
       {/* ── Right panel ── */}
-      <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-[var(--bg-page)]">
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-background">
         {!selectedRunId ? (
           <div className="flex items-center justify-center h-full">
             <div className="flex flex-col items-center gap-3">
-              <div className="w-12 h-12 rounded-full bg-[var(--bg-elevated)] flex items-center justify-center">
-                <Play className="w-5 h-5 text-[var(--text-muted)]" />
+              <div className="w-12 h-12 rounded-full bg-popover flex items-center justify-center">
+                <Play className="w-5 h-5 text-muted-foreground" />
               </div>
-              <span className="text-sm text-[var(--text-muted)]">请选择一个回测查看详情</span>
+              <span className="text-sm text-muted-foreground">请选择一个回测查看详情</span>
             </div>
           </div>
         ) : (
@@ -654,13 +836,35 @@ export default function BacktestPage() {
             className="flex flex-col h-full"
           >
             {/* Tab header */}
-            <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--border-gray)] bg-[var(--bg-card)] shrink-0">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-card shrink-0">
               <div className="flex flex-col gap-0.5">
-                <span className="text-sm font-semibold text-[var(--text-primary)]">
+                <span className="text-sm font-semibold text-foreground">
                   {selectedRun?.strategy_name}
                 </span>
-                <span className="text-[10px] text-[var(--text-muted)]">
-                  {selectedRun?.symbol} · {selectedRun?.interval} · {selectedRun?.start_date?.slice(0, 10)} → {selectedRun?.end_date?.slice(0, 10)}
+                <span className="text-[10px] text-muted-foreground">
+                  {(() => {
+                    const syms = (selectedRun?.symbol ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+                    if (syms.length <= 3) return syms.join(", ");
+                    return (
+                      <>
+                        {syms.slice(0, 3).join(", ")}{" "}
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger className="text-[10px] text-muted-foreground hover:text-foreground cursor-default">
+                              +{syms.length - 3}
+                            </TooltipTrigger>
+                            <TooltipContent side="bottom" className="max-w-sm">
+                              <div className="flex flex-wrap gap-1">
+                                {syms.map((s) => (
+                                  <span key={s} className="text-[10px]">{s}</span>
+                                ))}
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      </>
+                    );
+                  })()} · {selectedRun?.interval} · {selectedRun?.start_date?.slice(0, 10)} → {selectedRun?.end_date?.slice(0, 10)}
                 </span>
               </div>
               {selectedRun && <StatusBadge status={selectedRun.status} />}
@@ -668,8 +872,10 @@ export default function BacktestPage() {
 
             <TabsList
               variant="line"
-              className="px-4 pt-1 shrink-0 border-b border-[var(--border-gray)] bg-[var(--bg-card)] w-full justify-start rounded-none h-9"
+              className="px-4 pt-1 shrink-0 border-b border-border bg-card w-full justify-start rounded-none h-9"
             >
+              <TabsTrigger value="overview-grey" className="text-xs px-3">Overview</TabsTrigger>
+              <TabsTrigger value="performance" className="text-xs px-3">Performance</TabsTrigger>
               <TabsTrigger value="overview" className="text-xs px-3">概览</TabsTrigger>
               <TabsTrigger value="tearsheet" className="text-xs px-3">报告</TabsTrigger>
               <TabsTrigger value="tradelog" className="text-xs px-3">交易日志</TabsTrigger>
@@ -677,89 +883,31 @@ export default function BacktestPage() {
             </TabsList>
 
             <div className="flex-1 min-h-0 overflow-hidden">
+              <TabsContent value="overview-grey" className="h-full overflow-y-auto">
+                {selectedRun?.status === "completed" ? (
+                  <OverviewGreyTab runId={selectedRunId} />
+                ) : (
+                  <div className="flex items-center justify-center h-full">
+                    <span className="text-xs text-muted-foreground">回测完成后可查看</span>
+                  </div>
+                )}
+              </TabsContent>
+              <TabsContent value="performance" className="h-full overflow-y-auto">
+                {selectedRun?.status === "completed" && selectedRunId ? (
+                  <PerformanceTab runId={selectedRunId} />
+                ) : (
+                  <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
+                )}
+              </TabsContent>
               <TabsContent value="overview" className="h-full overflow-y-auto">
                 {selectedRun?.status === "completed" ? (
                   <OverviewTab runId={selectedRunId} />
-                ) : selectedRun?.status === "running" || selectedRun?.status === "queued" ? (
-                  <div className="flex items-center justify-center h-full">
-                    <div className="flex flex-col items-center gap-6 w-80">
-                      {/* SVG Progress Ring */}
-                      {(() => {
-                        const pct = selectedRun.status === "running"
-                          ? (progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0)
-                          : 0;
-                        const isQueued = selectedRun.status === "queued";
-                        const radius = 80;
-                        const stroke = 6;
-                        const circumference = 2 * Math.PI * radius;
-                        const offset = circumference - (pct / 100) * circumference;
-
-                        return (
-                          <>
-                            <div className="relative progress-ring-glow">
-                              <svg width="184" height="184" viewBox="0 0 184 184">
-                                {/* Track */}
-                                <circle cx="92" cy="92" r={radius} fill="none"
-                                  stroke="var(--bg-subtle)" strokeWidth={stroke} />
-                                {/* Progress arc */}
-                                {!isQueued && (
-                                  <circle cx="92" cy="92" r={radius} fill="none"
-                                    stroke="url(#ringGradient)" strokeWidth={stroke}
-                                    strokeLinecap="round"
-                                    strokeDasharray={circumference}
-                                    strokeDashoffset={offset}
-                                    style={{ transform: "rotate(-90deg)", transformOrigin: "center", transition: "stroke-dashoffset 600ms cubic-bezier(0.4, 0, 0.2, 1)" }}
-                                  />
-                                )}
-                                {/* Spinning tail for queued */}
-                                {isQueued && (
-                                  <circle cx="92" cy="92" r={radius} fill="none"
-                                    stroke="var(--accent-blue)" strokeWidth={stroke}
-                                    strokeLinecap="round" opacity="0.6"
-                                    strokeDasharray={`${circumference * 0.25} ${circumference * 0.75}`}
-                                    style={{ transform: "rotate(-90deg)", transformOrigin: "center", animation: "spin 1.5s linear infinite" }}
-                                  />
-                                )}
-                                <defs>
-                                  <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                                    <stop offset="0%" stopColor="#4C9EEB" />
-                                    <stop offset="100%" stopColor="#A78BFA" />
-                                  </linearGradient>
-                                </defs>
-                              </svg>
-                              {/* Center text */}
-                              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                                {isQueued ? (
-                                  <span className="text-sm font-medium text-[var(--text-muted)] progress-breathe">排队中</span>
-                                ) : (
-                                  <>
-                                    <span className="text-4xl font-bold font-heading text-[var(--text-primary)] progress-pop" key={pct}>
-                                      {pct}
-                                    </span>
-                                    <span className="text-sm font-medium text-[var(--text-muted)] -mt-0.5">%</span>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Status label */}
-                            <span className="text-sm font-medium text-[var(--text-secondary)]">
-                              {isQueued ? "等待运行..." : "回测运行中"}
-                            </span>
-
-                          </>
-                        );
-                      })()}
-                    </div>
-                  </div>
                 ) : (
-                  <div className="flex items-center justify-center h-48">
-                    <span className="text-xs text-[var(--text-muted)]">
-                      {selectedRun?.status === "failed"
-                        ? `回测失败: ${selectedRun.error ?? "未知错误"}`
-                        : "已取消"}
-                    </span>
-                  </div>
+                  <RunningPlaceholder
+                    status={selectedRun?.status}
+                    pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0}
+                    fallbackMsg={selectedRun?.status === "failed" ? `回测失败: ${selectedRun.error ?? "未知错误"}` : "已取消"}
+                  />
                 )}
               </TabsContent>
 
@@ -767,9 +915,7 @@ export default function BacktestPage() {
                 {selectedRun?.status === "completed" ? (
                   <TearsheetTab runId={selectedRunId} />
                 ) : (
-                  <div className="flex items-center justify-center h-48">
-                    <span className="text-xs text-[var(--text-muted)]">回测完成后可查看报告</span>
-                  </div>
+                  <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
                 )}
               </TabsContent>
 
@@ -777,9 +923,7 @@ export default function BacktestPage() {
                 {selectedRun?.status === "completed" ? (
                   <TradeLogTab tradeLog={tradeLog} />
                 ) : (
-                  <div className="flex items-center justify-center h-48">
-                    <span className="text-xs text-[var(--text-muted)]">回测完成后可查看交易日志</span>
-                  </div>
+                  <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
                 )}
               </TabsContent>
 
@@ -787,9 +931,7 @@ export default function BacktestPage() {
                 {selectedRun?.status === "completed" ? (
                   <ReportsTab runId={selectedRunId} />
                 ) : (
-                  <div className="flex items-center justify-center h-48">
-                    <span className="text-xs text-[var(--text-muted)]">回测完成后可查看数据报表</span>
-                  </div>
+                  <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
                 )}
               </TabsContent>
             </div>

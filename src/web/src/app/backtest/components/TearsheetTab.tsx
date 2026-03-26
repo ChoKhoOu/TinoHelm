@@ -44,21 +44,21 @@ export function TearsheetTab({ runId }: TearsheetTabProps) {
   return (
     <div className="flex flex-col h-full">
       {/* Controls bar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border-gray)] bg-[var(--bg-card)] shrink-0">
-        <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-[var(--text-muted)]">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-card shrink-0">
+        <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-muted-foreground">
           回测报告
         </span>
         <div className="flex items-center gap-2">
           <button
             onClick={handleOpenTab}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] transition-colors"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
           >
             <ExternalLink className="w-3.5 h-3.5" />
             新标签页打开
           </button>
           <button
             onClick={handleFullscreen}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] transition-colors"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
           >
             <Maximize2 className="w-3.5 h-3.5" />
             全屏
@@ -86,15 +86,15 @@ export function TearsheetTab({ runId }: TearsheetTabProps) {
       </div>
 
       {/* CSV download bar */}
-      <div className="flex items-center gap-2 px-4 py-2.5 border-t border-[var(--border-gray)] bg-[var(--bg-card)] shrink-0 flex-wrap">
-        <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-[var(--text-muted)] mr-1">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-t border-border bg-card shrink-0 flex-wrap">
+        <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-muted-foreground mr-1">
           下载报表
         </span>
         {CSV_REPORTS.map(({ key, label }) => (
           <button
             key={key}
             onClick={() => handleDownloadCsv(key)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] text-[var(--text-secondary)] hover:text-[var(--accent-blue)] hover:bg-[var(--accent-blue-20)] border border-[var(--border-gray)] hover:border-[var(--accent-blue)] transition-colors"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] text-muted-foreground hover:text-primary hover:bg-[var(--accent-blue-20)] border border-border hover:border-primary transition-colors"
           >
             <Download className="w-3 h-3" />
             {label}
