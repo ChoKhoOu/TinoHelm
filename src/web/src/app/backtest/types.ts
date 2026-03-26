@@ -54,6 +54,32 @@ export interface BacktestStatistics {
   total_orders: number;
   filled_orders: number;
   final_balance: string | null;
+  // Extended statistics for returns analytics
+  best_day?: number | null;
+  worst_day?: number | null;
+  best_month?: number | null;
+  worst_month?: number | null;
+  positive_days_pct?: number | null;
+  skewness?: number | null;
+  kurtosis?: number | null;
+  tail_ratio?: number | null;
+  stability?: number | null;
+  // Performance tab extended metrics
+  omega_ratio?: number | null;
+  var_95?: number | null;
+  var_99?: number | null;
+  cvar_95?: number | null;
+  downside_deviation?: number | null;
+  ulcer_index?: number | null;
+  max_daily_loss?: number | null;
+  positive_months_pct?: number | null;
+  normal_dist_mean?: number | null;
+  normal_dist_std?: number | null;
+  // Benchmark-relative metrics
+  alpha?: number | null;
+  beta?: number | null;
+  r_squared?: number | null;
+  information_ratio?: number | null;
 }
 
 export interface PerInstrumentEntry {
@@ -95,6 +121,59 @@ export interface PortfolioAnalytics {
   diversification_benefit_pct?: number;
 }
 
+export interface AnnualReturn {
+  year: number;
+  return_pct: number;
+}
+
+export interface RollingReturnPoint {
+  timestamp: string;
+  rolling_3m: number | null;
+  rolling_6m: number | null;
+  rolling_12m: number | null;
+}
+
+export interface DistributionBin {
+  bin_start: number;
+  bin_end: number;
+  count: number;
+}
+
+export interface QQPlotPoint {
+  theoretical: number;
+  empirical: number;
+}
+
+export interface BenchmarkPoint {
+  timestamp: string;
+  equity: number;
+}
+
+export interface RollingSharpePoint {
+  timestamp: string;
+  rolling_3m: number | null;
+  rolling_6m: number | null;
+  rolling_12m: number | null;
+}
+
+export interface RollingSortinoPoint {
+  timestamp: string;
+  rolling_6m: number | null;
+  rolling_12m: number | null;
+}
+
+export interface RollingVolatilityPoint {
+  timestamp: string;
+  rolling_6m: number | null;
+  rolling_12m: number | null;
+}
+
+export interface RollingBetaPoint {
+  timestamp: string;
+  rolling_6m: number | null;
+  rolling_12m: number | null;
+}
+
 export interface BacktestResult {
   statistics: BacktestStatistics;
   equity_curve: EquityCurvePoint[];
@@ -105,4 +184,16 @@ export interface BacktestResult {
   drawdown_periods?: DrawdownPeriod[];
   instrument_correlation?: Record<string, Record<string, number>>;
   portfolio_analytics?: PortfolioAnalytics;
+  annual_returns?: AnnualReturn[];
+  rolling_returns?: RollingReturnPoint[];
+  returns_distribution?: DistributionBin[];
+  qq_plot_data?: QQPlotPoint[];
+  benchmark_equity_curve?: BenchmarkPoint[];
+  daily_returns?: number[];
+  // Performance tab rolling analytics
+  rolling_sharpe?: RollingSharpePoint[];
+  rolling_sortino?: RollingSortinoPoint[];
+  rolling_volatility?: RollingVolatilityPoint[];
+  rolling_beta?: RollingBetaPoint[];
+  benchmark_type?: "single_bh" | "basket_bh" | "zero_line";
 }
