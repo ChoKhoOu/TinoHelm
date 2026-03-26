@@ -109,9 +109,26 @@ def _compute_streaks(pnl_values: list[float]) -> tuple[int, int]:
     return max_win_streak, max_lose_streak
 
 
+def _norm_ppf(p: float) -> float:
+    """Approximate inverse normal CDF (percent-point function).
+
+    Uses the rational approximation from Abramowitz & Stegun, formula 26.2.23.
+    Accurate to ~4.5e-4 for 0 < p < 1.  Pure Python, no scipy required.
+    """
+    if p <= 0 or p >= 1:
+        return 0.0
+    if p < 0.5:
+        return -_norm_ppf(1 - p)
+    t = (-2.0 * math.log(1.0 - p)) ** 0.5
+    c0, c1, c2 = 2.515517, 0.802853, 0.010328
+    d1, d2, d3 = 1.432788, 0.189269, 0.001308
+    return t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
+
+
 def extract_backtest_results(
     engine: BacktestEngine,
     starting_balance: float = 10000,
+    benchmark_daily_closes: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Extract comprehensive results from a completed BacktestEngine.
 
@@ -365,6 +382,177 @@ def extract_backtest_results(
         indices[-1] = len(equity_curve) - 1  # Always include last point
         equity_curve = [equity_curve[i] for i in indices]
 
+    # Function-scope variables for daily returns (used by sections 8b, 8c, 11b-11f)
+    _daily_rets = None  # numpy array, set in section 8b
+    _n_days = 0
+
+    # Extended statistics (set in section 8c, used in section 13 result dict)
+    best_day = worst_day = positive_days_pct = None
+    skewness = kurtosis_val = tail_ratio = stability = None
+    omega_ratio = var_95 = var_99 = cvar_95 = downside_dev = ulcer_index = max_daily_loss = None
+    normal_dist_mean = normal_dist_std = None
+    positive_months_pct = None
+
+    # Benchmark-relative metrics (set in section 11k)
+    alpha = beta_val = r_squared = information_ratio = None
+    benchmark_type = "zero_line"
+    benchmark_daily_returns = None
+    rolling_sharpe: list[dict[str, Any]] = []
+    rolling_sortino: list[dict[str, Any]] = []
+    rolling_volatility: list[dict[str, Any]] = []
+    rolling_beta: list[dict[str, Any]] = []
+
+    # ------------------------------------------------------------------
+    # 8b. Recompute risk metrics from equity curve (industry standard)
+    # ------------------------------------------------------------------
+    # NT's analyzer.returns() uses per-trade notional returns
+    # (realized_pnl / position_cost) which inflates metrics for leveraged
+    # futures. We recompute all risk metrics from the actual dollar equity
+    # curve built in section 8 — this matches industry-standard portfolio
+    # return definitions.
+    try:
+        if len(equity_curve) >= 2:
+            import numpy as _np
+            from datetime import datetime as _eq_dt
+
+            eq_values = [starting_balance] + [pt["equity"] for pt in equity_curve]
+            eq_arr = _np.array(eq_values, dtype=float)
+
+            # Daily portfolio returns: r_t = (equity_t - equity_{t-1}) / equity_{t-1}
+            daily_rets = _np.diff(eq_arr) / eq_arr[:-1]
+
+            # Hoist to function scope for downstream sections (8c, 11b-11f)
+            _daily_rets = daily_rets
+            _n_days = len(daily_rets)
+
+            # Also fix returns_pct in equity_curve to use proper daily return
+            for i, pt in enumerate(equity_curve):
+                pt["returns_pct"] = round(float(daily_rets[i]) * 100, 4)
+
+            n_days = len(daily_rets)
+            mean_ret = float(daily_rets.mean())
+            std_ret = float(daily_rets.std(ddof=1)) if n_days > 1 else 0.0
+
+            # Calendar days for annualization (crypto = 365)
+            first_date = _eq_dt.strptime(equity_curve[0]["timestamp"], "%Y-%m-%d")
+            last_date = _eq_dt.strptime(equity_curve[-1]["timestamp"], "%Y-%m-%d")
+            calendar_days = max((last_date - first_date).days, 1)
+            ann_factor = 365  # crypto markets trade 365 days/year
+
+            # Max Drawdown (peak-to-trough of equity)
+            peak_arr = _np.maximum.accumulate(eq_arr[1:])  # skip prepended starting_balance
+            dd_arr = (eq_arr[1:] - peak_arr) / peak_arr
+            max_drawdown = round(float(dd_arr.min()), 6) if len(dd_arr) > 0 else 0.0
+
+            # CAGR: (final / initial) ^ (365 / calendar_days) - 1
+            final_eq = eq_arr[-1]
+            if final_eq > 0 and starting_balance > 0:
+                cagr = round((final_eq / starting_balance) ** (ann_factor / calendar_days) - 1, 6)
+            else:
+                cagr = None
+
+            # Sharpe Ratio: mean(daily_ret) / std(daily_ret) * sqrt(365)
+            if std_ret > 1e-12:
+                sharpe = round(mean_ret / std_ret * _np.sqrt(ann_factor), 4)
+            else:
+                sharpe = None
+
+            # Sortino Ratio: mean(daily_ret) / downside_std * sqrt(365)
+            downside = daily_rets[daily_rets < 0]
+            ds_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+            if ds_std > 1e-12:
+                sortino = round(mean_ret / ds_std * _np.sqrt(ann_factor), 4)
+            else:
+                sortino = None
+
+            # Calmar Ratio: CAGR / |max_drawdown|
+            if cagr is not None and max_drawdown is not None and abs(max_drawdown) > 1e-12:
+                calmar = round(cagr / abs(max_drawdown), 4)
+            else:
+                calmar = None
+
+            # Volatility: std(daily_ret) * sqrt(365)
+            returns_volatility = round(std_ret * _np.sqrt(ann_factor), 4) if std_ret > 1e-12 else None
+
+            # Total return % (consistent with equity curve)
+            total_return_pct = round((final_eq / starting_balance - 1) * 100, 4)
+
+            logger.info(
+                "Risk metrics recomputed from equity curve: max_dd=%.4f, sharpe=%.4f, cagr=%.4f (%d calendar days, %d data points)",
+                max_drawdown, sharpe or 0, cagr or 0, calendar_days, n_days,
+            )
+
+            # ----------------------------------------------------------
+            # 8c. Extended statistics for returns analytics
+            # ----------------------------------------------------------
+            try:
+                best_day = round(float(daily_rets.max() * 100), 4)
+                worst_day = round(float(daily_rets.min() * 100), 4)
+                positive_days_pct = round(float((daily_rets > 0).sum() / n_days * 100), 2) if n_days > 0 else None
+
+                # Skewness & Kurtosis
+                try:
+                    from scipy.stats import skew as _sp_skew, kurtosis as _sp_kurt
+                    skewness = _safe_float(_sp_skew(daily_rets))
+                    kurtosis_val = _safe_float(_sp_kurt(daily_rets, fisher=True))
+                except ImportError:
+                    skewness = _safe_float(float(_np.mean(((daily_rets - mean_ret) / std_ret) ** 3))) if std_ret > 1e-12 else None
+                    kurtosis_val = _safe_float(float(_np.mean(((daily_rets - mean_ret) / std_ret) ** 4) - 3)) if std_ret > 1e-12 else None
+
+                # Tail Ratio: 95th percentile / abs(5th percentile)
+                p95 = float(_np.percentile(daily_rets, 95))
+                p5 = float(_np.percentile(daily_rets, 5))
+                tail_ratio = round(p95 / abs(p5), 4) if abs(p5) > 1e-12 else None
+
+                # Stability: R² of cumulative returns linear regression
+                cum_rets = _np.cumsum(daily_rets)
+                x_idx = _np.arange(len(cum_rets))
+                if len(x_idx) > 1:
+                    slope, intercept = _np.polyfit(x_idx, cum_rets, 1)
+                    y_pred = slope * x_idx + intercept
+                    ss_res = float(_np.sum((cum_rets - y_pred) ** 2))
+                    ss_tot = float(_np.sum((cum_rets - cum_rets.mean()) ** 2))
+                    stability = round(1 - ss_res / ss_tot, 4) if ss_tot > 1e-12 else None
+                else:
+                    stability = None
+
+                # ----------------------------------------------------------
+                # 8c-ext. Additional risk metrics for Performance tab
+                # ----------------------------------------------------------
+                # Omega Ratio: sum(gains) / sum(|losses|)
+                _gains = daily_rets[daily_rets > 0].sum()
+                _losses_abs = abs(daily_rets[daily_rets < 0].sum())
+                omega_ratio = round(float(_gains / _losses_abs), 4) if _losses_abs > 1e-12 else None
+
+                # VaR (95% and 99%) — percentile of daily returns as %
+                var_95 = round(float(_np.percentile(daily_rets, 5) * 100), 4)
+                var_99 = round(float(_np.percentile(daily_rets, 1) * 100), 4)
+
+                # CVaR / Expected Shortfall (mean of returns below VaR threshold)
+                _var_thresh = _np.percentile(daily_rets, 5)
+                _below_var = daily_rets[daily_rets <= _var_thresh]
+                cvar_95 = round(float(_below_var.mean() * 100), 4) if len(_below_var) > 0 else None
+
+                # Downside Deviation (annualized)
+                _ds_rets = daily_rets[daily_rets < 0]
+                downside_dev = round(float(_ds_rets.std(ddof=1) * _np.sqrt(365)), 4) if len(_ds_rets) > 1 else None
+
+                # Ulcer Index: RMS of drawdown percentages
+                ulcer_index = round(float(_np.sqrt(_np.mean(dd_arr ** 2))), 6) if len(dd_arr) > 0 else None
+
+                # Max Daily Loss (percentage)
+                max_daily_loss = round(float(daily_rets.min() * 100), 4) if n_days > 0 else None
+
+                # Normal distribution parameters (for overlay curve in frontend)
+                normal_dist_mean = round(float(mean_ret * 100), 6)
+                normal_dist_std = round(float(std_ret * 100), 6)
+
+            except Exception:
+                logger.warning("Failed to compute extended statistics (8c)", exc_info=True)
+
+    except Exception:
+        logger.warning("Failed to recompute risk metrics from equity curve", exc_info=True)
+
     # ------------------------------------------------------------------
     # 9. Per-instrument breakdown
     # ------------------------------------------------------------------
@@ -531,19 +719,52 @@ def extract_backtest_results(
     monthly_returns: list[dict[str, Any]] = []
     weekly_returns: list[dict[str, Any]] = []
     try:
-        if returns_series is not None and len(returns_series) > 0:
+        # Use equity-curve-derived daily PnL for periodic returns (consistent
+        # with portfolio-level metrics, avoids per-trade notional return issue).
+        if equity_curve and len(equity_curve) >= 2:
+            from collections import defaultdict as _pr_defaultdict
+
+            monthly_pnl_agg: dict[str, float] = _pr_defaultdict(float)
+            weekly_pnl_agg: dict[str, float] = _pr_defaultdict(float)
+
+            prev_equity = starting_balance
+            for pt in equity_curve:
+                eq = pt["equity"]
+                daily_ret = (eq - prev_equity) / prev_equity if prev_equity > 0 else 0.0
+                month_key = pt["timestamp"][:7]  # "YYYY-MM"
+                monthly_pnl_agg[month_key] += daily_ret
+
+                # ISO week ending date
+                from datetime import datetime as _pr_dt
+                d = _pr_dt.strptime(pt["timestamp"], "%Y-%m-%d")
+                # Use Monday-start week key
+                import calendar as _cal_mod
+                week_start = d - pd.Timedelta(days=d.weekday())
+                week_key = (week_start + pd.Timedelta(days=6)).strftime("%Y-%m-%d")
+                weekly_pnl_agg[week_key] += daily_ret
+
+                prev_equity = eq
+
+            for period in sorted(monthly_pnl_agg.keys()):
+                monthly_returns.append({
+                    "period": period,
+                    "return_pct": round(float(monthly_pnl_agg[period]) * 100, 4),
+                })
+            for period in sorted(weekly_pnl_agg.keys()):
+                weekly_returns.append({
+                    "period": period,
+                    "return_pct": round(float(weekly_pnl_agg[period]) * 100, 4),
+                })
+        elif returns_series is not None and len(returns_series) > 0:
+            # Fallback to analyzer returns if equity curve unavailable
             rs = returns_series.copy()
             rs.index = pd.to_datetime(rs.index)
-
-            # Monthly
             monthly = (1 + rs).resample("ME").prod() - 1
             for ts, ret in monthly.items():
                 monthly_returns.append({
                     "period": ts.strftime("%Y-%m"),
                     "return_pct": round(float(ret) * 100, 4),
                 })
-
-            # Weekly
             weekly = (1 + rs).resample("W").prod() - 1
             for ts, ret in weekly.items():
                 weekly_returns.append({
@@ -553,25 +774,34 @@ def extract_backtest_results(
     except Exception:
         logger.warning("Failed to compute periodic returns", exc_info=True)
 
+    # Best/worst month from monthly returns
+    best_month = max((m["return_pct"] for m in monthly_returns), default=None) if monthly_returns else None
+    worst_month = min((m["return_pct"] for m in monthly_returns), default=None) if monthly_returns else None
+
+    # Positive months percentage
+    if monthly_returns:
+        _pos_m = sum(1 for m in monthly_returns if m["return_pct"] > 0)
+        positive_months_pct = round(_pos_m / len(monthly_returns) * 100, 2)
+
     # ------------------------------------------------------------------
     # 11. Drawdown analysis (periods with duration)
     # ------------------------------------------------------------------
     drawdown_periods: list[dict[str, Any]] = []
     try:
-        if returns_series is not None and len(returns_series) > 0:
-            rs_dd = returns_series.copy()
-            rs_dd.index = pd.to_datetime(rs_dd.index)
-            cum = (1 + rs_dd).cumprod()
-            peak = cum.cummax()
-            dd = (cum - peak) / peak
+        # Use equity-curve drawdown_pct for consistency with KPI and chart
+        if equity_curve and len(equity_curve) >= 2:
+            from datetime import datetime as _dd_dt
 
             in_drawdown = False
             dd_start = None
             dd_trough = 0.0
             dd_trough_ts = None
 
-            for ts, dd_val in dd.items():
-                if dd_val < 0:
+            for pt in equity_curve:
+                dd_val = pt["drawdown_pct"] / 100.0  # convert from pct to fraction
+                ts = _dd_dt.strptime(pt["timestamp"], "%Y-%m-%d")
+
+                if dd_val < -1e-8:
                     if not in_drawdown:
                         in_drawdown = True
                         dd_start = ts
@@ -583,9 +813,9 @@ def extract_backtest_results(
                 else:
                     if in_drawdown:
                         drawdown_periods.append({
-                            "start": str(dd_start),
-                            "trough_date": str(dd_trough_ts),
-                            "recovery_date": str(ts),
+                            "start": str(dd_start.date()),
+                            "trough_date": str(dd_trough_ts.date()),
+                            "recovery_date": str(ts.date()),
                             "max_drawdown_pct": round(float(dd_trough) * 100, 4),
                             "duration_days": (ts - dd_start).days,
                             "recovery_days": (ts - dd_trough_ts).days,
@@ -594,12 +824,13 @@ def extract_backtest_results(
 
             # Handle ongoing drawdown at end
             if in_drawdown and dd_start is not None:
+                last_ts = _dd_dt.strptime(equity_curve[-1]["timestamp"], "%Y-%m-%d")
                 drawdown_periods.append({
-                    "start": str(dd_start),
-                    "trough_date": str(dd_trough_ts),
+                    "start": str(dd_start.date()),
+                    "trough_date": str(dd_trough_ts.date()),
                     "recovery_date": None,
                     "max_drawdown_pct": round(float(dd_trough) * 100, 4),
-                    "duration_days": (rs_dd.index[-1] - dd_start).days,
+                    "duration_days": (last_ts - dd_start).days,
                     "recovery_days": None,
                 })
 
@@ -608,6 +839,321 @@ def extract_backtest_results(
             drawdown_periods = drawdown_periods[:10]
     except Exception:
         logger.warning("Failed to compute drawdown periods", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11b. Annual returns (compound formula)
+    # ------------------------------------------------------------------
+    annual_returns: list[dict[str, Any]] = []
+    try:
+        if equity_curve and len(equity_curve) >= 2:
+            year_boundaries: dict[int, dict] = {}
+            prev_eq = starting_balance
+            for pt in equity_curve:
+                year = int(pt["timestamp"][:4])
+                eq = pt["equity"]
+                if year not in year_boundaries:
+                    year_boundaries[year] = {"first_eq": prev_eq, "last_eq": eq}
+                else:
+                    year_boundaries[year]["last_eq"] = eq
+                prev_eq = eq
+            for y in sorted(year_boundaries.keys()):
+                b = year_boundaries[y]
+                ret = (b["last_eq"] / b["first_eq"] - 1) * 100 if b["first_eq"] > 0 else 0.0
+                annual_returns.append({"year": y, "return_pct": round(ret, 4)})
+    except Exception:
+        logger.warning("Failed to compute annual returns", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11c. Rolling returns (3m/6m/12m)
+    # ------------------------------------------------------------------
+    rolling_returns: list[dict[str, Any]] = []
+    try:
+        if _daily_rets is not None and len(_daily_rets) >= 2:
+            import numpy as _np2  # may re-alias if _np not in scope here
+            _np_rr = _np2 if '_np2' in dir() else __import__('numpy')
+            windows = {"rolling_3m": 63, "rolling_6m": 126, "rolling_12m": 252}
+            for i, pt in enumerate(equity_curve):
+                entry: dict[str, Any] = {"timestamp": pt["timestamp"]}
+                for key, w in windows.items():
+                    if i + 1 >= w:
+                        window_rets = _daily_rets[i + 1 - w:i + 1]
+                        cum_ret = float(_np_rr.prod(1 + window_rets) - 1)
+                        entry[key] = round(cum_ret * 100, 4)
+                    else:
+                        entry[key] = None
+                rolling_returns.append(entry)
+
+            # Downsample with uniform spacing
+            if len(rolling_returns) > 500:
+                indices = _np_rr.linspace(0, len(rolling_returns) - 1, 500, dtype=int)
+                rolling_returns = [rolling_returns[i] for i in indices]
+    except Exception:
+        logger.warning("Failed to compute rolling returns", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11d. Returns distribution (histogram bins)
+    # ------------------------------------------------------------------
+    returns_distribution: list[dict[str, Any]] = []
+    try:
+        if _daily_rets is not None and len(_daily_rets) >= 2:
+            import numpy as _np3
+            dr_pct = _daily_rets * 100
+            counts, bin_edges = _np3.histogram(dr_pct, bins=40)
+            for j in range(len(counts)):
+                returns_distribution.append({
+                    "bin_start": round(float(bin_edges[j]), 4),
+                    "bin_end": round(float(bin_edges[j + 1]), 4),
+                    "count": int(counts[j]),
+                })
+    except Exception:
+        logger.warning("Failed to compute returns distribution", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11e. QQ plot data (theoretical vs empirical quantiles)
+    # ------------------------------------------------------------------
+    qq_plot_data: list[dict[str, float]] = []
+    try:
+        if _daily_rets is not None and len(_daily_rets) >= 2:
+            import numpy as _np4
+            n = len(_daily_rets)
+            sorted_rets = _np4.sort(_daily_rets)
+
+            # Theoretical normal quantiles
+            try:
+                from scipy.stats import norm as _norm
+                probs = _np4.linspace(1 / (n + 1), n / (n + 1), n)
+                theoretical = _norm.ppf(probs)
+            except ImportError:
+                probs = _np4.linspace(1 / (n + 1), n / (n + 1), n)
+                theoretical = _np4.array([_norm_ppf(float(p)) for p in probs])
+
+            # Downsample to ~200 points
+            if n > 200:
+                indices = _np4.linspace(0, n - 1, 200, dtype=int)
+                sorted_rets = sorted_rets[indices]
+                theoretical = theoretical[indices]
+
+            for t, e in zip(theoretical, sorted_rets):
+                qq_plot_data.append({
+                    "theoretical": round(float(t), 6),
+                    "empirical": round(float(e), 6),
+                })
+    except Exception:
+        logger.warning("Failed to compute QQ plot data", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11f. Benchmark equity curve (Buy & Hold)
+    # ------------------------------------------------------------------
+    # Uses pre-computed daily closes from runner (raw bar data captured
+    # before engine.run(), avoiding cache capacity eviction).
+    # Falls back to engine.cache.bars() if pre-computed data unavailable.
+    benchmark_equity_curve: list[dict[str, Any]] = []
+    try:
+        if equity_curve and len(equity_curve) >= 2:
+            # Build inst_daily_close from pre-computed data or cache fallback
+            inst_daily_close: dict[str, dict[str, float]] = {}
+
+            if benchmark_daily_closes:
+                # Pre-computed by runner — complete data, no cache eviction
+                inst_daily_close = benchmark_daily_closes
+            else:
+                # Fallback: read from engine cache (may be incomplete for long backtests)
+                instruments = list(per_instrument.keys()) if per_instrument else []
+                if not instruments:
+                    instruments = [str(iid) for iid in engine.cache.instrument_ids()]
+                for inst_str in instruments:
+                    bar_types = engine.cache.bar_types()
+                    target_bt = None
+                    for bt in bar_types:
+                        if str(bt.instrument_id) == inst_str:
+                            target_bt = bt
+                            break
+                    if target_bt is None:
+                        continue
+                    bars = engine.cache.bars(target_bt)
+                    if not bars:
+                        continue
+                    daily: dict[str, float] = {}
+                    for bar in bars:
+                        ts = pd.Timestamp(bar.ts_init, unit="ns")
+                        day_key = ts.strftime("%Y-%m-%d")
+                        daily[day_key] = float(bar.close)
+                    inst_daily_close[inst_str] = daily
+
+            if inst_daily_close:
+                eq_dates = [pt["timestamp"] for pt in equity_curve]
+                alloc_per_inst = starting_balance / len(inst_daily_close)
+
+                inst_units: dict[str, float] = {}
+                for inst, closes in inst_daily_close.items():
+                    for d in eq_dates:
+                        if d in closes and closes[d] > 0:
+                            inst_units[inst] = alloc_per_inst / closes[d]
+                            break
+
+                last_price: dict[str, float] = {}
+                for d in eq_dates:
+                    bm_equity = 0.0
+                    for inst, units in inst_units.items():
+                        closes = inst_daily_close.get(inst, {})
+                        price = closes.get(d)
+                        if price is not None:
+                            last_price[inst] = price
+                        elif inst in last_price:
+                            price = last_price[inst]
+                        else:
+                            price = alloc_per_inst / units if units > 0 else 0
+                        bm_equity += units * price
+                    benchmark_equity_curve.append({
+                        "timestamp": d,
+                        "equity": round(bm_equity, 4),
+                    })
+    except Exception:
+        logger.warning("Failed to compute benchmark equity curve", exc_info=True)
+
+    # Determine benchmark type
+    try:
+        instruments_list = list(per_instrument.keys()) if per_instrument else []
+        if not instruments_list:
+            instruments_list = [str(iid) for iid in engine.cache.instrument_ids()]
+        if instruments_list:
+            benchmark_type = "single_bh" if len(instruments_list) == 1 else "basket_bh"
+    except Exception:
+        pass  # keeps default "zero_line"
+
+    # Compute benchmark daily returns for rolling beta / benchmark-relative metrics
+    try:
+        if benchmark_equity_curve and len(benchmark_equity_curve) >= 2:
+            import numpy as _np_bmdr
+            _bm_values = [starting_balance] + [pt["equity"] for pt in benchmark_equity_curve]
+            _bm_arr = _np_bmdr.array(_bm_values, dtype=float)
+            benchmark_daily_returns = _np_bmdr.diff(_bm_arr) / _bm_arr[:-1]
+    except Exception:
+        logger.warning("Failed to compute benchmark daily returns", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11g. Rolling Sharpe Ratio (3m/6m/12m)
+    # ------------------------------------------------------------------
+    try:
+        if _daily_rets is not None and len(_daily_rets) >= 63:
+            import numpy as _np_rs
+            _rs_windows = {"rolling_3m": 63, "rolling_6m": 126, "rolling_12m": 252}
+            for i, pt in enumerate(equity_curve):
+                entry: dict[str, Any] = {"timestamp": pt["timestamp"]}
+                for key, w in _rs_windows.items():
+                    if i + 1 >= w:
+                        wr = _daily_rets[i + 1 - w:i + 1]
+                        m, s = float(wr.mean()), float(wr.std(ddof=1))
+                        entry[key] = round(m / s * _np_rs.sqrt(365), 4) if s > 1e-12 else None
+                    else:
+                        entry[key] = None
+                rolling_sharpe.append(entry)
+            if len(rolling_sharpe) > 500:
+                _idx = _np_rs.linspace(0, len(rolling_sharpe) - 1, 500, dtype=int)
+                rolling_sharpe = [rolling_sharpe[int(i)] for i in _idx]
+    except Exception:
+        logger.warning("Failed to compute rolling Sharpe", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11h. Rolling Sortino Ratio (6m/12m)
+    # ------------------------------------------------------------------
+    try:
+        if _daily_rets is not None and len(_daily_rets) >= 126:
+            import numpy as _np_rso
+            _rso_windows = {"rolling_6m": 126, "rolling_12m": 252}
+            for i, pt in enumerate(equity_curve):
+                entry = {"timestamp": pt["timestamp"]}
+                for key, w in _rso_windows.items():
+                    if i + 1 >= w:
+                        wr = _daily_rets[i + 1 - w:i + 1]
+                        _ds = wr[wr < 0]
+                        ds_s = float(_ds.std(ddof=1)) if len(_ds) > 1 else 0.0
+                        entry[key] = round(float(wr.mean()) / ds_s * _np_rso.sqrt(365), 4) if ds_s > 1e-12 else None
+                    else:
+                        entry[key] = None
+                rolling_sortino.append(entry)
+            if len(rolling_sortino) > 500:
+                _idx = _np_rso.linspace(0, len(rolling_sortino) - 1, 500, dtype=int)
+                rolling_sortino = [rolling_sortino[int(i)] for i in _idx]
+    except Exception:
+        logger.warning("Failed to compute rolling Sortino", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11i. Rolling Volatility (6m/12m)
+    # ------------------------------------------------------------------
+    try:
+        if _daily_rets is not None and len(_daily_rets) >= 126:
+            import numpy as _np_rv
+            _rv_windows = {"rolling_6m": 126, "rolling_12m": 252}
+            for i, pt in enumerate(equity_curve):
+                entry = {"timestamp": pt["timestamp"]}
+                for key, w in _rv_windows.items():
+                    if i + 1 >= w:
+                        wr = _daily_rets[i + 1 - w:i + 1]
+                        entry[key] = round(float(wr.std(ddof=1)) * _np_rv.sqrt(365), 4)
+                    else:
+                        entry[key] = None
+                rolling_volatility.append(entry)
+            if len(rolling_volatility) > 500:
+                _idx = _np_rv.linspace(0, len(rolling_volatility) - 1, 500, dtype=int)
+                rolling_volatility = [rolling_volatility[int(i)] for i in _idx]
+    except Exception:
+        logger.warning("Failed to compute rolling volatility", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11j. Rolling Beta (6m/12m) — requires benchmark returns
+    # ------------------------------------------------------------------
+    try:
+        if _daily_rets is not None and benchmark_daily_returns is not None and len(_daily_rets) >= 126:
+            import numpy as _np_rb
+            _rb_windows = {"rolling_6m": 126, "rolling_12m": 252}
+            _rb_min_len = min(len(_daily_rets), len(benchmark_daily_returns))
+            for i, pt in enumerate(equity_curve[:_rb_min_len]):
+                entry = {"timestamp": pt["timestamp"]}
+                for key, w in _rb_windows.items():
+                    if i + 1 >= w:
+                        sr = _daily_rets[i + 1 - w:i + 1]
+                        br = benchmark_daily_returns[i + 1 - w:i + 1]
+                        _cov_val = float(_np_rb.cov(sr, br)[0, 1])
+                        _var_bm = float(_np_rb.var(br, ddof=1))
+                        entry[key] = round(_cov_val / _var_bm, 4) if _var_bm > 1e-12 else None
+                    else:
+                        entry[key] = None
+                rolling_beta.append(entry)
+            if len(rolling_beta) > 500:
+                _idx = _np_rb.linspace(0, len(rolling_beta) - 1, 500, dtype=int)
+                rolling_beta = [rolling_beta[int(i)] for i in _idx]
+    except Exception:
+        logger.warning("Failed to compute rolling beta", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 11k. Benchmark-relative metrics (Alpha, Beta, R², Information Ratio)
+    # ------------------------------------------------------------------
+    try:
+        if _daily_rets is not None and benchmark_daily_returns is not None:
+            import numpy as _np_bm
+            _bm_min_len = min(len(_daily_rets), len(benchmark_daily_returns))
+            if _bm_min_len >= 30:
+                _sr = _daily_rets[:_bm_min_len]
+                _br = benchmark_daily_returns[:_bm_min_len]
+                _cov_sb = float(_np_bm.cov(_sr, _br)[0, 1])
+                _var_b = float(_np_bm.var(_br, ddof=1))
+                if _var_b > 1e-12:
+                    beta_val = round(_cov_sb / _var_b, 4)
+                    alpha = round((float(_sr.mean()) - beta_val * float(_br.mean())) * 365, 4)
+                    _corr = float(_np_bm.corrcoef(_sr, _br)[0, 1])
+                    r_squared = round(_corr ** 2, 4)
+                    _excess = _sr - _br
+                    _te = float(_excess.std(ddof=1))
+                    if _te > 1e-12:
+                        information_ratio = round(float(_excess.mean()) / _te * _np_bm.sqrt(365), 4)
+    except Exception:
+        logger.warning("Failed to compute benchmark-relative metrics", exc_info=True)
+
+    # Persist raw daily returns for future analytics endpoint migration
+    daily_returns_pct: list[float] = []
+    if _daily_rets is not None:
+        daily_returns_pct = [round(float(r) * 100, 4) for r in _daily_rets]
 
     # ------------------------------------------------------------------
     # 12. Slippage statistics
@@ -685,6 +1231,32 @@ def extract_backtest_results(
             "filled_orders": len(filled),
             "final_balance": final_balance,
             "returns_volatility": round(returns_volatility, 4) if returns_volatility is not None else None,
+            # Extended statistics (section 8c)
+            "best_day": best_day,
+            "worst_day": worst_day,
+            "best_month": best_month,
+            "worst_month": worst_month,
+            "positive_days_pct": positive_days_pct,
+            "skewness": skewness,
+            "kurtosis": kurtosis_val,
+            "tail_ratio": tail_ratio,
+            "stability": stability,
+            # Performance tab extended metrics (section 8c-ext)
+            "omega_ratio": _safe_float(omega_ratio),
+            "var_95": _safe_float(var_95),
+            "var_99": _safe_float(var_99),
+            "cvar_95": _safe_float(cvar_95),
+            "downside_deviation": _safe_float(downside_dev),
+            "ulcer_index": _safe_float(ulcer_index),
+            "max_daily_loss": _safe_float(max_daily_loss),
+            "positive_months_pct": _safe_float(positive_months_pct),
+            "normal_dist_mean": _safe_float(normal_dist_mean),
+            "normal_dist_std": _safe_float(normal_dist_std),
+            # Benchmark-relative metrics (section 11k)
+            "alpha": _safe_float(alpha),
+            "beta": _safe_float(beta_val),
+            "r_squared": _safe_float(r_squared),
+            "information_ratio": _safe_float(information_ratio),
         },
         "equity_curve": equity_curve,
         "trade_log": trade_log,
@@ -697,4 +1269,16 @@ def extract_backtest_results(
         "instrument_correlation": instrument_correlation,
         "monthly_pnl_heatmap": monthly_pnl_heatmap,
         "portfolio_analytics": portfolio_analytics,
+        "annual_returns": annual_returns,
+        "rolling_returns": rolling_returns,
+        "returns_distribution": returns_distribution,
+        "qq_plot_data": qq_plot_data,
+        "benchmark_equity_curve": benchmark_equity_curve,
+        "daily_returns": daily_returns_pct,
+        # Performance tab rolling analytics (sections 11g-11j)
+        "rolling_sharpe": rolling_sharpe,
+        "rolling_sortino": rolling_sortino,
+        "rolling_volatility": rolling_volatility,
+        "rolling_beta": rolling_beta,
+        "benchmark_type": benchmark_type,
     }

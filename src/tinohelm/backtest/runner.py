@@ -152,6 +152,7 @@ class BacktestRunner:
         self._engine: BacktestEngine | None = None
         self._redis_client = None  # sync Redis for progress reporting
         self._run_id: str = ""
+        self._job_start_time: float = 0.0  # set by worker for elapsed tracking
 
         # Portfolio config (explicit or auto-wrapped from legacy params)
         self._portfolio_config = portfolio_config
@@ -551,6 +552,23 @@ class BacktestRunner:
             implicit=True,
         )
 
+    def _report_progress(self, pct: int) -> None:
+        """Report setup-phase progress (0-10%) to Redis if available."""
+        if not self._redis_client or not self._run_id:
+            return
+        try:
+            import json as _json, time as _time
+            elapsed = round(_time.monotonic() - self._job_start_time, 1) if self._job_start_time else 0
+            self._redis_client.setex(
+                f"tino:backtest:progress:{self._run_id}", 86400, str(pct),
+            )
+            self._redis_client.publish(
+                f"tino:backtest:progress:{self._run_id}",
+                _json.dumps({"type": "backtest.progress", "run_id": self._run_id, "pct": pct, "elapsed_secs": elapsed}),
+            )
+        except Exception:
+            pass
+
     def run(self) -> dict[str, Any]:
         """Execute the backtest and return results dict."""
         logger.info("Starting backtest: %s on %s", self.strategy_path, self.symbols)
@@ -623,6 +641,9 @@ class BacktestRunner:
         all_bar_type_strs: list[str] = []
         loaded_bar_type_strs: list[str] = []  # bar types with actual data (for progress)
         total_bar_count: int = 0
+        # Capture daily close prices from raw bars for benchmark computation
+        # (engine.cache.bars() has limited capacity and evicts old bars)
+        benchmark_daily_closes: dict[str, dict[str, float]] = {}
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
@@ -634,12 +655,25 @@ class BacktestRunner:
                     loaded_bar_type_strs.append(source_bt_str or bt_str)
                     engine.add_data(bars, sort=False)
                     all_bar_type_strs.append(bt_str)
+                    # Extract daily close prices for benchmark B&H (only first interval per symbol)
+                    if nt_sym not in benchmark_daily_closes:
+                        from datetime import datetime as _bm_dt, timezone as _bm_tz
+                        daily_closes: dict[str, float] = {}
+                        for bar in bars:
+                            day_key = _bm_dt.fromtimestamp(
+                                int(bar.ts_init) / 1e9, tz=_bm_tz.utc
+                            ).strftime("%Y-%m-%d")
+                            daily_closes[day_key] = float(bar.close)
+                        benchmark_daily_closes[nt_sym] = daily_closes
                 else:
                     logger.warning("No bar data available for %s at %s", sym, ivl)
+        self._benchmark_daily_closes = benchmark_daily_closes
 
         # Single efficient sort after all data is loaded (avoids O(n*k) re-sorting)
         if all_bar_type_strs:
             engine.sort_data()
+
+        self._report_progress(4)  # K-line data loaded
 
         # Inject NT-format params for strategy config resolution
         self.strategy_params.setdefault("instrument_id", nt_symbols[0] if nt_symbols else "")
@@ -699,6 +733,8 @@ class BacktestRunner:
         except Exception:
             logger.warning("Failed to register custom statistics", exc_info=True)
 
+        self._report_progress(5)  # Strategies loaded
+
         # Add funding cost tracker + inject FundingRateUpdate data for perpetual futures
         self._funding_enabled = False
         if self.symbols and self.start and self.end:
@@ -725,9 +761,13 @@ class BacktestRunner:
                     len(funding_events), len(funding_updates),
                 )
 
+        self._report_progress(7)  # Funding rates loaded
+
         # Load mark price and index price data for strategies
         if self.symbols and self.start and self.end:
             self._load_auxiliary_price_data(engine, nt_symbols)
+
+        self._report_progress(9)  # Auxiliary price data loaded
 
         # Add progress reporter actor for bar-level progress tracking
         if self._redis_client and self._run_id and total_bar_count > 0:
@@ -1303,4 +1343,8 @@ class BacktestRunner:
     def _extract_results(self, engine: BacktestEngine, starting_balance: float = 10000) -> dict[str, Any]:
         """Extract results from completed backtest engine."""
         from tinohelm.backtest.result import extract_backtest_results
-        return extract_backtest_results(engine, starting_balance=starting_balance)
+        return extract_backtest_results(
+            engine,
+            starting_balance=starting_balance,
+            benchmark_daily_closes=getattr(self, "_benchmark_daily_closes", None),
+        )
