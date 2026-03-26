@@ -29,18 +29,18 @@ import { CHART_AXIS_STYLE as AXIS_STYLE, CHART_TOOLTIP_STYLE as TOOLTIP_STYLE } 
 /* ── Helpers ────────────────────────────────────────────────── */
 
 function heatBg(val: number): string {
-  if (val >= 5) return "color-mix(in srgb, var(--accent-green) 30%, var(--bg-card))";
-  if (val >= 3) return "color-mix(in srgb, var(--accent-green) 22%, var(--bg-card))";
-  if (val > 0) return "color-mix(in srgb, var(--accent-green) 14%, var(--bg-card))";
-  if (val === 0) return "var(--bg-elevated)";
-  if (val > -3) return "color-mix(in srgb, var(--accent-red) 14%, var(--bg-card))";
-  return "color-mix(in srgb, var(--accent-red) 30%, var(--bg-card))";
+  if (val >= 5) return "color-mix(in srgb, var(--accent-green) 30%, var(--card))";
+  if (val >= 3) return "color-mix(in srgb, var(--accent-green) 22%, var(--card))";
+  if (val > 0) return "color-mix(in srgb, var(--accent-green) 14%, var(--card))";
+  if (val === 0) return "var(--popover)";
+  if (val > -3) return "color-mix(in srgb, var(--accent-red) 14%, var(--card))";
+  return "color-mix(in srgb, var(--accent-red) 30%, var(--card))";
 }
 
 function heatFg(val: number): string {
   if (val > 0) return "#26D97F";
   if (val < 0) return "#EF5350";
-  return "var(--text-muted)";
+  return "var(--muted-foreground)";
 }
 
 /* ── Chart Card ─────────────────────────────────────────────── */
@@ -55,14 +55,14 @@ function ChartCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden min-h-0">
+    <div className="flex flex-col rounded-xl bg-card border border-border overflow-hidden min-h-0">
       <div className="flex items-center gap-2 px-5 py-[13px] shrink-0">
-        <span className="text-[var(--text-muted)]">{icon}</span>
-        <span className="text-[11px] font-semibold tracking-[0.5px] uppercase text-[var(--text-secondary)]">
+        <span className="text-muted-foreground">{icon}</span>
+        <span className="text-[11px] font-semibold tracking-[0.5px] uppercase text-muted-foreground">
           {title}
         </span>
       </div>
-      <div className="h-px bg-[var(--border-gray)] shrink-0" />
+      <div className="h-px bg-border shrink-0" />
       <div className="flex-1 p-5 min-h-0">{children}</div>
     </div>
   );
@@ -73,8 +73,8 @@ function ChartCard({
 function ChartSkeleton() {
   return (
     <div className="w-full h-full flex flex-col gap-3 animate-pulse">
-      <div className="h-4 w-1/3 rounded bg-[var(--border-gray)]" />
-      <div className="flex-1 rounded bg-[var(--border-gray)]" />
+      <div className="h-4 w-1/3 rounded bg-border" />
+      <div className="flex-1 rounded bg-border" />
     </div>
   );
 }
@@ -84,7 +84,7 @@ function ChartSkeleton() {
 function EmptyChart({ label }: { label: string }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-2">
-      <span className="text-[11px] font-mono text-[var(--text-muted)]">{label}</span>
+      <span className="text-[11px] font-mono text-muted-foreground">{label}</span>
     </div>
   );
 }
@@ -140,10 +140,10 @@ export default function AnalyticsPage() {
       <FadeIn direction="down" duration={0.25}>
         <div className="flex items-center justify-between">
           <div className="flex flex-col gap-1">
-            <h1 className="font-heading text-[26px] font-bold tracking-tight text-[var(--text-primary)]">
+            <h1 className="font-heading text-[26px] font-bold tracking-tight text-foreground">
               数据分析
             </h1>
-            <span className="text-[11px] font-mono text-[var(--text-muted)]">
+            <span className="text-[11px] font-mono text-muted-foreground">
               // 深度绩效分析 — 全部策略
             </span>
           </div>
@@ -169,7 +169,7 @@ export default function AnalyticsPage() {
                   <div className="grid grid-cols-[44px_repeat(12,1fr)] gap-1">
                     <div />
                     {MONTHS_ZH.map((m) => (
-                      <div key={m} className="text-[9px] font-medium text-[var(--text-muted)] text-center font-mono">
+                      <div key={m} className="text-[9px] font-medium text-muted-foreground text-center font-mono">
                         {m}
                       </div>
                     ))}
@@ -177,7 +177,7 @@ export default function AnalyticsPage() {
                   {/* Year rows */}
                   {heatmapData.years.map((year) => (
                     <div key={year} className="grid grid-cols-[44px_repeat(12,1fr)] gap-1">
-                      <div className="text-[10px] font-semibold font-mono text-[var(--text-secondary)] flex items-center">
+                      <div className="text-[10px] font-semibold font-mono text-muted-foreground flex items-center">
                         {year}
                       </div>
                       {(heatmapData.map[year] ?? new Array(12).fill(0)).map((v, i) => (
@@ -210,11 +210,11 @@ export default function AnalyticsPage() {
                         <stop offset="95%" stopColor="#EF5350" stopOpacity={0.04} />
                       </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-gray)" vertical={false} />
-                    <XAxis dataKey="date" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border-gray)" }} interval="preserveStartEnd" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                    <XAxis dataKey="date" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border)" }} interval="preserveStartEnd" />
                     <YAxis tick={AXIS_STYLE} tickLine={false} axisLine={false} tickFormatter={(v: number) => `${v.toFixed(1)}%`} width={48} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number | undefined) => [v != null ? `${v.toFixed(2)}%` : "—", "回撤"]} />
-                    <ReferenceLine y={0} stroke="var(--border-gray)" strokeDasharray="4 4" />
+                    <ReferenceLine y={0} stroke="var(--border)" strokeDasharray="4 4" />
                     <Area type="monotone" dataKey="drawdown" stroke="#EF5350" fill="url(#ddGrad)" strokeWidth={1.5} dot={false} />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -230,8 +230,8 @@ export default function AnalyticsPage() {
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={distributionData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-gray)" vertical={false} />
-                    <XAxis dataKey="range" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border-gray)" }} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                    <XAxis dataKey="range" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border)" }} />
                     <YAxis tick={AXIS_STYLE} tickLine={false} axisLine={false} width={36} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number | undefined) => [v ?? 0, "次数"]} />
                     <Bar dataKey="count" fill="#4C9EEB" radius={[3, 3, 0, 0]} />
@@ -249,12 +249,12 @@ export default function AnalyticsPage() {
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={rollingSharpeData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-gray)" vertical={false} />
-                    <XAxis dataKey="date" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border-gray)" }} interval="preserveStartEnd" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                    <XAxis dataKey="date" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border)" }} interval="preserveStartEnd" />
                     <YAxis tick={AXIS_STYLE} tickLine={false} axisLine={false} width={36} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number | undefined) => [v != null ? v.toFixed(2) : "—", "夏普比率"]} />
                     <ReferenceLine y={1} stroke="#4C9EEB" strokeDasharray="4 4" strokeOpacity={0.5} />
-                    <ReferenceLine y={0} stroke="var(--border-gray)" />
+                    <ReferenceLine y={0} stroke="var(--border)" />
                     <Line type="monotone" dataKey="sharpe" stroke="#4C9EEB" strokeWidth={2} dot={false} activeDot={{ r: 3, fill: "#4C9EEB" }} />
                   </LineChart>
                 </ResponsiveContainer>

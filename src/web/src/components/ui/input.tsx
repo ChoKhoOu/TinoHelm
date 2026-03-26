@@ -22,7 +22,7 @@ function Input({ className, type, label, ...props }: InputProps) {
   if (label) {
     return (
       <div className="flex flex-col gap-1">
-        <label className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">{label}</label>
+        <label className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">{label}</label>
         {input}
       </div>
     );

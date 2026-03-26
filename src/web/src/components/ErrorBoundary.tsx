@@ -27,13 +27,13 @@ export class ErrorBoundary extends Component<Props, State> {
       return (
         <div className="flex flex-col items-center justify-center h-full gap-4 p-8">
           <AlertTriangle className="w-10 h-10 text-[var(--accent-amber)]" />
-          <h2 className="font-heading text-lg font-bold text-[var(--text-primary)]">出现错误</h2>
-          <p className="text-sm text-[var(--text-muted)] max-w-md text-center font-mono">
+          <h2 className="font-heading text-lg font-bold text-foreground">出现错误</h2>
+          <p className="text-sm text-muted-foreground max-w-md text-center font-mono">
             {this.state.error?.message || "发生了未知错误"}
           </p>
           <button
             onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload(); }}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent-blue)] text-white text-sm font-medium hover:opacity-90 transition-opacity"
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-white text-sm font-medium hover:opacity-90 transition-opacity"
           >
             <RefreshCw className="w-4 h-4" />
             重新加载

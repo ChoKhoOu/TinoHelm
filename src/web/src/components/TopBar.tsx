@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import { Search, Bell } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useWsConnection } from "@/providers/WebSocketProvider";
 
 const pathTitles: Record<string, string> = {
@@ -46,20 +47,20 @@ export function TopBar() {
   const wsLabel = connected ? "已连接" : reconnecting ? "重连中..." : "已断开";
 
   return (
-    <header className="flex items-center justify-between h-[52px] px-6 border-b border-[var(--border-gray)] shrink-0">
-      <h1 className="font-heading text-base font-semibold text-[var(--text-primary)]">{title}</h1>
+    <header className="flex items-center justify-between h-[52px] px-6 border-b border-border shrink-0">
+      <h1 className="font-heading text-base font-semibold text-foreground">{title}</h1>
       <div className="flex items-center gap-4">
-        <button className="text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors">
+        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-muted-foreground">
           <Search className="w-4 h-4" />
-        </button>
-        <button className="text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors relative">
+        </Button>
+        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-muted-foreground relative">
           <Bell className="w-4 h-4" />
-        </button>
+        </Button>
         <div className="flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${wsColor}`} title={wsLabel} />
-          <span className="text-[10px] font-mono text-[var(--text-muted)]">{wsLabel}</span>
+          <span className="text-[10px] font-mono text-muted-foreground">{wsLabel}</span>
         </div>
-        <span className="text-[11px] font-mono text-[var(--text-muted)] tabular-nums">{clock}</span>
+        <span className="text-[11px] font-mono text-muted-foreground tabular-nums">{clock}</span>
       </div>
     </header>
   );

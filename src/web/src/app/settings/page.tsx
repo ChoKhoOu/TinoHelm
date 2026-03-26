@@ -6,6 +6,8 @@ import { apiGet, apiPut } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FadeIn } from "@/components/motion/FadeIn";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
@@ -58,10 +60,10 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden">
-      <div className="flex items-center gap-2 px-5 py-3 border-b border-[var(--border-gray)]">
-        <span className="text-[var(--text-muted)]">{icon}</span>
-        <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+    <div className="rounded-xl bg-card border border-border overflow-hidden">
+      <div className="flex items-center gap-2 px-5 py-3 border-b border-border">
+        <span className="text-muted-foreground">{icon}</span>
+        <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
           {title}
         </span>
       </div>
@@ -77,7 +79,7 @@ function StatusDot({ online }: { online: boolean | undefined }) {
     <span
       className={`inline-block w-2 h-2 rounded-full ${
         online === undefined
-          ? "bg-[var(--text-muted)]"
+          ? "bg-muted-foreground"
           : online
           ? "bg-[var(--accent-green)]"
           : "bg-[var(--accent-red)]"
@@ -167,20 +169,20 @@ export default function SettingsPage() {
     return (
       <div className="flex flex-col gap-5 p-6">
         <div className="flex flex-col gap-0.5">
-          <h1 className="font-heading text-[22px] font-bold tracking-tight text-[var(--text-primary)]">
+          <h1 className="font-heading text-[22px] font-bold tracking-tight text-foreground">
             系统设置
           </h1>
-          <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+          <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
             // 加载中...
           </span>
         </div>
         <div className="grid grid-cols-2 gap-5">
           {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] p-5">
-              <Skeleton className="h-3 w-24 mb-4 bg-[var(--bg-elevated)]" />
+            <div key={i} className="rounded-xl bg-card border border-border p-5">
+              <Skeleton className="h-3 w-24 mb-4 bg-popover" />
               <div className="flex flex-col gap-3">
                 {Array.from({ length: 4 }).map((_, j) => (
-                  <Skeleton key={j} className="h-8 w-full bg-[var(--bg-elevated)]" />
+                  <Skeleton key={j} className="h-8 w-full bg-popover" />
                 ))}
               </div>
             </div>
@@ -193,7 +195,7 @@ export default function SettingsPage() {
   if (error) {
     return (
       <div className="flex items-center justify-center h-full p-8">
-        <span className="text-[11px] text-[var(--accent-red)]">{error}</span>
+        <span className="text-[11px] text-destructive">{error}</span>
       </div>
     );
   }
@@ -205,10 +207,10 @@ export default function SettingsPage() {
     <div className="flex flex-col gap-6 p-6 h-full overflow-y-auto">
       {/* Title */}
       <div className="flex flex-col gap-0.5 shrink-0">
-        <h1 className="font-heading text-[22px] font-bold tracking-tight text-[var(--text-primary)]">
+        <h1 className="font-heading text-[22px] font-bold tracking-tight text-foreground">
           系统设置
         </h1>
-        <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+        <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
           // TinoHelm v{health?.platform_version ?? "0.1.0"}
         </span>
       </div>
@@ -220,7 +222,7 @@ export default function SettingsPage() {
             {/* Health indicators */}
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
                   系统状态
                 </span>
                 <div className="flex items-center gap-1.5">
@@ -236,7 +238,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
                   PostgreSQL
                 </span>
                 <div className="flex items-center gap-1.5">
@@ -245,7 +247,7 @@ export default function SettingsPage() {
                     className={`text-[11px] font-medium ${
                       health?.postgres_connected
                         ? "text-[var(--accent-green)]"
-                        : "text-[var(--text-muted)]"
+                        : "text-muted-foreground"
                     }`}
                   >
                     {health?.postgres_connected ? "已连接" : "未连接"}
@@ -254,7 +256,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
                   Redis
                 </span>
                 <div className="flex items-center gap-1.5">
@@ -263,7 +265,7 @@ export default function SettingsPage() {
                     className={`text-[11px] font-medium ${
                       health?.redis_connected || health?.redis_version
                         ? "text-[var(--accent-green)]"
-                        : "text-[var(--text-muted)]"
+                        : "text-muted-foreground"
                     }`}
                   >
                     {health?.redis_connected || health?.redis_version ? "已连接" : "未连接"}
@@ -271,7 +273,7 @@ export default function SettingsPage() {
                 </div>
               </div>
 
-              <div className="h-px bg-[var(--border-gray)]" />
+              <Separator />
 
               {[
                 { label: "版本", value: `TinoHelm v${health?.platform_version ?? "0.1.0"}` },
@@ -289,10 +291,10 @@ export default function SettingsPage() {
                 },
               ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between">
-                  <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                  <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
                     {item.label}
                   </span>
-                  <span className="text-[11px] font-mono text-[var(--text-primary)]">
+                  <span className="text-[11px] font-mono text-foreground">
                     {item.value}
                   </span>
                 </div>
@@ -305,28 +307,34 @@ export default function SettingsPage() {
         <FadeIn delay={0.05}>
           <SectionCard icon={<Shield className="w-4 h-4" />} title="风险限额">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] text-[var(--text-muted)]">最大持仓/单日亏损/单笔金额/杠杆倍数</span>
+              <span className="text-[11px] text-muted-foreground">最大持仓/单日亏损/单笔金额/杠杆倍数</span>
               {!editing ? (
-                <button
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => setEditing(true)}
-                  className="inline-flex items-center gap-1 text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--accent-green)] transition-colors"
+                  className="gap-1 text-[10px] font-semibold text-muted-foreground hover:text-[var(--accent-green)] transition-colors"
                 >
                   <Edit3 className="w-3 h-3" />
                   编辑
-                </button>
+                </Button>
               ) : (
                 <div className="flex items-center gap-2">
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     onClick={handleCancelEdit}
-                    className="inline-flex items-center gap-1 text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                    className="gap-1 text-[10px] font-semibold text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <X className="w-3 h-3" />
                     取消
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     onClick={handleSaveRisk}
                     disabled={saving}
-                    className="inline-flex items-center gap-1 text-[10px] font-bold text-[var(--accent-green)] hover:opacity-80 transition-opacity disabled:opacity-50"
+                    className="gap-1 text-[10px] font-bold text-[var(--accent-green)] hover:opacity-80 transition-opacity disabled:opacity-50"
                   >
                     {saving ? (
                       <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
@@ -334,7 +342,7 @@ export default function SettingsPage() {
                       <Save className="w-3 h-3" />
                     )}
                     保存
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
@@ -352,7 +360,7 @@ export default function SettingsPage() {
             )}
 
             {settings?.risk_limits === undefined && !editing ? (
-              <span className="text-[11px] text-[var(--text-muted)]">暂无风险限额配置</span>
+              <span className="text-[11px] text-muted-foreground">暂无风险限额配置</span>
             ) : editing ? (
               <div className="flex flex-col gap-3">
                 <Input
@@ -424,12 +432,12 @@ export default function SettingsPage() {
                 ].map((item) => (
                   <div
                     key={item.label}
-                    className="flex items-center justify-between rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-4 py-2.5"
+                    className="flex items-center justify-between rounded-lg bg-popover border border-border px-4 py-2.5"
                   >
-                    <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                    <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
                       {item.label}
                     </span>
-                    <span className="text-[11px] font-mono font-semibold text-[var(--text-primary)]">
+                    <span className="text-[11px] font-mono font-semibold text-foreground">
                       {item.value}
                     </span>
                   </div>
@@ -452,11 +460,11 @@ export default function SettingsPage() {
                 const val = settings?.[item.key as keyof SettingsData] as string | undefined;
                 return (
                   <div key={item.key} className="flex flex-col gap-1.5">
-                    <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+                    <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
                       {item.label}
                     </span>
-                    <div className="flex items-center rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] px-4 py-2.5 min-h-[38px]">
-                      <span className="text-[11px] font-mono text-[var(--text-secondary)] break-all">
+                    <div className="flex items-center rounded-lg bg-popover border border-border px-4 py-2.5 min-h-[38px]">
+                      <span className="text-[11px] font-mono text-muted-foreground break-all">
                         {val ?? "—"}
                       </span>
                     </div>

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { apiGet } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { useWsEvent } from "@/providers/WebSocketProvider";
 import { StrategyPanel } from "./components/StrategyPanel";
 import { PositionsTable, type Position } from "./components/PositionsTable";
@@ -121,12 +122,13 @@ export default function TradingPage() {
   }, [orderMsg]);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden bg-[var(--bg-page)]">
+    <div className="flex flex-col h-full overflow-hidden bg-background">
       {/* Node type tabs */}
-      <div className="shrink-0 flex items-center gap-0 px-4 border-b border-[var(--border-gray)] bg-[var(--bg-sidebar)]">
+      <div className="shrink-0 flex items-center gap-0 px-4 border-b border-border bg-sidebar">
         {(["sandbox", "live"] as const).map((mode) => (
-          <button
+          <Button
             key={mode}
+            variant="ghost"
             onClick={() => setNodeType(mode)}
             className="relative px-5 py-3 text-[11px] font-bold tracking-wide uppercase transition-colors"
             style={{
@@ -135,7 +137,7 @@ export default function TradingPage() {
                   ? mode === "live"
                     ? "var(--accent-green)"
                     : "var(--accent-amber)"
-                  : "var(--text-muted)",
+                  : "var(--muted-foreground)",
             }}
           >
             {mode === "sandbox" ? "沙盒" : "实盘"}
@@ -150,7 +152,7 @@ export default function TradingPage() {
                 transition={{ type: "spring", stiffness: 400, damping: 35 }}
               />
             )}
-          </button>
+          </Button>
         ))}
       </div>
 
@@ -158,7 +160,7 @@ export default function TradingPage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Left column: Strategy panel */}
         <div
-          className="shrink-0 flex flex-col border-r border-[var(--border-gray)] bg-[var(--bg-card)]"
+          className="shrink-0 flex flex-col border-r border-border bg-card"
           style={{ width: 280 }}
         >
           <StrategyPanel nodeType={nodeType} />
@@ -167,7 +169,7 @@ export default function TradingPage() {
         {/* Center: Positions + Equity area */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Positions table */}
-          <div className="flex-1 overflow-hidden border-b border-[var(--border-gray)] bg-[var(--bg-card)]">
+          <div className="flex-1 overflow-hidden border-b border-border bg-card">
             {loading ? (
               <PositionsSkeleton />
             ) : (
@@ -177,10 +179,10 @@ export default function TradingPage() {
 
           {/* Equity chart placeholder */}
           <div
-            className="shrink-0 border-t border-[var(--border-gray)] bg-[var(--bg-card)] flex items-center justify-center"
+            className="shrink-0 border-t border-border bg-card flex items-center justify-center"
             style={{ height: 160 }}
           >
-            <span className="text-[10px] text-[var(--text-muted)] tracking-[0.5px] uppercase">
+            <span className="text-[10px] text-muted-foreground tracking-[0.5px] uppercase">
               权益曲线 — 即将推出
             </span>
           </div>
@@ -188,11 +190,11 @@ export default function TradingPage() {
 
         {/* Right column: Fills + Orders */}
         <div
-          className="shrink-0 flex flex-col border-l border-[var(--border-gray)] bg-[var(--bg-card)]"
+          className="shrink-0 flex flex-col border-l border-border bg-card"
           style={{ width: 320 }}
         >
           {/* Fills stream — top half */}
-          <div className="flex-1 overflow-hidden border-b border-[var(--border-gray)]">
+          <div className="flex-1 overflow-hidden border-b border-border">
             <FillsStream fills={fills} />
           </div>
 

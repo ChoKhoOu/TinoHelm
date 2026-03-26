@@ -27,16 +27,16 @@ export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="flex flex-col items-center justify-between w-16 shrink-0 h-full bg-[var(--bg-sidebar)] border-r border-[var(--border-gray)]">
+    <aside className="flex flex-col items-center justify-between w-16 shrink-0 h-full bg-sidebar border-r border-border">
       <div className="flex flex-col items-center w-full">
         {/* Logo */}
         <div className="flex items-center justify-center w-full h-14 mb-2">
-          <div className="w-8 h-8 rounded-lg bg-[var(--accent-blue)] flex items-center justify-center">
+          <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
             <span className="text-[11px] font-bold text-white">TH</span>
           </div>
         </div>
 
-        <div className="w-8 h-px bg-[var(--border-gray)] mb-2" />
+        <div className="w-8 h-px bg-border mb-2" />
 
         {/* Nav */}
         <nav className="flex flex-col items-center gap-1 w-full px-2">
@@ -50,8 +50,8 @@ export function Sidebar() {
                       href={item.href}
                       className={`relative flex items-center justify-center w-10 h-10 rounded-lg transition-colors duration-150 ${
                         isActive
-                          ? "text-[var(--accent-blue)] bg-[var(--accent-blue-20)]"
-                          : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]"
+                          ? "text-primary bg-[var(--accent-blue-20)]"
+                          : "text-muted-foreground hover:text-muted-foreground hover:bg-muted"
                       }`}
                     />
                   }
@@ -59,7 +59,7 @@ export function Sidebar() {
                   {isActive && (
                     <motion.div
                       layoutId="sidebar-active"
-                      className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-[var(--accent-blue)]"
+                      className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-primary"
                       transition={{ type: "spring", stiffness: 350, damping: 30 }}
                     />
                   )}
@@ -76,7 +76,7 @@ export function Sidebar() {
 
       {/* Bottom — Settings */}
       <div className="flex flex-col items-center gap-2 pb-4 px-2 w-full">
-        <div className="w-8 h-px bg-[var(--border-gray)]" />
+        <div className="w-8 h-px bg-border" />
         <Tooltip>
           <TooltipTrigger
             render={
@@ -84,8 +84,8 @@ export function Sidebar() {
                 href="/settings"
                 className={`flex items-center justify-center w-10 h-10 rounded-lg transition-colors duration-150 ${
                   pathname === "/settings"
-                    ? "text-[var(--accent-blue)] bg-[var(--accent-blue-20)]"
-                    : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]"
+                    ? "text-primary bg-[var(--accent-blue-20)]"
+                    : "text-muted-foreground hover:text-muted-foreground hover:bg-muted"
                 }`}
               />
             }

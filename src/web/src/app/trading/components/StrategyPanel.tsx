@@ -34,7 +34,7 @@ const PORTFOLIO_STATE_LABELS: Record<string, string> = {
 };
 
 const PORTFOLIO_STATE_COLORS: Record<string, string> = {
-  available: "var(--text-muted)",
+  available: "var(--muted-foreground)",
   starting: "var(--accent-blue)",
   running: "var(--accent-green)",
   paused: "var(--accent-amber)",
@@ -44,7 +44,7 @@ const PORTFOLIO_STATE_COLORS: Record<string, string> = {
 const STRATEGY_STATUS_COLORS: Record<string, string> = {
   running: "var(--accent-green)",
   paused: "var(--accent-amber)",
-  stopped: "var(--text-muted)",
+  stopped: "var(--muted-foreground)",
   error: "var(--accent-red)",
 };
 
@@ -99,13 +99,13 @@ export function StrategyPanel({ nodeType }: Props) {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-gray)]">
-        <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
           策略 / 组合
         </span>
         <button
           onClick={fetchData}
-          className="text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
+          className="text-muted-foreground hover:text-foreground transition-colors"
           title="刷新"
         >
           <RefreshCw className="w-3 h-3" />
@@ -115,7 +115,7 @@ export function StrategyPanel({ nodeType }: Props) {
       <div className="flex-1 overflow-y-auto">
         {/* Strategies section */}
         <div className="px-4 pt-3 pb-1">
-          <span className="text-[9px] font-bold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+          <span className="text-[9px] font-bold tracking-[0.5px] text-muted-foreground uppercase">
             策略实例
           </span>
         </div>
@@ -123,26 +123,26 @@ export function StrategyPanel({ nodeType }: Props) {
         {loading ? (
           <div className="px-4 py-2 space-y-2">
             {[1, 2, 3].map((i) => (
-              <div key={i} className="h-7 rounded bg-[var(--bg-elevated)] animate-pulse" />
+              <div key={i} className="h-7 rounded bg-popover animate-pulse" />
             ))}
           </div>
         ) : data.strategies.length === 0 ? (
-          <div className="px-4 py-4 text-[11px] text-[var(--text-muted)]">暂无运行策略</div>
+          <div className="px-4 py-4 text-[11px] text-muted-foreground">暂无运行策略</div>
         ) : (
           <div className="px-3 pb-2 space-y-0.5">
             {data.strategies.map((s) => (
               <div
                 key={s.strategy_id}
-                className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-[var(--bg-elevated)] transition-colors"
+                className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-popover transition-colors"
               >
-                <span className="text-[11px] font-mono text-[var(--text-primary)] truncate max-w-[140px]">
+                <span className="text-[11px] font-mono text-foreground truncate max-w-[140px]">
                   {s.name || s.strategy_id}
                 </span>
                 <span
                   className="px-2 py-0.5 rounded text-[9px] font-bold"
                   style={{
-                    color: STRATEGY_STATUS_COLORS[s.status] ?? "var(--text-muted)",
-                    backgroundColor: `${STRATEGY_STATUS_COLORS[s.status] ?? "var(--text-muted)"}18`,
+                    color: STRATEGY_STATUS_COLORS[s.status] ?? "var(--muted-foreground)",
+                    backgroundColor: `${STRATEGY_STATUS_COLORS[s.status] ?? "var(--muted-foreground)"}18`,
                   }}
                 >
                   {s.status === "running" ? "运行" : s.status === "paused" ? "暂停" : s.status === "error" ? "错误" : "停止"}
@@ -153,11 +153,11 @@ export function StrategyPanel({ nodeType }: Props) {
         )}
 
         {/* Divider */}
-        <div className="mx-4 border-t border-[var(--border-gray)] my-2" />
+        <div className="mx-4 border-t border-border my-2" />
 
         {/* Portfolios section */}
         <div className="px-4 pb-1">
-          <span className="text-[9px] font-bold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+          <span className="text-[9px] font-bold tracking-[0.5px] text-muted-foreground uppercase">
             组合管理
           </span>
         </div>
@@ -165,11 +165,11 @@ export function StrategyPanel({ nodeType }: Props) {
         {loading ? (
           <div className="px-4 py-2 space-y-2">
             {[1, 2].map((i) => (
-              <div key={i} className="h-14 rounded bg-[var(--bg-elevated)] animate-pulse" />
+              <div key={i} className="h-14 rounded bg-popover animate-pulse" />
             ))}
           </div>
         ) : data.portfolios.length === 0 ? (
-          <div className="px-4 py-4 text-[11px] text-[var(--text-muted)]">暂无组合</div>
+          <div className="px-4 py-4 text-[11px] text-muted-foreground">暂无组合</div>
         ) : (
           <div className="px-3 pb-3 space-y-1">
             {data.portfolios.map((p) => {
@@ -181,17 +181,17 @@ export function StrategyPanel({ nodeType }: Props) {
               return (
                 <div
                   key={p.name}
-                  className="rounded p-2 bg-[var(--bg-elevated)] border border-[var(--border-gray)]"
+                  className="rounded p-2 bg-popover border border-border"
                 >
                   <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[11px] font-semibold text-[var(--text-primary)] truncate max-w-[120px]">
+                    <span className="text-[11px] font-semibold text-foreground truncate max-w-[120px]">
                       {p.name}
                     </span>
                     <span
                       className="px-1.5 py-0.5 rounded text-[9px] font-bold"
                       style={{
-                        color: PORTFOLIO_STATE_COLORS[p.state] ?? "var(--text-muted)",
-                        backgroundColor: `${PORTFOLIO_STATE_COLORS[p.state] ?? "var(--text-muted)"}18`,
+                        color: PORTFOLIO_STATE_COLORS[p.state] ?? "var(--muted-foreground)",
+                        backgroundColor: `${PORTFOLIO_STATE_COLORS[p.state] ?? "var(--muted-foreground)"}18`,
                       }}
                     >
                       {PORTFOLIO_STATE_LABELS[p.state] ?? p.state}
@@ -237,7 +237,7 @@ export function StrategyPanel({ nodeType }: Props) {
                       />
                     )}
                     {isTransitioning && (
-                      <span className="text-[9px] text-[var(--text-muted)]">处理中...</span>
+                      <span className="text-[9px] text-muted-foreground">处理中...</span>
                     )}
                   </div>
                 </div>

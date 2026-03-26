@@ -9,6 +9,7 @@ import {
   type ColumnDef,
 } from "@tanstack/react-table";
 import { TrendingUp, TrendingDown, Inbox } from "lucide-react";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 export interface Position {
   position_id: string;
@@ -62,7 +63,7 @@ export function PositionsTable({ positions }: Props) {
     columnHelper.accessor("instrument_id", {
       header: "标的",
       cell: (info) => (
-        <span className="text-[11px] font-mono font-semibold text-[var(--text-primary)]">
+        <span className="text-[11px] font-mono font-semibold text-foreground">
           {info.getValue()}
         </span>
       ),
@@ -86,7 +87,7 @@ export function PositionsTable({ positions }: Props) {
     columnHelper.accessor("quantity", {
       header: "数量",
       cell: (info) => (
-        <span className="text-[11px] font-mono text-[var(--text-secondary)]">
+        <span className="text-[11px] font-mono text-muted-foreground">
           {info.getValue()}
         </span>
       ),
@@ -94,7 +95,7 @@ export function PositionsTable({ positions }: Props) {
     columnHelper.accessor("avg_px_open", {
       header: "开仓均价",
       cell: (info) => (
-        <span className="text-[11px] font-mono text-[var(--text-secondary)]">
+        <span className="text-[11px] font-mono text-muted-foreground">
           {info.getValue()}
         </span>
       ),
@@ -117,7 +118,7 @@ export function PositionsTable({ positions }: Props) {
     columnHelper.accessor("duration", {
       header: "持仓时长",
       cell: (info) => (
-        <span className="text-[11px] font-mono text-[var(--text-muted)]">
+        <span className="text-[11px] font-mono text-muted-foreground">
           {info.getValue() || "—"}
         </span>
       ),
@@ -134,9 +135,9 @@ export function PositionsTable({ positions }: Props) {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-gray)] shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+          <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
             持仓
           </span>
           <span
@@ -154,33 +155,33 @@ export function PositionsTable({ positions }: Props) {
       {/* Table */}
       <div className="flex-1 overflow-auto">
         {positions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-3 text-[var(--text-muted)]">
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
             <Inbox className="w-8 h-8 opacity-30" />
             <span className="text-[12px]">暂无持仓</span>
           </div>
         ) : (
-          <table className="w-full text-left border-collapse">
-            <thead className="sticky top-0 bg-[var(--bg-card)] z-10">
+          <Table className="w-full text-left border-collapse">
+            <TableHeader className="sticky top-0 bg-card z-10">
               {table.getHeaderGroups().map((headerGroup) => (
-                <tr key={headerGroup.id}>
+                <TableRow key={headerGroup.id}>
                   {headerGroup.headers.map((header) => (
-                    <th
+                    <TableHead
                       key={header.id}
-                      className="px-4 py-2 text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase border-b border-[var(--border-gray)] whitespace-nowrap"
+                      className="px-4 py-2 text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase border-b border-border whitespace-nowrap"
                     >
                       {flexRender(header.column.columnDef.header, header.getContext())}
-                    </th>
+                    </TableHead>
                   ))}
-                </tr>
+                </TableRow>
               ))}
-            </thead>
-            <tbody>
+            </TableHeader>
+            <TableBody>
               {table.getRowModel().rows.map((row) => {
                 const flash = flashMap[row.id];
                 return (
-                  <tr
+                  <TableRow
                     key={row.id}
-                    className={`border-b border-[var(--border-gray)] last:border-b-0 transition-colors hover:bg-[var(--bg-elevated)] ${
+                    className={`border-b border-border last:border-b-0 transition-colors hover:bg-popover ${
                       flash === "positive"
                         ? "flash-positive"
                         : flash === "negative"
@@ -189,15 +190,15 @@ export function PositionsTable({ positions }: Props) {
                     }`}
                   >
                     {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} className="px-4 py-2.5 whitespace-nowrap">
+                      <TableCell key={cell.id} className="px-4 py-2.5 whitespace-nowrap">
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
+                      </TableCell>
                     ))}
-                  </tr>
+                  </TableRow>
                 );
               })}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
       </div>
     </div>

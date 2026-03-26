@@ -65,9 +65,9 @@ export function OrdersPanel({ orders, nodeType, onOrderCancelled }: Props) {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-gray)] shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+          <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
             挂单
           </span>
           <span
@@ -85,7 +85,7 @@ export function OrdersPanel({ orders, nodeType, onOrderCancelled }: Props) {
       {/* List */}
       <div className="flex-1 overflow-y-auto">
         {orders.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-3 text-[var(--text-muted)]">
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
             <Inbox className="w-6 h-6 opacity-30" />
             <span className="text-[11px]">暂无挂单</span>
           </div>
@@ -95,19 +95,19 @@ export function OrdersPanel({ orders, nodeType, onOrderCancelled }: Props) {
               const isBuy = order.side === "BUY";
               const isCancelling = cancellingIds.has(order.client_order_id);
               const statusColor =
-                ORDER_STATUS_COLORS[order.status] ?? "var(--text-muted)";
+                ORDER_STATUS_COLORS[order.status] ?? "var(--muted-foreground)";
               const statusLabel =
                 ORDER_STATUS_LABELS[order.status] ?? order.status;
 
               return (
                 <div
                   key={order.client_order_id}
-                  className="flex items-center gap-3 px-4 py-2.5 border-b border-[var(--border-gray)] hover:bg-[var(--bg-elevated)] transition-colors"
+                  className="flex items-center gap-3 px-4 py-2.5 border-b border-border hover:bg-popover transition-colors"
                 >
                   {/* Info */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-0.5">
-                      <span className="text-[11px] font-mono font-semibold text-[var(--text-primary)] truncate">
+                      <span className="text-[11px] font-mono font-semibold text-foreground truncate">
                         {order.instrument_id}
                       </span>
                       <span
@@ -129,10 +129,10 @@ export function OrdersPanel({ orders, nodeType, onOrderCancelled }: Props) {
                       >
                         {isBuy ? "买" : "卖"}
                       </span>
-                      <span className="text-[10px] font-mono text-[var(--text-muted)]">
+                      <span className="text-[10px] font-mono text-muted-foreground">
                         {order.order_type}
                       </span>
-                      <span className="text-[10px] font-mono text-[var(--text-secondary)]">
+                      <span className="text-[10px] font-mono text-muted-foreground">
                         {order.quantity} @ {order.price || "市价"}
                       </span>
                     </div>
@@ -142,7 +142,7 @@ export function OrdersPanel({ orders, nodeType, onOrderCancelled }: Props) {
                   <button
                     onClick={() => handleCancel(order.client_order_id)}
                     disabled={isCancelling}
-                    className="shrink-0 w-6 h-6 flex items-center justify-center rounded transition-colors hover:bg-[var(--accent-red-20)] text-[var(--text-muted)] hover:text-[var(--accent-red)] disabled:opacity-40"
+                    className="shrink-0 w-6 h-6 flex items-center justify-center rounded transition-colors hover:bg-[var(--accent-red-20)] text-muted-foreground hover:text-destructive disabled:opacity-40"
                     title="撤单"
                   >
                     {isCancelling ? (

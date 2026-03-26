@@ -11,6 +11,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import { apiPost } from "@/lib/api";
 import { useWsConnection } from "@/providers/WebSocketProvider";
 
@@ -72,7 +73,7 @@ export function ActionBar({ nodeType, riskMetrics }: Props) {
   return (
     <>
       <div
-        className="h-14 shrink-0 flex items-center px-4 gap-6 border-t border-[var(--border-gray)] bg-[var(--bg-sidebar)]"
+        className="h-14 shrink-0 flex items-center px-4 gap-6 border-t border-border bg-sidebar"
       >
         {/* Risk metrics */}
         <div className="flex items-center gap-5">
@@ -80,15 +81,15 @@ export function ActionBar({ nodeType, riskMetrics }: Props) {
             label="风险敞口"
             value={`$${exposure >= 1000 ? `${(exposure / 1000).toFixed(1)}K` : exposure.toFixed(0)}`}
           />
-          <div className="w-px h-5 bg-[var(--border-gray)]" />
+          <Separator orientation="vertical" className="h-5" />
           <RiskMetric
             label="保证金"
             value={`${margin.toFixed(1)}%`}
             valueColor={marginHigh ? "var(--accent-red)" : undefined}
           />
-          <div className="w-px h-5 bg-[var(--border-gray)]" />
+          <Separator orientation="vertical" className="h-5" />
           <RiskMetric label="杠杆" value={`${leverage.toFixed(2)}x`} />
-          <div className="w-px h-5 bg-[var(--border-gray)]" />
+          <Separator orientation="vertical" className="h-5" />
           <RiskMetric
             label="日度VaR"
             value={`$${dailyVar >= 1000 ? `${(dailyVar / 1000).toFixed(1)}K` : dailyVar.toFixed(0)}`}
@@ -106,7 +107,7 @@ export function ActionBar({ nodeType, riskMetrics }: Props) {
           </span>
         </div>
 
-        <div className="w-px h-5 bg-[var(--border-gray)]" />
+        <Separator orientation="vertical" className="h-5" />
 
         {/* Lifecycle action buttons */}
         <div className="flex items-center gap-2">
@@ -143,12 +144,12 @@ export function ActionBar({ nodeType, riskMetrics }: Props) {
 
       {/* Confirmation dialog */}
       <Dialog open={confirmAction !== null} onOpenChange={(open) => !open && setConfirmAction(null)}>
-        <DialogContent className="bg-[var(--bg-card)] border-[var(--border-gray)] max-w-sm">
+        <DialogContent className="bg-card border-border sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle className="text-[var(--text-primary)]">
+            <DialogTitle className="text-foreground">
               {confirmAction === "halt" ? "紧急暂停确认" : "关闭节点确认"}
             </DialogTitle>
-            <DialogDescription className="text-[var(--text-muted)] text-[12px]">
+            <DialogDescription className="text-muted-foreground text-[12px]">
               {confirmAction === "halt"
                 ? "此操作将立即暂停所有交易，阻止新订单提交。确认继续？"
                 : "此操作将关闭交易节点进程。所有策略将停止运行。确认继续？"}
@@ -189,7 +190,7 @@ function RiskMetric({
 }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="text-[9px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase whitespace-nowrap">
+      <span className="text-[9px] font-semibold tracking-[0.5px] text-muted-foreground uppercase whitespace-nowrap">
         {label}
       </span>
       <span
@@ -215,33 +216,23 @@ function ActionButton({
   onClick: () => void;
   variant: "outline" | "destructive-outline" | "destructive";
 }) {
-  const styles: Record<string, React.CSSProperties> = {
-    outline: {
-      color: "var(--text-secondary)",
-      border: "1px solid var(--border-light)",
-      background: "transparent",
-    },
-    "destructive-outline": {
-      color: "var(--accent-red)",
-      border: "1px solid var(--accent-red)",
-      background: "transparent",
-    },
-    destructive: {
-      color: "#fff",
-      border: "1px solid var(--accent-red)",
-      background: "var(--accent-red)",
-    },
-  };
+  const isDestructiveOutline = variant === "destructive-outline";
+  const buttonVariant = variant === "destructive" ? "destructive" : "outline";
 
   return (
-    <button
+    <Button
+      variant={buttonVariant}
+      size="sm"
       onClick={onClick}
       disabled={loading}
-      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-bold tracking-wide transition-opacity hover:opacity-80 disabled:opacity-50 whitespace-nowrap"
-      style={styles[variant]}
+      className={
+        isDestructiveOutline
+          ? "text-[var(--accent-red)] border-[var(--accent-red)] text-[10px] font-bold tracking-wide whitespace-nowrap"
+          : "text-[10px] font-bold tracking-wide whitespace-nowrap"
+      }
     >
       {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : icon}
       {label}
-    </button>
+    </Button>
   );
 }

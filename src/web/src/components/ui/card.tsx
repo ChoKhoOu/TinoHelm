@@ -106,20 +106,20 @@ function MetricCard({ label, value, change, changeType = "neutral", className }:
     changeType === "positive"
       ? "text-[var(--accent-green)]"
       : changeType === "negative"
-      ? "text-[var(--accent-red)]"
-      : "text-[var(--text-muted)]";
+      ? "text-destructive"
+      : "text-muted-foreground";
 
   return (
     <div
       className={cn(
-        "flex flex-col gap-2 rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] px-5 py-4",
+        "flex flex-col gap-2 rounded-xl bg-card border border-border px-5 py-4",
         className
       )}
     >
-      <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+      <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
         {label}
       </span>
-      <span className="font-heading text-[24px] font-bold tracking-[-0.5px] text-[var(--text-primary)]">
+      <span className="font-heading text-[24px] font-bold tracking-[-0.5px] text-foreground">
         {value}
       </span>
       {change && (

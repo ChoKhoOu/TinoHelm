@@ -5,6 +5,9 @@ import { Search, RefreshCw, CheckCircle, ChevronRight, FileText, Layers } from "
 import { apiGet, apiPost } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FadeIn } from "@/components/motion/FadeIn";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
@@ -66,8 +69,8 @@ function ListSkeleton() {
     <div className="flex flex-col gap-2 p-3">
       {Array.from({ length: 6 }).map((_, i) => (
         <div key={i} className="rounded-lg p-3 flex flex-col gap-2">
-          <Skeleton className="h-3.5 w-2/3 bg-[var(--bg-elevated)]" />
-          <Skeleton className="h-2.5 w-1/2 bg-[var(--bg-elevated)]" />
+          <Skeleton className="h-3.5 w-2/3 bg-popover" />
+          <Skeleton className="h-2.5 w-1/2 bg-popover" />
         </div>
       ))}
     </div>
@@ -78,13 +81,13 @@ function DetailSkeleton() {
   return (
     <div className="flex flex-col gap-5 p-6">
       <div className="flex flex-col gap-2">
-        <Skeleton className="h-6 w-48 bg-[var(--bg-elevated)]" />
-        <Skeleton className="h-3 w-32 bg-[var(--bg-elevated)]" />
+        <Skeleton className="h-6 w-48 bg-popover" />
+        <Skeleton className="h-3 w-32 bg-popover" />
       </div>
       <div className="flex flex-col gap-3">
-        <Skeleton className="h-3 w-20 bg-[var(--bg-elevated)]" />
+        <Skeleton className="h-3 w-20 bg-popover" />
         {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-9 w-full bg-[var(--bg-elevated)]" />
+          <Skeleton key={i} className="h-9 w-full bg-popover" />
         ))}
       </div>
     </div>
@@ -103,50 +106,48 @@ function StrategyRow({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
       onClick={onClick}
-      className={`w-full text-left rounded-lg px-3 py-2.5 flex items-center gap-3 transition-all duration-100 group ${
+      className={`w-full justify-start h-auto text-left rounded-lg px-3 py-2.5 flex items-center gap-3 transition-all duration-100 group ${
         selected
           ? "bg-[var(--accent-green-20)] border border-[var(--accent-green)]/30"
-          : "hover:bg-[var(--bg-elevated)] border border-transparent"
+          : "hover:bg-popover border border-transparent"
       }`}
     >
       <div className="flex-1 min-w-0 flex flex-col gap-0.5">
         <div className="flex items-center gap-2">
           <span
             className={`text-[12px] font-semibold truncate ${
-              selected ? "text-[var(--accent-green)]" : "text-[var(--text-primary)]"
+              selected ? "text-[var(--accent-green)]" : "text-foreground"
             }`}
           >
             {strategy.name}
           </span>
-          <span
-            className={`shrink-0 inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold ${
-              strategy.is_portfolio
-                ? "bg-[var(--accent-blue-20)] text-[var(--accent-blue)]"
-                : "bg-[var(--bg-elevated)] text-[var(--text-muted)]"
-            }`}
+          <Badge
+            variant={strategy.is_portfolio ? "info" : "neutral"}
+            className="shrink-0 text-[9px] font-bold"
           >
             {strategy.is_portfolio ? "组合" : "单策略"}
-          </span>
+          </Badge>
         </div>
         {strategy.class_name && (
-          <span className="text-[10px] text-[var(--text-muted)] truncate font-mono">
+          <span className="text-[10px] text-muted-foreground truncate font-mono">
             {strategy.class_name}
           </span>
         )}
       </div>
       {strategy.version && (
-        <span className="shrink-0 text-[9px] font-mono text-[var(--text-muted)]">
+        <span className="shrink-0 text-[9px] font-mono text-muted-foreground">
           v{strategy.version}
         </span>
       )}
       <ChevronRight
         className={`shrink-0 w-3 h-3 transition-colors ${
-          selected ? "text-[var(--accent-green)]" : "text-[var(--text-muted)] opacity-0 group-hover:opacity-100"
+          selected ? "text-[var(--accent-green)]" : "text-muted-foreground opacity-0 group-hover:opacity-100"
         }`}
       />
-    </button>
+    </Button>
   );
 }
 
@@ -181,27 +182,26 @@ function DetailPanel({
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
-            <h2 className="font-heading text-xl font-bold text-[var(--text-primary)]">
+            <h2 className="font-heading text-xl font-bold text-foreground">
               {info.name}
             </h2>
-            <span
-              className={`inline-flex rounded-full px-2.5 py-1 text-[9px] font-bold ${
-                info.is_portfolio
-                  ? "bg-[var(--accent-blue-20)] text-[var(--accent-blue)]"
-                  : "bg-[var(--bg-elevated)] text-[var(--text-muted)]"
-              }`}
+            <Badge
+              variant={info.is_portfolio ? "info" : "neutral"}
+              className="text-[9px] font-bold"
             >
               {info.is_portfolio ? "组合策略" : "单策略"}
-            </span>
+            </Badge>
           </div>
           {info.description && (
-            <span className="text-[11px] text-[var(--text-secondary)]">{info.description}</span>
+            <span className="text-[11px] text-muted-foreground">{info.description}</span>
           )}
         </div>
-        <button
+        <Button
+          variant="outline"
+          size="sm"
           onClick={onValidate}
           disabled={validating}
-          className="shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-gray)] bg-[var(--bg-elevated)] px-3 py-1.5 text-[11px] font-semibold text-[var(--text-secondary)] hover:border-[var(--accent-green)]/50 hover:text-[var(--accent-green)] transition-all duration-150 disabled:opacity-50"
+          className="shrink-0 border-border bg-popover text-[11px] font-semibold text-muted-foreground hover:border-[var(--accent-green)]/50 hover:text-[var(--accent-green)] transition-all duration-150"
         >
           {validating ? (
             <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
@@ -209,7 +209,7 @@ function DetailPanel({
             <CheckCircle className="w-3 h-3" />
           )}
           验证
-        </button>
+        </Button>
       </div>
 
       {validateResult && (
@@ -225,8 +225,8 @@ function DetailPanel({
       )}
 
       {/* 概览 */}
-      <div className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] p-5 flex flex-col gap-4">
-        <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+      <div className="rounded-xl bg-card border border-border p-5 flex flex-col gap-4">
+        <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
           概览
         </span>
         <div className="grid grid-cols-2 gap-x-8 gap-y-3">
@@ -241,51 +241,51 @@ function DetailPanel({
       </div>
 
       {/* 参数 */}
-      <div className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden">
-        <div className="px-5 py-3 border-b border-[var(--border-gray)] flex items-center justify-between">
-          <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+      <div className="rounded-xl bg-card border border-border overflow-hidden">
+        <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+          <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
             参数
           </span>
           {paramsLoading && (
-            <div className="w-3 h-3 border border-[var(--text-muted)] border-t-transparent rounded-full animate-spin" />
+            <div className="w-3 h-3 border border-muted-foreground border-t-transparent rounded-full animate-spin" />
           )}
         </div>
         {paramsLoading ? (
           <div className="p-5 flex flex-col gap-2">
             {Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton key={i} className="h-8 w-full bg-[var(--bg-elevated)]" />
+              <Skeleton key={i} className="h-8 w-full bg-popover" />
             ))}
           </div>
         ) : params.length === 0 ? (
-          <div className="px-5 py-6 text-center text-[11px] text-[var(--text-muted)]">
+          <div className="px-5 py-6 text-center text-[11px] text-muted-foreground">
             暂无参数配置
           </div>
         ) : (
           <div>
             {/* Table header */}
-            <div className="flex items-center px-5 py-2 border-b border-[var(--border-gray)]">
-              <span className="w-[160px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">参数名</span>
-              <span className="w-[80px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">类型</span>
-              <span className="w-[120px] text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">默认值</span>
-              <span className="flex-1 text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)]">优化范围</span>
+            <div className="flex items-center px-5 py-2 border-b border-border">
+              <span className="w-[160px] text-[10px] font-semibold tracking-[0.5px] text-muted-foreground">参数名</span>
+              <span className="w-[80px] text-[10px] font-semibold tracking-[0.5px] text-muted-foreground">类型</span>
+              <span className="w-[120px] text-[10px] font-semibold tracking-[0.5px] text-muted-foreground">默认值</span>
+              <span className="flex-1 text-[10px] font-semibold tracking-[0.5px] text-muted-foreground">优化范围</span>
             </div>
             {params.map((p, i) => (
               <div
                 key={p.name}
                 className={`flex items-center px-5 py-2.5 text-[11px] ${
-                  i < params.length - 1 ? "border-b border-[var(--border-gray)]" : ""
+                  i < params.length - 1 ? "border-b border-border" : ""
                 }`}
               >
-                <span className="w-[160px] font-mono text-[var(--text-primary)] truncate">{p.name}</span>
+                <span className="w-[160px] font-mono text-foreground truncate">{p.name}</span>
                 <span className="w-[80px]">
-                  <span className="inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold bg-[var(--accent-blue-20)] text-[var(--accent-blue)]">
+                  <span className="inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold bg-[var(--accent-blue-20)] text-primary">
                     {p.type}
                   </span>
                 </span>
-                <span className="w-[120px] font-mono text-[var(--text-secondary)]">
+                <span className="w-[120px] font-mono text-muted-foreground">
                   {p.default !== undefined && p.default !== null ? String(p.default) : "—"}
                 </span>
-                <span className="flex-1 font-mono text-[var(--text-muted)] text-[10px]">
+                <span className="flex-1 font-mono text-muted-foreground text-[10px]">
                   {p.min !== undefined && p.max !== undefined
                     ? `[${p.min}, ${p.max}]`
                     : "—"}
@@ -298,9 +298,9 @@ function DetailPanel({
 
       {/* 版本历史 */}
       {detail?.versions && detail.versions.length > 0 && (
-        <div className="rounded-xl bg-[var(--bg-card)] border border-[var(--border-gray)] overflow-hidden">
-          <div className="px-5 py-3 border-b border-[var(--border-gray)]">
-            <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+        <div className="rounded-xl bg-card border border-border overflow-hidden">
+          <div className="px-5 py-3 border-b border-border">
+            <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
               版本历史
             </span>
           </div>
@@ -309,15 +309,15 @@ function DetailPanel({
               <div
                 key={v.version}
                 className={`flex items-center gap-4 px-5 py-2.5 text-[11px] ${
-                  i < detail.versions!.length - 1 ? "border-b border-[var(--border-gray)]" : ""
+                  i < detail.versions!.length - 1 ? "border-b border-border" : ""
                 }`}
               >
                 <span className="font-mono text-[var(--accent-green)] w-16">v{v.version}</span>
                 {v.date && (
-                  <span className="text-[var(--text-muted)] w-28">{v.date}</span>
+                  <span className="text-muted-foreground w-28">{v.date}</span>
                 )}
                 {v.notes && (
-                  <span className="text-[var(--text-secondary)] flex-1">{v.notes}</span>
+                  <span className="text-muted-foreground flex-1">{v.notes}</span>
                 )}
               </div>
             ))}
@@ -331,10 +331,10 @@ function DetailPanel({
 function KvRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+      <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
         {label}
       </span>
-      <span className={`text-[11px] text-[var(--text-primary)] ${mono ? "font-mono" : "font-medium"}`}>
+      <span className={`text-[11px] text-foreground ${mono ? "font-mono" : "font-medium"}`}>
         {value}
       </span>
     </div>
@@ -453,39 +453,39 @@ export default function StrategiesPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Top bar */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-gray)] shrink-0">
+      <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
         <div className="flex flex-col gap-0.5">
-          <h1 className="font-heading text-[22px] font-bold tracking-tight text-[var(--text-primary)]">
+          <h1 className="font-heading text-[22px] font-bold tracking-tight text-foreground">
             策略管理
           </h1>
-          <span className="text-[10px] font-semibold tracking-[0.5px] text-[var(--text-muted)] uppercase">
+          <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
             // {loading ? "加载中..." : `${strategies.length} 个策略已发现`}
           </span>
         </div>
-        <button
+        <Button
           onClick={handleRescan}
           disabled={rescanning}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-green)] text-[var(--text-on-accent)] px-4 py-2 text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150 disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-green)] text-primary-foreground px-4 py-2 text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150 disabled:opacity-50"
         >
           <RefreshCw className={`w-3 h-3 ${rescanning ? "animate-spin" : ""}`} />
           重新扫描
-        </button>
+        </Button>
       </div>
 
       {/* Body: master-detail */}
       <div className="flex flex-1 min-h-0">
         {/* Left panel — 380px */}
-        <div className="w-[380px] shrink-0 flex flex-col border-r border-[var(--border-gray)]">
+        <div className="w-[380px] shrink-0 flex flex-col border-r border-border">
           {/* Search */}
-          <div className="px-3 py-3 border-b border-[var(--border-gray)]">
+          <div className="px-3 py-3 border-b border-border">
             <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--text-muted)]" />
-              <input
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+              <Input
                 type="text"
                 placeholder="搜索策略..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="w-full h-8 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-gray)] pl-8 pr-3 text-[11px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-green)]/50 transition-colors"
+                className="w-full h-8 rounded-lg bg-popover border border-border pl-8 pr-3 text-[11px] text-foreground placeholder:text-muted-foreground outline-none focus:border-[var(--accent-green)]/50 transition-colors"
               />
             </div>
           </div>
@@ -496,17 +496,18 @@ export default function StrategiesPage() {
               <ListSkeleton />
             ) : error ? (
               <div className="flex flex-col items-center justify-center h-full gap-2 p-6">
-                <span className="text-[11px] text-[var(--accent-red)]">{error}</span>
-                <button
+                <span className="text-[11px] text-destructive">{error}</span>
+                <Button
+                  variant="ghost"
                   onClick={loadStrategies}
-                  className="text-[10px] text-[var(--text-muted)] underline"
+                  className="text-[10px] text-muted-foreground underline h-auto p-0"
                 >
                   重试
-                </button>
+                </Button>
               </div>
             ) : filtered.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full gap-2 p-6">
-                <span className="text-[11px] text-[var(--text-muted)]">
+                <span className="text-[11px] text-muted-foreground">
                   {search ? "无匹配结果" : "暂无策略"}
                 </span>
               </div>
@@ -540,14 +541,14 @@ export default function StrategiesPage() {
             />
           ) : (
             <div className="flex flex-col items-center justify-center h-full gap-3">
-              <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-gray)]">
+              <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-popover border border-border">
                 {strategies.length > 0 ? (
-                  <Layers className="w-5 h-5 text-[var(--text-muted)]" />
+                  <Layers className="w-5 h-5 text-muted-foreground" />
                 ) : (
-                  <FileText className="w-5 h-5 text-[var(--text-muted)]" />
+                  <FileText className="w-5 h-5 text-muted-foreground" />
                 )}
               </div>
-              <span className="text-[11px] text-[var(--text-muted)]">请选择一个策略</span>
+              <span className="text-[11px] text-muted-foreground">请选择一个策略</span>
             </div>
           )}
         </div>

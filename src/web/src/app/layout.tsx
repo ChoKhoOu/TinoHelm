@@ -5,6 +5,7 @@ import { TopBar } from "@/components/TopBar";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Providers } from "@/components/Providers";
 import { PageTransition } from "@/components/motion/PageTransition";
+import { Toaster } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
   title: "TinoHelm — 量化交易平台",
@@ -24,7 +25,7 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="h-full bg-[var(--bg-page)] text-[var(--text-primary)] font-mono antialiased">
+      <body className="h-full bg-background text-foreground font-mono antialiased">
         <Providers>
           <div className="flex h-full">
             <Sidebar />
@@ -39,6 +40,7 @@ export default function RootLayout({
               </ErrorBoundary>
             </div>
           </div>
+          <Toaster position="top-right" richColors />
         </Providers>
       </body>
     </html>
