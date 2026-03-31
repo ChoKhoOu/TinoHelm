@@ -200,6 +200,23 @@ class Position(Base):
     )
 
 
+class EquitySnapshot(Base):
+    """Periodic equity snapshot for equity curve visualization."""
+    __tablename__ = "equity_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    node_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    equity: Mapped[float] = mapped_column(Float, nullable=False)
+    balance: Mapped[float] = mapped_column(Float, nullable=False)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    ts: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_equity_snapshots_node_ts", "node_type", "ts"),
+    )
+
+
 class RiskEvent(Base):
     __tablename__ = "risk_events"
 
