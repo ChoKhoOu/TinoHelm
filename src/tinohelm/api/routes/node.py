@@ -7,9 +7,9 @@ import logging
 from typing import Literal
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.api.deps import get_db, get_process_manager, get_redis
@@ -187,6 +187,51 @@ async def flatten_stop_portfolio(
     return {"status": "ok", "action": "flatten_stop_portfolio", "name": body.name}
 
 
+@router.get("/data-status")
+async def data_status(
+    mode: Literal["sandbox", "live"] = "sandbox",
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Return data feed health status derived from heartbeat."""
+    raw = await rds.get(f"tino:heartbeat:{mode}")
+    if not raw:
+        return {"status": "offline", "last_seen": None, "bar_types": [], "strategies": 0, "positions": 0}
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    hb = json.loads(raw)
+    # Derive strategy count from strategy_states (more reliable than cache count)
+    strategy_states = hb.get("strategy_states", {})
+    strategy_count = len(strategy_states) if strategy_states else hb.get("strategies", 0)
+    return {
+        "status": "online",
+        "last_seen": hb.get("ts"),
+        "bar_types": hb.get("bar_types", []),
+        "strategies": strategy_count,
+        "positions": hb.get("positions", 0),
+        "balance_total": hb.get("balance_total"),
+        "balance_free": hb.get("balance_free"),
+    }
+
+
+@router.get("/subscriptions")
+async def subscriptions(
+    mode: Literal["sandbox", "live"] = "sandbox",
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Return active data subscriptions from heartbeat and portfolio registry."""
+    # Try heartbeat first
+    raw = await rds.get(f"tino:heartbeat:{mode}")
+    if not raw:
+        return {"bar_types": [], "instruments": []}
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    hb = json.loads(raw)
+    bar_types = hb.get("bar_types", [])
+    # Derive instruments from bar type strings (format: "BTCUSDT-PERP.BINANCE-5-MINUTE-...")
+    instruments = sorted({bt.split(".")[0] for bt in bar_types if "." in bt})
+    return {"bar_types": bar_types, "instruments": instruments}
+
+
 @router.get("/status")
 async def node_status(
     pm: ProcessManager = Depends(get_process_manager),
@@ -219,3 +264,99 @@ async def node_status(
     }
 
     return status
+
+
+# ---- paper trading config / reset ----
+
+class PaperConfigUpdate(BaseModel):
+    """Fields that can be updated in paper trading config."""
+    starting_capital: float | None = None
+    fee_rate: float | None = None
+    slippage_model: str | None = None
+    latency_ms: int | None = None
+
+
+@router.get("/paper-config")
+async def get_paper_config(
+    mode: Literal["sandbox", "live"] = "sandbox",
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Return current paper trading configuration."""
+    raw = await rds.get(f"tino:{mode}:paper_config")
+    if raw:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        return json.loads(raw)
+    return {
+        "starting_capital": 10000.0,
+        "fee_rate": 0.0004,
+        "slippage_model": "binance-default",
+        "latency_ms": 0,
+    }
+
+
+@router.put("/paper-config")
+async def update_paper_config(
+    body: PaperConfigUpdate,
+    mode: Literal["sandbox", "live"] = "sandbox",
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Update paper trading configuration. Takes effect on next node restart."""
+    raw = await rds.get(f"tino:{mode}:paper_config")
+    config: dict = {}
+    if raw:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        config = json.loads(raw)
+    updates = body.model_dump(exclude_none=True)
+    config.update(updates)
+    await rds.set(f"tino:{mode}:paper_config", json.dumps(config))
+    return {"status": "ok", "config": config}
+
+
+@router.post("/paper-reset")
+async def paper_reset(
+    mode: Literal["sandbox", "live"] = "sandbox",
+    restart: bool = Query(False, description="Restart node after reset"),
+    pm: ProcessManager = Depends(get_process_manager),
+    db: AsyncSession = Depends(get_db),
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Reset paper trading state: shutdown node, clear data, optionally restart."""
+    # 1. Shutdown node
+    try:
+        await asyncio.to_thread(pm.lifecycle_command, action="shutdown", node_type=mode)
+    except Exception:
+        pass
+
+    # 2. Wait for heartbeat to go stale (poll up to 15s)
+    for _ in range(15):
+        await asyncio.sleep(1)
+        hb = await rds.get(f"tino:heartbeat:{mode}")
+        if not hb:
+            break
+
+    # 3. Clear DB data
+    await db.execute(text("DELETE FROM positions WHERE node_type = :nt"), {"nt": mode})
+    await db.execute(text("DELETE FROM fills WHERE node_type = :nt"), {"nt": mode})
+    await db.execute(text("DELETE FROM equity_snapshots WHERE node_type = :nt"), {"nt": mode})
+    await db.commit()
+
+    # 4. Clear Redis state
+    keys = await rds.keys(f"tino:{mode}:*")
+    if keys:
+        await rds.delete(*keys)
+
+    result: dict = {"status": "ok", "action": "reset", "mode": mode, "data_cleared": True}
+
+    # 5. Optionally restart
+    if restart:
+        await asyncio.sleep(2)
+        try:
+            await asyncio.to_thread(pm.lifecycle_command, action="start", node_type=mode)
+            result["restarted"] = True
+        except Exception as e:
+            result["restarted"] = False
+            result["restart_error"] = str(e)
+
+    return result

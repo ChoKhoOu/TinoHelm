@@ -454,6 +454,81 @@ async def delete_backtest_run(
     return BacktestDeleteResponse(run_id=run_id, deleted=True)
 
 
+@router.get("/compare")
+async def backtest_compare(
+    strategy_name: str = Query(..., description="Strategy name to compare"),
+    node_type: str = Query("sandbox", description="Node type for paper equity"),
+    db: AsyncSession = Depends(get_db),
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Compare backtest results with paper trading equity."""
+    # 1. Find most recent completed backtest for this strategy
+    stmt = (
+        select(BacktestRun)
+        .where(BacktestRun.strategy_name == strategy_name, BacktestRun.status == "completed")
+        .order_by(BacktestRun.created_at.desc())
+        .limit(1)
+    )
+    run = (await db.execute(stmt)).scalar_one_or_none()
+
+    backtest_data = None
+    warning = None
+    if run:
+        artifacts_dir = Path.home() / ".tino" / "data" / "artifacts" / str(run.run_id)
+        results_file = artifacts_dir / "results.json"
+        if results_file.exists():
+            try:
+                raw = json.loads(await asyncio.to_thread(results_file.read_text))
+                backtest_data = {
+                    "equity_curve": raw.get("equity_curve", []),
+                    "stats": {
+                        k: raw.get(k) for k in [
+                            "total_pnl", "win_rate", "sharpe_ratio", "max_drawdown",
+                            "total_trades", "avg_trade_pnl", "profit_factor",
+                        ] if k in raw
+                    },
+                    "run_id": run.run_id,
+                    "strategy_name": strategy_name,
+                }
+            except Exception as e:
+                warning = f"Failed to load backtest artifacts: {e}"
+        else:
+            warning = "Backtest artifacts not found (may have been cleaned up)"
+    else:
+        warning = f"No completed backtest found for strategy '{strategy_name}'"
+
+    # 2. Load paper equity
+    paper_equity: list[dict] = []
+    try:
+        raw_list = await rds.lrange(f"tino:{node_type}:equity_history", 0, -1)
+        if raw_list:
+            for item in raw_list:
+                if isinstance(item, bytes):
+                    item = item.decode()
+                paper_equity.append(json.loads(item))
+    except Exception:
+        pass
+
+    # 3. Compute comparison if both available
+    comparison = None
+    if backtest_data and paper_equity:
+        bt_stats = backtest_data.get("stats", {})
+        comparison = {
+            "backtest_pnl": bt_stats.get("total_pnl"),
+            "backtest_win_rate": bt_stats.get("win_rate"),
+            "backtest_sharpe": bt_stats.get("sharpe_ratio"),
+            "paper_equity_points": len(paper_equity),
+            "paper_latest_equity": paper_equity[-1].get("equity") if paper_equity else None,
+        }
+
+    return {
+        "backtest": backtest_data,
+        "paper": {"equity_curve": paper_equity},
+        "comparison": comparison,
+        "warning": warning,
+    }
+
+
 @router.get("/{run_id}/artifacts", tags=["backtest"])
 async def list_artifacts(
     run_id: str,

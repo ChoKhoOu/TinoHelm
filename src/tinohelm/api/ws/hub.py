@@ -55,6 +55,7 @@ async def ws_events(
 @router.websocket("/ws/equity")
 async def ws_equity(websocket: WebSocket) -> None:
     """Stream equity curve snapshots via the ``tino:equity`` Redis channel."""
+    logger.warning("DEPRECATED: /ws/equity endpoint — use /ws/events with equity.snapshot event type")
     bridge = get_event_bridge()
 
     if bridge.client_count() >= MAX_WS_CONNECTIONS:

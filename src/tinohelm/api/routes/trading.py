@@ -4,12 +4,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tinohelm.api.deps import get_db
+from tinohelm.api.deps import get_db, get_redis
 from tinohelm.db.models import Fill, Position
 
 logger = logging.getLogger(__name__)
@@ -248,3 +249,104 @@ async def trading_summary(
         total_realized_pnl=total_realized_pnl,
         open_instruments=open_instruments,
     )
+
+
+class EquityPoint(BaseModel):
+    equity: float
+    balance: float
+    unrealized_pnl: float
+    ts: str
+
+
+@router.get("/signals/history")
+async def signals_history(
+    strategy_id: str = Query(..., description="Strategy ID"),
+    node_type: str = Query("sandbox", description="Node type"),
+    rds=Depends(get_redis),
+) -> list[dict]:
+    """Return last 30 signal snapshots for sparkline initialization."""
+    import json as _json
+    key = f"tino:{node_type}:signals:history:{strategy_id}"
+    raw = await rds.lrange(key, 0, 29)
+    result = []
+    for item in raw:
+        if isinstance(item, bytes):
+            item = item.decode()
+        result.append(_json.loads(item))
+    result.reverse()  # Oldest first for sparkline rendering
+    return result
+
+
+@router.get("/equity", response_model=list[EquityPoint])
+async def list_equity(
+    node_type: str = Query(..., description="Node type (sandbox/live)"),
+    limit: int = Query(1000, ge=1, le=5000, description="Max results"),
+    rds: aioredis.Redis = Depends(get_redis),
+    db: AsyncSession = Depends(get_db),
+) -> list[EquityPoint]:
+    """Return equity snapshots for equity curve chart."""
+    # Fast path: Redis list
+    try:
+        import json as _json
+        raw = await rds.lrange(f"tino:{node_type}:equity_history", 0, limit - 1)
+        if raw:
+            points = []
+            for item in raw:
+                if isinstance(item, bytes):
+                    item = item.decode()
+                d = _json.loads(item)
+                points.append(EquityPoint(
+                    equity=d.get("equity", 0),
+                    balance=d.get("balance", 0),
+                    unrealized_pnl=d.get("unrealized_pnl", 0),
+                    ts=d.get("ts", ""),
+                ))
+            return points
+    except Exception:
+        pass
+
+    # Fallback: DB
+    from tinohelm.db.models import EquitySnapshot
+    stmt = (
+        select(EquitySnapshot)
+        .where(EquitySnapshot.node_type == node_type)
+        .order_by(EquitySnapshot.ts.asc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        EquityPoint(equity=r.equity, balance=r.balance, unrealized_pnl=r.unrealized_pnl, ts=r.ts)
+        for r in rows
+    ]
+
+
+@router.delete("/orders/{client_order_id}")
+async def cancel_order(
+    client_order_id: str,
+    mode: str = Query(..., description="Node type (sandbox/live)"),
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Cancel an open order by client_order_id."""
+    import json as _json
+    cmd = {"cmd": "cancel_order", "client_order_id": client_order_id}
+    await rds.publish(f"tino:{mode}:commands", _json.dumps(cmd))
+    return {"status": "ok", "client_order_id": client_order_id, "mode": mode}
+
+
+@router.get("/risk-metrics")
+async def risk_metrics(
+    node_type: str = Query(..., description="Node type (sandbox/live)"),
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Return latest risk metrics from RiskGuardActor."""
+    import json as _json
+    raw = await rds.get(f"tino:{node_type}:risk_metrics")
+    if raw:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        return _json.loads(raw)
+    return {
+        "equity": 0, "peak_equity": 0, "drawdown_pct": 0,
+        "daily_pnl_pct": 0, "total_exposure": 0, "position_count": 0,
+        "breached": False, "breach_reason": "", "per_instrument_exposure": {},
+    }
