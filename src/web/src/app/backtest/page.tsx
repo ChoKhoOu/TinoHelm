@@ -33,12 +33,12 @@ import { useWsEvent } from "@/providers/WebSocketProvider";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { RunStatus, TradeLogEntry, BacktestResult } from "./types";
-import { OverviewTab } from "./components/OverviewTab";
 import { OverviewGreyTab } from "./components/OverviewGreyTab";
 import { TearsheetTab } from "./components/TearsheetTab";
 import { TradeLogTab } from "./components/TradeLogTab";
 import { ReportsTab } from "./components/ReportsTab";
 import { PerformanceTab } from "./components/PerformanceTab";
+import { TradesTab } from "./components/TradesTab";
 
 /* ------------------------------------------------------------------ */
 /*  Progress ring placeholder for running/queued backtests             */
@@ -876,8 +876,8 @@ export default function BacktestPage() {
             >
               <TabsTrigger value="overview-grey" className="text-xs px-3">Overview</TabsTrigger>
               <TabsTrigger value="performance" className="text-xs px-3">Performance</TabsTrigger>
-              <TabsTrigger value="overview" className="text-xs px-3">概览</TabsTrigger>
-              <TabsTrigger value="tearsheet" className="text-xs px-3">报告</TabsTrigger>
+              <TabsTrigger value="trades" className="text-xs px-3">Trades</TabsTrigger>
+<TabsTrigger value="tearsheet" className="text-xs px-3">报告</TabsTrigger>
               <TabsTrigger value="tradelog" className="text-xs px-3">交易日志</TabsTrigger>
               <TabsTrigger value="reports" className="text-xs px-3">数据表格</TabsTrigger>
             </TabsList>
@@ -887,9 +887,7 @@ export default function BacktestPage() {
                 {selectedRun?.status === "completed" ? (
                   <OverviewGreyTab runId={selectedRunId} />
                 ) : (
-                  <div className="flex items-center justify-center h-full">
-                    <span className="text-xs text-muted-foreground">回测完成后可查看</span>
-                  </div>
+                  <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
                 )}
               </TabsContent>
               <TabsContent value="performance" className="h-full overflow-y-auto">
@@ -899,19 +897,14 @@ export default function BacktestPage() {
                   <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
                 )}
               </TabsContent>
-              <TabsContent value="overview" className="h-full overflow-y-auto">
-                {selectedRun?.status === "completed" ? (
-                  <OverviewTab runId={selectedRunId} />
+              <TabsContent value="trades" className="h-full overflow-y-auto">
+                {selectedRun?.status === "completed" && selectedRunId ? (
+                  <TradesTab runId={selectedRunId} />
                 ) : (
-                  <RunningPlaceholder
-                    status={selectedRun?.status}
-                    pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0}
-                    fallbackMsg={selectedRun?.status === "failed" ? `回测失败: ${selectedRun.error ?? "未知错误"}` : "已取消"}
-                  />
+                  <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
                 )}
               </TabsContent>
-
-              <TabsContent value="tearsheet" className="h-full">
+<TabsContent value="tearsheet" className="h-full">
                 {selectedRun?.status === "completed" ? (
                   <TearsheetTab runId={selectedRunId} />
                 ) : (

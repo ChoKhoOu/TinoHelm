@@ -1,5 +1,63 @@
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelling" | "cancelled";
 
+// Trades tab chart data interfaces
+export interface TradePnlDistributionBin {
+  bin_start: number;
+  bin_end: number;
+  count: number;
+}
+
+export interface CumulativeTradePnl {
+  trade_num: number;
+  cumulative_pnl: number;
+}
+
+export interface TradePnlScatterPoint {
+  timestamp: string;
+  pnl: number;
+  side: string;
+  instrument: string;
+}
+
+export interface MaeMfePoint {
+  pnl: number;
+  mae: number;
+  mfe: number;
+  side: string;
+}
+
+export interface HoldingTimeBin {
+  bin_start: number;
+  bin_end: number;
+  count: number;
+}
+
+export interface StreakEntry {
+  streak_num: number;
+  type: "win" | "loss";
+  count: number;
+  total_pnl: number;
+}
+
+export interface LongShortSideStats {
+  trades: number;
+  total_pnl: number;
+  avg_pnl: number;
+  win_rate: number;
+}
+
+export interface LongVsShort {
+  long: LongShortSideStats;
+  short: LongShortSideStats;
+}
+
+export interface ReturnByGroup {
+  dow?: number;
+  dow_name?: string;
+  hour?: number;
+  values: number[];
+}
+
 export interface TradeLogEntry {
   opened_at: string;
   closed_at?: string;
@@ -80,6 +138,16 @@ export interface BacktestStatistics {
   beta?: number | null;
   r_squared?: number | null;
   information_ratio?: number | null;
+  // Trades tab metrics
+  median_trade_pnl?: number | null;
+  std_trade_pnl?: number | null;
+  fill_rate?: number | null;
+  avg_trades_per_day?: number | null;
+  recovery_factor?: number | null;
+  sqn?: number | null;
+  kelly_criterion?: number | null;
+  k_ratio?: number | null;
+  expectancy_r?: number | null;
 }
 
 export interface PerInstrumentEntry {
@@ -196,4 +264,14 @@ export interface BacktestResult {
   rolling_volatility?: RollingVolatilityPoint[];
   rolling_beta?: RollingBetaPoint[];
   benchmark_type?: "single_bh" | "basket_bh" | "zero_line";
+  // Trades tab chart data
+  trade_pnl_distribution?: TradePnlDistributionBin[];
+  cumulative_trade_pnl?: CumulativeTradePnl[];
+  trade_pnl_scatter?: TradePnlScatterPoint[];
+  mae_mfe?: MaeMfePoint[];
+  holding_time_distribution?: HoldingTimeBin[];
+  streak_sequence?: StreakEntry[];
+  long_vs_short?: LongVsShort;
+  return_by_dow?: ReturnByGroup[];
+  return_by_hour?: ReturnByGroup[];
 }

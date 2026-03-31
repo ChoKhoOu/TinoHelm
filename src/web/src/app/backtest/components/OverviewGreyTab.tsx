@@ -399,6 +399,8 @@ function EquityDrawdownChart({
     backdropFilter: "blur(8px)",
     boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
   };
+  const tooltipLabelStyle = { color: "rgba(255,255,255,0.5)" };
+  const tooltipItemStyle = { color: "#E8EAED" };
 
   return (
     <motion.div
@@ -448,7 +450,7 @@ function EquityDrawdownChart({
               width={48}
             />
             <RechartsTooltip
-              contentStyle={tooltipStyle}
+              contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
               formatter={(value: unknown, _name: unknown, props: { payload?: { equity?: number } }) => {
                 const eq = props?.payload?.equity ?? Number(value);
                 const color = eq >= startingBalance ? "#4C9EEB" : "#EF5350";
@@ -528,7 +530,7 @@ function EquityDrawdownChart({
               width={48}
             />
             <RechartsTooltip
-              contentStyle={tooltipStyle}
+              contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
               formatter={(value: unknown) => [
                 `${Number(value).toFixed(2)}%`,
                 "回撤",

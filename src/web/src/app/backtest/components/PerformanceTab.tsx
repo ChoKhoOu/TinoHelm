@@ -97,6 +97,8 @@ const tooltipStyle: React.CSSProperties = {
   backdropFilter: "blur(8px)",
   boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
 };
+const tooltipLabelStyle: React.CSSProperties = { color: "rgba(255,255,255,0.5)" };
+const tooltipItemStyle: React.CSSProperties = { color: "#E8EAED" };
 
 
 function fmtNum(v: number | null | undefined, decimals = 2): string {
@@ -471,7 +473,7 @@ function EnhancedEquityCurve({
             domain={scaleMode === "log" ? ["auto", "auto"] : undefined}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               if (name === "benchmark") {
@@ -605,7 +607,7 @@ function DrawdownChart({
             width={42}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown) => [
               <span key="v" style={{ color: "#EF5350" }}>
                 {Number(value).toFixed(2)}%
@@ -867,7 +869,7 @@ function AnnualReturnsChart({
             width={42}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             cursor={{ fill: "rgba(255,255,255,0.04)" }}
             formatter={(value: unknown) => {
               const v = Number(value);
@@ -945,7 +947,7 @@ function WeeklyReturnsChart({
             width={38}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             cursor={{ fill: "rgba(255,255,255,0.04)" }}
             formatter={(value: unknown) => {
               const v = Number(value);
@@ -1036,7 +1038,7 @@ function RollingSharpeChart({
             width={36}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               const colorMap: Record<string, string> = {
@@ -1108,7 +1110,7 @@ function RollingSortinoChart({
           <XAxis dataKey="t" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
           <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} width={36} />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               const colorMap: Record<string, string> = { rolling_6m: "#A78BFA", rolling_12m: "#F0B429" };
@@ -1183,7 +1185,7 @@ function RollingVolatilityChart({
           <XAxis dataKey="t" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
           <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${(Number(v) * 100).toFixed(0)}%`} width={42} />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               const colorMap: Record<string, string> = { rolling_6m: "#A78BFA", rolling_12m: "#F0B429" };
@@ -1247,7 +1249,7 @@ function RollingBetaChart({
           <XAxis dataKey="t" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
           <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} width={36} />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               const colorMap: Record<string, string> = { rolling_6m: "#A78BFA", rolling_12m: "#F0B429" };
@@ -1316,7 +1318,7 @@ function RollingReturnsChart({
           <XAxis dataKey="t" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
           <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${Number(v).toFixed(0)}%`} width={42} />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               const colorMap: Record<string, string> = {
@@ -1465,7 +1467,7 @@ function DistributionHistogram({
             width={32}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               if (name === "normal") {
@@ -1585,7 +1587,7 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
             }}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle}
+            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
             formatter={(value: unknown, name: string | undefined) => [
               Number(value).toFixed(4),
               name ?? "",
