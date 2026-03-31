@@ -38,6 +38,11 @@ class RiskGuardConfig(ActorConfig, frozen=True):
     All thresholds are optional — only enabled limits are checked.
     """
 
+    # Portfolio isolation: only monitor strategies with this tag prefix.
+    # If None, monitors ALL positions (backward compatible).
+    portfolio_name: str | None = None
+    strategy_tag_prefix: str | None = None
+
     # Daily PnL stop loss (negative fraction, e.g. -0.02 = -2%)
     daily_stop_loss_pct: float | None = None
 
@@ -79,6 +84,9 @@ class RiskGuardActor(Actor):
     def __init__(self, config: RiskGuardConfig) -> None:
         super().__init__(config)
 
+        self._portfolio_name = config.portfolio_name
+        self._strategy_tag_prefix = config.strategy_tag_prefix
+
         self._venue_name = config.venue_name
         self._currency_str = config.currency
         self._starting_balance = config.starting_balance
@@ -107,6 +115,13 @@ class RiskGuardActor(Actor):
 
     _TIMER_NAME: str = "risk_guard_check"
 
+    def _is_my_position(self, position) -> bool:
+        """Check if a position belongs to this RiskGuard's portfolio."""
+        if self._strategy_tag_prefix is None:
+            return True  # No filtering — monitor everything (backward compat)
+        strategy_id = str(position.strategy_id)
+        return self._strategy_tag_prefix in strategy_id
+
     def on_start(self) -> None:
         """Initialize equity tracking and start periodic risk-check timer."""
         from nautilus_trader.model.identifiers import Venue
@@ -128,9 +143,9 @@ class RiskGuardActor(Actor):
             self._peak_equity = equity
             self._day_start_equity = equity
         logger.info(
-            "RiskGuardActor started: equity=%.2f, breach_action=%s, check_interval=%ds",
-            self._peak_equity, self._breach_action.value,
-            self._check_interval_secs,
+            "RiskGuardActor started: portfolio=%s, equity=%.2f, breach_action=%s, check_interval=%ds",
+            self._portfolio_name or "ALL", self._peak_equity,
+            self._breach_action.value, self._check_interval_secs,
         )
 
     def on_event(self, event) -> None:
@@ -197,9 +212,6 @@ class RiskGuardActor(Actor):
 
     def _check_risks(self) -> None:
         """Run all configured risk checks and publish breach if triggered."""
-        if self._breached:
-            return  # Already breached, don't re-publish
-
         equity = self._get_equity()
         if equity <= 0:
             return
@@ -207,6 +219,12 @@ class RiskGuardActor(Actor):
         # Update HWM
         if equity > self._peak_equity:
             self._peak_equity = equity
+
+        # ALWAYS publish metrics (before any breach early-return)
+        self._publish_metrics(equity)
+
+        if self._breached:
+            return  # Already breached, don't re-check
 
         # 1. Daily PnL check
         if self._daily_stop_loss_pct is not None and self._day_start_equity > 0:
@@ -244,7 +262,9 @@ class RiskGuardActor(Actor):
         # 4. Position count check
         # Breach when exceeding max, not at exactly max
         if self._max_positions is not None:
-            position_count = len(self.cache.positions_open())
+            position_count = sum(
+                1 for p in self.cache.positions_open() if self._is_my_position(p)
+            )
             if position_count > self._max_positions:
                 logger.warning(
                     "RISK BREACH: positions %d > limit %d",
@@ -253,18 +273,75 @@ class RiskGuardActor(Actor):
                 self._trigger_breach("position_count")
                 return
 
-    def _calc_total_exposure(self) -> float:
-        """Get total net exposure via NT Portfolio API.
+    def _publish_metrics(self, equity: float) -> None:
+        """Publish current risk metrics to msgbus for BridgeActor relay."""
+        drawdown_pct = (equity - self._peak_equity) / self._peak_equity if self._peak_equity > 0 else 0.0
+        daily_pnl_pct = (equity - self._day_start_equity) / self._day_start_equity if self._day_start_equity > 0 else 0.0
+        total_exposure = self._calc_total_exposure()
+        position_count = sum(1 for p in self.cache.positions_open() if self._is_my_position(p))
 
-        Uses ``portfolio.net_exposures(venue)`` which returns a
-        ``dict[Currency, Money]`` with proper currency handling.
+        per_instrument: dict[str, float] = {}
+        for p in self.cache.positions_open():
+            if not self._is_my_position(p):
+                continue
+            iid = str(p.instrument_id)
+            price = p.avg_px_open
+            tick = self.cache.trade_tick(p.instrument_id)
+            if tick is not None:
+                price = float(tick.price)
+            per_instrument[iid] = round(abs(float(p.quantity) * price), 2)
+
+        self.msgbus.publish("risk.metrics.snapshot", {
+            "equity": round(equity, 2),
+            "peak_equity": round(self._peak_equity, 2),
+            "drawdown_pct": round(drawdown_pct, 6),
+            "daily_pnl_pct": round(daily_pnl_pct, 6),
+            "total_exposure": round(total_exposure, 2),
+            "position_count": position_count,
+            "breached": self._breached,
+            "breach_reason": self._breach_reason,
+            "per_instrument_exposure": per_instrument,
+        })
+
+    def _calc_total_exposure(self) -> float:
+        """Get total exposure for this portfolio's positions.
+
+        When portfolio isolation is active (``strategy_tag_prefix`` set),
+        manually sums exposure from filtered positions instead of using
+        the global ``portfolio.net_exposures()``.
         """
-        exposures = self.portfolio.net_exposures(self._venue)
-        if not exposures:
-            return 0.0
+        if self._strategy_tag_prefix is None:
+            # No filtering — use global NT Portfolio API (backward compat)
+            exposures = self.portfolio.net_exposures(self._venue)
+            if not exposures:
+                return 0.0
+            total = 0.0
+            for _currency, money in exposures.items():
+                total += abs(float(money.as_double()))
+            return total
+
+        # Filtered: manually sum exposure from this portfolio's positions
         total = 0.0
-        for _currency, money in exposures.items():
-            total += abs(float(money.as_double()))
+        for position in self.cache.positions_open():
+            if not self._is_my_position(position):
+                continue
+            instrument = self.cache.instrument(position.instrument_id)
+            if instrument is None:
+                continue
+            # Try to get last price from trade tick, then quote tick
+            last_price = None
+            tick = self.cache.trade_tick(position.instrument_id)
+            if tick is not None:
+                last_price = float(tick.price)
+            else:
+                qtick = self.cache.quote_tick(position.instrument_id)
+                if qtick is not None:
+                    last_price = float(qtick.ask_price)
+            if last_price is not None:
+                total += abs(float(position.quantity) * last_price)
+            else:
+                # Fallback: use avg_px_open
+                total += abs(float(position.quantity) * position.avg_px_open)
         return total
 
     def _trigger_breach(self, reason: str) -> None:
@@ -304,8 +381,10 @@ class RiskGuardActor(Actor):
             self._publish_flatten_all()
 
     def _publish_flatten_all(self) -> None:
-        """Publish instrument IDs of all open positions for flattening."""
+        """Publish instrument IDs of this portfolio's open positions for flattening."""
         for position in self.cache.positions_open():
+            if not self._is_my_position(position):
+                continue
             instrument_id = str(position.instrument_id)
             self.msgbus.publish(RISK_GUARD_FLATTEN, instrument_id)
             logger.warning("RiskGuardActor: flatten instrument %s", instrument_id)
