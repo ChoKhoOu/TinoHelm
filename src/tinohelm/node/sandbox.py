@@ -25,6 +25,8 @@ def run_node(config: dict[str, Any]) -> None:
         :func:`tinohelm.node.factory.build_trading_node_config`.
     """
     # ---- Lazy imports (heavy nautilus deps only in the subprocess) --------
+    from decimal import Decimal
+
     from nautilus_trader.adapters.binance import BINANCE
     from nautilus_trader.adapters.binance.common.enums import (
         BinanceAccountType,
@@ -64,6 +66,10 @@ def run_node(config: dict[str, Any]) -> None:
     # ---- Build NautilusTrader config -------------------------------------
     redis_host = config.get("redis_host", "localhost")
     redis_port = config.get("redis_port", 6379)
+    redis_password = config.get("redis_password", "") or None
+
+    # Layer 3: Global safety net — NT RiskEngine pre-trade checks
+    _re_cfg = config.get("risk_engine", {})
 
     node_config = TradingNodeConfig(
         trader_id=config["trader_id"],
@@ -78,6 +84,7 @@ def run_node(config: dict[str, Any]) -> None:
                 type="redis",
                 host=redis_host,
                 port=redis_port,
+                password=redis_password,
                 timeout=2,
             ),
             encoding="msgpack",
@@ -107,7 +114,10 @@ def run_node(config: dict[str, Any]) -> None:
             purge_closed_positions_interval_mins=15,
             purge_closed_positions_buffer_mins=60,
         ),
-        risk_engine=LiveRiskEngineConfig(),
+        risk_engine=LiveRiskEngineConfig(
+            max_order_submit_rate=_re_cfg.get("max_order_submit_rate", "100/00:00:01"),
+            max_order_modify_rate=_re_cfg.get("max_order_modify_rate", "100/00:00:01"),
+        ),
         data_clients={
             "BINANCE": BinanceDataClientConfig(
                 api_key=config["binance"]["api_key"],
@@ -126,10 +136,17 @@ def run_node(config: dict[str, Any]) -> None:
                 api_secret=config["binance"]["api_secret"],
                 account_type=BinanceAccountType[config["binance"]["account_type"]],
                 environment=BinanceEnvironment.DEMO,
-                # NT 1.224.0 maps DEMO to testnet URLs for futures — override manually
+                # NT 1.224.0 maps DEMO to testnet URLs for futures — override manually.
+                # Without these overrides NT falls back to testnet.binancefuture.com /
+                # stream.binancefuture.com which use a private CA ("Think Beyond Pte. Ltd.")
+                # that rustls (webpki-roots) does not trust, causing UnknownIssuer TLS errors.
                 base_url_http="https://demo-fapi.binance.com",
                 base_url_ws="wss://demo-fstream.binance.com",
+                base_url_ws_stream="wss://demo-fstream.binance.com",
                 instrument_provider=InstrumentProviderConfig(load_all=True),
+                # Binance Hedge Mode does not support reduce_only; disable it.
+                # NT virtual hedging (use_position_ids=True) handles position sides.
+                use_reduce_only=False,
             ),
         },
     )

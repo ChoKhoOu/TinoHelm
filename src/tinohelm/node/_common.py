@@ -123,6 +123,7 @@ def load_components(
         registry.register(
             portfolio_config_name,
             portfolio_cfg.source_path or Path(""),
+            manual_tag=portfolio_cfg.tag,
         )
         tags = registry.allocate_tags(
             portfolio_config_name,
@@ -130,7 +131,12 @@ def load_components(
             existing_tags=set(),
         )
         strategy_instances = create_strategies(portfolio_cfg, order_id_tags=tags)
-        actor_instances = create_actors(portfolio_cfg)
+        entry = registry.get(portfolio_config_name)
+        actor_instances = create_actors(
+            portfolio_cfg,
+            portfolio_name=portfolio_config_name,
+            strategy_tag_prefix=entry.order_id_tag_prefix if entry else None,
+        )
     else:
         # No boot-time portfolio — discover available portfolios
         strategy_instances = []

@@ -63,9 +63,13 @@ def run_node(config: dict[str, Any]) -> None:
     # ---- Build NautilusTrader config -------------------------------------
     redis_host = config.get("redis_host", "localhost")
     redis_port = config.get("redis_port", 6379)
+    redis_password = config.get("redis_password", "") or None
 
     reconciliation = config.get("reconciliation", True)
     reconciliation_lookback_mins = config.get("reconciliation_lookback_mins", 1440)
+
+    # Layer 3: Global safety net — NT RiskEngine pre-trade checks
+    _re_cfg = config.get("risk_engine", {})
 
     node_config = TradingNodeConfig(
         trader_id=config["trader_id"],
@@ -80,6 +84,7 @@ def run_node(config: dict[str, Any]) -> None:
                 type="redis",
                 host=redis_host,
                 port=redis_port,
+                password=redis_password,
                 timeout=2,
             ),
             encoding="msgpack",
@@ -110,7 +115,10 @@ def run_node(config: dict[str, Any]) -> None:
             purge_closed_positions_interval_mins=15,
             purge_closed_positions_buffer_mins=60,
         ),
-        risk_engine=LiveRiskEngineConfig(),
+        risk_engine=LiveRiskEngineConfig(
+            max_order_submit_rate=_re_cfg.get("max_order_submit_rate", "100/00:00:01"),
+            max_order_modify_rate=_re_cfg.get("max_order_modify_rate", "100/00:00:01"),
+        ),
         data_clients={
             "BINANCE": BinanceDataClientConfig(
                 api_key=config["binance"]["api_key"],
@@ -127,6 +135,7 @@ def run_node(config: dict[str, Any]) -> None:
                 account_type=BinanceAccountType[config["binance"]["account_type"]],
                 testnet=testnet,
                 instrument_provider=InstrumentProviderConfig(load_all=True),
+                use_reduce_only=False,
             ),
         },
     )

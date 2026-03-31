@@ -191,7 +191,9 @@ class LifecycleController:
             from tinohelm.portfolio.config import load_portfolio_config
             from tinohelm.portfolio.loader import create_strategies, create_actors
 
-            portfolio_cfg = load_portfolio_config(name)
+            import os
+            _strategies_dir = os.environ.get("TINO_STRATEGIES_DIR")
+            portfolio_cfg = load_portfolio_config(name, strategies_dir=_strategies_dir)
 
             # Allocate tags with collision check
             existing_tags = {str(sid) for sid in self._trader.strategy_ids()}
@@ -199,7 +201,12 @@ class LifecycleController:
 
             # Create instances
             strategy_instances = create_strategies(portfolio_cfg, order_id_tags=tags)
-            actor_instances = create_actors(portfolio_cfg)
+            lc_entry = self._registry.get(name)
+            actor_instances = create_actors(
+                portfolio_cfg,
+                portfolio_name=name,
+                strategy_tag_prefix=lc_entry.order_id_tag_prefix if lc_entry else None,
+            )
 
             # Atomic registration: rollback on partial failure
             added_strategies = []
@@ -411,6 +418,42 @@ class LifecycleController:
             state_dict["portfolios"] = self._registry.get_all_states()
 
         return state_dict
+
+    # ------------------------------------------------------------------
+    # Order management
+    # ------------------------------------------------------------------
+
+    def cancel_order(self, client_order_id: str) -> None:
+        """Cancel a specific order by client_order_id.
+
+        Resolves the owning strategy from the order and delegates cancellation.
+        NT Trader does not expose cancel_order() directly — must go through strategy.
+        """
+        from nautilus_trader.model.identifiers import ClientOrderId
+
+        coid = ClientOrderId(client_order_id)
+        order = self._trader.cache.order(coid)
+        if order is None:
+            self._log.warning(f"Order {client_order_id} not found in cache")
+            if self._publish_ack:
+                self._publish_ack("commands_ack", {"cmd": "cancel_order", "client_order_id": client_order_id, "status": "not_found"})
+            return
+        if order.is_closed:
+            self._log.info(f"Order {client_order_id} already closed ({order.status})")
+            if self._publish_ack:
+                self._publish_ack("commands_ack", {"cmd": "cancel_order", "client_order_id": client_order_id, "status": "already_closed"})
+            return
+        # Resolve owning strategy
+        strategy = self._trader.strategy(order.strategy_id)
+        if strategy is None:
+            self._log.warning(f"Strategy {order.strategy_id} not found for order {client_order_id}")
+            if self._publish_ack:
+                self._publish_ack("commands_ack", {"cmd": "cancel_order", "client_order_id": client_order_id, "status": "strategy_not_found"})
+            return
+        strategy.cancel_order(order)
+        self._log.info(f"Cancel submitted for order {client_order_id} via strategy {order.strategy_id}")
+        if self._publish_ack:
+            self._publish_ack("commands_ack", {"cmd": "cancel_order", "client_order_id": client_order_id, "status": "submitted"})
 
     # ------------------------------------------------------------------
     # RiskGuard integration (Q2)

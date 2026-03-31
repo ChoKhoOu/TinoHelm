@@ -64,6 +64,7 @@ def build_trading_node_config(
     parsed = urlparse(settings.redis.url)
     redis_host = parsed.hostname or "localhost"
     redis_port = parsed.port or 6379
+    redis_password = parsed.password or ""
 
     # Binance credentials: embed directly or use from-env sentinel.
     if for_redis:
@@ -86,6 +87,7 @@ def build_trading_node_config(
         "redis_url": settings.redis.url,
         "redis_host": redis_host,
         "redis_port": redis_port,
+        "redis_password": redis_password,
         "redis_db": redis_db,
         "db_url": settings.database.url,
         "strategies": strategies,
@@ -93,6 +95,11 @@ def build_trading_node_config(
         "binance": binance_config,
         "catalog_path": str(settings.paths.catalog),
         "log_path": str(settings.paths.logs),
+        "risk_engine": {
+            "max_notional_per_order": 50000,  # USDT
+            "max_order_submit_rate": "20/00:00:01",
+            "max_order_modify_rate": "20/00:00:01",
+        },
     }
 
     if node_type == "sandbox":

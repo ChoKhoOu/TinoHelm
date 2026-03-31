@@ -5,7 +5,6 @@ Pure Python class with zero NT dependencies — fully testable with plain pytest
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -77,20 +76,40 @@ class PortfolioRegistry:
 
         return changes
 
-    def register(self, name: str, source_path: Path) -> PortfolioEntry:
-        """Register a portfolio and assign tag prefix."""
+    def register(
+        self, name: str, source_path: Path, *, manual_tag: str | None = None,
+    ) -> PortfolioEntry:
+        """Register a portfolio and assign tag prefix.
+
+        If *manual_tag* is provided (from ``tag:`` in portfolio.yaml), it is
+        used verbatim.  Otherwise a tag is derived from the portfolio name
+        using ``_derive_tag()``.  Collisions raise ``ValueError`` — the user
+        must resolve by adding ``tag: xxx`` to portfolio.yaml.
+        """
         if name in self._portfolios:
             return self._portfolios[name]
 
-        prefix = self._derive_prefix(name)
+        tag = manual_tag or _derive_tag(name)
+        if tag in self._used_prefixes:
+            existing_owner = self._used_prefixes[tag]
+            if manual_tag:
+                raise ValueError(
+                    f"Tag '{tag}' already used by '{existing_owner}', pick another"
+                )
+            raise ValueError(
+                f"Auto-derived tag '{tag}' collides between '{name}' and "
+                f"'{existing_owner}'. Add 'tag: <unique>' to portfolio.yaml "
+                f"for one of them."
+            )
+
         entry = PortfolioEntry(
             name=name,
             source_path=source_path,
-            order_id_tag_prefix=prefix,
+            order_id_tag_prefix=tag,
             tag_offset=self._next_tag_offset,
         )
         self._portfolios[name] = entry
-        self._used_prefixes[prefix] = name
+        self._used_prefixes[tag] = name
         return entry
 
     def allocate_tags(
@@ -209,41 +228,41 @@ class PortfolioRegistry:
         }
 
     def restore_was_running(self, saved_state: dict[str, Any]) -> None:
-        """Mark portfolios that were running before last restart."""
+        """Mark portfolios that were running before last restart.
+
+        Note: ``next_tag_offset`` is NOT restored — container restart kills
+        all strategies, so offsets reset to 0.  The ``existing_tags`` collision
+        check in ``allocate_tags()`` is the real safety net.
+        """
         was_running = saved_state.get("was_running", [])
         for name in was_running:
             entry = self._portfolios.get(name)
             if entry:
                 entry.was_running = True
-        # Restore tag offset to prevent collisions
-        saved_offset = saved_state.get("next_tag_offset", 0)
-        if saved_offset > self._next_tag_offset:
-            self._next_tag_offset = saved_offset
 
-    def _derive_prefix(self, name: str) -> str:
-        """Derive a 3-char lowercase prefix from portfolio folder name.
 
-        Strips non-alpha chars, takes first 3 alpha chars.
-        On collision, appends incrementing index: "mom", "mo0", "mo1".
-        """
-        alpha_chars = re.sub(r"[^a-zA-Z]", "", name).lower()
-        if len(alpha_chars) < 3:
-            alpha_chars = (alpha_chars + "xxx")[:3]
-        base = alpha_chars[:3]
+def _derive_tag(name: str) -> str:
+    """Derive a readable tag from a portfolio folder name.
 
-        if base not in self._used_prefixes:
-            return base
+    Takes the first letter of each ``_``-separated word, but preserves
+    version numbers (``v33`` → ``33``, plain digits kept as-is).
 
-        # Collision — try base[:2] + digit
-        for i in range(10):
-            candidate = f"{base[:2]}{i}"
-            if candidate not in self._used_prefixes:
-                return candidate
+    Examples::
 
-        # Extreme fallback
-        for i in range(100):
-            candidate = f"{base[0]}{i:02d}"
-            if candidate not in self._used_prefixes:
-                return candidate
-
-        raise ValueError(f"Cannot derive unique prefix for '{name}'")
+        multi_factor_v33  → "mf33"
+        multi_factor_v32  → "mf32"
+        momentum_btc      → "mb"
+        mean_reversion_v1 → "mr1"
+        stat_arb_btc_eth  → "sabe"
+        trend_following   → "tf"
+    """
+    parts = name.split("_")
+    tag = ""
+    for part in parts:
+        if part.startswith("v") and part[1:].isdigit():
+            tag += part[1:]       # "v33" → "33"
+        elif part.isdigit():
+            tag += part           # pure digits kept
+        else:
+            tag += part[0].lower()
+    return tag
