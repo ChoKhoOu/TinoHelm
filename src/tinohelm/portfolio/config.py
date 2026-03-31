@@ -37,6 +37,19 @@ class AccountSettings:
 
 
 @dataclass
+class RiskGuardSettings:
+    """Declarative risk guard configuration from portfolio.yaml."""
+
+    enabled: bool = True
+    check_interval_secs: int = 10
+    daily_stop_loss_pct: float | None = None
+    max_drawdown_pct: float | None = None
+    max_total_exposure: float | None = None
+    max_positions: int | None = None
+    breach_action: str = "reduce_only"
+
+
+@dataclass
 class PortfolioConfig:
     """Parsed portfolio configuration.
 
@@ -60,6 +73,12 @@ class PortfolioConfig:
 
     # Account settings
     account: AccountSettings = field(default_factory=AccountSettings)
+
+    # Declarative risk guard settings (optional, from portfolio.yaml)
+    risk_guard: RiskGuardSettings | None = None
+
+    # Manual tag override for PortfolioRegistry (from portfolio.yaml 'tag:')
+    tag: str | None = None
 
     # Optimization parameter ranges (optional)
     optimize_ranges: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -177,12 +196,29 @@ def _load_from_yaml(yaml_path: Path, folder: Path) -> PortfolioConfig:
         leverage=account_raw.get("leverage", 1),
     )
 
+    # Parse risk_guard section (declarative format)
+    risk_guard_raw = raw.get("risk_guard")
+    risk_guard_settings = None
+    if isinstance(risk_guard_raw, dict):
+        risk_guard_settings = RiskGuardSettings(
+            enabled=risk_guard_raw.get("enabled", True),
+            check_interval_secs=risk_guard_raw.get("check_interval_sec", risk_guard_raw.get("check_interval_secs", 10)),
+            daily_stop_loss_pct=risk_guard_raw.get("daily_stop_loss_pct") or risk_guard_raw.get("max_daily_loss_pct"),
+            max_drawdown_pct=risk_guard_raw.get("max_drawdown_pct"),
+            max_total_exposure=risk_guard_raw.get("max_total_exposure"),
+            max_positions=risk_guard_raw.get("max_position_count") or risk_guard_raw.get("max_positions"),
+            breach_action=risk_guard_raw.get("breach_action", "reduce_only"),
+        )
+
     # Strategy params
     params = raw.get("params", {}) or {}
 
     # Optimization parameter ranges
     from tinohelm.strategy.utils import parse_optimize_ranges
     optimize_ranges = parse_optimize_ranges(raw.get("optimize", {}) or {})
+
+    # Manual tag override for PortfolioRegistry
+    manual_tag = raw.get("tag")
 
     config = PortfolioConfig(
         strategy_class=strategy_class,
@@ -192,6 +228,8 @@ def _load_from_yaml(yaml_path: Path, folder: Path) -> PortfolioConfig:
         params=params,
         actors=actors,
         account=account,
+        risk_guard=risk_guard_settings,
+        tag=manual_tag,
         optimize_ranges=optimize_ranges,
         source_path=folder,
         implicit=False,

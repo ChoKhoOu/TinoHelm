@@ -100,6 +100,8 @@ def create_actors(
     config: PortfolioConfig,
     *,
     actors_dir: str | Path | None = None,
+    portfolio_name: str | None = None,
+    strategy_tag_prefix: str | None = None,
 ) -> list[Any]:
     """Create actor instances from a PortfolioConfig's actor references.
 
@@ -108,17 +110,53 @@ def create_actors(
     - Portfolio folder relative path when ``ActorRef.class_path`` is set
       (e.g. ``./custom_monitor:MyMonitor``)
 
+    When ``config.risk_guard`` is set (declarative format), a RiskGuardActor
+    is created automatically and any legacy ``risk_guard`` actor in the
+    actors list is skipped to avoid duplicates.
+
     Returns a list of instantiated Actor objects. Returns empty list if no
     actors are configured.
     """
-    if not config.actors:
+    if not config.actors and config.risk_guard is None:
         return []
 
     actors_dir = Path(actors_dir) if actors_dir else _DEFAULT_ACTORS_DIR
     results = []
 
-    for actor_ref in config.actors:
-        actor_instance = _load_single_actor(actor_ref, config, actors_dir)
+    # Declarative risk_guard section takes priority
+    if config.risk_guard is not None and config.risk_guard.enabled:
+        from tinohelm.actors.risk_guard import RiskGuardActor, RiskGuardConfig
+
+        rg_component_id = f"RiskGuard-{portfolio_name}" if portfolio_name else "RiskGuardActor"
+        rg_config = RiskGuardConfig(
+            component_id=rg_component_id,
+            portfolio_name=portfolio_name,
+            strategy_tag_prefix=strategy_tag_prefix,
+            daily_stop_loss_pct=config.risk_guard.daily_stop_loss_pct,
+            max_drawdown_pct=config.risk_guard.max_drawdown_pct,
+            max_total_exposure=config.risk_guard.max_total_exposure,
+            max_positions=config.risk_guard.max_positions,
+            breach_action=config.risk_guard.breach_action,
+            check_interval_secs=config.risk_guard.check_interval_secs,
+            venue_name="BINANCE",
+            currency=config.account.currency,
+            starting_balance=config.account.starting_balance,
+        )
+        rg_actor = RiskGuardActor(config=rg_config)
+        results.append(rg_actor)
+        logger.info("Created RiskGuardActor: %s (portfolio=%s)", rg_component_id, portfolio_name)
+
+        # Skip legacy risk_guard in actors list to avoid duplicate
+        legacy_actors = [a for a in (config.actors or []) if a.name != "risk_guard"]
+    else:
+        legacy_actors = list(config.actors or [])
+
+    for actor_ref in legacy_actors:
+        actor_instance = _load_single_actor(
+            actor_ref, config, actors_dir,
+            portfolio_name=portfolio_name,
+            strategy_tag_prefix=strategy_tag_prefix,
+        )
         results.append(actor_instance)
 
     return results
@@ -128,6 +166,9 @@ def _load_single_actor(
     ref: ActorRef,
     config: PortfolioConfig,
     actors_dir: Path,
+    *,
+    portfolio_name: str | None = None,
+    strategy_tag_prefix: str | None = None,
 ) -> Any:
     """Load and instantiate a single actor from an ActorRef."""
     if ref.name:
@@ -177,6 +218,14 @@ def _load_single_actor(
         actor_cls, actor_config_cls = _discover_actor_classes(module_file, class_name)
     else:
         raise ValueError("ActorRef must have either 'name' or 'class' set")
+
+    # Inject portfolio isolation for legacy risk_guard actors
+    if ref.name == "risk_guard" and portfolio_name:
+        if ref.params is None:
+            ref.params = {}
+        ref.params.setdefault("portfolio_name", portfolio_name)
+        ref.params.setdefault("strategy_tag_prefix", strategy_tag_prefix)
+        ref.params.setdefault("component_id", f"RiskGuard-{portfolio_name}")
 
     # Instantiate with params
     if actor_config_cls and ref.params:
