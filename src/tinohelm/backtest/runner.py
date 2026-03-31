@@ -808,7 +808,7 @@ class BacktestRunner:
         # Export raw reports before dispose (if artifacts_dir is set)
         if self.artifacts_dir is not None:
             self._export_reports(engine)
-            self._generate_tearsheet(engine, all_bar_type_strs)
+            self._generate_tearsheet(engine, loaded_bar_type_strs)
             self._enhance_tearsheet(results)
 
         # Cleanup

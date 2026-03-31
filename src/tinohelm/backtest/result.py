@@ -1194,6 +1194,306 @@ def extract_backtest_results(
         logger.warning("Failed to compute slippage stats", exc_info=True)
 
     # ------------------------------------------------------------------
+    # 12b. Trades analytics (scalar metrics + chart data arrays)
+    # ------------------------------------------------------------------
+    # Defaults so the final dict always has these keys
+    median_trade_pnl = None
+    std_trade_pnl = None
+    fill_rate = None
+    avg_trades_per_day = None
+    recovery_factor = None
+    sqn = None
+    kelly_criterion = None
+    k_ratio = None
+    expectancy_r = None
+
+    trade_pnl_distribution: list[dict[str, Any]] = []
+    cumulative_trade_pnl: list[dict[str, Any]] = []
+    trade_pnl_scatter: list[dict[str, Any]] = []
+    mae_mfe: list[dict[str, Any]] = []
+    holding_time_distribution: list[dict[str, Any]] = []
+    streak_sequence: list[dict[str, Any]] = []
+    long_vs_short: dict[str, Any] = {}
+    return_by_dow: list[dict[str, Any]] = []
+    return_by_hour: list[dict[str, Any]] = []
+
+    try:
+        import numpy as np
+        from datetime import datetime as _ta_dt, timezone as _ta_tz
+
+        pnls = [_parse_realized_pnl(p.realized_pnl) for p in closed_positions]
+
+        if pnls:
+            _pnl_arr = np.array(pnls, dtype=float)
+
+            # --- Scalar metrics ---
+            median_trade_pnl = _safe_float(round(float(np.median(_pnl_arr)), 4))
+            std_trade_pnl = _safe_float(round(float(np.std(_pnl_arr, ddof=1)), 4)) if len(pnls) > 1 else None
+
+            if orders and len(orders) > 0:
+                fill_rate = _safe_float(round(len(filled) / len(orders) * 100, 4))
+
+            if returns_series is not None and len(returns_series) > 0:
+                avg_trades_per_day = _safe_float(round(total_trades / len(returns_series), 4))
+
+            if max_drawdown is not None and abs(max_drawdown) > 1e-12 and starting_balance > 0:
+                # max_drawdown is a ratio (e.g. -0.01 = 1%); convert total_pnl to ratio too
+                net_return = total_pnl / starting_balance
+                recovery_factor = _safe_float(round(net_return / abs(max_drawdown), 4))
+
+            # SQN: sqrt(N) * mean(pnls) / std(pnls)
+            _pnl_std = float(np.std(_pnl_arr, ddof=1)) if len(pnls) > 1 else 0.0
+            _pnl_mean = float(np.mean(_pnl_arr))
+            if _pnl_std > 1e-12:
+                sqn = _safe_float(round(float(np.sqrt(len(pnls)) * _pnl_mean / _pnl_std), 4))
+
+            # Kelly Criterion: win_rate - (1 - win_rate) / R
+            if avg_win is not None and avg_loss is not None and abs(avg_loss) > 1e-12:
+                _R = abs(avg_win / avg_loss)
+                _wr = win_rate if win_rate is not None else 0.0
+                kelly_criterion = _safe_float(round((_wr - (1 - _wr) / _R) * 100, 4))
+
+            # K-Ratio: slope of OLS on log(cumulative equity) / std_err(slope)
+            try:
+                _cum_equity = starting_balance + np.cumsum(_pnl_arr)
+                _pos_mask = _cum_equity > 0
+                if _pos_mask.sum() >= 2:
+                    _log_eq = np.log(_cum_equity[_pos_mask])
+                    _x = np.arange(len(_log_eq), dtype=float)
+                    _n_k = len(_x)
+                    _coeffs = np.polyfit(_x, _log_eq, 1)
+                    _slope = _coeffs[0]
+                    _y_pred = _slope * _x + _coeffs[1]
+                    _residuals = _log_eq - _y_pred
+                    _mse = float(np.sum(_residuals ** 2) / (_n_k - 2)) if _n_k > 2 else 0.0
+                    _x_var = float(np.sum((_x - _x.mean()) ** 2))
+                    if _x_var > 1e-12 and _mse > 0:
+                        _std_err = float(np.sqrt(_mse / _x_var))
+                        if _std_err > 1e-12:
+                            # Kestner 2003: normalize by sqrt(N) for scale independence
+                            k_ratio = _safe_float(round(float(_slope / (_std_err * np.sqrt(_n_k))), 4))
+            except Exception:
+                logger.warning("Failed to compute K-Ratio", exc_info=True)
+
+            # Expectancy in R-multiples
+            if expectancy is not None and avg_loss is not None and abs(avg_loss) > 1e-12:
+                expectancy_r = _safe_float(round(expectancy / abs(avg_loss), 4))
+
+            # --- Chart data arrays ---
+
+            # 1. Trade PnL distribution (histogram)
+            try:
+                _n_bins = min(30, max(10, len(pnls) // 5))
+                _counts, _bin_edges = np.histogram(_pnl_arr, bins=_n_bins)
+                for j in range(len(_counts)):
+                    trade_pnl_distribution.append({
+                        "bin_start": round(float(_bin_edges[j]), 4),
+                        "bin_end": round(float(_bin_edges[j + 1]), 4),
+                        "count": int(_counts[j]),
+                    })
+            except Exception:
+                logger.warning("Failed to compute trade PnL distribution", exc_info=True)
+
+            # 2. Cumulative trade PnL
+            try:
+                _cum_pnl = np.cumsum(_pnl_arr)
+                for idx_t, cpnl in enumerate(_cum_pnl):
+                    cumulative_trade_pnl.append({
+                        "trade_num": idx_t + 1,
+                        "cumulative_pnl": round(float(cpnl), 4),
+                    })
+            except Exception:
+                logger.warning("Failed to compute cumulative trade PnL", exc_info=True)
+
+            # 3. Trade PnL scatter
+            try:
+                for p in closed_positions:
+                    _pnl_v = _parse_realized_pnl(p.realized_pnl)
+                    _ts_c = getattr(p, "ts_closed", None)
+                    trade_pnl_scatter.append({
+                        "timestamp": _format_ns_timestamp(_ts_c) if _ts_c else None,
+                        "pnl": round(_pnl_v, 4),
+                        "side": _format_order_side(p.entry),
+                        "instrument": str(p.instrument_id),
+                    })
+            except Exception:
+                logger.warning("Failed to compute trade PnL scatter", exc_info=True)
+
+            # 4. MAE/MFE (max adverse/favorable excursion)
+            try:
+                _bar_type_list = engine.cache.bar_types()
+                # Build a dict: instrument_id_str -> list of bars (sorted by ts_init)
+                _inst_bars: dict[str, list] = {}
+                for _bt in _bar_type_list:
+                    _bars = engine.cache.bars(_bt)
+                    if _bars:
+                        _inst_key = str(_bt.instrument_id)
+                        if _inst_key not in _inst_bars:
+                            _inst_bars[_inst_key] = list(_bars)
+                        else:
+                            _inst_bars[_inst_key].extend(_bars)
+
+                for p in closed_positions:
+                    _inst_str = str(p.instrument_id)
+                    if _inst_str not in _inst_bars:
+                        continue
+                    _ts_o = getattr(p, "ts_opened", 0)
+                    _ts_c = getattr(p, "ts_closed", 0)
+                    if not _ts_o or not _ts_c:
+                        continue
+
+                    _entry_px = float(p.avg_px_open)
+                    _side_str = _format_order_side(p.entry)
+                    _p_pnl = _parse_realized_pnl(p.realized_pnl)
+
+                    # Find bars within holding period
+                    _highs = []
+                    _lows = []
+                    for bar in _inst_bars[_inst_str]:
+                        if bar.ts_init >= _ts_o and bar.ts_init <= _ts_c:
+                            _highs.append(float(bar.high))
+                            _lows.append(float(bar.low))
+
+                    if not _highs:
+                        continue
+
+                    _max_high = max(_highs)
+                    _min_low = min(_lows)
+
+                    if _side_str == "BUY":
+                        _mae = _entry_px - _min_low
+                        _mfe = _max_high - _entry_px
+                    else:
+                        _mae = _max_high - _entry_px
+                        _mfe = _entry_px - _min_low
+
+                    mae_mfe.append({
+                        "pnl": round(_p_pnl, 4),
+                        "mae": round(_mae, 4),
+                        "mfe": round(_mfe, 4),
+                        "side": _side_str,
+                    })
+            except Exception:
+                logger.warning("Failed to compute MAE/MFE", exc_info=True)
+
+            # 5. Holding time distribution (histogram, in hours)
+            try:
+                _durations_h = []
+                for p in closed_positions:
+                    _dur = getattr(p, "duration_ns", None)
+                    if _dur and _dur > 0:
+                        _durations_h.append(int(_dur) / 3.6e12)  # ns -> hours
+                if _durations_h:
+                    _dur_arr = np.array(_durations_h, dtype=float)
+                    _n_bins_h = min(30, max(10, len(_durations_h) // 5))
+                    _h_counts, _h_edges = np.histogram(_dur_arr, bins=_n_bins_h)
+                    for j in range(len(_h_counts)):
+                        holding_time_distribution.append({
+                            "bin_start": round(float(_h_edges[j]), 4),
+                            "bin_end": round(float(_h_edges[j + 1]), 4),
+                            "count": int(_h_counts[j]),
+                        })
+            except Exception:
+                logger.warning("Failed to compute holding time distribution", exc_info=True)
+
+            # 6. Streak sequence
+            try:
+                _streaks: list[dict[str, Any]] = []
+                _cur_type: str | None = None
+                _cur_count = 0
+                _cur_pnl = 0.0
+                for _pv in pnls:
+                    _t = "win" if _pv > 0 else "loss"
+                    if _pv == 0:
+                        _t = "loss"  # breakeven counted as loss streak
+                    if _t == _cur_type:
+                        _cur_count += 1
+                        _cur_pnl += _pv
+                    else:
+                        if _cur_type is not None:
+                            _streaks.append({
+                                "streak_num": len(_streaks) + 1,
+                                "type": _cur_type,
+                                "count": _cur_count,
+                                "total_pnl": round(_cur_pnl, 4),
+                            })
+                        _cur_type = _t
+                        _cur_count = 1
+                        _cur_pnl = _pv
+                if _cur_type is not None:
+                    _streaks.append({
+                        "streak_num": len(_streaks) + 1,
+                        "type": _cur_type,
+                        "count": _cur_count,
+                        "total_pnl": round(_cur_pnl, 4),
+                    })
+                streak_sequence = _streaks
+            except Exception:
+                logger.warning("Failed to compute streak sequence", exc_info=True)
+
+            # 7. Long vs Short comparison
+            try:
+                _long_trades = [p for p in closed_positions if _format_order_side(p.entry) == "BUY"]
+                _short_trades = [p for p in closed_positions if _format_order_side(p.entry) == "SELL"]
+
+                def _side_stats(trades: list) -> dict[str, Any]:
+                    if not trades:
+                        return {"trades": 0, "total_pnl": 0.0, "avg_pnl": 0.0, "win_rate": 0.0}
+                    _pnls_s = [_parse_realized_pnl(t.realized_pnl) for t in trades]
+                    _wins = sum(1 for v in _pnls_s if v > 0)
+                    _total = sum(_pnls_s)
+                    return {
+                        "trades": len(trades),
+                        "total_pnl": round(_total, 4),
+                        "avg_pnl": round(_total / len(trades), 4),
+                        "win_rate": round(_wins / len(trades), 4),
+                    }
+
+                long_vs_short = {
+                    "long": _side_stats(_long_trades),
+                    "short": _side_stats(_short_trades),
+                }
+            except Exception:
+                logger.warning("Failed to compute long vs short comparison", exc_info=True)
+
+            # 8. Return by day-of-week
+            try:
+                _dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                _dow_map: dict[int, list[float]] = {i: [] for i in range(7)}
+                for p in closed_positions:
+                    _ts_c = getattr(p, "ts_closed", None)
+                    if _ts_c and _ts_c > 0:
+                        _dt_c = _ta_dt.fromtimestamp(int(_ts_c) / 1e9, tz=_ta_tz.utc)
+                        _dow_map[_dt_c.weekday()].append(_parse_realized_pnl(p.realized_pnl))
+                for _dow_i in range(7):
+                    return_by_dow.append({
+                        "dow": _dow_i,
+                        "dow_name": _dow_names[_dow_i],
+                        "values": [round(v, 4) for v in _dow_map[_dow_i]],
+                    })
+            except Exception:
+                logger.warning("Failed to compute return by day-of-week", exc_info=True)
+
+            # 9. Return by hour
+            try:
+                _hour_map: dict[int, list[float]] = {i: [] for i in range(24)}
+                for p in closed_positions:
+                    _ts_c = getattr(p, "ts_closed", None)
+                    if _ts_c and _ts_c > 0:
+                        _dt_c = _ta_dt.fromtimestamp(int(_ts_c) / 1e9, tz=_ta_tz.utc)
+                        _hour_map[_dt_c.hour].append(_parse_realized_pnl(p.realized_pnl))
+                for _h in range(24):
+                    return_by_hour.append({
+                        "hour": _h,
+                        "values": [round(v, 4) for v in _hour_map[_h]],
+                    })
+            except Exception:
+                logger.warning("Failed to compute return by hour", exc_info=True)
+
+    except Exception:
+        logger.warning("Failed to compute trades analytics (section 12b)", exc_info=True)
+
+    # ------------------------------------------------------------------
     # 13. Assemble final result
     # ------------------------------------------------------------------
     return {
@@ -1257,6 +1557,16 @@ def extract_backtest_results(
             "beta": _safe_float(beta_val),
             "r_squared": _safe_float(r_squared),
             "information_ratio": _safe_float(information_ratio),
+            # Trades analytics scalar metrics (section 12b)
+            "median_trade_pnl": _safe_float(median_trade_pnl),
+            "std_trade_pnl": _safe_float(std_trade_pnl),
+            "fill_rate": _safe_float(fill_rate),
+            "avg_trades_per_day": _safe_float(avg_trades_per_day),
+            "recovery_factor": _safe_float(recovery_factor),
+            "sqn": _safe_float(sqn),
+            "kelly_criterion": _safe_float(kelly_criterion),
+            "k_ratio": _safe_float(k_ratio),
+            "expectancy_r": _safe_float(expectancy_r),
         },
         "equity_curve": equity_curve,
         "trade_log": trade_log,
@@ -1281,4 +1591,14 @@ def extract_backtest_results(
         "rolling_volatility": rolling_volatility,
         "rolling_beta": rolling_beta,
         "benchmark_type": benchmark_type,
+        # Trades analytics chart data (section 12b)
+        "trade_pnl_distribution": trade_pnl_distribution,
+        "cumulative_trade_pnl": cumulative_trade_pnl,
+        "trade_pnl_scatter": trade_pnl_scatter,
+        "mae_mfe": mae_mfe,
+        "holding_time_distribution": holding_time_distribution,
+        "streak_sequence": streak_sequence,
+        "long_vs_short": long_vs_short,
+        "return_by_dow": return_by_dow,
+        "return_by_hour": return_by_hour,
     }
