@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import collections
 import json
+import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,9 @@ class BridgeActorConfig(ActorConfig):
     heartbeat_interval_secs: int = 5
     heartbeat_ttl_secs: int = 15
     db_url: str = ""  # Empty string = no DB persistence
+    equity_snapshot_interval_secs: int = 60
+    venue_name: str = "BINANCE"
+    currency: str = "USDT"
 
 
 class BridgeActor(Actor):
@@ -56,6 +60,12 @@ class BridgeActor(Actor):
         self._hb_interval = config.heartbeat_interval_secs
         self._hb_ttl = config.heartbeat_ttl_secs
         self._db_url = config.db_url or os.environ.get("TINO_DATABASE__URL", "")
+        self._equity_interval = config.equity_snapshot_interval_secs
+        self._venue_name_str = config.venue_name
+        self._currency_str = config.currency
+        self._venue = None  # resolved in on_start()
+        self._currency_obj = None  # resolved in on_start()
+        self._log_handler = None
         self._redis: redis.Redis | None = None
         self._db_engine: Any = None  # sqlalchemy.Engine | None
         self._cmd_thread: threading.Thread | None = None
@@ -75,6 +85,41 @@ class BridgeActor(Actor):
         self._lifecycle: Any = None  # LifecycleController | None
         self._lifecycle_trader: Any = None  # stored until on_start()
         self._lifecycle_risk_engine: Any = None  # stored until on_start()
+
+    class _RedisLogHandler(logging.Handler):
+        """Publishes log records to Redis with token bucket rate limiting."""
+
+        def __init__(self, redis_client, node_type, rate_limit=10):
+            super().__init__()
+            self._redis = redis_client
+            self._node_type = node_type
+            self._tokens = float(rate_limit)
+            self._last_refill = 0.0
+            self._rate_limit = rate_limit
+
+        def emit(self, record):
+            import time as _time
+            now = _time.monotonic()
+            if self._last_refill == 0.0:
+                self._last_refill = now
+            elapsed = now - self._last_refill
+            self._tokens = min(self._rate_limit, self._tokens + elapsed * self._rate_limit)
+            self._last_refill = now
+            if self._tokens < 1:
+                return
+            self._tokens -= 1
+            try:
+                payload = json.dumps({
+                    "type": "log.entry",
+                    "node_type": self._node_type,
+                    "level": record.levelname,
+                    "message": record.getMessage(),
+                    "logger_name": record.name,
+                    "ts": _ts_ns_to_iso(int(_time.time() * 1e9)),
+                })
+                self._redis.publish(f"tino:{self._node_type}:logs", payload)
+            except Exception:
+                pass
 
     def set_lifecycle_deps(self, trader: Any, risk_engine: Any) -> None:
         """Store trader and risk_engine references for LifecycleController.
@@ -137,6 +182,31 @@ class BridgeActor(Actor):
             interval=timedelta(seconds=1),
         )
 
+        # Resolve venue and currency objects
+        from nautilus_trader.model.identifiers import Venue
+        from tinohelm.data.instruments import _resolve_currency
+        self._venue = Venue(self._venue_name_str)
+        self._currency_obj = _resolve_currency(self._currency_str)
+
+        # Equity snapshot timer
+        self.clock.set_timer(
+            name="equity_snapshot",
+            interval=timedelta(seconds=self._equity_interval),
+        )
+
+        # Subscribe to risk metrics from RiskGuardActor
+        self.msgbus.subscribe("risk.metrics.snapshot", self._on_risk_metrics)
+
+        # Subscribe to strategy signal snapshots
+        from tinohelm.data.strategy_snapshot import StrategySnapshot
+        self.subscribe_data(StrategySnapshot)
+
+        # Install log handler
+        log_handler = self._RedisLogHandler(self._redis, self._node_type)
+        log_handler.setLevel(logging.INFO)
+        logging.getLogger("tinohelm").addHandler(log_handler)
+        self._log_handler = log_handler
+
         # Command listener thread (runs Redis SUBSCRIBE in background)
         self._cmd_thread = threading.Thread(
             target=self._command_listener,
@@ -151,15 +221,53 @@ class BridgeActor(Actor):
         )
         self._file_watcher_thread.start()
 
+        # Auto-resume portfolios that were running before last restart
+        if hasattr(self, '_registry') and self._registry is not None:
+            resume_names = [
+                name for name, entry in self._registry._portfolios.items()
+                if entry.was_running and entry.state == "available"
+            ]
+            if resume_names:
+                self._pending_auto_resume = resume_names
+                self.log.info(f"Will auto-resume {len(resume_names)} portfolio(s) in 15s: {resume_names}")
+                self.clock.set_time_alert(
+                    name="auto_resume_portfolios",
+                    alert_time=self.clock.utc_now() + timedelta(seconds=15),
+                )
+
         self.log.info(f"BridgeActor started for {self._node_type}")
 
     def on_event(self, event: Event) -> None:
         """Handle timer events for command dispatch (runs on NT event loop)."""
+        if isinstance(event, TimeEvent) and event.name == "auto_resume_portfolios":
+            self._do_auto_resume()
+            return
         if isinstance(event, TimeEvent) and event.name == "bridge_cmd_dispatch":
             self._drain_pending_commands()
             # Check flatten-stop completion on the same timer
             if self._lifecycle and self._lifecycle._flatten_stop_pending:
                 self._lifecycle.check_flatten_stop_completion()
+        elif isinstance(event, TimeEvent) and event.name == "equity_snapshot":
+            self._take_equity_snapshot()
+
+    def on_data(self, data) -> None:
+        """Handle structured data events (StrategySnapshot)."""
+        from tinohelm.data.strategy_snapshot import StrategySnapshot
+        if isinstance(data, StrategySnapshot):
+            self._on_strategy_snapshot(data)
+
+    def _do_auto_resume(self) -> None:
+        """Auto-resume portfolios that were running before last restart."""
+        names = getattr(self, '_pending_auto_resume', [])
+        if not names or not self._lifecycle:
+            return
+        for name in names:
+            try:
+                self.log.info(f"Auto-resuming portfolio '{name}'")
+                self._lifecycle.start_portfolio(name)
+            except Exception as e:
+                self.log.error(f"Auto-resume failed for '{name}': {e}")
+        self._pending_auto_resume = []
 
     def _drain_pending_commands(self) -> None:
         """Process all queued commands on the NT event loop thread."""
@@ -220,6 +328,12 @@ class BridgeActor(Actor):
                     self._lifecycle.pause_portfolio(cmd.get("portfolio_name", ""))
                 elif action == "resume_portfolio":
                     self._lifecycle.resume_portfolio(cmd.get("portfolio_name", ""))
+                elif action == "cancel_order":
+                    coid = cmd.get("client_order_id")
+                    if coid:
+                        self._lifecycle.cancel_order(coid)
+                    else:
+                        self.log.warning("cancel_order: missing client_order_id")
                 else:
                     self.log.warning(f"Unknown command: {action}")
             except Exception as e:
@@ -227,6 +341,9 @@ class BridgeActor(Actor):
                 self._publish("commands_ack", {"cmd": action, "status": "error", "reason": str(e)})
 
     def on_stop(self) -> None:
+        if self._log_handler:
+            logging.getLogger("tinohelm").removeHandler(self._log_handler)
+            self._log_handler = None
         self._running = False
         if self._file_watcher_thread and self._file_watcher_thread.is_alive():
             self._file_watcher_thread.join(timeout=5)
@@ -297,6 +414,25 @@ class BridgeActor(Actor):
             if hasattr(self, '_registry') and self._registry is not None:
                 payload["portfolios"] = self._registry.get_all_states()
 
+            # Account balance for margin display
+            try:
+                if self._venue and self._currency_obj:
+                    account = self.portfolio.account(self._venue)
+                    if account:
+                        bt = account.balance_total(self._currency_obj)
+                        bf = account.balance_free(self._currency_obj)
+                        payload["balance_total"] = float(bt.as_double()) if bt else 0.0
+                        payload["balance_free"] = float(bf.as_double()) if bf else 0.0
+            except Exception:
+                pass
+
+            # Subscribed bar types
+            try:
+                bar_types = self.cache.bar_types()
+                payload["bar_types"] = [str(bt) for bt in bar_types] if bar_types else []
+            except Exception:
+                payload["bar_types"] = []
+
             self._redis.setex(
                 f"tino:heartbeat:{self._node_type}",
                 self._hb_ttl,
@@ -326,6 +462,113 @@ class BridgeActor(Actor):
                     pass  # Best-effort persistence
         except Exception as e:
             self.log.error(f"Heartbeat error: {e}")
+
+    def _take_equity_snapshot(self) -> None:
+        """Sample current equity and publish + persist."""
+        if not self._redis or self._venue is None:
+            return
+        try:
+            account = self.portfolio.account(self._venue)
+            if account is None:
+                return
+            balance_money = account.balance_total(self._currency_obj)
+            if balance_money is None:
+                return
+            balance = float(balance_money.as_double())
+            unrealized = 0.0
+            try:
+                pnls = self.portfolio.unrealized_pnls(self._venue)
+                if pnls:
+                    for _currency, pnl_money in pnls.items():
+                        unrealized += float(pnl_money.as_double())
+            except Exception:
+                pass
+            equity = balance + unrealized
+            ts = _ts_ns_to_iso(self.clock.timestamp_ns())
+            payload = {
+                "type": "equity.snapshot",
+                "node_type": self._node_type,
+                "equity": round(equity, 2),
+                "balance": round(balance, 2),
+                "unrealized_pnl": round(unrealized, 2),
+                "ts": ts,
+            }
+            # Publish to Redis PubSub
+            self._publish("equity", payload)
+            # Store in Redis list (capped)
+            key = f"tino:{self._node_type}:equity_history"
+            self._redis.rpush(key, json.dumps(payload, default=str))
+            self._redis.ltrim(key, -1440, -1)
+            # Persist to DB
+            self._persist_equity_snapshot(equity, balance, unrealized, ts)
+        except Exception as e:
+            self.log.error(f"Equity snapshot error: {e}")
+
+    def _persist_equity_snapshot(self, equity: float, balance: float, unrealized: float, ts: str) -> None:
+        """Insert equity snapshot to DB."""
+        if not self._db_engine:
+            return
+        try:
+            from sqlalchemy import text
+            from sqlalchemy.orm import Session
+            stmt = text(
+                "INSERT INTO equity_snapshots (node_type, equity, balance, unrealized_pnl, ts) "
+                "VALUES (:node_type, :equity, :balance, :unrealized_pnl, :ts)"
+            )
+            with Session(self._db_engine) as session:
+                session.execute(stmt, {
+                    "node_type": self._node_type,
+                    "equity": equity,
+                    "balance": balance,
+                    "unrealized_pnl": unrealized,
+                    "ts": ts,
+                })
+                session.commit()
+        except Exception as e:
+            self.log.error(f"DB persist equity error: {e}")
+
+    def _on_risk_metrics(self, data: dict) -> None:
+        """Relay risk metrics from RiskGuardActor to Redis."""
+        if not isinstance(data, dict):
+            return
+        data["type"] = "risk.metrics"
+        data["node_type"] = self._node_type
+        self._publish("risk", data)
+        # Also persist as key for REST API initial load
+        if self._redis:
+            try:
+                self._redis.setex(
+                    f"tino:{self._node_type}:risk_metrics",
+                    30,
+                    json.dumps(data, default=str),
+                )
+            except Exception:
+                pass
+
+    def _on_strategy_snapshot(self, snapshot) -> None:
+        """Relay strategy snapshot to Redis PubSub + ring buffer."""
+        try:
+            fields = json.loads(snapshot.fields_json)
+        except Exception:
+            return
+        payload = {
+            "type": "signal.snapshot",
+            "node_type": self._node_type,
+            "strategy_id": snapshot.strategy_id,
+            "instrument_id": snapshot.instrument_id,
+            "fields": fields,
+            "ts": _ts_ns_to_iso(snapshot.ts_event),
+        }
+        # Publish to Redis PubSub for real-time WS
+        self._publish("signals", payload)
+        # Store in Redis ring buffer for sparkline history (30 entries)
+        if self._redis:
+            try:
+                key = f"tino:{self._node_type}:signals:history:{snapshot.strategy_id}"
+                self._redis.lpush(key, json.dumps(payload, default=str))
+                self._redis.ltrim(key, 0, 29)
+            except Exception as e:
+                self.log.error(f"Redis signal history error: {e}")
 
     def _command_listener(self) -> None:
         """Background thread listening for commands via Redis PubSub."""
