@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { RefreshCw, Play, Pause, RotateCcw, Square, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { apiGet, apiPost } from "@/lib/api";
 
 interface StrategyInfo {
@@ -48,10 +49,19 @@ const STRATEGY_STATUS_COLORS: Record<string, string> = {
   error: "var(--accent-red)",
 };
 
+const ACTION_LABELS: Record<string, string> = {
+  start: "启动",
+  pause: "暂停",
+  resume: "恢复",
+  "flatten-stop": "平仓停止",
+};
+
 export function StrategyPanel({ nodeType }: Props) {
   const [data, setData] = useState<LifecycleState>({ strategies: [], portfolios: [] });
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fastPollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -67,33 +77,63 @@ export function StrategyPanel({ nodeType }: Props) {
         portfolios,
         strategies: stateRes?.strategies ?? [],
       });
-    } catch {
-      // silent — show stale data
+    } catch (err) {
+      toast.error("无法连接到节点 API");
+      console.error("fetchData error:", err);
     } finally {
       setLoading(false);
     }
   }, [nodeType]);
 
+  const startPolling = useCallback((intervalMs: number) => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    intervalRef.current = setInterval(fetchData, intervalMs);
+  }, [fetchData]);
+
+  const startFastPollThenRevert = useCallback(() => {
+    // Switch to 1s polling for 10 seconds, then revert to 5s
+    startPolling(1000);
+    if (fastPollTimeoutRef.current) clearTimeout(fastPollTimeoutRef.current);
+    fastPollTimeoutRef.current = setTimeout(() => {
+      startPolling(5000);
+    }, 10000);
+  }, [startPolling]);
+
   useEffect(() => {
     fetchData();
-    const id = setInterval(fetchData, 5000);
-    return () => clearInterval(id);
-  }, [fetchData]);
+    startPolling(5000);
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (fastPollTimeoutRef.current) clearTimeout(fastPollTimeoutRef.current);
+    };
+  }, [fetchData, startPolling]);
 
   const handlePortfolioAction = useCallback(
     async (portfolioName: string, action: "start" | "pause" | "resume" | "flatten-stop") => {
+      // Confirmation for dangerous action
+      if (action === "flatten-stop") {
+        const confirmed = window.confirm(
+          `确定要平仓并停止 "${portfolioName}" 吗？这将关闭所有持仓并移除策略。`
+        );
+        if (!confirmed) return;
+      }
+
+      const actionLabel = ACTION_LABELS[action];
       const key = `${portfolioName}:${action}`;
       setActionLoading(key);
       try {
         await apiPost(`/api/node/portfolio/${action}`, { name: portfolioName, mode: nodeType });
+        toast.success(`组合 "${portfolioName}" 已${actionLabel}`);
         await fetchData();
-      } catch {
-        // silent
+        startFastPollThenRevert();
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        toast.error(`组合 "${portfolioName}" ${actionLabel}失败: ${error.message || "未知错误"}`);
       } finally {
         setActionLoading(null);
       }
     },
-    [nodeType, fetchData]
+    [nodeType, fetchData, startFastPollThenRevert]
   );
 
   return (
@@ -181,10 +221,10 @@ export function StrategyPanel({ nodeType }: Props) {
               return (
                 <div
                   key={p.name}
-                  className="rounded p-2 bg-popover border border-border"
+                  className="rounded p-3 bg-popover border border-border"
                 >
                   <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[11px] font-semibold text-foreground truncate max-w-[120px]">
+                    <span className="text-[12px] font-semibold text-foreground truncate max-w-[120px]">
                       {p.name}
                     </span>
                     <span
@@ -199,10 +239,10 @@ export function StrategyPanel({ nodeType }: Props) {
                   </div>
 
                   {/* Action buttons */}
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1.5">
                     {isAvailable && (
                       <PortfolioButton
-                        icon={<Play className="w-2.5 h-2.5" />}
+                        icon={<Play className="w-3.5 h-3.5" />}
                         label="启动"
                         loading={actionLoading === `${p.name}:start`}
                         onClick={() => handlePortfolioAction(p.name, "start")}
@@ -211,7 +251,7 @@ export function StrategyPanel({ nodeType }: Props) {
                     )}
                     {isRunning && (
                       <PortfolioButton
-                        icon={<Pause className="w-2.5 h-2.5" />}
+                        icon={<Pause className="w-3.5 h-3.5" />}
                         label="暂停"
                         loading={actionLoading === `${p.name}:pause`}
                         onClick={() => handlePortfolioAction(p.name, "pause")}
@@ -220,7 +260,7 @@ export function StrategyPanel({ nodeType }: Props) {
                     )}
                     {isPaused && (
                       <PortfolioButton
-                        icon={<RotateCcw className="w-2.5 h-2.5" />}
+                        icon={<RotateCcw className="w-3.5 h-3.5" />}
                         label="恢复"
                         loading={actionLoading === `${p.name}:resume`}
                         onClick={() => handlePortfolioAction(p.name, "resume")}
@@ -229,7 +269,7 @@ export function StrategyPanel({ nodeType }: Props) {
                     )}
                     {(isRunning || isPaused) && (
                       <PortfolioButton
-                        icon={<Square className="w-2.5 h-2.5" />}
+                        icon={<Square className="w-3.5 h-3.5" />}
                         label="平仓停止"
                         loading={actionLoading === `${p.name}:flatten-stop`}
                         onClick={() => handlePortfolioAction(p.name, "flatten-stop")}
@@ -267,7 +307,7 @@ function PortfolioButton({
     <button
       onClick={onClick}
       disabled={loading}
-      className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold transition-opacity hover:opacity-80 disabled:opacity-50"
+      className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[11px] font-bold transition-opacity hover:opacity-80 disabled:opacity-50"
       style={{
         color,
         backgroundColor: `${color}18`,
@@ -275,7 +315,7 @@ function PortfolioButton({
       }}
     >
       {loading ? (
-        <Loader2 className="w-2.5 h-2.5 animate-spin" />
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
       ) : (
         icon
       )}

@@ -1,62 +1,98 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { motion } from "framer-motion";
 import { apiGet } from "@/lib/api";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
 import { useWsEvent } from "@/providers/WebSocketProvider";
-import { StrategyPanel } from "./components/StrategyPanel";
-import { PositionsTable, type Position } from "./components/PositionsTable";
-import { FillsStream, type Fill } from "./components/FillsStream";
-import { OrdersPanel, type Order } from "./components/OrdersPanel";
-import { ActionBar } from "./components/ActionBar";
+import { TopBar } from "./components/TopBar";
+import { OverviewTab } from "./components/tabs/OverviewTab";
+import { OrdersTab } from "./components/tabs/OrdersTab";
+import { StrategiesTab } from "./components/tabs/StrategiesTab";
+import { RiskTab } from "./components/tabs/RiskTab";
+import { MarketDataTab } from "./components/tabs/MarketDataTab";
+import { LogsTab } from "./components/tabs/LogsTab";
+import { BacktestCompareTab } from "./components/tabs/BacktestCompareTab";
+import { PaperSettingsTab } from "./components/tabs/PaperSettingsTab";
+
+export type NodeType = "sandbox" | "live";
+
+export interface Position {
+  id: number;
+  node_type: string;
+  position_id: string;
+  strategy_id_tag: string;
+  instrument_id: string;
+  side: string;
+  quantity: string;
+  signed_qty: number;
+  avg_px_open: number | null;
+  avg_px_close: number | null;
+  realized_pnl: number | null;
+  unrealized_pnl: number | null;
+  currency: string | null;
+  entry_side: string | null;
+  peak_qty: string | null;
+  ts_opened: string | null;
+  ts_closed: string | null;
+  duration: string | null;
+  is_open: boolean;
+  event_count: number;
+  updated_at: string | null;
+}
+
+export interface Fill {
+  id: number;
+  node_type: string;
+  trade_id: string;
+  position_id: string | null;
+  client_order_id: string;
+  venue_order_id: string | null;
+  strategy_id_tag: string | null;
+  instrument_id: string;
+  order_side: string;
+  last_qty: string;
+  last_px: string;
+  commission: string | null;
+  liquidity_side: string | null;
+  ts_event: string;
+  created_at: string | null;
+}
+
+export interface Order {
+  client_order_id: string;
+  instrument_id: string;
+  side: string;
+  type: string;
+  quantity: string;
+  price: string | null;
+  status: string;
+  strategy_id?: string;
+  ts_event?: string;
+}
 
 const MAX_FILLS = 50;
 
-type NodeType = "sandbox" | "live";
-
-interface NodeStatus {
-  positions?: Position[];
-  orders?: Order[];
-  risk_metrics?: {
-    total_exposure?: number;
-    margin_used_pct?: number;
-    leverage?: number;
-    daily_var?: number;
-  };
-}
-
 export default function TradingPage() {
   const [nodeType, setNodeType] = useState<NodeType>("sandbox");
+  const [activeTab, setActiveTab] = useState("overview");
   const [positions, setPositions] = useState<Position[]>([]);
   const [fills, setFills] = useState<Fill[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [riskMetrics, setRiskMetrics] = useState<NodeStatus["risk_metrics"]>({});
   const [loading, setLoading] = useState(true);
 
-  // Track current nodeType in ref to prevent stale closures in WS handlers
   const nodeTypeRef = useRef<NodeType>(nodeType);
   useEffect(() => { nodeTypeRef.current = nodeType; }, [nodeType]);
 
-  // Fetch initial data
-  const fetchStatus = useCallback(async (mode: NodeType) => {
+  const fetchData = useCallback(async (mode: NodeType) => {
     setLoading(true);
     try {
-      const [statusData, fillsData] = await Promise.all([
-        apiGet<NodeStatus>("/api/node/status", { mode }),
-        apiGet<{ fills: Fill[] }>("/api/trading/fills", { mode, limit: "50" }),
+      const [posData, fillsData] = await Promise.all([
+        apiGet<Position[]>("/api/trading/positions", { node_type: mode, is_open: "true" }),
+        apiGet<Fill[]>("/api/trading/fills", { node_type: mode, limit: "50" }),
       ]);
-      if (statusData) {
-        setPositions(statusData.positions ?? []);
-        setOrders(statusData.orders ?? []);
-        setRiskMetrics(statusData.risk_metrics ?? {});
-      }
-      if (fillsData?.fills) {
-        setFills(fillsData.fills.slice(0, MAX_FILLS));
-      }
+      setPositions(posData ?? []);
+      setFills((fillsData ?? []).slice(0, MAX_FILLS));
     } catch {
-      // silent — show stale/empty state
+      // silent
     } finally {
       setLoading(false);
     }
@@ -66,17 +102,18 @@ export default function TradingPage() {
     setPositions([]);
     setFills([]);
     setOrders([]);
-    fetchStatus(nodeType);
-  }, [nodeType, fetchStatus]);
+    fetchData(nodeType);
+  }, [nodeType, fetchData]);
 
   // WS: position updates
   const positionMsg = useWsEvent("position.update");
   useEffect(() => {
     if (!positionMsg) return;
-    const data = positionMsg.data as { node_type?: string; position?: Position };
+    const envelope = positionMsg as unknown as Record<string, unknown>;
+    const data = (envelope.data ?? envelope) as { node_type?: string; position?: Position; position_id?: string };
     if (data?.node_type && data.node_type !== nodeTypeRef.current) return;
-    if (!data?.position) return;
-    const pos = data.position;
+    const pos = data?.position ?? (data?.position_id ? (data as unknown as Position) : null);
+    if (!pos) return;
     setPositions((prev) => {
       const idx = prev.findIndex((p) => p.position_id === pos.position_id);
       if (idx === -1) return [pos, ...prev];
@@ -90,13 +127,14 @@ export default function TradingPage() {
   const fillMsg = useWsEvent("fill.new");
   useEffect(() => {
     if (!fillMsg) return;
-    const data = fillMsg.data as { node_type?: string; fill?: Fill };
+    const envelope = fillMsg as unknown as Record<string, unknown>;
+    const data = (envelope.data ?? envelope) as { node_type?: string; fill?: Fill; trade_id?: string };
     if (data?.node_type && data.node_type !== nodeTypeRef.current) return;
-    if (!data?.fill) return;
+    const fill = data?.fill ?? (data?.trade_id ? (data as unknown as Fill) : null);
+    if (!fill) return;
     setFills((prev) => {
-      // Deduplicate by trade_id
-      if (prev.some((f) => f.trade_id === data.fill!.trade_id)) return prev;
-      return [data.fill!, ...prev].slice(0, MAX_FILLS);
+      if (prev.some((f) => f.trade_id === fill.trade_id)) return prev;
+      return [fill, ...prev].slice(0, MAX_FILLS);
     });
   }, [fillMsg]);
 
@@ -104,13 +142,14 @@ export default function TradingPage() {
   const orderMsg = useWsEvent("order.update");
   useEffect(() => {
     if (!orderMsg) return;
-    const data = orderMsg.data as { node_type?: string; order?: Order };
+    const envelope = orderMsg as unknown as Record<string, unknown>;
+    const data = (envelope.data ?? envelope) as { node_type?: string; order?: Order; client_order_id?: string };
     if (data?.node_type && data.node_type !== nodeTypeRef.current) return;
-    if (!data?.order) return;
-    const ord = data.order;
+    const ord = data?.order ?? (data?.client_order_id ? (data as unknown as Order) : null);
+    if (!ord) return;
     setOrders((prev) => {
-      const terminalStatuses = ["FILLED", "CANCELED", "EXPIRED", "DENIED", "REJECTED"];
-      if (terminalStatuses.includes(ord.status)) {
+      const terminal = ["FILLED", "CANCELED", "EXPIRED", "DENIED", "REJECTED"];
+      if (terminal.includes(ord.status)) {
         return prev.filter((o) => o.client_order_id !== ord.client_order_id);
       }
       const idx = prev.findIndex((o) => o.client_order_id === ord.client_order_id);
@@ -121,110 +160,42 @@ export default function TradingPage() {
     });
   }, [orderMsg]);
 
+  // When switching to live mode, hide sandbox-only tabs
+  useEffect(() => {
+    if (nodeType === "live" && (activeTab === "compare" || activeTab === "settings")) {
+      setActiveTab("overview");
+    }
+  }, [nodeType, activeTab]);
+
+  const renderTab = () => {
+    switch (activeTab) {
+      case "overview":
+        return <OverviewTab nodeType={nodeType} positions={positions} loading={loading} />;
+      case "orders":
+        return <OrdersTab nodeType={nodeType} orders={orders} fills={fills} onRefresh={() => fetchData(nodeType)} />;
+      case "strategies":
+        return <StrategiesTab nodeType={nodeType} />;
+      case "risk":
+        return <RiskTab nodeType={nodeType} />;
+      case "market":
+        return <MarketDataTab nodeType={nodeType} />;
+      case "logs":
+        return <LogsTab nodeType={nodeType} />;
+      case "compare":
+        return <BacktestCompareTab nodeType={nodeType} />;
+      case "settings":
+        return <PaperSettingsTab nodeType={nodeType} />;
+      default:
+        return <OverviewTab nodeType={nodeType} positions={positions} loading={loading} />;
+    }
+  };
+
   return (
     <div className="flex flex-col h-full overflow-hidden bg-background">
-      {/* Node type tabs */}
-      <div className="shrink-0 flex items-center gap-0 px-4 border-b border-border bg-sidebar">
-        {(["sandbox", "live"] as const).map((mode) => (
-          <Button
-            key={mode}
-            variant="ghost"
-            onClick={() => setNodeType(mode)}
-            className="relative px-5 py-3 text-[11px] font-bold tracking-wide uppercase transition-colors"
-            style={{
-              color:
-                nodeType === mode
-                  ? mode === "live"
-                    ? "var(--accent-green)"
-                    : "var(--accent-amber)"
-                  : "var(--muted-foreground)",
-            }}
-          >
-            {mode === "sandbox" ? "沙盒" : "实盘"}
-            {nodeType === mode && (
-              <motion.div
-                layoutId="tab-underline"
-                className="absolute bottom-0 left-0 right-0 h-0.5"
-                style={{
-                  backgroundColor:
-                    mode === "live" ? "var(--accent-green)" : "var(--accent-amber)",
-                }}
-                transition={{ type: "spring", stiffness: 400, damping: 35 }}
-              />
-            )}
-          </Button>
-        ))}
+      <TopBar nodeType={nodeType} onNodeTypeChange={setNodeType} activeTab={activeTab} onTabChange={setActiveTab} />
+      <div className="flex-1 overflow-auto">
+        {renderTab()}
       </div>
-
-      {/* Main 3-column layout */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left column: Strategy panel */}
-        <div
-          className="shrink-0 flex flex-col border-r border-border bg-card"
-          style={{ width: 280 }}
-        >
-          <StrategyPanel nodeType={nodeType} />
-        </div>
-
-        {/* Center: Positions + Equity area */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Positions table */}
-          <div className="flex-1 overflow-hidden border-b border-border bg-card">
-            {loading ? (
-              <PositionsSkeleton />
-            ) : (
-              <PositionsTable positions={positions} />
-            )}
-          </div>
-
-          {/* Equity chart placeholder */}
-          <div
-            className="shrink-0 border-t border-border bg-card flex items-center justify-center"
-            style={{ height: 160 }}
-          >
-            <span className="text-[10px] text-muted-foreground tracking-[0.5px] uppercase">
-              权益曲线 — 即将推出
-            </span>
-          </div>
-        </div>
-
-        {/* Right column: Fills + Orders */}
-        <div
-          className="shrink-0 flex flex-col border-l border-border bg-card"
-          style={{ width: 320 }}
-        >
-          {/* Fills stream — top half */}
-          <div className="flex-1 overflow-hidden border-b border-border">
-            <FillsStream fills={fills} />
-          </div>
-
-          {/* Orders panel — bottom half */}
-          <div className="flex-1 overflow-hidden">
-            <OrdersPanel
-              orders={orders}
-              nodeType={nodeType}
-              onOrderCancelled={() => fetchStatus(nodeType)}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Bottom action bar */}
-      <ActionBar nodeType={nodeType} riskMetrics={riskMetrics ?? {}} />
-    </div>
-  );
-}
-
-function PositionsSkeleton() {
-  return (
-    <div className="p-4 space-y-3">
-      <div className="flex items-center gap-2 mb-4">
-        <Skeleton className="h-4 w-16" />
-        <Skeleton className="h-4 w-6" />
-      </div>
-      {[1, 2, 3, 4].map((i) => (
-        <Skeleton key={i} className="h-10 w-full" />
-      ))}
     </div>
   );
 }

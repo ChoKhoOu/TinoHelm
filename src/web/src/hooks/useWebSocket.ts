@@ -65,6 +65,56 @@ export interface BacktestProgressEvent extends WsEventMessage {
   };
 }
 
+export interface EquitySnapshotEvent extends WsEventMessage {
+  type: 'equity.snapshot';
+  data: {
+    node_type: string;
+    equity: number;
+    balance: number;
+    unrealized_pnl: number;
+    ts: string;
+    [key: string]: unknown;
+  };
+}
+
+export interface RiskMetricsEvent extends WsEventMessage {
+  type: 'risk.metrics';
+  data: {
+    node_type: string;
+    equity: number;
+    peak_equity: number;
+    drawdown_pct: number;
+    daily_pnl_pct: number;
+    total_exposure: number;
+    position_count: number;
+    breached: boolean;
+    breach_reason: string;
+    per_instrument_exposure: Record<string, number>;
+    [key: string]: unknown;
+  };
+}
+
+export interface LogEntryEvent extends WsEventMessage {
+  type: 'log.entry';
+  data: {
+    node_type: string;
+    level: "DEBUG" | "INFO" | "WARNING" | "ERROR";
+    message: string;
+    logger_name: string;
+    ts: string;
+    [key: string]: unknown;
+  };
+}
+
+export interface SignalSnapshotEvent {
+  type: "signal.snapshot";
+  node_type: string;
+  strategy_id: string;
+  instrument_id: string;
+  fields: Record<string, unknown>;
+  ts: string;
+}
+
 interface UseWebSocketOptions {
   path?: string;
   channels?: string[];
