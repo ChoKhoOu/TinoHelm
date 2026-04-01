@@ -4,6 +4,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import SecretStr
 
 from tinohelm.node.factory import build_trading_node_config
 
@@ -19,8 +20,8 @@ def _make_settings(
     """Build a minimal mock Settings object."""
     settings = MagicMock()
     settings.redis.url = redis_url
-    settings.binance.api_key = api_key
-    settings.binance.api_secret = api_secret
+    settings.binance.api_key = SecretStr(api_key)
+    settings.binance.api_secret = SecretStr(api_secret)
     settings.binance.account_type = account_type
     settings.binance.testnet = testnet
     settings.database.url = db_url
