@@ -970,7 +970,7 @@ class BacktestRunner:
                 a._risk_engine = engine.kernel.risk_engine
 
         engine.run()
-        return self._extract_results(engine, starting_balance)
+        return self._extract_results(engine, starting_balance, compute_robustness=False)
 
     def _export_reports(self, engine: BacktestEngine) -> None:
         """Export all 5 raw reports from the engine to CSV before dispose."""
@@ -1340,11 +1340,15 @@ class BacktestRunner:
         except Exception:
             logger.warning("Failed to enhance tearsheet", exc_info=True)
 
-    def _extract_results(self, engine: BacktestEngine, starting_balance: float = 10000) -> dict[str, Any]:
+    def _extract_results(
+        self, engine: BacktestEngine, starting_balance: float = 10000,
+        compute_robustness: bool = True,
+    ) -> dict[str, Any]:
         """Extract results from completed backtest engine."""
         from tinohelm.backtest.result import extract_backtest_results
         return extract_backtest_results(
             engine,
             starting_balance=starting_balance,
             benchmark_daily_closes=getattr(self, "_benchmark_daily_closes", None),
+            compute_robustness=compute_robustness,
         )

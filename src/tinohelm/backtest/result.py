@@ -125,10 +125,138 @@ def _norm_ppf(p: float) -> float:
     return t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
 
 
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF approximation. Pure Python, no scipy."""
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def _compute_psr(
+    daily_sharpe: float | None,
+    n_obs: int,
+    skewness: float,
+    kurtosis: float,
+    benchmark_sr: float = 0.0,
+) -> float | None:
+    """Probabilistic Sharpe Ratio — Bailey & López de Prado (2012).
+
+    Parameters
+    ----------
+    daily_sharpe : per-period (daily) Sharpe = mean_ret / std_ret (NOT annualized)
+    n_obs : number of daily return observations
+    skewness, kurtosis : of daily returns (excess kurtosis, i.e. normal=0)
+    benchmark_sr : benchmark daily Sharpe (default 0)
+    """
+    if daily_sharpe is None or n_obs < 5:
+        return None
+    sr = daily_sharpe
+    denom_sq = 1 - skewness * sr + ((kurtosis - 1) / 4) * sr * sr
+    if denom_sq <= 0:
+        return None
+    z = (sr - benchmark_sr) * math.sqrt(n_obs - 1) / math.sqrt(denom_sq)
+    return round(_norm_cdf(z), 4)
+
+
+def _compute_min_backtest_length(
+    daily_sharpe: float | None,
+    skewness: float,
+    kurtosis: float,
+    confidence: float = 0.95,
+) -> int | None:
+    """Minimum Backtest Length in days — Bailey & López de Prado (2012).
+
+    Returns None if daily_sharpe <= 0 (undefined for non-positive SR).
+    """
+    if daily_sharpe is None or daily_sharpe <= 0:
+        return None
+    z_alpha = _norm_ppf(confidence)
+    sr = daily_sharpe
+    numer = 1 - skewness * sr + ((kurtosis - 1) / 4) * sr * sr
+    if numer <= 0:
+        return None
+    mbl = 1 + numer * (z_alpha / sr) ** 2
+    return max(1, int(math.ceil(mbl)))
+
+
+def _compute_monte_carlo(
+    trade_pnls: list[float],
+    starting_balance: float,
+    n_sims: int = 1000,
+    max_curve_points: int = 500,
+) -> dict | None:
+    """Monte Carlo equity cone via trade-order shuffling.
+
+    Returns None if fewer than 2 trades.
+    Uses fixed seed for reproducibility.
+    Downsamples curves to *max_curve_points* if n_trades exceeds that.
+    """
+    if len(trade_pnls) < 2:
+        return None
+
+    import numpy as np
+
+    rng = np.random.default_rng(seed=42)
+    pnls = np.array(trade_pnls, dtype=np.float64)
+    n_trades = len(pnls)
+
+    # Run simulations
+    all_curves = np.empty((n_sims, n_trades), dtype=np.float64)
+    for i in range(n_sims):
+        shuffled = rng.permutation(pnls)
+        all_curves[i] = starting_balance + np.cumsum(shuffled)
+
+    # Original equity curve
+    original = starting_balance + np.cumsum(pnls)
+
+    # Percentile bands at each trade index
+    p5, p25, p50, p75, p95 = np.percentile(
+        all_curves, [5, 25, 50, 75, 95], axis=0,
+    )
+
+    # Summary metrics
+    final_values = all_curves[:, -1]
+    final_returns = (final_values - starting_balance) / starting_balance
+
+    # Max drawdown per simulation
+    def _mc_max_dd(curve: np.ndarray) -> float:
+        peak = np.maximum.accumulate(curve)
+        dd = (curve - peak) / np.where(peak > 0, peak, 1.0)
+        return float(dd.min())
+
+    max_dds = np.array([_mc_max_dd(all_curves[i]) for i in range(n_sims)])
+
+    # Downsample if too many trades
+    if n_trades > max_curve_points:
+        indices = np.linspace(0, n_trades - 1, max_curve_points, dtype=int)
+        p5, p25, p50, p75, p95 = p5[indices], p25[indices], p50[indices], p75[indices], p95[indices]
+        original = original[indices]
+        x_labels = indices.tolist()
+    else:
+        x_labels = list(range(n_trades))
+
+    return {
+        "percentiles": [5, 25, 50, 75, 95],
+        "curves": {
+            "p5": [round(float(v), 2) for v in p5],
+            "p25": [round(float(v), 2) for v in p25],
+            "p50": [round(float(v), 2) for v in p50],
+            "p75": [round(float(v), 2) for v in p75],
+            "p95": [round(float(v), 2) for v in p95],
+        },
+        "original": [round(float(v), 2) for v in original],
+        "x_labels": x_labels,
+        "mc_probability_of_loss": round(float(np.mean(final_returns < 0)) * 100, 2),
+        "mc_5th_percentile_return": round(float(np.percentile(final_returns, 5)) * 100, 2),
+        "mc_median_max_drawdown": round(float(np.median(max_dds)) * 100, 2),
+        "mc_median_final_return": round(float(np.median(final_returns)) * 100, 2),
+        "mc_num_simulations": n_sims,
+    }
+
+
 def extract_backtest_results(
     engine: BacktestEngine,
     starting_balance: float = 10000,
     benchmark_daily_closes: dict[str, dict[str, float]] | None = None,
+    compute_robustness: bool = True,
 ) -> dict[str, Any]:
     """Extract comprehensive results from a completed BacktestEngine.
 
@@ -1496,7 +1624,7 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     # 13. Assemble final result
     # ------------------------------------------------------------------
-    return {
+    _result = {
         "statistics": {
             "total_pnl": round(total_pnl, 4),
             "total_return_pct": round(total_return_pct, 4),
@@ -1602,3 +1730,52 @@ def extract_backtest_results(
         "return_by_dow": return_by_dow,
         "return_by_hour": return_by_hour,
     }
+
+    # ------------------------------------------------------------------
+    # 14. Robustness metrics (Layer 1 — any backtest)
+    # ------------------------------------------------------------------
+    robustness = None
+    if compute_robustness:
+        try:
+            _r_daily_sr = (mean_ret / std_ret) if std_ret and std_ret > 1e-12 else None
+            _r_sk = skewness if skewness is not None else 0.0
+            _r_ku = kurtosis_val if kurtosis_val is not None else 0.0
+            _r_nobs = _n_days if _n_days else 0
+
+            psr_val = _compute_psr(_r_daily_sr, _r_nobs, _r_sk, _r_ku)
+            mbl_val = _compute_min_backtest_length(_r_daily_sr, _r_sk, _r_ku)
+
+            # MC from trade PnLs
+            trade_pnl_list = [
+                float(t["realized_pnl"])
+                for t in trade_log
+                if isinstance(t.get("realized_pnl"), (int, float))
+            ]
+            mc_result = _compute_monte_carlo(trade_pnl_list, starting_balance)
+
+            robustness = {
+                "psr": psr_val,
+                "min_backtest_length_days": mbl_val,
+                "actual_backtest_length_days": _r_nobs,
+                "backtest_length_sufficient": (
+                    (_r_nobs >= mbl_val) if mbl_val is not None else None
+                ),
+            }
+            if mc_result:
+                robustness["mc_equity_cone"] = {
+                    "percentiles": mc_result["percentiles"],
+                    "curves": mc_result["curves"],
+                    "original": mc_result["original"],
+                    "x_labels": mc_result["x_labels"],
+                }
+                robustness["mc_probability_of_loss"] = mc_result["mc_probability_of_loss"]
+                robustness["mc_5th_percentile_return"] = mc_result["mc_5th_percentile_return"]
+                robustness["mc_median_max_drawdown"] = mc_result["mc_median_max_drawdown"]
+                robustness["mc_median_final_return"] = mc_result["mc_median_final_return"]
+                robustness["mc_num_simulations"] = mc_result["mc_num_simulations"]
+        except Exception:
+            logger.warning("Robustness computation failed", exc_info=True)
+
+    _result["robustness"] = robustness
+
+    return _result

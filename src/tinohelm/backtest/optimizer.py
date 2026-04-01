@@ -237,6 +237,215 @@ def _auto_workers() -> int:
 # Main optimizer class
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Robustness helpers (Layer 2/3)
+# ---------------------------------------------------------------------------
+
+def _slim_result(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only fields needed for IS/OOS comparison charts."""
+    if result is None:
+        return None
+    return {
+        "statistics": result.get("statistics"),
+        "equity_curve": result.get("equity_curve"),
+        "monthly_returns": result.get("monthly_returns"),
+    }
+
+
+def _compute_dsr(
+    best_sharpe: float,
+    trials_data: list[dict[str, Any]],
+    skewness: float,
+    kurtosis: float,
+    n_obs: int,
+) -> float | None:
+    """Deflated Sharpe Ratio — Bailey & López de Prado (2014).
+
+    Only valid when fitness_objective is "sharpe".
+    Filters out failed trials (value == _FAIL_VALUE or state != COMPLETE).
+    """
+    from tinohelm.backtest.result import _norm_ppf, _norm_cdf
+
+    valid_values = [
+        t["value"] for t in trials_data
+        if t.get("state") == "COMPLETE"
+        and t.get("value") is not None
+        and t["value"] != _FAIL_VALUE
+    ]
+    n_trials = len(valid_values)
+    if n_trials < 5 or n_obs < 5 or best_sharpe is None:
+        return None
+
+    # De-annualize trial Sharpe values (stored as annualized)
+    sr_values = [v / math.sqrt(252) for v in valid_values]
+    sr_mean = sum(sr_values) / len(sr_values)
+    sr_var = sum((s - sr_mean) ** 2 for s in sr_values) / (len(sr_values) - 1)
+    if sr_var <= 0:
+        return None
+
+    gamma = 0.5772156649  # Euler-Mascheroni constant
+    e_val = math.e
+
+    # Expected maximum SR under null
+    sr_max_star = math.sqrt(sr_var) * (
+        (1 - gamma) * _norm_ppf(1 - 1 / n_trials)
+        + gamma * _norm_ppf(1 - 1 / (n_trials * e_val))
+    )
+
+    # DSR = PSR with sr_max_star as benchmark
+    daily_sr = best_sharpe / math.sqrt(252)  # de-annualize best
+    denom_sq = 1 - skewness * daily_sr + ((kurtosis - 1) / 4) * daily_sr * daily_sr
+    if denom_sq <= 0:
+        return None
+    z = (daily_sr - sr_max_star) * math.sqrt(n_obs - 1) / math.sqrt(denom_sq)
+    return round(_norm_cdf(z), 4)
+
+
+def _compute_param_sensitivity(
+    trials_data: list[dict[str, Any]],
+    param_ranges: dict[str, dict[str, Any]],
+    param_importances: dict[str, float],
+    n_bins: int = 10,
+    max_pairs: int = 3,
+) -> dict[str, Any] | None:
+    """Bin trial params and compute mean fitness per bin.
+
+    single_param: histogram for each param.
+    grid: 2D heatmap for top param pairs by importance.
+    """
+    import numpy as np
+
+    valid_trials = [
+        t for t in trials_data
+        if t.get("state") == "COMPLETE"
+        and t.get("value") is not None
+        and t["value"] != _FAIL_VALUE
+    ]
+    if len(valid_trials) < 10:
+        return None
+
+    param_names = list(param_ranges.keys())
+
+    # --- Single param sensitivity ---
+    single_param: dict[str, Any] = {}
+    for pname in param_names:
+        values = []
+        fitnesses = []
+        for t in valid_trials:
+            if pname in t.get("params", {}):
+                values.append(t["params"][pname])
+                fitnesses.append(t["value"])
+        if len(values) < 10:
+            continue
+        arr_v = np.array(values, dtype=np.float64)
+        arr_f = np.array(fitnesses, dtype=np.float64)
+        # Quantile-based bins
+        bin_edges = np.unique(np.percentile(arr_v, np.linspace(0, 100, n_bins + 1)))
+        if len(bin_edges) < 2:
+            continue
+        bin_indices = np.digitize(arr_v, bin_edges[1:-1])
+        bin_means = []
+        bin_centers = []
+        for bi in range(len(bin_edges) - 1):
+            mask = bin_indices == bi
+            if mask.any():
+                bin_means.append(round(float(arr_f[mask].mean()), 4))
+                bin_centers.append(round(float((bin_edges[bi] + bin_edges[bi + 1]) / 2), 6))
+        if bin_centers:
+            single_param[pname] = {"bins": bin_centers, "values": bin_means}
+
+    # --- Param pairs (top by importance) ---
+    grid: dict[str, Any] = {}
+    sorted_params = sorted(
+        [p for p in param_importances if p in param_names],
+        key=lambda k: param_importances.get(k, 0),
+        reverse=True,
+    )
+    top_params = sorted_params[:4]
+    pairs_done = 0
+    for i, pa in enumerate(top_params):
+        for pb in top_params[i + 1:]:
+            if pairs_done >= max_pairs:
+                break
+            va, vb, vf = [], [], []
+            for t in valid_trials:
+                p = t.get("params", {})
+                if pa in p and pb in p:
+                    va.append(p[pa])
+                    vb.append(p[pb])
+                    vf.append(t["value"])
+            if len(va) < 10:
+                continue
+            arr_a = np.array(va, dtype=np.float64)
+            arr_b = np.array(vb, dtype=np.float64)
+            arr_ff = np.array(vf, dtype=np.float64)
+            edges_a = np.unique(np.percentile(arr_a, np.linspace(0, 100, n_bins + 1)))
+            edges_b = np.unique(np.percentile(arr_b, np.linspace(0, 100, n_bins + 1)))
+            if len(edges_a) < 2 or len(edges_b) < 2:
+                continue
+            idx_a = np.digitize(arr_a, edges_a[1:-1])
+            idx_b = np.digitize(arr_b, edges_b[1:-1])
+            na, nb = len(edges_a) - 1, len(edges_b) - 1
+            grid_vals = [[None] * nb for _ in range(na)]
+            for ai in range(na):
+                for bi_idx in range(nb):
+                    mask = (idx_a == ai) & (idx_b == bi_idx)
+                    if mask.any():
+                        grid_vals[ai][bi_idx] = round(float(arr_ff[mask].mean()), 4)
+            key = f"{pa}__{pb}"
+            grid[key] = {
+                "x_bins": [round(float((edges_a[j] + edges_a[j + 1]) / 2), 6) for j in range(na)],
+                "y_bins": [round(float((edges_b[j] + edges_b[j + 1]) / 2), 6) for j in range(nb)],
+                "values": grid_vals,
+                "x_label": pa,
+                "y_label": pb,
+            }
+            pairs_done += 1
+        if pairs_done >= max_pairs:
+            break
+
+    return {"single_param": single_param, "grid": grid}
+
+
+def _compute_param_stability(
+    trials_data: list[dict[str, Any]],
+    best_params: dict[str, Any],
+    threshold: float = 0.20,
+) -> float | None:
+    """Std of fitness for trials within ±threshold of best params.
+
+    Lower = more stable (params don't affect fitness much near optimum).
+    """
+    if not best_params:
+        return None
+
+    valid_trials = [
+        t for t in trials_data
+        if t.get("state") == "COMPLETE"
+        and t.get("value") is not None
+        and t["value"] != _FAIL_VALUE
+    ]
+    nearby = []
+    for t in valid_trials:
+        params = t.get("params", {})
+        is_near = True
+        for k, bv in best_params.items():
+            if k not in params:
+                is_near = False
+                break
+            if abs(params[k] - bv) / max(abs(bv), 1e-9) > threshold:
+                is_near = False
+                break
+        if is_near:
+            nearby.append(t["value"])
+
+    if len(nearby) < 3:
+        return None
+    mean_v = sum(nearby) / len(nearby)
+    variance = sum((v - mean_v) ** 2 for v in nearby) / (len(nearby) - 1)
+    return round(variance ** 0.5, 4)
+
+
 class BacktestOptimizer:
     """Runs Optuna-based hyperparameter optimization over a backtest strategy.
 
@@ -657,6 +866,20 @@ class BacktestOptimizer:
             except Exception as exc:
                 logger.warning("Validation backtest failed: %s", exc)
 
+        # --- IS (train) validation backtest — simple split mode only ---
+        train_validation_result: dict[str, Any] | None = None
+        if best_params and not use_walk_forward:
+            try:
+                tv_params = dict(self.strategy_params)
+                tv_params.update(best_params)
+                train_validation_result = _run_backtest(
+                    self.strategy_path, self.config_path, tv_params,
+                    self.catalog_path, self.symbol, self.interval,
+                    train_start, train_end,
+                )
+            except Exception as exc:
+                logger.warning("Train validation backtest failed: %s", exc)
+
         # --- Parameter importance ---
         param_importances: dict[str, float] = {}
         try:
@@ -704,6 +927,42 @@ class BacktestOptimizer:
 
         if use_walk_forward:
             full_result["walk_forward_results"] = wf_fold_results
+
+        # --- Layer 2: IS validation (slimmed) ---
+        full_result["train_validation"] = _slim_result(train_validation_result)
+
+        # --- Layer 3: DSR (only for Sharpe objective) ---
+        dsr_value = None
+        if self.fitness_objective == "sharpe" and validation_result:
+            try:
+                val_stats = validation_result.get("statistics", {})
+                dsr_value = _compute_dsr(
+                    best_sharpe=val_stats.get("sharpe_ratio", 0),
+                    trials_data=trials_data,
+                    skewness=val_stats.get("skewness", 0) or 0,
+                    kurtosis=val_stats.get("kurtosis", 0) or 0,
+                    n_obs=len(validation_result.get("daily_returns", []) or []),
+                )
+            except Exception:
+                logger.debug("DSR computation failed", exc_info=True)
+        full_result["dsr"] = dsr_value
+
+        # --- Layer 3: Parameter sensitivity & stability ---
+        try:
+            full_result["parameter_sensitivity"] = _compute_param_sensitivity(
+                trials_data, self.param_ranges, param_importances,
+            )
+        except Exception:
+            logger.debug("Parameter sensitivity computation failed", exc_info=True)
+            full_result["parameter_sensitivity"] = None
+
+        try:
+            full_result["parameter_stability_score"] = _compute_param_stability(
+                trials_data, best_params,
+            )
+        except Exception:
+            logger.debug("Parameter stability computation failed", exc_info=True)
+            full_result["parameter_stability_score"] = None
 
         # --- Persist to DB ---
         self._complete(
