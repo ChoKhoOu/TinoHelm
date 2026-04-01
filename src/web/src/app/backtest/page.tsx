@@ -39,6 +39,7 @@ import { TradeLogTab } from "./components/TradeLogTab";
 import { ReportsTab } from "./components/ReportsTab";
 import { PerformanceTab } from "./components/PerformanceTab";
 import { TradesTab } from "./components/TradesTab";
+import { RobustnessTab } from "./components/RobustnessTab";
 
 /* ------------------------------------------------------------------ */
 /*  Progress ring placeholder for running/queued backtests             */
@@ -877,6 +878,7 @@ export default function BacktestPage() {
               <TabsTrigger value="overview-grey" className="text-xs px-3">Overview</TabsTrigger>
               <TabsTrigger value="performance" className="text-xs px-3">Performance</TabsTrigger>
               <TabsTrigger value="trades" className="text-xs px-3">Trades</TabsTrigger>
+              <TabsTrigger value="robustness" className="text-xs px-3">健壮性</TabsTrigger>
 <TabsTrigger value="tearsheet" className="text-xs px-3">报告</TabsTrigger>
               <TabsTrigger value="tradelog" className="text-xs px-3">交易日志</TabsTrigger>
               <TabsTrigger value="reports" className="text-xs px-3">数据表格</TabsTrigger>
@@ -900,6 +902,13 @@ export default function BacktestPage() {
               <TabsContent value="trades" className="h-full overflow-y-auto">
                 {selectedRun?.status === "completed" && selectedRunId ? (
                   <TradesTab runId={selectedRunId} />
+                ) : (
+                  <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
+                )}
+              </TabsContent>
+              <TabsContent value="robustness" className="h-full overflow-y-auto">
+                {selectedRun?.status === "completed" && selectedRunId ? (
+                  <RobustnessTab runId={selectedRunId} />
                 ) : (
                   <RunningPlaceholder status={selectedRun?.status} pct={progressMap[selectedRunId!] ?? selectedRun?.progress_pct ?? 0} />
                 )}

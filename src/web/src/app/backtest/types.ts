@@ -242,6 +242,28 @@ export interface RollingBetaPoint {
   rolling_12m: number | null;
 }
 
+// --- Robustness types (Layer 1/2/3) ---
+
+export interface McEquityCone {
+  percentiles: number[];
+  curves: Record<string, number[]>; // p5, p25, p50, p75, p95
+  original: number[];
+  x_labels: number[];
+}
+
+export interface RobustnessMetrics {
+  psr: number | null;
+  min_backtest_length_days: number | null;
+  actual_backtest_length_days: number | null;
+  backtest_length_sufficient: boolean | null;
+  mc_equity_cone?: McEquityCone | null;
+  mc_probability_of_loss?: number | null;
+  mc_5th_percentile_return?: number | null;
+  mc_median_max_drawdown?: number | null;
+  mc_median_final_return?: number | null;
+  mc_num_simulations?: number | null;
+}
+
 export interface BacktestResult {
   statistics: BacktestStatistics;
   equity_curve: EquityCurvePoint[];
@@ -274,4 +296,6 @@ export interface BacktestResult {
   long_vs_short?: LongVsShort;
   return_by_dow?: ReturnByGroup[];
   return_by_hour?: ReturnByGroup[];
+  // Robustness metrics (Layer 1 — any backtest)
+  robustness?: RobustnessMetrics;
 }
