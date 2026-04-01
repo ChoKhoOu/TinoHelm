@@ -65,8 +65,15 @@ class CreateStrategyRequest(BaseModel):
     type: Literal["bar", "tick"] = "bar"
 
 
+class CreatePortfolioRequest(BaseModel):
+    """Request body for POST /create-portfolio."""
+
+    name: str
+    strategy_type: Literal["bar", "tick"] = "bar"
+
+
 class CreateStrategyResponse(BaseModel):
-    """Response for strategy scaffold creation."""
+    """Response for strategy/portfolio scaffold creation."""
 
     name: str
     file_path: str
@@ -294,6 +301,35 @@ async def create_strategy(
         name=body.name,
         file_path=str(file_path),
         message=f"Created {body.type} strategy scaffold: {body.name}",
+    )
+
+
+@router.post("/create-portfolio", response_model=CreateStrategyResponse)
+async def create_portfolio(
+    body: CreatePortfolioRequest,
+    settings: Settings = Depends(get_settings_dep),
+) -> CreateStrategyResponse:
+    """Generate a portfolio scaffold folder (strategy.py + portfolio.yaml)."""
+    from tinohelm.strategy.scaffold import generate_portfolio_scaffold
+
+    try:
+        folder_path = generate_portfolio_scaffold(
+            name=body.name,
+            strategies_dir=settings.paths.strategies,
+            strategy_type=body.strategy_type,
+        )
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail=f"Portfolio '{body.name}' already exists")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception:
+        logger.exception("Failed to create portfolio scaffold: %s", body.name)
+        raise HTTPException(status_code=500, detail="Internal error creating portfolio")
+
+    return CreateStrategyResponse(
+        name=body.name,
+        file_path=str(folder_path),
+        message=f"Created portfolio scaffold: {body.name}",
     )
 
 
