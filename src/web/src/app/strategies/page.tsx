@@ -1,13 +1,24 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { Search, RefreshCw, CheckCircle, ChevronRight, FileText, Layers } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { Search, RefreshCw, CheckCircle, ChevronRight, FileText, Layers, Plus } from "lucide-react";
+import { apiGet, apiPost, ApiError } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FadeIn } from "@/components/motion/FadeIn";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Label } from "@/components/ui/label";
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
@@ -36,6 +47,12 @@ interface StrategyParam {
   min?: number;
   max?: number;
   description?: string;
+}
+
+interface ParamsResponse {
+  name: string;
+  config_params: Array<{ name: string; type: string; required: boolean; default: string | null }>;
+  optimize_ranges: Record<string, { type: string; min: number; max: number; step?: number }>;
 }
 
 interface StrategyVersion {
@@ -360,23 +377,37 @@ export default function StrategiesPage() {
   const [validating, setValidating] = useState(false);
   const [validateResult, setValidateResult] = useState<string | null>(null);
 
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createType, setCreateType] = useState<"bar" | "tick" | "portfolio">("bar");
+  const [portfolioStrategyType, setPortfolioStrategyType] = useState<"bar" | "tick">("bar");
+  const [createName, setCreateName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
   useEffect(() => {
     loadStrategies();
   }, []);
 
-  async function loadStrategies() {
+  async function loadStrategies(autoSelectName?: string) {
     setLoading(true);
     setError(null);
     try {
       const raw = await apiGet<RawStrategyItem[]>("/api/strategies");
-      if (raw) setStrategies(raw.map((s) => ({
-        name: s.name,
-        class_name: s.strategy_class,
-        file_path: s.file_path,
-        is_portfolio: s.type === "portfolio",
-        version: s.version,
-        description: s.description,
-      })));
+      if (raw) {
+        const mapped = raw.map((s) => ({
+          name: s.name,
+          class_name: s.strategy_class,
+          file_path: s.file_path,
+          is_portfolio: s.type === "portfolio",
+          version: s.version,
+          description: s.description,
+        }));
+        setStrategies(mapped);
+        if (autoSelectName) {
+          const found = mapped.find((s) => s.name === autoSelectName);
+          if (found) handleSelect(found);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -393,6 +424,47 @@ export default function StrategiesPage() {
       // ignore
     } finally {
       setRescanning(false);
+    }
+  }
+
+  function openCreateDialog() {
+    setCreateType("bar");
+    setPortfolioStrategyType("bar");
+    setCreateName("");
+    setCreateError(null);
+    setCreateOpen(true);
+  }
+
+  async function handleCreate() {
+    const name = createName.trim();
+    if (!name) return;
+    setCreating(true);
+    setCreateError(null);
+    try {
+      if (createType === "portfolio") {
+        await apiPost("/api/strategies/create-portfolio", { name, strategy_type: portfolioStrategyType });
+      } else {
+        await apiPost("/api/strategies/create", { name, type: createType });
+      }
+      setCreateOpen(false);
+      // Auto rescan + select new strategy
+      setRescanning(true);
+      try {
+        await apiPost("/api/strategies/rescan");
+        await loadStrategies(name);
+      } finally {
+        setRescanning(false);
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setCreateError("策略已存在");
+      } else if (err instanceof Error) {
+        setCreateError(err.message || "创建失败");
+      } else {
+        setCreateError("创建失败");
+      }
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -415,10 +487,23 @@ export default function StrategiesPage() {
     }
 
     try {
-      const p = await apiGet<StrategyParam[]>(
+      const resp = await apiGet<ParamsResponse>(
         `/api/strategies/${encodeURIComponent(s.name)}/params`
       );
-      if (p) setParams(p);
+      if (resp?.config_params) {
+        setParams(
+          resp.config_params.map((cp) => {
+            const range = resp.optimize_ranges?.[cp.name];
+            return {
+              name: cp.name,
+              type: cp.type,
+              default: cp.default ?? undefined,
+              min: range?.min,
+              max: range?.max,
+            };
+          })
+        );
+      }
     } catch {
       // ignore
     } finally {
@@ -462,14 +547,23 @@ export default function StrategiesPage() {
             // {loading ? "加载中..." : `${strategies.length} 个策略已发现`}
           </span>
         </div>
-        <Button
-          onClick={handleRescan}
-          disabled={rescanning}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-green)] text-primary-foreground px-4 py-2 text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150 disabled:opacity-50"
-        >
-          <RefreshCw className={`w-3 h-3 ${rescanning ? "animate-spin" : ""}`} />
-          重新扫描
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={openCreateDialog}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-popover text-foreground px-4 py-2 text-[11px] font-bold tracking-wide hover:border-[var(--accent-blue)]/50 hover:text-[var(--accent-blue)] transition-all duration-150"
+          >
+            <Plus className="w-3 h-3" />
+            新建策略
+          </Button>
+          <Button
+            onClick={handleRescan}
+            disabled={rescanning}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-green)] text-primary-foreground px-4 py-2 text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3 h-3 ${rescanning ? "animate-spin" : ""}`} />
+            重新扫描
+          </Button>
+        </div>
       </div>
 
       {/* Body: master-detail */}
@@ -499,7 +593,7 @@ export default function StrategiesPage() {
                 <span className="text-[11px] text-destructive">{error}</span>
                 <Button
                   variant="ghost"
-                  onClick={loadStrategies}
+                  onClick={() => loadStrategies()}
                   className="text-[10px] text-muted-foreground underline h-auto p-0"
                 >
                   重试
@@ -553,6 +647,119 @@ export default function StrategiesPage() {
           )}
         </div>
       </div>
+
+      {/* Create Strategy Dialog */}
+      <Dialog open={createOpen} onOpenChange={(open) => { if (!creating) setCreateOpen(open); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>新建策略</DialogTitle>
+            <DialogDescription>选择策略类型并输入名称</DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-4 py-2">
+            {/* Type selector */}
+            <div className="flex flex-col gap-2.5">
+              <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
+                类型
+              </span>
+              <RadioGroup
+                value={createType}
+                onValueChange={(val: string) => setCreateType(val as "bar" | "tick" | "portfolio")}
+                className="flex gap-3"
+              >
+                {([
+                  { value: "bar", label: "Bar 策略" },
+                  { value: "tick", label: "Tick 策略" },
+                  { value: "portfolio", label: "投资组合" },
+                ] as const).map((opt) => (
+                  <Label
+                    key={opt.value}
+                    className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2.5 cursor-pointer transition-all duration-150 ${
+                      createType === opt.value
+                        ? "border-[var(--accent-blue)]/50 bg-[var(--accent-blue)]/5"
+                        : "border-border hover:border-foreground/20"
+                    }`}
+                  >
+                    <RadioGroupItem value={opt.value} />
+                    <span className="text-[11px] font-semibold">{opt.label}</span>
+                  </Label>
+                ))}
+              </RadioGroup>
+            </div>
+
+            {/* Portfolio strategy type sub-selector */}
+            {createType === "portfolio" && (
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
+                  策略模板
+                </span>
+                <div className="flex gap-2">
+                  {([
+                    { value: "bar", label: "Bar 策略" },
+                    { value: "tick", label: "Tick 策略" },
+                  ] as const).map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setPortfolioStrategyType(opt.value)}
+                      className={`flex-1 rounded-lg border px-3 py-2 text-[11px] font-semibold transition-all duration-150 ${
+                        portfolioStrategyType === opt.value
+                          ? "border-[var(--accent-blue)]/50 bg-[var(--accent-blue)]/5 text-[var(--accent-blue)]"
+                          : "border-border text-muted-foreground hover:border-foreground/20"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Name input */}
+            <div className="flex flex-col gap-2">
+              <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
+                名称
+              </span>
+              <Input
+                placeholder="输入策略名称"
+                value={createName}
+                onChange={(e) => {
+                  setCreateName(e.target.value);
+                  setCreateError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && createName.trim() && !creating) handleCreate();
+                }}
+                className="h-9 rounded-lg bg-popover border-border text-[12px] placeholder:text-muted-foreground focus:border-[var(--accent-blue)]/50"
+              />
+            </div>
+
+            {/* Inline error */}
+            {createError && (
+              <div className="rounded-lg px-4 py-2.5 text-[11px] font-medium border bg-[var(--accent-red)]/5 border-[var(--accent-red)]/30 text-[var(--accent-red)]">
+                {createError}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" size="sm" />}>
+              取消
+            </DialogClose>
+            <Button
+              size="sm"
+              onClick={handleCreate}
+              disabled={!createName.trim() || creating}
+              className="bg-[var(--accent-blue)] text-white hover:opacity-90 disabled:opacity-50"
+            >
+              {creating && (
+                <div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              )}
+              创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
