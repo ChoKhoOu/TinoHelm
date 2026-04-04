@@ -140,7 +140,7 @@ interface BacktestRunSummary {
 
 interface StrategyInfo {
   name: string;
-  type?: string; // "single" | "portfolio"
+  type?: string; // "single" | "bundle"
 }
 
 interface StrategyDefaults {
@@ -304,7 +304,7 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
   const [strategySearch, setStrategySearch] = useState("");
   const [strategyDropdownOpen, setStrategyDropdownOpen] = useState(false);
   const [symbolInput, setSymbolInput] = useState("");
-  const [isPortfolio, setIsPortfolio] = useState(false);
+  const [isBundle, setIsBundle] = useState(false);
   const strategyRef = useRef<HTMLDivElement>(null);
   const [dateRange, setDateRange] = useState<DateRange | undefined>({
     from: parse("2025-01-01", "yyyy-MM-dd", new Date()),
@@ -323,12 +323,12 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
     return () => document.removeEventListener("mousedown", handler);
   }, [strategyDropdownOpen]);
 
-  // Fetch portfolio defaults when strategy changes
+  // Fetch bundle defaults when strategy changes
   useEffect(() => {
     if (!form.strategy_name) return;
     const strat = strategies.find((s) => s.name === form.strategy_name);
-    const isPf = strat?.type === "portfolio";
-    setIsPortfolio(isPf);
+    const isPf = strat?.type === "bundle";
+    setIsBundle(isPf);
     if (!isPf) return;
 
     apiGet<StrategyDefaults>(`/api/strategies/${encodeURIComponent(form.strategy_name)}/defaults`)
@@ -428,7 +428,7 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
                         }`}
                       >
                         <span className="font-medium">{s.name}</span>
-                        {s.type === "portfolio" && (
+                        {s.type === "bundle" && (
                           <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--accent-purple-20)] text-[var(--accent-purple)] font-medium">
                             组合
                           </span>
@@ -446,7 +446,7 @@ function NewRunDialog({ open, onClose, strategies, onSubmit }: NewRunDialogProps
           <div className="flex flex-col gap-1">
             <div className="flex items-center justify-between">
               <label className={labelCls}>交易对</label>
-              {isPortfolio && form.symbols.length > 0 && (
+              {isBundle && form.symbols.length > 0 && (
                 <span className="text-[9px] text-[var(--accent-purple)]">从配置自动填充</span>
               )}
             </div>

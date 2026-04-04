@@ -42,7 +42,7 @@ interface CompareResult {
   warning: string | null;
 }
 
-interface Portfolio {
+interface StrategyInfo {
   name: string;
   state: string;
 }
@@ -140,13 +140,13 @@ export function BacktestCompareTab({ nodeType }: Props) {
   const [result, setResult] = useState<CompareResult | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Load portfolio list for strategy selector
+  // Load strategy list for strategy selector
   useEffect(() => {
     let cancelled = false;
-    apiGet<{ portfolios: Record<string, Portfolio> }>("/api/node/portfolios", { mode: nodeType })
+    apiGet<{ strategies: Record<string, StrategyInfo> }>("/api/node/strategies", { mode: nodeType })
       .then((data) => {
         if (cancelled || !data) return;
-        const names = Object.keys(data.portfolios ?? {});
+        const names = Object.keys(data.strategies ?? {});
         setStrategies(names);
       })
       .catch(() => {});

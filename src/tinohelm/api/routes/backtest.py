@@ -54,7 +54,7 @@ class BacktestRunRequest(BaseModel):
             if self.symbol is not None:
                 self.symbols = [self.symbol]
             else:
-                # Portfolio strategies resolve symbols from portfolio.yaml
+                # Strategies may define symbols in their config
                 self.symbols = []
         # Filter out empty strings (e.g. TUI sends [""] when symbol field is blank)
         self.symbols = [s for s in self.symbols if s.strip()]
@@ -212,7 +212,7 @@ async def create_backtest_run(
         strategy_name=body.strategy,
         strategy_id=row.id,
         strategy_version_id=strategy_version_id,
-        symbol=",".join(body.symbols) if body.symbols else "(portfolio)",
+        symbol=",".join(body.symbols) if body.symbols else "(default)",
         interval=",".join(body.intervals),
         start_date=body.start_date,
         end_date=body.end_date,

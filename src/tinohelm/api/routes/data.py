@@ -40,18 +40,22 @@ class DataFetchRequest(BaseModel):
     """Request body for POST /fetch."""
 
     symbol: str
-    interval: str
+    interval: str | None = None
     start: date
     end: date
+    data_type: str = "klines"
+    asset_class: str = "um"
 
 
 class DataFetchBatchRequest(BaseModel):
     """Request body for POST /fetch-batch."""
 
     symbols: list[str]
-    intervals: list[str]
+    intervals: list[str] = ["1m"]
     start: date
     end: date
+    data_type: str = "klines"
+    asset_class: str = "um"
 
 
 class CompactRequest(BaseModel):
@@ -96,8 +100,8 @@ def _nt_to_interval(nt_suffix: str) -> str | None:
 
 def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
     """Calculate total Parquet size on disk for a specific symbol/interval."""
-    from tinohelm.portfolio.loader import _normalize_symbol
-    nt_sym = _normalize_symbol(symbol)
+    from tinohelm.strategy.loader import normalize_symbol
+    nt_sym = normalize_symbol(symbol)
     nt_interval = _interval_to_nt(interval)
     bar_type_dir = Path(catalog_path) / "data" / "bar" / f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
     if not bar_type_dir.exists():
@@ -107,83 +111,56 @@ def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
 
 # ---- background task ----
 
-async def _run_data_fetch(symbol: str, interval: str, start: date, end: date, settings: Settings | None = None, task_id: str | None = None) -> None:
-    """Background task to fetch market data, store to Parquet, and register in DB catalog."""
+async def _run_data_fetch(
+    symbol: str, interval: str | None, start: date, end: date,
+    settings: Settings | None = None, task_id: str | None = None,
+    data_type: str = "klines", asset_class: str = "um",
+) -> None:
+    """Background task to fetch market data via BinanceVisionPipeline."""
+    import json as _json
     import redis.asyncio as aioredis
 
     redis_url = str(settings.redis.url) if settings else "redis://redis:6379"
-    progress_channel = f"tino:data:progress:{task_id or f'{symbol}:{interval}'}"
+    progress_channel = f"tino:data:progress:{task_id or f'{symbol}:{data_type}'}"
     r = aioredis.from_url(redis_url, decode_responses=True)
 
     async def _pub(pct: int, msg: str):
-        import json as _json
-        payload: dict = {"symbol": symbol, "interval": interval, "progress": pct, "message": msg}
+        payload: dict = {"symbol": symbol, "data_type": data_type, "progress": pct, "message": msg}
+        if interval:
+            payload["interval"] = interval
         if task_id:
             payload["task_id"] = task_id
         await r.publish(progress_channel, _json.dumps(payload))
 
-    # Acquire per-symbol:interval lock to prevent concurrent Parquet writes
-    lock_key = f"tino:data:lock:{symbol}:{interval}"
-    lock = r.lock(lock_key, timeout=3600)  # 1h max hold
+    lock_key = f"tino:data:lock:{symbol}:{data_type}:{interval or 'none'}"
+    lock = r.lock(lock_key, timeout=3600)
     acquired = await lock.acquire(blocking=False)
     if not acquired:
-        await _pub(-1, f"{symbol} {interval} 正在下载中，请等待完成后再试")
+        await _pub(-1, f"{symbol} {data_type} 正在下载中，请等待完成后再试")
         await r.close()
         return
 
     try:
-        from datetime import datetime, timezone
-        from tinohelm.data.fetcher import fetch_and_store
-        from tinohelm.db.session import get_session_factory
-
-        start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
-        end_dt = datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc)
+        from tinohelm.data.pipeline import BinanceVisionPipeline
 
         catalog_path = str(settings.paths.catalog) if settings else "data/catalog"
-        db_url = str(settings.database.url) if settings else None
+        pipeline = BinanceVisionPipeline(catalog_path=catalog_path)
 
-        result = await fetch_and_store(
+        result = await pipeline.ingest(
             symbol=symbol,
+            data_type=data_type,
+            start=start,
+            end=end,
+            asset_class=asset_class,
             interval=interval,
-            start=start_dt,
-            end=end_dt,
-            catalog_path=catalog_path,
-            redis_url=redis_url,
-            progress_channel=progress_channel,
-            db_url=db_url,
-            task_id=task_id,
+            progress_cb=_pub,
         )
 
-        # Always upsert DB catalog (even if skipped — to expand date range)
-        # Calculate size for THIS symbol/interval only
-        total_size = _parquet_size_for(catalog_path, symbol, interval)
-
-        factory = get_session_factory()
-        async with factory() as db:
-            stmt = select(DataCatalog).where(
-                DataCatalog.symbol == symbol,
-                DataCatalog.data_type == "bar",
-                DataCatalog.interval == interval,
-            )
-            existing = (await db.execute(stmt)).scalar_one_or_none()
-            if existing:
-                existing.start_date = min(existing.start_date, start)
-                existing.end_date = max(existing.end_date, end)
-                existing.size_bytes = total_size
-            else:
-                db.add(DataCatalog(
-                    symbol=symbol,
-                    data_type="bar",
-                    interval=interval,
-                    start_date=start,
-                    end_date=end,
-                    file_path=catalog_path,
-                    size_bytes=total_size,
-                ))
-            await db.commit()
-
-        logger.info("Data fetch completed: %s %s — %d bars (skipped=%s)",
-                     symbol, interval, result["bars_count"], result.get("skipped", False))
+        logger.info(
+            "Data fetch completed: %s %s — %d objects (skipped=%s, rest_fallback=%s)",
+            symbol, data_type, result.objects_count,
+            result.skipped, result.rest_fallback_used,
+        )
     except Exception as exc:
         logger.exception("Data fetch failed: %s", exc)
     finally:
@@ -225,12 +202,16 @@ async def trigger_data_fetch(
     """Trigger a background data fetch task."""
     import uuid
     task_id = str(uuid.uuid4())
-    background_tasks.add_task(_run_data_fetch, body.symbol, body.interval, body.start, body.end, settings, task_id)
+    background_tasks.add_task(
+        _run_data_fetch, body.symbol, body.interval, body.start, body.end,
+        settings, task_id, body.data_type, body.asset_class,
+    )
     return {
         "status": "accepted",
         "task_id": task_id,
-        "message": f"Data fetch for {body.symbol} {body.interval} queued",
+        "message": f"Data fetch for {body.symbol} {body.data_type} queued",
         "symbol": body.symbol,
+        "data_type": body.data_type,
         "interval": body.interval,
         "start": body.start.isoformat(),
         "end": body.end.isoformat(),
@@ -278,18 +259,20 @@ async def trigger_data_fetch_batch(
     """Trigger background data fetch for multiple symbols in parallel."""
     if not body.symbols:
         raise HTTPException(status_code=400, detail="symbols must not be empty")
-    if not body.intervals:
-        raise HTTPException(status_code=400, detail="intervals must not be empty")
     count = 0
     for symbol in body.symbols:
         for interval in body.intervals:
-            background_tasks.add_task(_run_data_fetch, symbol, interval, body.start, body.end, settings)
+            background_tasks.add_task(
+                _run_data_fetch, symbol, interval, body.start, body.end,
+                settings, None, body.data_type, body.asset_class,
+            )
             count += 1
     return {
         "status": "accepted",
         "message": f"Data fetch for {count} task(s) queued ({len(body.symbols)} symbol(s) × {len(body.intervals)} interval(s))",
         "symbols": body.symbols,
         "intervals": body.intervals,
+        "data_type": body.data_type,
         "start": body.start.isoformat(),
         "end": body.end.isoformat(),
         "count": count,
@@ -427,3 +410,60 @@ async def scan_data_catalog(
 
     await db.commit()
     return {"status": "ok", "scanned": scanned, "created": created, "updated": updated}
+
+
+@router.get("/types")
+async def list_data_types() -> list[dict]:
+    """Return supported data types and their availability."""
+    from tinohelm.data.downloader import DATA_TYPE_AVAILABILITY
+    from tinohelm.data.converters import CONVERTER_REGISTRY
+
+    result = []
+    for dt, (has_daily, has_monthly) in DATA_TYPE_AVAILABILITY.items():
+        converter = CONVERTER_REGISTRY.get(dt)
+        implemented = converter is not None
+        try:
+            if implemented and converter is not None:
+                converter.convert.__func__  # check if it's not a stub
+                # Stubs raise NotImplementedError — detect via class check
+                from tinohelm.data.converters.book_ticker import BookTickerConverter
+                from tinohelm.data.converters.book_depth import BookDepthConverter
+                from tinohelm.data.converters.liquidation import LiquidationConverter
+                from tinohelm.data.converters.metrics import MetricsConverter
+                stub_types = (BookTickerConverter, BookDepthConverter, LiquidationConverter, MetricsConverter)
+                if isinstance(converter, stub_types):
+                    implemented = False
+        except Exception:
+            pass
+
+        result.append({
+            "data_type": dt,
+            "has_daily": has_daily,
+            "has_monthly": has_monthly,
+            "implemented": implemented,
+        })
+    return result
+
+
+@router.get("/coverage/{symbol}")
+async def get_data_coverage(
+    symbol: str,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Return data coverage ranges for a symbol across all data types."""
+    stmt = (
+        select(DataCatalog)
+        .where(DataCatalog.symbol == symbol)
+        .order_by(DataCatalog.data_type, DataCatalog.interval)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "data_type": r.data_type,
+            "interval": r.interval,
+            "start_date": r.start_date.isoformat(),
+            "end_date": r.end_date.isoformat(),
+            "size_bytes": r.size_bytes,
+        }
+        for r in rows
+    ]

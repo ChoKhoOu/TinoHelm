@@ -18,13 +18,13 @@ interface StrategyInfo {
   status: "running" | "paused" | "stopped" | "error";
 }
 
-interface PortfolioInfo {
+interface RuntimeEntry {
   name: string;
   state: "available" | "starting" | "running" | "paused" | "flattening";
   strategies: string[];
 }
 
-const PORTFOLIO_STATE_LABELS: Record<string, string> = {
+const STRATEGY_STATE_LABELS: Record<string, string> = {
   available: "可用",
   starting: "启动中",
   running: "运行中",
@@ -32,7 +32,7 @@ const PORTFOLIO_STATE_LABELS: Record<string, string> = {
   flattening: "平仓中",
 };
 
-const PORTFOLIO_STATE_COLORS: Record<string, string> = {
+const STRATEGY_STATE_COLORS: Record<string, string> = {
   available: "var(--muted-foreground)",
   starting: "var(--accent-blue)",
   running: "var(--accent-green)",
@@ -253,7 +253,7 @@ function SectionHeader({ label }: { label: string }) {
   );
 }
 
-function PortfolioButton({
+function RuntimeEntryButton({
   icon,
   label,
   loading,
@@ -288,7 +288,7 @@ function PortfolioButton({
 // ---------------------------------------------------------------------------
 export function StrategiesTab({ nodeType }: Props) {
   const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
-  const [portfolios, setPortfolios] = useState<PortfolioInfo[]>([]);
+  const [runtimeEntries, setRuntimeEntries] = useState<RuntimeEntry[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -347,9 +347,9 @@ export function StrategiesTab({ nodeType }: Props) {
 
   const fetchData = useCallback(async () => {
     try {
-      const [portfoliosRes, stateRes, posRes] = await Promise.all([
-        apiGet<{ portfolios: PortfolioInfo[] | Record<string, unknown> }>(
-          "/api/node/portfolios",
+      const [strategiesRes, stateRes, posRes] = await Promise.all([
+        apiGet<{ strategies: RuntimeEntry[] | Record<string, unknown> }>(
+          "/api/node/strategies",
           { mode: nodeType }
         ),
         apiGet<{
@@ -364,16 +364,16 @@ export function StrategiesTab({ nodeType }: Props) {
         }),
       ]);
 
-      const raw = portfoliosRes?.portfolios;
-      const parsedPortfolios: PortfolioInfo[] =
+      const raw = strategiesRes?.strategies;
+      const parsedEntries: RuntimeEntry[] =
         raw && !Array.isArray(raw)
           ? Object.entries(raw).map(([name, info]) => ({
               name,
               ...(info as Record<string, unknown>),
-            } as PortfolioInfo))
-          : ((raw as PortfolioInfo[]) ?? []);
+            } as RuntimeEntry))
+          : ((raw as RuntimeEntry[]) ?? []);
 
-      setPortfolios(parsedPortfolios);
+      setRuntimeEntries(parsedEntries);
       const stateMap = stateRes?.strategy_states ?? {};
       const parsedStrategies: StrategyInfo[] = Object.entries(stateMap).map(
         ([id, status]) => ({
@@ -472,7 +472,7 @@ export function StrategiesTab({ nodeType }: Props) {
     [nodeType, signalHistory]
   );
 
-  const handlePortfolioAction = useCallback(
+  const handleStrategyAction = useCallback(
     async (
       name: string,
       action: "start" | "pause" | "resume" | "flatten-stop"
@@ -494,7 +494,7 @@ export function StrategiesTab({ nodeType }: Props) {
       const key = `${name}:${action}`;
       setActionLoading(key);
       try {
-        await apiPost(`/api/node/portfolio/${action}`, {
+        await apiPost(`/api/node/strategy/${action}`, {
           name,
           mode: nodeType,
         });
@@ -630,7 +630,7 @@ export function StrategiesTab({ nodeType }: Props) {
         </GlassCard>
       </motion.div>
 
-      {/* Portfolio Management */}
+      {/* Strategy Management */}
       <motion.div
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
@@ -647,24 +647,24 @@ export function StrategiesTab({ nodeType }: Props) {
                 />
               ))}
             </div>
-          ) : portfolios.length === 0 ? (
+          ) : runtimeEntries.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-10 gap-2 text-muted-foreground/30">
               <Inbox className="w-7 h-7 opacity-40" />
               <span className="text-xs">暂无组合</span>
             </div>
           ) : (
             <div className="p-3 flex flex-col gap-2">
-              {portfolios.map((p) => {
+              {runtimeEntries.map((p) => {
                 const isRunning = p.state === "running";
                 const isPaused = p.state === "paused";
                 const isAvailable = p.state === "available";
                 const isTransitioning =
                   p.state === "starting" || p.state === "flattening";
                 const stateColor =
-                  PORTFOLIO_STATE_COLORS[p.state] ??
+                  STRATEGY_STATE_COLORS[p.state] ??
                   "var(--muted-foreground)";
                 const stateLabel =
-                  PORTFOLIO_STATE_LABELS[p.state] ?? p.state;
+                  STRATEGY_STATE_LABELS[p.state] ?? p.state;
 
                 return (
                   <div
@@ -703,47 +703,47 @@ export function StrategiesTab({ nodeType }: Props) {
                     {/* Action buttons */}
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {isAvailable && (
-                        <PortfolioButton
+                        <RuntimeEntryButton
                           icon={<Play className="w-3.5 h-3.5" />}
                           label="启动"
                           loading={actionLoading === `${p.name}:start`}
                           onClick={() =>
-                            handlePortfolioAction(p.name, "start")
+                            handleStrategyAction(p.name, "start")
                           }
                           color="var(--accent-green)"
                         />
                       )}
                       {isRunning && (
-                        <PortfolioButton
+                        <RuntimeEntryButton
                           icon={<Pause className="w-3.5 h-3.5" />}
                           label="暂停"
                           loading={actionLoading === `${p.name}:pause`}
                           onClick={() =>
-                            handlePortfolioAction(p.name, "pause")
+                            handleStrategyAction(p.name, "pause")
                           }
                           color="var(--accent-amber)"
                         />
                       )}
                       {isPaused && (
-                        <PortfolioButton
+                        <RuntimeEntryButton
                           icon={<RotateCcw className="w-3.5 h-3.5" />}
                           label="恢复"
                           loading={actionLoading === `${p.name}:resume`}
                           onClick={() =>
-                            handlePortfolioAction(p.name, "resume")
+                            handleStrategyAction(p.name, "resume")
                           }
                           color="var(--accent-blue)"
                         />
                       )}
                       {(isRunning || isPaused) && (
-                        <PortfolioButton
+                        <RuntimeEntryButton
                           icon={<Square className="w-3.5 h-3.5" />}
                           label="平仓停止"
                           loading={
                             actionLoading === `${p.name}:flatten-stop`
                           }
                           onClick={() =>
-                            handlePortfolioAction(p.name, "flatten-stop")
+                            handleStrategyAction(p.name, "flatten-stop")
                           }
                           color="var(--accent-red)"
                         />

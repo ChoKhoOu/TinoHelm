@@ -106,46 +106,19 @@ class OptimizeRunItem(BaseModel):
 # ---- helpers ----
 
 def _discover_optimize_ranges(strategy_row: Strategy) -> dict[str, dict[str, Any]]:
-    """Load optimize ranges from strategy's OPTIMIZE dict or portfolio.yaml."""
+    """Load optimize ranges from strategy's OPTIMIZE dict."""
     from pathlib import Path as P
 
-    from tinohelm.strategy.utils import parse_optimize_ranges
+    from tinohelm.strategy.module_loader import load_strategy_module
 
     file_path = P(strategy_row.file_path)
 
-    # Portfolio: check portfolio.yaml for optimize section
-    if file_path.name == "portfolio.yaml" and file_path.exists():
-        import yaml
-        with open(file_path) as f:
-            raw = yaml.safe_load(f)
-        return parse_optimize_ranges((raw or {}).get("optimize", {}) or {})
-
-    # Single file: check module-level OPTIMIZE dict
     if file_path.suffix == ".py" and file_path.exists():
-        import importlib.util
-        import sys
-
-        module_name = f"_opt_discover_{file_path.stem}"
-        str_dir = str(file_path.parent.resolve())
-        added_path = str_dir not in sys.path
-        if added_path:
-            sys.path.insert(0, str_dir)
-
-        if module_name in sys.modules:
-            del sys.modules[module_name]
-        spec = importlib.util.spec_from_file_location(module_name, str(file_path))
-        if spec and spec.loader:
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = mod
-            try:
-                spec.loader.exec_module(mod)
-                return parse_optimize_ranges(getattr(mod, "OPTIMIZE", {}) or {})
-            except Exception as e:
-                logger.warning("Failed to load OPTIMIZE from %s: %s", file_path, e)
-            finally:
-                sys.modules.pop(module_name, None)
-                if added_path and str_dir in sys.path:
-                    sys.path.remove(str_dir)
+        try:
+            result = load_strategy_module(file_path)
+            return result.optimize_ranges
+        except Exception as e:
+            logger.warning("Failed to load OPTIMIZE from %s: %s", file_path, e)
 
     return {}
 

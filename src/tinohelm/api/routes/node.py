@@ -40,7 +40,7 @@ class LifecycleRequest(BaseModel):
     strategy_id: str | None = None
 
 
-class PortfolioLifecycleRequest(BaseModel):
+class StrategyLifecycleRequest(BaseModel):
     """Request body for portfolio lifecycle commands."""
     name: str
     mode: Literal["sandbox", "live"] = "live"
@@ -93,98 +93,98 @@ async def lifecycle_state(
     return {"trading_state": "unknown", "strategy_states": {}, "paused": []}
 
 
-@router.get("/portfolios")
-async def list_portfolios(
+@router.get("/strategies")
+async def list_strategies(
     mode: Literal["sandbox", "live"] = "live",
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
-    """Return all portfolios with their state."""
-    raw = await rds.get(f"tino:{mode}:portfolio_registry")
+    """Return all strategies with their state (new name for /portfolios)."""
+    raw = await rds.get(f"tino:{mode}:strategy_registry")
     if raw:
         if isinstance(raw, bytes):
             raw = raw.decode()
         data = json.loads(raw)
-        return {"portfolios": data.get("portfolios", {})}
+        return {"strategies": data.get("strategies", {})}
     # Fallback: try heartbeat
     hb_raw = await rds.get(f"tino:heartbeat:{mode}")
     if hb_raw:
         if isinstance(hb_raw, bytes):
             hb_raw = hb_raw.decode()
         hb = json.loads(hb_raw)
-        return {"portfolios": hb.get("portfolios", {})}
-    return {"portfolios": {}}
+        return {"strategies": hb.get("strategies", {})}
+    return {"strategies": {}}
 
 
-@router.post("/portfolio/start")
-async def start_portfolio(
-    body: PortfolioLifecycleRequest,
+@router.post("/strategy/start")
+async def start_strategy(
+    body: StrategyLifecycleRequest,
     pm: ProcessManager = Depends(get_process_manager),
 ) -> dict:
-    """Start a portfolio's strategies on the node."""
+    """Start a strategy on the node."""
     try:
         await asyncio.to_thread(
             pm.lifecycle_command,
-            action="start_portfolio",
+            action="start_strategy",
             node_type=body.mode,
-            portfolio_name=body.name,
+            strategy_name=body.name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"status": "ok", "action": "start_portfolio", "name": body.name}
+    return {"status": "ok", "action": "start_strategy", "name": body.name}
 
 
-@router.post("/portfolio/pause")
-async def pause_portfolio(
-    body: PortfolioLifecycleRequest,
+@router.post("/strategy/pause")
+async def pause_strategy(
+    body: StrategyLifecycleRequest,
     pm: ProcessManager = Depends(get_process_manager),
 ) -> dict:
-    """Pause a running portfolio."""
+    """Pause a running strategy."""
     try:
         await asyncio.to_thread(
             pm.lifecycle_command,
-            action="pause_portfolio",
+            action="pause_strategy",
             node_type=body.mode,
-            portfolio_name=body.name,
+            strategy_name=body.name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"status": "ok", "action": "pause_portfolio", "name": body.name}
+    return {"status": "ok", "action": "pause_strategy", "name": body.name}
 
 
-@router.post("/portfolio/resume")
-async def resume_portfolio(
-    body: PortfolioLifecycleRequest,
+@router.post("/strategy/resume")
+async def resume_strategy(
+    body: StrategyLifecycleRequest,
     pm: ProcessManager = Depends(get_process_manager),
 ) -> dict:
-    """Resume a paused portfolio."""
+    """Resume a paused strategy."""
     try:
         await asyncio.to_thread(
             pm.lifecycle_command,
-            action="resume_portfolio",
+            action="resume_strategy",
             node_type=body.mode,
-            portfolio_name=body.name,
+            strategy_name=body.name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"status": "ok", "action": "resume_portfolio", "name": body.name}
+    return {"status": "ok", "action": "resume_strategy", "name": body.name}
 
 
-@router.post("/portfolio/flatten-stop")
-async def flatten_stop_portfolio(
-    body: PortfolioLifecycleRequest,
+@router.post("/strategy/flatten-stop")
+async def flatten_stop_strategy(
+    body: StrategyLifecycleRequest,
     pm: ProcessManager = Depends(get_process_manager),
 ) -> dict:
-    """Flatten positions and stop a portfolio."""
+    """Flatten positions and stop a strategy."""
     try:
         await asyncio.to_thread(
             pm.lifecycle_command,
-            action="flatten_stop_portfolio",
+            action="flatten_stop_strategy",
             node_type=body.mode,
-            portfolio_name=body.name,
+            strategy_name=body.name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"status": "ok", "action": "flatten_stop_portfolio", "name": body.name}
+    return {"status": "ok", "action": "flatten_stop_strategy", "name": body.name}
 
 
 @router.get("/data-status")

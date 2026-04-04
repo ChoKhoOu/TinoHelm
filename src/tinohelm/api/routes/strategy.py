@@ -62,14 +62,8 @@ class CreateStrategyRequest(BaseModel):
     """Request body for POST /create."""
 
     name: str
-    type: Literal["bar", "tick"] = "bar"
+    type: str = "strategy"
 
-
-class CreatePortfolioRequest(BaseModel):
-    """Request body for POST /create-portfolio."""
-
-    name: str
-    strategy_type: Literal["bar", "tick"] = "bar"
 
 
 class CreateStrategyResponse(BaseModel):
@@ -174,57 +168,32 @@ async def get_strategy_params(
     file_path = Path(row.file_path)
 
     if file_path.suffix == ".py" and file_path.exists():
-        import importlib.util
         import inspect
-        import sys
 
-        from tinohelm.strategy.utils import get_config_fields
-
-        module_name = f"_params_discover_{file_path.stem}"
-        str_dir = str(file_path.parent.resolve())
-        added_path = False
-        if str_dir not in sys.path:
-            sys.path.insert(0, str_dir)
-            added_path = True
-
-        if module_name in sys.modules:
-            del sys.modules[module_name]
+        from tinohelm.strategy.module_loader import load_module_from_file
+        from tinohelm.strategy.utils import get_config_fields, parse_optimize_ranges
 
         try:
-            spec = importlib.util.spec_from_file_location(module_name, str(file_path))
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = mod
-                spec.loader.exec_module(mod)
+            mod = load_module_from_file(file_path)
 
-                for obj_name, obj in inspect.getmembers(mod, inspect.isclass):
-                    if obj.__module__ != module_name:
-                        continue
-                    for base in inspect.getmro(obj):
-                        if base.__name__ == "StrategyConfig" and base.__module__.startswith("nautilus_trader"):
-                            config_params = get_config_fields(obj)
-                            break
+            for obj_name, obj in inspect.getmembers(mod, inspect.isclass):
+                if obj.__module__ != mod.__name__:
+                    continue
+                for base in inspect.getmro(obj):
+                    if base.__name__ == "StrategyConfig" and base.__module__.startswith("nautilus_trader"):
+                        config_params = get_config_fields(obj)
+                        break
 
-                from tinohelm.strategy.utils import parse_optimize_ranges
-                optimize_ranges = parse_optimize_ranges(getattr(mod, "OPTIMIZE", {}) or {})
+            optimize_ranges = parse_optimize_ranges(getattr(mod, "OPTIMIZE", {}) or {})
         except Exception as e:
             logger.warning("Failed to inspect strategy %s: %s", name, e)
-        finally:
-            sys.modules.pop(module_name, None)
-            if added_path and str_dir in sys.path:
-                sys.path.remove(str_dir)
-
-    elif file_path.name == "portfolio.yaml" and file_path.exists():
-        import yaml
-        from tinohelm.strategy.utils import parse_optimize_ranges
-        with open(file_path) as f:
-            raw = yaml.safe_load(f)
-        optimize_ranges = parse_optimize_ranges((raw or {}).get("optimize", {}) or {})
 
     # Filter out internal params (injected by loader)
     internal_params = {"instrument_id", "instrument_ids", "bar_type", "bar_types",
-                       "_bar_type_map", "order_id_tag", "manage_stop", "manage_gtd_expiry",
-                       "oms_type", "external_order_claims", "manage_contingent_orders"}
+                       "symbols", "interval", "resolved_bar_types",
+                       "order_id_tag", "manage_stop", "manage_gtd_expiry",
+                       "oms_type", "external_order_claims", "manage_contingent_orders",
+                       "symbol_params"}
     user_params = [p for p in config_params if p["name"] not in internal_params]
 
     return {
@@ -235,7 +204,7 @@ async def get_strategy_params(
 
 
 class StrategyDefaults(BaseModel):
-    """Default configuration for a strategy (from portfolio.yaml if applicable)."""
+    """Default configuration for a strategy."""
 
     symbols: list[str] = []
     interval: str | None = None
@@ -248,31 +217,11 @@ async def get_strategy_defaults(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
 ) -> StrategyDefaults:
-    """Get default run configuration for a strategy.
-
-    For portfolio strategies, returns symbols, interval, and starting_balance
-    from portfolio.yaml. For single-file strategies, returns empty defaults.
-    """
+    """Get default run configuration for a strategy."""
     stmt = select(Strategy).where(Strategy.name == name)
     row = (await db.execute(stmt)).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
-
-    file_path = Path(row.file_path)
-    if file_path.name == "portfolio.yaml" and file_path.exists():
-        import yaml
-
-        with open(file_path) as f:
-            raw = yaml.safe_load(f) or {}
-        symbols = raw.get("symbols", [])
-        interval = raw.get("interval")
-        account = raw.get("account", {})
-        starting_balance = account.get("starting_balance")
-        return StrategyDefaults(
-            symbols=symbols if isinstance(symbols, list) else [],
-            interval=str(interval) if interval else None,
-            starting_balance=float(starting_balance) if starting_balance else None,
-        )
 
     return StrategyDefaults()
 
@@ -304,33 +253,33 @@ async def create_strategy(
     )
 
 
-@router.post("/create-portfolio", response_model=CreateStrategyResponse)
-async def create_portfolio(
-    body: CreatePortfolioRequest,
+@router.post("/{name}/open")
+async def open_strategy(
+    name: str,
+    db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
-) -> CreateStrategyResponse:
-    """Generate a portfolio scaffold folder (strategy.py + portfolio.yaml)."""
-    from tinohelm.strategy.scaffold import generate_portfolio_scaffold
+) -> dict:
+    """Return the host-side absolute path to a strategy file/folder."""
+    import os
 
-    try:
-        folder_path = generate_portfolio_scaffold(
-            name=body.name,
-            strategies_dir=settings.paths.strategies,
-            strategy_type=body.strategy_type,
-        )
-    except FileExistsError:
-        raise HTTPException(status_code=409, detail=f"Portfolio '{body.name}' already exists")
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception:
-        logger.exception("Failed to create portfolio scaffold: %s", body.name)
-        raise HTTPException(status_code=500, detail="Internal error creating portfolio")
+    stmt = select(Strategy).where(Strategy.name == name)
+    row = (await db.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
 
-    return CreateStrategyResponse(
-        name=body.name,
-        file_path=str(folder_path),
-        message=f"Created portfolio scaffold: {body.name}",
-    )
+    file_path = Path(row.file_path).resolve()
+    abs_path = str(file_path)
+
+    # Map container path to host path if running inside Docker
+    # Container: /app/tino/strategies/... → Host: ~/.tino/strategies/...
+    container_strategies = str(Path(settings.paths.strategies).resolve())
+    host_home = os.environ.get("HOST_HOME", "")
+    if host_home:
+        host_strategies = os.path.join(host_home, ".tino", "strategies")
+        if abs_path.startswith(container_strategies):
+            abs_path = abs_path.replace(container_strategies, host_strategies, 1)
+
+    return {"name": name, "path": abs_path}
 
 
 @router.post("/rescan", response_model=RescanResponse)

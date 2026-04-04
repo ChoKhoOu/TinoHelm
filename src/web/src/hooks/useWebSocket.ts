@@ -50,7 +50,7 @@ export interface HeartbeatEvent extends WsEventMessage {
     positions: number;
     trading_state: string;
     strategy_states: Record<string, string>;
-    portfolios?: Record<string, unknown>;
+    strategies_registry?: Record<string, unknown>;
     [key: string]: unknown;
   };
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { Search, RefreshCw, CheckCircle, ChevronRight, FileText, Layers, Plus } from "lucide-react";
+import { Search, RefreshCw, CheckCircle, ChevronRight, FileText, Layers, Plus, FolderOpen, Copy, Check } from "lucide-react";
 import { apiGet, apiPost, ApiError } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FadeIn } from "@/components/motion/FadeIn";
@@ -17,8 +17,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Label } from "@/components/ui/label";
 
 /* ── Types ───────────────────────────────────────────────────────── */
 
@@ -35,7 +33,6 @@ interface StrategyListItem {
   name: string;
   class_name?: string;
   file_path?: string;
-  is_portfolio?: boolean;
   version?: string;
   description?: string;
 }
@@ -65,7 +62,6 @@ interface StrategyDetail {
   name: string;
   class_name?: string;
   file_path?: string;
-  is_portfolio?: boolean;
   version?: string;
   description?: string;
   versions?: StrategyVersion[];
@@ -142,10 +138,10 @@ function StrategyRow({
             {strategy.name}
           </span>
           <Badge
-            variant={strategy.is_portfolio ? "info" : "neutral"}
+            variant="neutral"
             className="shrink-0 text-[9px] font-bold"
           >
-            {strategy.is_portfolio ? "组合" : "单策略"}
+            策略
           </Badge>
         </div>
         {strategy.class_name && (
@@ -179,6 +175,8 @@ function DetailPanel({
   onValidate,
   validating,
   validateResult,
+  onOpen,
+  opening,
 }: {
   strategy: StrategyListItem;
   detail: StrategyDetail | null;
@@ -188,7 +186,11 @@ function DetailPanel({
   onValidate: () => void;
   validating: boolean;
   validateResult: string | null;
+  onOpen: () => void;
+  opening: boolean;
 }) {
+  const [copied, setCopied] = useState(false);
+
   if (detailLoading) return <DetailSkeleton />;
 
   const info = detail ?? strategy;
@@ -203,30 +205,59 @@ function DetailPanel({
               {info.name}
             </h2>
             <Badge
-              variant={info.is_portfolio ? "info" : "neutral"}
+              variant="neutral"
               className="text-[9px] font-bold"
             >
-              {info.is_portfolio ? "组合策略" : "单策略"}
+              策略
             </Badge>
           </div>
           {info.description && (
             <span className="text-[11px] text-muted-foreground">{info.description}</span>
           )}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onValidate}
-          disabled={validating}
-          className="shrink-0 border-border bg-popover text-[11px] font-semibold text-muted-foreground hover:border-[var(--accent-green)]/50 hover:text-[var(--accent-green)] transition-all duration-150"
-        >
-          {validating ? (
-            <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-          ) : (
-            <CheckCircle className="w-3 h-3" />
-          )}
-          验证
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              onOpen();
+              // Also copy path to clipboard as fallback
+              try {
+                const resp = await apiPost<{ path: string }>(`/api/strategies/${encodeURIComponent(strategy.name)}/open`);
+                if (resp?.path) {
+                  await navigator.clipboard.writeText(resp.path);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                }
+              } catch {
+                // ignore — onOpen already handles the API call
+              }
+            }}
+            disabled={opening}
+            className="border-border bg-popover text-[11px] font-semibold text-muted-foreground hover:border-[var(--accent-blue)]/50 hover:text-[var(--accent-blue)] transition-all duration-150"
+          >
+            {copied ? (
+              <Check className="w-3 h-3 text-[var(--accent-green)]" />
+            ) : (
+              <FolderOpen className="w-3 h-3" />
+            )}
+            {copied ? "已复制路径" : "打开文件夹"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onValidate}
+            disabled={validating}
+            className="border-border bg-popover text-[11px] font-semibold text-muted-foreground hover:border-[var(--accent-green)]/50 hover:text-[var(--accent-green)] transition-all duration-150"
+          >
+            {validating ? (
+              <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <CheckCircle className="w-3 h-3" />
+            )}
+            验证
+          </Button>
+        </div>
       </div>
 
       {validateResult && (
@@ -249,7 +280,7 @@ function DetailPanel({
         <div className="grid grid-cols-2 gap-x-8 gap-y-3">
           <KvRow label="策略名称" value={info.name} />
           <KvRow label="策略类" value={info.class_name ?? "—"} mono />
-          <KvRow label="类型" value={info.is_portfolio ? "组合策略" : "单策略"} />
+          <KvRow label="类型" value="策略" />
           <KvRow label="版本" value={info.version ? `v${info.version}` : "—"} />
           <div className="col-span-2">
             <KvRow label="文件路径" value={info.file_path ?? "—"} mono />
@@ -378,8 +409,7 @@ export default function StrategiesPage() {
   const [validateResult, setValidateResult] = useState<string | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [createType, setCreateType] = useState<"bar" | "tick" | "portfolio">("bar");
-  const [portfolioStrategyType, setPortfolioStrategyType] = useState<"bar" | "tick">("bar");
+  const createType = "strategy";
   const [createName, setCreateName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -398,7 +428,6 @@ export default function StrategiesPage() {
           name: s.name,
           class_name: s.strategy_class,
           file_path: s.file_path,
-          is_portfolio: s.type === "portfolio",
           version: s.version,
           description: s.description,
         }));
@@ -428,8 +457,6 @@ export default function StrategiesPage() {
   }
 
   function openCreateDialog() {
-    setCreateType("bar");
-    setPortfolioStrategyType("bar");
     setCreateName("");
     setCreateError(null);
     setCreateOpen(true);
@@ -441,11 +468,7 @@ export default function StrategiesPage() {
     setCreating(true);
     setCreateError(null);
     try {
-      if (createType === "portfolio") {
-        await apiPost("/api/strategies/create-portfolio", { name, strategy_type: portfolioStrategyType });
-      } else {
-        await apiPost("/api/strategies/create", { name, type: createType });
-      }
+      await apiPost("/api/strategies/create", { name, type: createType });
       setCreateOpen(false);
       // Auto rescan + select new strategy
       setRescanning(true);
@@ -511,6 +534,20 @@ export default function StrategiesPage() {
     }
   }
 
+  const [opening, setOpening] = useState(false);
+
+  async function handleOpen() {
+    if (!selected) return;
+    setOpening(true);
+    try {
+      await apiPost(`/api/strategies/${encodeURIComponent(selected.name)}/open`);
+    } catch {
+      // ignore — clipboard copy is handled in the button's onClick
+    } finally {
+      setOpening(false);
+    }
+  }
+
   async function handleValidate() {
     if (!selected) return;
     setValidating(true);
@@ -519,7 +556,12 @@ export default function StrategiesPage() {
       await apiPost(`/api/strategies/${encodeURIComponent(selected.name)}/validate`);
       setValidateResult("ok");
     } catch (err) {
-      setValidateResult(err instanceof Error ? err.message : "error");
+      if (err instanceof ApiError && err.data && typeof err.data === "object") {
+        const d = err.data as { issues?: string[] };
+        setValidateResult(d.issues?.join("; ") ?? err.message);
+      } else {
+        setValidateResult(err instanceof Error ? err.message : "error");
+      }
     } finally {
       setValidating(false);
     }
@@ -632,6 +674,8 @@ export default function StrategiesPage() {
               onValidate={handleValidate}
               validating={validating}
               validateResult={validateResult}
+              onOpen={handleOpen}
+              opening={opening}
             />
           ) : (
             <div className="flex flex-col items-center justify-center h-full gap-3">
@@ -657,64 +701,6 @@ export default function StrategiesPage() {
           </DialogHeader>
 
           <div className="flex flex-col gap-4 py-2">
-            {/* Type selector */}
-            <div className="flex flex-col gap-2.5">
-              <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-                类型
-              </span>
-              <RadioGroup
-                value={createType}
-                onValueChange={(val: string) => setCreateType(val as "bar" | "tick" | "portfolio")}
-                className="flex gap-3"
-              >
-                {([
-                  { value: "bar", label: "Bar 策略" },
-                  { value: "tick", label: "Tick 策略" },
-                  { value: "portfolio", label: "投资组合" },
-                ] as const).map((opt) => (
-                  <Label
-                    key={opt.value}
-                    className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2.5 cursor-pointer transition-all duration-150 ${
-                      createType === opt.value
-                        ? "border-[var(--accent-blue)]/50 bg-[var(--accent-blue)]/5"
-                        : "border-border hover:border-foreground/20"
-                    }`}
-                  >
-                    <RadioGroupItem value={opt.value} />
-                    <span className="text-[11px] font-semibold">{opt.label}</span>
-                  </Label>
-                ))}
-              </RadioGroup>
-            </div>
-
-            {/* Portfolio strategy type sub-selector */}
-            {createType === "portfolio" && (
-              <div className="flex flex-col gap-2.5">
-                <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-                  策略模板
-                </span>
-                <div className="flex gap-2">
-                  {([
-                    { value: "bar", label: "Bar 策略" },
-                    { value: "tick", label: "Tick 策略" },
-                  ] as const).map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => setPortfolioStrategyType(opt.value)}
-                      className={`flex-1 rounded-lg border px-3 py-2 text-[11px] font-semibold transition-all duration-150 ${
-                        portfolioStrategyType === opt.value
-                          ? "border-[var(--accent-blue)]/50 bg-[var(--accent-blue)]/5 text-[var(--accent-blue)]"
-                          : "border-border text-muted-foreground hover:border-foreground/20"
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
             {/* Name input */}
             <div className="flex flex-col gap-2">
               <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
