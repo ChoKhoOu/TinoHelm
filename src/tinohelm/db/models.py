@@ -32,7 +32,7 @@ class RunStatus(str, enum.Enum):
 
 class StrategyType(str, enum.Enum):
     single = "single"
-    portfolio = "portfolio"
+    portfolio = "portfolio"  # Deprecated: kept for DB backward compat, no longer generated
 
 
 class Strategy(Base):

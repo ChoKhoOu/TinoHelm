@@ -76,7 +76,7 @@ cd src/web && npm run build            # Static export to src/web/out/
 
 **Data flow for backtests**: CLI → POST /api/backtest/run → Redis queue `tino:backtest:queue` → Worker subprocess dequeues → BacktestRunner (NT BacktestEngine) → Result extraction → DB + Redis progress → CLI polls status
 
-**Data flow for live/sandbox trading**: TradingNode subprocess → BridgeActor listens to NT position/order events → Persists to PostgreSQL (`positions` table via UPSERT, `fills` table via INSERT ON CONFLICT DO NOTHING) → Publishes JSON to Redis PubSub (`tino:{node_type}:positions`, `tino:{node_type}:fills`) → EventBridge relays to WebSocket clients → TUI receives `position.update`/`fill.new` events and refreshes display. Dedup keys: `position_id` for positions, `trade_id` for fills. TUI boots by GET-loading historical data, then switches to WS real-time stream.
+**Data flow for live/sandbox trading**: TradingNode subprocess → 5 specialized actors handle bridging: **SnapshotActor** publishes NT position/order/bar events to Redis PubSub (`tino:{node_type}:positions`, `tino:{node_type}:fills`), **DbWriterActor** persists to PostgreSQL (`positions` table via UPSERT, `fills` table via INSERT ON CONFLICT DO NOTHING), **CommandActor** receives external lifecycle commands via Redis SUBSCRIBE, **HealthActor** sends heartbeats + monitors strategy files, **MetricsActor** captures equity snapshots → EventBridge relays to WebSocket clients → TUI receives `position.update`/`fill.new` events and refreshes display. Dedup keys: `position_id` for positions, `trade_id` for fills. TUI boots by GET-loading historical data, then switches to WS real-time stream.
 
 **Data pipeline** (instrument + bars): `data/instruments.py` fetches real instrument definitions from Binance `/fapi/v1/exchangeInfo` API (24h file cache), `data/providers/binance.py` fetches klines from `/fapi/v1/klines`, `data/catalog.py` wraps both into NT-native Parquet format. Instruments are always built from real exchange parameters — never hardcoded.
 
@@ -95,25 +95,32 @@ Everything is a portfolio. Single `.py` strategies are auto-wrapped as implicit 
     └── factors.py                   # Extracted indicators/constants
 ```
 
-**Strategy/Actor loading** is unified in `portfolio/loader.py` — the single entry point shared by BacktestRunner, Sandbox node, and Live node. It creates N strategy instances (one per symbol) with injected `instrument_id`/`bar_type`/`order_id_tag`/`manage_stop`, plus optional Actor instances.
+**Strategy/Actor loading** uses a unified module loader (`strategy/module_loader.py`) for safe importlib operations with sys.path cleanup and boundary protection. The high-level entry point is `strategy/loader.py` (shared by BacktestRunner, Sandbox node, and Live node), which creates N strategy instances (one per symbol) with injected `instrument_id`/`bar_type`/`order_id_tag`/`manage_stop`, plus optional Actor instances. Strategy bundle config is loaded via `portfolio/config.py`.
 
 **RiskGuardActor** (`actors/risk_guard.py`) is a cross-strategy portfolio risk overlay. It subscribes to all bar types via `self.cache.bar_types()` in `on_start()`, and communicates via NT msgbus (`self.msgbus.publish("risk.guard.state", action)`). Strategies subscribe to these topics to honor risk signals.
 
-**BridgeActor** (`node/bridge_actor.py`) bridges NT internal msgbus events to Redis PubSub for cross-process communication. Used by both sandbox and live nodes. Also drives portfolio lifecycle by hosting `LifecycleController` and `PortfolioRegistry` after `node.build()`.
+**5 Node Actors** (`node/actors/`) — decomposed single-responsibility actors replacing the former monolithic BridgeActor:
+- **SnapshotActor** — NT events → Redis PubSub (positions, orders, bars, risk metrics)
+- **CommandActor** — Redis SUBSCRIBE → LifecycleController dispatch (daemon thread + deque + NT timer)
+- **DbWriterActor** — trade events → PostgreSQL (batched 1s flush via `queue_for_executor`)
+- **HealthActor** — heartbeat (5s) + strategy file monitoring (10s poll) + auto-resume on restart
+- **MetricsActor** — equity snapshots (60s timer) → Redis + PostgreSQL
 
-### Multi-Portfolio Lifecycle
+All 5 actors are created in `_common.py:load_components()` and wired into the TradingNode.
 
-Runtime portfolio management is layered across three components in `node/`:
+### Strategy Lifecycle
 
-**PortfolioRegistry** (`node/portfolio_registry.py`) — pure Python, no NT deps. Tracks portfolio state machine:
+Runtime strategy management is layered across three components in `node/`:
+
+**StrategyRegistry** (`node/strategy_registry.py`) — pure Python, no NT deps. Tracks strategy state machine:
 ```
 available → starting → running → paused → available
                          ↓                    ↑
                       flattening ─────────────┘
 ```
 - Scans `~/.tino/strategies/` for `portfolio.yaml` folders
-- Allocates globally unique `order_id_tag` prefixes (2-char hex: `"00"`, `"01"`, …) to avoid strategy ID collisions across portfolios
-- Maps `strategy_id → portfolio_name` for reverse lookups
+- Allocates globally unique `order_id_tag` prefixes (2-char hex: `"00"`, `"01"`, …) to avoid strategy ID collisions
+- Maps `strategy_id → strategy_name` for reverse lookups
 
 **LifecycleController** (`node/lifecycle_controller.py`) — 4-level control, called on NT event loop thread:
 - **L1 Soft Pause**: publishes `lifecycle.pause.{strategy_id}` on msgbus — strategy honors voluntarily
@@ -125,11 +132,11 @@ available → starting → running → paused → available
 
 **Topics** (`node/topics.py`) — defines msgbus topic constants: `LIFECYCLE_PAUSE`, `LIFECYCLE_RESUME`, `LIFECYCLE_FLATTEN`, `RISK_GUARD_STATE`.
 
-**Portfolio lifecycle API**: `GET /api/node/portfolios`, `POST /api/node/portfolio/{start,pause,resume,flatten-stop}` (see `api/routes/node.py`).
+**Strategy lifecycle API**: `GET /api/node/strategies`, `POST /api/node/strategy/{start,pause,resume,flatten-stop}` (see `api/routes/node.py`).
 
-**Portfolio CLI**: `tino node portfolio list|start|pause|resume|flatten-stop --mode sandbox|live`.
+**Strategy CLI**: `tino node strategy list|start|pause|resume|flatten-stop --mode sandbox|live`.
 
-**DB design**: The `strategies` table is ephemeral (rebuilt on `tino strategy rescan`). `backtest_runs` uses `strategy_name` (string column) instead of FK for decoupling. `positions` stores live/sandbox position snapshots (upserted by `position_id`). `fills` stores immutable fill records (deduped by `trade_id`). Both written by BridgeActor in the TradingNode subprocess via sync DB engine.
+**DB design**: The `strategies` table is ephemeral (rebuilt on `tino strategy rescan`). `backtest_runs` uses `strategy_name` (string column) instead of FK for decoupling. `positions` stores live/sandbox position snapshots (upserted by `position_id`). `fills` stores immutable fill records (deduped by `trade_id`). Both written by DbWriterActor in the TradingNode subprocess via `queue_for_executor`.
 
 ## Key Conventions
 
@@ -170,7 +177,7 @@ Priority: ENV vars (`TINO_` prefix, `__` nested delimiter) > `config/user.yaml` 
 - `tino:{node_type}:fills` — Fill/trade events (PubSub)
 - `tino:{node_type}:commands_ack` — Lifecycle command acknowledgments (PubSub)
 - `tino:{node_type}:lifecycle_state` — Node lifecycle state snapshot (key)
-- `tino:{node_type}:portfolio_registry` — Portfolio registry JSON snapshot (key, 30s TTL)
+- `tino:{node_type}:strategy_registry` — Strategy registry JSON snapshot (key, 30s TTL)
 
 ## 用户规则
 - **MUST**: 涉及 NT API 的任何开发，必须先浏览 https://nautilustrader.io/docs/latest/ 对应文档页面，确认 API 签名和行为后再写代码。不要凭记忆或猜测调用 NT API。

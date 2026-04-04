@@ -40,7 +40,7 @@ class RiskGuardConfig(ActorConfig, frozen=True):
 
     # Portfolio isolation: only monitor strategies with this tag prefix.
     # If None, monitors ALL positions (backward compatible).
-    portfolio_name: str | None = None
+    strategy_name: str | None = None
     strategy_tag_prefix: str | None = None
 
     # Daily PnL stop loss (negative fraction, e.g. -0.02 = -2%)
@@ -84,7 +84,7 @@ class RiskGuardActor(Actor):
     def __init__(self, config: RiskGuardConfig) -> None:
         super().__init__(config)
 
-        self._portfolio_name = config.portfolio_name
+        self._strategy_name = config.strategy_name
         self._strategy_tag_prefix = config.strategy_tag_prefix
 
         self._venue_name = config.venue_name
@@ -144,7 +144,7 @@ class RiskGuardActor(Actor):
             self._day_start_equity = equity
         logger.info(
             "RiskGuardActor started: portfolio=%s, equity=%.2f, breach_action=%s, check_interval=%ds",
-            self._portfolio_name or "ALL", self._peak_equity,
+            self._strategy_name or "ALL", self._peak_equity,
             self._breach_action.value, self._check_interval_secs,
         )
 
@@ -274,7 +274,7 @@ class RiskGuardActor(Actor):
                 return
 
     def _publish_metrics(self, equity: float) -> None:
-        """Publish current risk metrics to msgbus for BridgeActor relay."""
+        """Publish current risk metrics to msgbus for SnapshotActor relay."""
         drawdown_pct = (equity - self._peak_equity) / self._peak_equity if self._peak_equity > 0 else 0.0
         daily_pnl_pct = (equity - self._day_start_equity) / self._day_start_equity if self._day_start_equity > 0 else 0.0
         total_exposure = self._calc_total_exposure()
