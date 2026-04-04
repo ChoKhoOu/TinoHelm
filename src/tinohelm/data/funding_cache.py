@@ -67,9 +67,6 @@ def load_funding_rates(
     3. Otherwise fetch missing data from Binance, merge into cache, save
     4. Return records filtered to [start, end]
     """
-    import asyncio
-    from tinohelm.data.providers.binance import fetch_funding_rates
-
     start_ms = int(start.timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
 
@@ -97,18 +94,23 @@ def load_funding_rates(
 
     if fetch_start is not None:
         try:
-            new_rates = asyncio.run(fetch_funding_rates(
+            from tinohelm.data.pipeline import BinanceVisionPipeline
+            from tinohelm.core.config import get_settings
+
+            settings = get_settings()
+            catalog_path = str(settings.paths.catalog) if settings else "data/catalog"
+            pipeline = BinanceVisionPipeline(catalog_path=catalog_path)
+            result = pipeline.ingest_sync(
                 symbol=symbol,
-                start=fetch_start,
-                end=end,
-            ))
-            if new_rates:
-                merged = cached + new_rates
-                _save_cache(symbol, merged)
-                cached = _load_cache(symbol)  # Re-read deduped/sorted version
+                data_type="fundingRate",
+                start=fetch_start.date() if isinstance(fetch_start, datetime) else fetch_start,
+                end=end.date() if isinstance(end, datetime) else end,
+            )
+            if result.objects_count > 0:
+                cached = _load_cache(symbol)  # Re-read from cache (Pipeline writes via _save_cache)
                 logger.info(
-                    "Incremental update: fetched %d new records for %s (cache now %d total)",
-                    len(new_rates), symbol, len(cached),
+                    "Incremental update: ingested %d records for %s (cache now %d total)",
+                    result.objects_count, symbol, len(cached),
                 )
             elif not cached:
                 logger.warning("No funding rate data available for %s", symbol)
