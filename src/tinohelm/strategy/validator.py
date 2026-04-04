@@ -1,12 +1,12 @@
 """Strategy file validation."""
 from __future__ import annotations
 
-import importlib
 import inspect
 import logging
-import sys
 from pathlib import Path
 from typing import Any
+
+from tinohelm.strategy.module_loader import load_module_from_file
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,7 @@ def validate_strategy(name: str, strategies_dir: str | Path) -> dict[str, Any]:
     Returns validation result dict.
     """
     strategies_dir = Path(strategies_dir)
+
     file_path = strategies_dir / f"{name}.py"
 
     result: dict[str, Any] = {
@@ -34,16 +35,9 @@ def validate_strategy(name: str, strategies_dir: str | Path) -> dict[str, Any]:
         result["errors"].append(f"File not found: {file_path}")
         return result
 
-    # Add to path
-    str_dir = str(strategies_dir.resolve())
-    if str_dir not in sys.path:
-        sys.path.insert(0, str_dir)
-
     # Try import
     try:
-        if name in sys.modules:
-            del sys.modules[name]
-        module = importlib.import_module(name)
+        module = load_module_from_file(file_path)
     except Exception as e:
         result["errors"].append(f"Import failed: {e}")
         return result
@@ -53,7 +47,7 @@ def validate_strategy(name: str, strategies_dir: str | Path) -> dict[str, Any]:
     config_cls = None
 
     for obj_name, obj in inspect.getmembers(module, inspect.isclass):
-        if obj.__module__ != name:
+        if obj.__module__ != module.__name__:
             continue
         for base in inspect.getmro(obj):
             if base.__name__ == "Strategy" and base.__module__.startswith("nautilus_trader"):
@@ -71,18 +65,13 @@ def validate_strategy(name: str, strategies_dir: str | Path) -> dict[str, Any]:
     if not strategy_cls or not config_cls:
         return result
 
-    # Check config has instrument_id
-    if hasattr(config_cls, "model_fields"):
-        fields = config_cls.model_fields
-        if "instrument_id" not in fields:
-            result["warnings"].append("Config missing 'instrument_id' field (recommended)")
-
-        for field_name, field_info in fields.items():
-            result["config_params"].append({
-                "name": field_name,
-                "type": str(field_info.annotation) if field_info.annotation else "Any",
-                "required": field_info.is_required(),
-            })
+    # Check config params (supports both Pydantic model_fields and msgspec __struct_fields__)
+    from tinohelm.strategy.utils import get_config_fields
+    if config_cls:
+        try:
+            result["config_params"] = get_config_fields(config_cls)
+        except Exception:
+            pass
 
     # Check hooks
     for hook in ["on_start", "on_stop", "on_bar", "on_quote_tick", "on_trade_tick",

@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import inspect
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.db.models import Strategy, StrategyVersion
+from tinohelm.strategy.module_loader import load_module_from_file
 from tinohelm.strategy.utils import get_config_fields
 
 logger = logging.getLogger(__name__)
@@ -24,29 +23,19 @@ def _compute_hash(file_path: Path) -> str:
 
 
 def scan_strategies(strategies_dir: str | Path) -> list[dict[str, Any]]:
-    """Scan directory for strategies: single .py files and portfolio folders.
+    """Scan directory for strategy .py files.
 
-    Returns list of dicts with strategy metadata. Each dict includes a ``type``
-    field: ``"single"`` for standalone .py files, ``"portfolio"`` for folders
-    containing ``portfolio.yaml``.
+    Uses the unified module_loader for file discovery and validation,
+    then extracts full metadata for each valid strategy.
+
+    Returns list of dicts with strategy metadata.
     """
-    strategies_dir = Path(strategies_dir)
-    if not strategies_dir.exists():
-        logger.warning(f"Strategies directory not found: {strategies_dir}")
-        return []
+    from tinohelm.strategy.module_loader import scan_valid_strategy_files
 
-    # Add strategies dir to sys.path if not present
-    str_dir = str(strategies_dir.resolve())
-    if str_dir not in sys.path:
-        sys.path.insert(0, str_dir)
-
+    valid_files = scan_valid_strategy_files(strategies_dir)
     results = []
 
-    # Scan single .py files
-    for py_file in sorted(strategies_dir.glob("*.py")):
-        if py_file.name.startswith("_"):
-            continue
-
+    for name, py_file in valid_files.items():
         try:
             info = _scan_single_file(py_file)
             if info:
@@ -54,39 +43,18 @@ def scan_strategies(strategies_dir: str | Path) -> list[dict[str, Any]]:
         except Exception as e:
             logger.warning(f"Failed to scan {py_file.name}: {e}")
 
-    # Scan portfolio folders (contain portfolio.yaml)
-    for folder in sorted(strategies_dir.iterdir()):
-        if not folder.is_dir():
-            continue
-        yaml_path = folder / "portfolio.yaml"
-        if not yaml_path.exists():
-            continue
-
-        try:
-            info = _scan_portfolio_folder(folder, yaml_path)
-            if info:
-                results.append(info)
-        except Exception as e:
-            logger.warning(f"Failed to scan portfolio {folder.name}: {e}")
-
     return results
 
 
 def _scan_single_file(py_file: Path) -> dict[str, Any] | None:
     """Scan a single .py file for Strategy/StrategyConfig subclasses."""
-    module_name = py_file.stem
-
-    # Remove cached module for fresh import
-    if module_name in sys.modules:
-        del sys.modules[module_name]
-
-    module = importlib.import_module(module_name)
+    module = load_module_from_file(py_file)
 
     strategy_cls = None
     config_cls = None
 
     for name, obj in inspect.getmembers(module, inspect.isclass):
-        if obj.__module__ != module_name:
+        if obj.__module__ != module.__name__:
             continue
         for base in inspect.getmro(obj):
             if base.__name__ == "Strategy" and base.__module__.startswith("nautilus_trader"):
@@ -96,6 +64,8 @@ def _scan_single_file(py_file: Path) -> dict[str, Any] | None:
 
     if not (strategy_cls and config_cls):
         return None
+
+    module_name = py_file.stem
 
     config_params = get_config_fields(config_cls)
     from tinohelm.strategy.utils import parse_optimize_ranges
@@ -122,51 +92,6 @@ def _scan_single_file(py_file: Path) -> dict[str, Any] | None:
         "config_params": config_params,
         "hooks": hooks,
         "type": "single",
-        "optimize_ranges": optimize_ranges,
-    }
-
-
-def _scan_portfolio_folder(folder: Path, yaml_path: Path) -> dict[str, Any] | None:
-    """Scan a portfolio folder containing portfolio.yaml."""
-    import yaml
-
-    with open(yaml_path) as f:
-        raw = yaml.safe_load(f)
-
-    if not isinstance(raw, dict):
-        return None
-
-    strategy_section = raw.get("strategy", {})
-    strategy_class = strategy_section.get("class", "")
-    config_class = strategy_section.get("config", strategy_class + "Config" if strategy_class else "")
-    symbols = raw.get("symbols", [])
-    interval = raw.get("interval", "")
-    actors = raw.get("actors", []) or []
-
-    # Optimization parameter ranges
-    from tinohelm.strategy.utils import parse_optimize_ranges
-    optimize_ranges = parse_optimize_ranges(raw.get("optimize", {}) or {})
-
-    # Compute hash from portfolio.yaml
-    code_hash = _compute_hash(yaml_path)
-
-    logger.info(
-        f"Discovered portfolio: {folder.name} ({len(symbols)} symbols, {len(actors)} actors)"
-    )
-    return {
-        "name": folder.name,
-        "file_path": str(yaml_path),
-        "strategy_class": strategy_class.rsplit(":", 1)[-1] if ":" in strategy_class else strategy_class,
-        "config_class": config_class.rsplit(":", 1)[-1] if ":" in config_class else config_class,
-        "module_path": strategy_class,
-        "config_module_path": config_class,
-        "code_hash": code_hash,
-        "config_params": [],
-        "hooks": [],
-        "type": "portfolio",
-        "symbols": symbols,
-        "interval": interval,
-        "actors": [a.get("name", a.get("class", "")) for a in actors if isinstance(a, dict)],
         "optimize_ranges": optimize_ranges,
     }
 

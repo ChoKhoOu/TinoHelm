@@ -1,4 +1,4 @@
-"""Tests for strategy registry — mixed directory scanning."""
+"""Tests for strategy registry — directory scanning."""
 from __future__ import annotations
 
 import pytest
@@ -8,8 +8,8 @@ from tinohelm.strategy.registry import scan_strategies
 
 
 @pytest.fixture
-def mixed_strategies_dir(tmp_path):
-    """Create a strategies dir with both single files and portfolio folders."""
+def strategies_dir(tmp_path):
+    """Create a strategies dir with .py files and other items."""
     strategies = tmp_path / "strategies"
     strategies.mkdir()
 
@@ -21,30 +21,10 @@ class SimpleMAConfig:
     pass
 """)
 
-    # Portfolio folder with portfolio.yaml
-    portfolio = strategies / "crypto_momentum"
-    portfolio.mkdir()
-    (portfolio / "portfolio.yaml").write_text("""\
-strategy:
-  class: "strategy:BTCMultiFactor"
-
-symbols:
-  - BTCUSDT-PERP
-  - ETHUSDT-PERP
-  - XRPUSDT-PERP
-
-interval: 5m
-
-actors:
-  - name: risk_guard
-    params:
-      max_drawdown_pct: -0.1
-""")
-
     # Underscore file (should be skipped)
     (strategies / "_helper.py").write_text("class Helper: pass")
 
-    # Non-portfolio folder (no portfolio.yaml, should be skipped)
+    # Subfolder (should be ignored — scanner only looks at .py files)
     other = strategies / "data_cache"
     other.mkdir()
     (other / "readme.txt").write_text("not a strategy")
@@ -53,32 +33,21 @@ actors:
 
 
 class TestScanStrategies:
-    """Test mixed directory scanning."""
+    """Test directory scanning."""
 
-    def test_detects_portfolio_folder(self, mixed_strategies_dir):
-        results = scan_strategies(mixed_strategies_dir)
-        portfolio_results = [r for r in results if r["type"] == "portfolio"]
-
-        assert len(portfolio_results) == 1
-        p = portfolio_results[0]
-        assert p["name"] == "crypto_momentum"
-        assert p["symbols"] == ["BTCUSDT-PERP", "ETHUSDT-PERP", "XRPUSDT-PERP"]
-        assert p["interval"] == "5m"
-        assert "risk_guard" in p["actors"]
-
-    def test_portfolio_has_type_field(self, mixed_strategies_dir):
-        results = scan_strategies(mixed_strategies_dir)
+    def test_only_scans_py_files(self, strategies_dir):
+        results = scan_strategies(strategies_dir)
         for r in results:
             assert "type" in r
-            assert r["type"] in ("single", "portfolio")
+            assert r["type"] == "single"
 
-    def test_skips_underscore_files(self, mixed_strategies_dir):
-        results = scan_strategies(mixed_strategies_dir)
+    def test_skips_underscore_files(self, strategies_dir):
+        results = scan_strategies(strategies_dir)
         names = [r["name"] for r in results]
         assert "_helper" not in names
 
-    def test_skips_non_portfolio_folders(self, mixed_strategies_dir):
-        results = scan_strategies(mixed_strategies_dir)
+    def test_skips_folders(self, strategies_dir):
+        results = scan_strategies(strategies_dir)
         names = [r["name"] for r in results]
         assert "data_cache" not in names
 
@@ -91,11 +60,3 @@ class TestScanStrategies:
     def test_nonexistent_dir(self, tmp_path):
         results = scan_strategies(tmp_path / "nonexistent")
         assert results == []
-
-    def test_portfolio_metadata_extraction(self, mixed_strategies_dir):
-        results = scan_strategies(mixed_strategies_dir)
-        portfolio = [r for r in results if r["type"] == "portfolio"][0]
-
-        assert portfolio["strategy_class"] == "BTCMultiFactor"
-        assert "code_hash" in portfolio
-        assert len(portfolio["code_hash"]) == 64  # SHA-256

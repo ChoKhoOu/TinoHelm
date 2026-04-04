@@ -1,4 +1,4 @@
-"""Portfolio configuration — schema and loader for portfolio.yaml."""
+"""Strategy bundle configuration — schema and loader for strategy .py files."""
 from __future__ import annotations
 
 import logging
@@ -6,8 +6,6 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +36,7 @@ class AccountSettings:
 
 @dataclass
 class RiskGuardSettings:
-    """Declarative risk guard configuration from portfolio.yaml."""
+    """Declarative risk guard configuration."""
 
     enabled: bool = True
     check_interval_secs: int = 10
@@ -50,11 +48,11 @@ class RiskGuardSettings:
 
 
 @dataclass
-class PortfolioConfig:
-    """Parsed portfolio configuration.
+class StrategyBundle:
+    """Internal configuration bundle for strategy loading.
 
-    Can be loaded from a ``portfolio.yaml`` file or auto-wrapped from
-    a single ``.py`` strategy file with CLI arguments.
+    Holds everything the loader/runner/node needs to instantiate a strategy.
+    Loaded from a single ``.py`` strategy file with CLI arguments.
     """
 
     # Strategy references
@@ -68,195 +66,89 @@ class PortfolioConfig:
     # Strategy params (passed to config constructor)
     params: dict[str, Any] = field(default_factory=dict)
 
+    # Resolved bar types (injected by runner for composite aggregation)
+    resolved_bar_types: list[str] = field(default_factory=list)
+
     # Actors (optional)
     actors: list[ActorRef] = field(default_factory=list)
 
     # Account settings
     account: AccountSettings = field(default_factory=AccountSettings)
 
-    # Declarative risk guard settings (optional, from portfolio.yaml)
+    # Declarative risk guard settings (optional)
     risk_guard: RiskGuardSettings | None = None
 
-    # Manual tag override for PortfolioRegistry (from portfolio.yaml 'tag:')
+    # Manual tag override for StrategyRegistry
     tag: str | None = None
 
     # Optimization parameter ranges (optional)
     optimize_ranges: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    # Source path (folder or .py file)
+    # Source path (.py file parent dir)
     source_path: Path | None = None
 
     # Whether this was auto-wrapped from a single .py file
     implicit: bool = False
 
 
-def load_portfolio_config(
+
+
+def load_strategy_bundle(
     name_or_path: str,
     *,
     strategies_dir: str | Path | None = None,
     symbol: str | None = None,
+    symbols: list[str] | None = None,
     interval: str | None = None,
     strategy_params: dict[str, Any] | None = None,
-) -> PortfolioConfig:
-    """Load a PortfolioConfig from a name or path.
+) -> StrategyBundle:
+    """Load a StrategyBundle from a strategy name or .py file path.
 
     Resolution order:
-    1. If ``name_or_path`` points to a folder with ``portfolio.yaml``, load it.
-    2. If ``~/.tino/strategies/<name>/portfolio.yaml`` exists, load it.
-    3. If ``~/.tino/strategies/<name>.py`` exists, auto-wrap as implicit portfolio.
-    4. If ``name_or_path`` is a ``.py`` file path, auto-wrap as implicit portfolio.
+    1. If ``~/.tino/strategies/<name>.py`` exists, wrap it.
+    2. If ``name_or_path`` is a ``.py`` file path, wrap it.
 
-    For implicit portfolios (single .py files), ``symbol`` and ``interval``
-    CLI arguments are required.
+    ``symbol``/``symbols`` and ``interval`` are required.
     """
     strategies_dir = Path(strategies_dir) if strategies_dir else _DEFAULT_STRATEGIES_DIR
     path = Path(name_or_path)
 
-    # Case 1: direct folder path with portfolio.yaml
-    if path.is_dir() and (path / "portfolio.yaml").exists():
-        return _load_from_yaml(path / "portfolio.yaml", path)
+    # Merge symbol/symbols for backward compat
+    effective_symbols = symbols or ([symbol] if symbol else None)
 
-    # Case 2: name resolves to a portfolio folder
-    portfolio_dir = strategies_dir / name_or_path
-    if portfolio_dir.is_dir() and (portfolio_dir / "portfolio.yaml").exists():
-        return _load_from_yaml(portfolio_dir / "portfolio.yaml", portfolio_dir)
-
-    # Case 3: name resolves to a single .py file
+    # Case 1: name resolves to a single .py file
     py_file = strategies_dir / f"{name_or_path}.py"
     if py_file.exists():
-        return _wrap_single_file(py_file, symbol=symbol, interval=interval, params=strategy_params)
+        return _wrap_single_file(py_file, symbols=effective_symbols, interval=interval, params=strategy_params)
 
-    # Case 4: direct .py file path
+    # Case 2: direct .py file path
     if path.suffix == ".py" and path.exists():
-        return _wrap_single_file(path, symbol=symbol, interval=interval, params=strategy_params)
+        return _wrap_single_file(path, symbols=effective_symbols, interval=interval, params=strategy_params)
 
     raise FileNotFoundError(
-        f"Cannot find portfolio or strategy: '{name_or_path}'. "
-        f"Looked in: {portfolio_dir}, {py_file}, {path}"
+        f"Cannot find strategy: '{name_or_path}'. "
+        f"Looked in: {py_file}, {path}"
     )
-
-
-def _load_from_yaml(yaml_path: Path, folder: Path) -> PortfolioConfig:
-    """Parse a portfolio.yaml file into a PortfolioConfig."""
-    with open(yaml_path) as f:
-        raw = yaml.safe_load(f)
-
-    if not isinstance(raw, dict):
-        raise ValueError(f"portfolio.yaml must be a YAML mapping, got {type(raw).__name__}")
-
-    # Validate required fields
-    strategy_section = raw.get("strategy")
-    if not strategy_section or not isinstance(strategy_section, dict):
-        raise ValueError("portfolio.yaml: missing required 'strategy' section")
-
-    strategy_class = strategy_section.get("class")
-    if not strategy_class:
-        raise ValueError("portfolio.yaml: missing required 'strategy.class' field")
-
-    # Config class defaults to strategy class name + "Config"
-    config_class = strategy_section.get("config")
-    if not config_class:
-        # Derive from strategy class: "module:Foo" -> "module:FooConfig"
-        config_class = strategy_class + "Config"
-
-    symbols = raw.get("symbols", [])
-    if not symbols:
-        raise ValueError("portfolio.yaml: missing required 'symbols' list")
-    if not isinstance(symbols, list):
-        raise ValueError(f"portfolio.yaml: 'symbols' must be a list, got {type(symbols).__name__}")
-
-    interval = raw.get("interval")
-    if not interval:
-        raise ValueError("portfolio.yaml: missing required 'interval' field")
-
-    # Validate symbol format
-    for sym in symbols:
-        if not _SYMBOL_RE.match(sym):
-            logger.warning(
-                "Symbol '%s' does not match expected format (e.g. BTCUSDT-PERP). "
-                "Proceeding anyway.",
-                sym,
-            )
-
-    # Parse actors
-    actors = []
-    for actor_raw in raw.get("actors", []) or []:
-        if isinstance(actor_raw, dict):
-            actors.append(ActorRef(
-                name=actor_raw.get("name"),
-                class_path=actor_raw.get("class"),
-                params=actor_raw.get("params", {}),
-            ))
-
-    # Parse account settings
-    account_raw = raw.get("account", {})
-    account = AccountSettings(
-        starting_balance=account_raw.get("starting_balance", 10000),
-        currency=account_raw.get("currency", "USDT"),
-        leverage=account_raw.get("leverage", 1),
-    )
-
-    # Parse risk_guard section (declarative format)
-    risk_guard_raw = raw.get("risk_guard")
-    risk_guard_settings = None
-    if isinstance(risk_guard_raw, dict):
-        risk_guard_settings = RiskGuardSettings(
-            enabled=risk_guard_raw.get("enabled", True),
-            check_interval_secs=risk_guard_raw.get("check_interval_sec", risk_guard_raw.get("check_interval_secs", 10)),
-            daily_stop_loss_pct=risk_guard_raw.get("daily_stop_loss_pct") or risk_guard_raw.get("max_daily_loss_pct"),
-            max_drawdown_pct=risk_guard_raw.get("max_drawdown_pct"),
-            max_total_exposure=risk_guard_raw.get("max_total_exposure"),
-            max_positions=risk_guard_raw.get("max_position_count") or risk_guard_raw.get("max_positions"),
-            breach_action=risk_guard_raw.get("breach_action", "reduce_only"),
-        )
-
-    # Strategy params
-    params = raw.get("params", {}) or {}
-
-    # Optimization parameter ranges
-    from tinohelm.strategy.utils import parse_optimize_ranges
-    optimize_ranges = parse_optimize_ranges(raw.get("optimize", {}) or {})
-
-    # Manual tag override for PortfolioRegistry
-    manual_tag = raw.get("tag")
-
-    config = PortfolioConfig(
-        strategy_class=strategy_class,
-        config_class=config_class,
-        symbols=symbols,
-        interval=interval,
-        params=params,
-        actors=actors,
-        account=account,
-        risk_guard=risk_guard_settings,
-        tag=manual_tag,
-        optimize_ranges=optimize_ranges,
-        source_path=folder,
-        implicit=False,
-    )
-
-    logger.info(
-        "Loaded portfolio config: %d symbols, %d actors, from %s",
-        len(symbols), len(actors), yaml_path,
-    )
-    return config
 
 
 def _wrap_single_file(
     py_file: Path,
     *,
     symbol: str | None = None,
+    symbols: list[str] | None = None,
     interval: str | None = None,
     params: dict[str, Any] | None = None,
-) -> PortfolioConfig:
-    """Auto-wrap a single .py strategy file as an implicit PortfolioConfig."""
-    if not symbol:
+) -> StrategyBundle:
+    """Wrap a single .py strategy file as a StrategyBundle."""
+    # Merge symbol/symbols
+    effective_symbols = symbols or ([symbol] if symbol else None)
+    if not effective_symbols:
         raise ValueError(
-            f"Single-file strategy '{py_file.name}' requires --symbol argument"
+            f"Strategy '{py_file.name}' requires --symbol or --symbols argument"
         )
     if not interval:
         raise ValueError(
-            f"Single-file strategy '{py_file.name}' requires --interval argument"
+            f"Strategy '{py_file.name}' requires --interval argument"
         )
 
     # Discover strategy and config class names from the file
@@ -266,12 +158,10 @@ def _wrap_single_file(
     strategy_class = f"{module_stem}:{strategy_class_name}"
     config_class = f"{module_stem}:{config_class_name}"
 
-    symbols = [symbol] if isinstance(symbol, str) else symbol
-
-    return PortfolioConfig(
+    return StrategyBundle(
         strategy_class=strategy_class,
         config_class=config_class,
-        symbols=symbols,
+        symbols=effective_symbols,
         interval=interval,
         params=params or {},
         actors=[],
@@ -285,56 +175,14 @@ def _wrap_single_file(
 def _discover_classes(py_file: Path) -> tuple[str, str, dict[str, dict[str, Any]]]:
     """Discover Strategy and StrategyConfig class names from a .py file.
 
-    Uses the same import mechanism as the scanner to find NT subclasses.
     Returns (strategy_class_name, config_class_name, optimize_ranges).
     """
-    import importlib.util
-    import inspect
-    import sys
+    from tinohelm.strategy.module_loader import load_strategy_module
 
-    module_name = f"_portfolio_discover_{py_file.stem}"
-    str_dir = str(py_file.parent.resolve())
-    added_path = str_dir not in sys.path
-    if added_path:
-        sys.path.insert(0, str_dir)
-
-    spec = importlib.util.spec_from_file_location(module_name, str(py_file))
-    if spec is None or spec.loader is None:
-        if added_path:
-            sys.path.remove(str_dir)
-        raise ImportError(f"Cannot load module from {py_file}")
-
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = mod
-    try:
-        spec.loader.exec_module(mod)
-    except Exception as e:
-        if added_path and str_dir in sys.path:
-            sys.path.remove(str_dir)
-        raise ImportError(f"Failed to import {py_file}: {e}") from e
-
-    strategy_cls_name = None
-    config_cls_name = None
-
-    for name, obj in inspect.getmembers(mod, inspect.isclass):
-        if obj.__module__ != module_name:
-            continue
-        for base in inspect.getmro(obj):
-            if base.__name__ == "Strategy" and base.__module__.startswith("nautilus_trader"):
-                strategy_cls_name = name
-            if base.__name__ == "StrategyConfig" and base.__module__.startswith("nautilus_trader"):
-                config_cls_name = name
-
-    if not strategy_cls_name:
+    result = load_strategy_module(py_file)
+    if result.strategy_cls is None:
         raise ValueError(f"No Strategy subclass found in {py_file}")
-    if not config_cls_name:
+    if result.config_cls is None:
         raise ValueError(f"No StrategyConfig subclass found in {py_file}")
 
-    optimize_ranges = getattr(mod, "OPTIMIZE", {}) or {}
-
-    # Clean up
-    del sys.modules[module_name]
-    if added_path and str_dir in sys.path:
-        sys.path.remove(str_dir)
-
-    return strategy_cls_name, config_cls_name, optimize_ranges
+    return result.strategy_cls.__name__, result.config_cls.__name__, result.optimize_ranges

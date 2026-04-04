@@ -1,18 +1,18 @@
-"""Portfolio loader — creates strategy and actor instances from PortfolioConfig.
+"""Strategy loader — creates strategy and actor instances from StrategyBundle.
 
 This is the single entry point for strategy/actor instantiation, shared by
 BacktestRunner, Sandbox node, and Live node.
 """
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import logging
 import sys
 from pathlib import Path
 from typing import Any
 
-from tinohelm.portfolio.config import PortfolioConfig, ActorRef
+from tinohelm.portfolio.config import StrategyBundle, ActorRef
+from tinohelm.strategy.module_loader import load_module_from_file
 from tinohelm.strategy.utils import get_config_field_names
 
 logger = logging.getLogger(__name__)
@@ -23,17 +23,45 @@ _DEFAULT_ACTORS_DIR = Path.home() / ".tino" / "actors"
 _BUILTIN_ACTORS_DIR = Path(__file__).resolve().parent.parent / "actors"
 
 
+# --- Public helpers (used by scaffold templates, runner, etc.) ---
+
+INTERVAL_MAP = {
+    "1m": "1-MINUTE", "3m": "3-MINUTE", "5m": "5-MINUTE",
+    "15m": "15-MINUTE", "30m": "30-MINUTE",
+    "1h": "1-HOUR", "2h": "2-HOUR", "4h": "4-HOUR",
+    "6h": "6-HOUR", "8h": "8-HOUR", "12h": "12-HOUR",
+    "1d": "1-DAY",
+}
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Normalize symbol to NT format: BTCUSDT-PERP -> BTCUSDT-PERP.BINANCE"""
+    s = symbol.replace(".BINANCE", "")
+    return f"{s}.BINANCE"
+
+
+def make_bar_type_str(symbol: str, interval: str) -> str:
+    """Build NT bar type string: BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-EXTERNAL"""
+    nt_symbol = normalize_symbol(symbol)
+    interval_part = INTERVAL_MAP.get(interval, "1-MINUTE")
+    return f"{nt_symbol}-{interval_part}-LAST-EXTERNAL"
+
+
 def create_strategies(
-    config: PortfolioConfig,
+    config: StrategyBundle,
     *,
+    order_id_tag: str | None = None,
+    # Backward-compat: accept old list-based signature
     order_id_tags: list[str] | None = None,
 ) -> list[Any]:
-    """Create one strategy instance per symbol from a PortfolioConfig.
+    """Create a single strategy instance from a StrategyBundle.
 
-    Each instance gets its own ``instrument_id`` and ``bar_type`` injected
-    into the config params.
+    The strategy receives ``symbols``, ``interval``, and ``resolved_bar_types``
+    in its config. For backward compatibility, if the strategy's config class
+    still declares ``instrument_id`` / ``bar_type`` fields, the first symbol's
+    values are injected.
 
-    Returns a list of instantiated Strategy objects (NT Strategy subclasses).
+    Returns a list containing one instantiated Strategy object.
     """
     from nautilus_trader.model.identifiers import InstrumentId
     from nautilus_trader.model.data import BarType
@@ -46,77 +74,71 @@ def create_strategies(
     # Determine accepted config fields
     config_fields = get_config_field_names(config_cls)
 
-    if order_id_tags is not None and len(order_id_tags) != len(config.symbols):
-        raise ValueError(
-            f"order_id_tags length ({len(order_id_tags)}) must match "
-            f"symbols length ({len(config.symbols)})"
-        )
+    params = dict(config.params)
 
-    strategies = []
-    for i, symbol in enumerate(config.symbols):
-        # Build per-symbol params
-        nt_symbol = _normalize_symbol(symbol)
+    # New fields: symbols, interval, resolved_bar_types
+    params["symbols"] = config.symbols
+    params["interval"] = config.interval
+    if config.resolved_bar_types:
+        params["resolved_bar_types"] = config.resolved_bar_types
 
-        per_symbol_params = dict(config.params)
-        per_symbol_params["instrument_id"] = nt_symbol
-        # Use bar_type from runner's per-symbol map (handles composite aggregation),
-        # fall back to building from symbol + interval
-        bar_type_map = per_symbol_params.pop("_bar_type_map", None) or {}
-        if nt_symbol in bar_type_map:
-            per_symbol_params["bar_type"] = bar_type_map[nt_symbol]
-        elif "bar_type" not in per_symbol_params:
-            per_symbol_params["bar_type"] = _make_bar_type_str(symbol, config.interval)
-
-        # Unique order_id_tag per instance — required for multi-strategy portfolios
-        if order_id_tags is not None:
-            per_symbol_params["order_id_tag"] = order_id_tags[i]
-        elif "order_id_tag" not in per_symbol_params:
-            per_symbol_params["order_id_tag"] = f"{i:03d}"
-
-        # Auto-exit on stop for safety (cancel orders + close positions)
-        if "manage_stop" not in per_symbol_params:
-            per_symbol_params["manage_stop"] = True
-
-        # Filter to fields the config accepts
-        if config_fields:
-            filtered = {k: v for k, v in per_symbol_params.items() if k in config_fields}
+    # Backward compat: inject instrument_id/bar_type for old strategies
+    if config_fields and "instrument_id" in config_fields and config.symbols:
+        params["instrument_id"] = normalize_symbol(config.symbols[0])
+    if config_fields and "bar_type" in config_fields and config.symbols and config.interval:
+        if config.resolved_bar_types:
+            params["bar_type"] = config.resolved_bar_types[0]
         else:
-            filtered = per_symbol_params
+            params["bar_type"] = make_bar_type_str(config.symbols[0], config.interval)
 
-        # Convert string values to NT types
-        if "instrument_id" in filtered and isinstance(filtered["instrument_id"], str):
-            filtered["instrument_id"] = InstrumentId.from_str(filtered["instrument_id"])
-        if "bar_type" in filtered and isinstance(filtered["bar_type"], str):
-            filtered["bar_type"] = BarType.from_str(filtered["bar_type"])
+    # Tag: prefer explicit arg, then bundle tag, then default
+    effective_tag = order_id_tag
+    if effective_tag is None and order_id_tags:
+        effective_tag = order_id_tags[0]  # backward compat: take first from list
+    if effective_tag is not None:
+        params["order_id_tag"] = effective_tag
+    elif "order_id_tag" not in params:
+        params["order_id_tag"] = config.tag or "000"
 
-        strategy_instance = strategy_cls(config=config_cls(**filtered))
-        strategies.append(strategy_instance)
-        logger.info("Created strategy instance: %s for %s", strategy_cls.__name__, symbol)
+    if "manage_stop" not in params:
+        params["manage_stop"] = True
 
-    return strategies
+    # Filter to fields the config accepts
+    if config_fields:
+        filtered = {k: v for k, v in params.items() if k in config_fields}
+    else:
+        filtered = params
+
+    # Convert string values to NT types
+    if "instrument_id" in filtered and isinstance(filtered["instrument_id"], str):
+        filtered["instrument_id"] = InstrumentId.from_str(filtered["instrument_id"])
+    if "bar_type" in filtered and isinstance(filtered["bar_type"], str):
+        filtered["bar_type"] = BarType.from_str(filtered["bar_type"])
+
+    strategy_instance = strategy_cls(config=config_cls(**filtered))
+    logger.info(
+        "Created strategy instance: %s for %s",
+        strategy_cls.__name__, config.symbols,
+    )
+    return [strategy_instance]
 
 
 def create_actors(
-    config: PortfolioConfig,
+    config: StrategyBundle,
     *,
     actors_dir: str | Path | None = None,
-    portfolio_name: str | None = None,
+    strategy_name: str | None = None,
     strategy_tag_prefix: str | None = None,
 ) -> list[Any]:
-    """Create actor instances from a PortfolioConfig's actor references.
-
-    Actors are loaded from:
-    - ``~/.tino/actors/<name>.py`` when ``ActorRef.name`` is set
-    - Portfolio folder relative path when ``ActorRef.class_path`` is set
-      (e.g. ``./custom_monitor:MyMonitor``)
+    """Create actor instances from a StrategyBundle's actor references.
 
     When ``config.risk_guard`` is set (declarative format), a RiskGuardActor
-    is created automatically and any legacy ``risk_guard`` actor in the
-    actors list is skipped to avoid duplicates.
+    is created automatically.
 
-    Returns a list of instantiated Actor objects. Returns empty list if no
-    actors are configured.
+    Returns a list of instantiated Actor objects.
     """
+    name = strategy_name
+
     if not config.actors and config.risk_guard is None:
         return []
 
@@ -127,10 +149,10 @@ def create_actors(
     if config.risk_guard is not None and config.risk_guard.enabled:
         from tinohelm.actors.risk_guard import RiskGuardActor, RiskGuardConfig
 
-        rg_component_id = f"RiskGuard-{portfolio_name}" if portfolio_name else "RiskGuardActor"
+        rg_component_id = f"RiskGuard-{name}" if name else "RiskGuardActor"
         rg_config = RiskGuardConfig(
             component_id=rg_component_id,
-            portfolio_name=portfolio_name,
+            strategy_name=name,
             strategy_tag_prefix=strategy_tag_prefix,
             daily_stop_loss_pct=config.risk_guard.daily_stop_loss_pct,
             max_drawdown_pct=config.risk_guard.max_drawdown_pct,
@@ -144,7 +166,7 @@ def create_actors(
         )
         rg_actor = RiskGuardActor(config=rg_config)
         results.append(rg_actor)
-        logger.info("Created RiskGuardActor: %s (portfolio=%s)", rg_component_id, portfolio_name)
+        logger.info("Created RiskGuardActor: %s (strategy=%s)", rg_component_id, name)
 
         # Skip legacy risk_guard in actors list to avoid duplicate
         legacy_actors = [a for a in (config.actors or []) if a.name != "risk_guard"]
@@ -154,7 +176,7 @@ def create_actors(
     for actor_ref in legacy_actors:
         actor_instance = _load_single_actor(
             actor_ref, config, actors_dir,
-            portfolio_name=portfolio_name,
+            strategy_name=name,
             strategy_tag_prefix=strategy_tag_prefix,
         )
         results.append(actor_instance)
@@ -164,16 +186,14 @@ def create_actors(
 
 def _load_single_actor(
     ref: ActorRef,
-    config: PortfolioConfig,
+    config: StrategyBundle,
     actors_dir: Path,
     *,
-    portfolio_name: str | None = None,
+    strategy_name: str | None = None,
     strategy_tag_prefix: str | None = None,
 ) -> Any:
     """Load and instantiate a single actor from an ActorRef."""
     if ref.name:
-        # Load from global actors directory: ~/.tino/actors/<name>.py
-        # Falls back to built-in actors shipped with the package
         actor_file = actors_dir / f"{ref.name}.py"
         if not actor_file.exists():
             actor_file = _BUILTIN_ACTORS_DIR / f"{ref.name}.py"
@@ -186,22 +206,17 @@ def _load_single_actor(
         actor_cls, actor_config_cls = _discover_actor_classes(actor_file)
 
     elif ref.class_path:
-        # Load from portfolio folder: ./module:ClassName
         if ref.class_path.startswith("./"):
-            # Relative to portfolio folder
             module_part, class_name = ref.class_path.rsplit(":", 1)
             relative = module_part.removeprefix("./")
             module_file = (config.source_path / (relative + ".py")).resolve()
-            # Validate path stays within portfolio folder
             if not str(module_file).startswith(str(config.source_path.resolve())):
                 raise ValueError(
-                    f"Actor class_path '{ref.class_path}' resolves outside portfolio folder"
+                    f"Actor class_path '{ref.class_path}' resolves outside strategy folder"
                 )
         else:
-            # Absolute-style module:ClassName
             module_part, class_name = ref.class_path.rsplit(":", 1)
             module_file = Path(module_part + ".py")
-            # Validate path is within allowed directories
             resolved = module_file.resolve()
             allowed_dirs = [Path.home() / ".tino"]
             if config.source_path:
@@ -219,13 +234,13 @@ def _load_single_actor(
     else:
         raise ValueError("ActorRef must have either 'name' or 'class' set")
 
-    # Inject portfolio isolation for legacy risk_guard actors
-    if ref.name == "risk_guard" and portfolio_name:
+    # Inject isolation for legacy risk_guard actors
+    if ref.name == "risk_guard" and strategy_name:
         if ref.params is None:
             ref.params = {}
-        ref.params.setdefault("portfolio_name", portfolio_name)
+        ref.params.setdefault("strategy_name", strategy_name)
         ref.params.setdefault("strategy_tag_prefix", strategy_tag_prefix)
-        ref.params.setdefault("component_id", f"RiskGuard-{portfolio_name}")
+        ref.params.setdefault("component_id", f"RiskGuard-{strategy_name}")
 
     # Instantiate with params
     if actor_config_cls and ref.params:
@@ -242,17 +257,15 @@ def _load_single_actor(
     return actor_instance
 
 
-def _import_strategy_classes(config: PortfolioConfig) -> tuple[type, type]:
-    """Import strategy class and config class from a PortfolioConfig."""
+def _import_strategy_classes(config: StrategyBundle) -> tuple[type, type]:
+    """Import strategy class and config class from a StrategyBundle."""
     strategy_module_path, strategy_class_name = config.strategy_class.rsplit(":", 1)
     config_module_path, config_class_name = config.config_class.rsplit(":", 1)
 
-    # Determine the actual file to load from
     source_path = config.source_path
     if source_path is None:
-        raise ValueError("PortfolioConfig.source_path is required for strategy loading")
+        raise ValueError("StrategyBundle.source_path is required for strategy loading")
 
-    # Try to find the module file
     strategy_file = _resolve_module_file(strategy_module_path, source_path)
 
     mod = _load_module_from_file(strategy_file, strategy_module_path)
@@ -264,21 +277,17 @@ def _import_strategy_classes(config: PortfolioConfig) -> tuple[type, type]:
 
 def _resolve_module_file(module_path: str, source_path: Path) -> Path:
     """Resolve a module path string to an actual .py file."""
-    # Check if it's a file path directly
     p = Path(module_path)
     if p.suffix == ".py" and p.exists():
         return p
 
-    # Try as module name in source directory
     module_file = source_path / f"{module_path}.py"
     if module_file.exists():
         return module_file
 
-    # Try as absolute path
     if p.is_absolute() and p.exists():
         return p
 
-    # Fall back: search in strategies dir and CWD
     for base in [source_path, Path.cwd(), Path("/app")]:
         candidate = base / f"{module_path}.py"
         if candidate.exists():
@@ -292,49 +301,16 @@ def _resolve_module_file(module_path: str, source_path: Path) -> Path:
 def _load_module_from_file(file_path: Path, module_name: str) -> Any:
     """Load a Python module from a file path.
 
-    The module is left in ``sys.modules`` because instantiated Strategy/Actor
-    objects reference it via ``__module__``. The fresh-import deletion ensures
-    code changes are picked up on next load.
+    Delegates to the unified module loader.
     """
-    parent = str(file_path.parent.resolve())
-    added_to_path = False
-    if parent not in sys.path:
-        sys.path.insert(0, parent)
-        added_to_path = True
-
-    clean_name = f"_portfolio_load_{file_path.stem}"
-
-    # Remove cached module for fresh import
-    if clean_name in sys.modules:
-        del sys.modules[clean_name]
-
-    spec = importlib.util.spec_from_file_location(clean_name, str(file_path))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load module from {file_path}")
-
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[clean_name] = mod
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        # Clean up sys.path to avoid pollution in long-running processes
-        if added_to_path:
-            try:
-                sys.path.remove(parent)
-            except ValueError:
-                pass
-    return mod
+    return load_module_from_file(file_path)
 
 
 def _discover_actor_classes(
     file_path: Path,
     class_name: str | None = None,
 ) -> tuple[type, type | None]:
-    """Discover Actor and ActorConfig subclasses from a .py file.
-
-    If ``class_name`` is given, look for that specific class.
-    Otherwise, find the first Actor subclass defined in the module.
-    """
+    """Discover Actor and ActorConfig subclasses from a .py file."""
     mod = _load_module_from_file(file_path, file_path.stem)
 
     actor_cls = None
@@ -365,10 +341,7 @@ def _discover_actor_classes(
 
 
 def scan_actors(actors_dir: str | Path | None = None) -> list[dict[str, Any]]:
-    """Scan the actors directory for Actor/ActorConfig subclasses.
-
-    Returns a list of dicts with actor metadata for each discovered .py file.
-    """
+    """Scan the actors directory for Actor/ActorConfig subclasses."""
     actors_dir = Path(actors_dir) if actors_dir else _DEFAULT_ACTORS_DIR
     if not actors_dir.exists():
         return []
@@ -393,23 +366,16 @@ def scan_actors(actors_dir: str | Path | None = None) -> list[dict[str, Any]]:
 
 
 def _warn_unrecognized_symbols(strategy_cls: type, symbols: list[str]) -> None:
-    """Warn if symbols have no matching SYMBOL_PROFILES entry in the strategy.
-
-    Looks for a module-level ``SYMBOL_PROFILES`` dict and ``DEFAULT_PROFILE``
-    in the strategy's module. If a symbol (converted to Jesse format like
-    ``BTC-USDT``) has no entry or has ``enabled: False``, logs a warning.
-    """
+    """Warn if symbols have no matching SYMBOL_PROFILES entry in the strategy."""
     mod = sys.modules.get(strategy_cls.__module__)
     if mod is None:
         return
 
     profiles = getattr(mod, "SYMBOL_PROFILES", None)
-    default_profile = getattr(mod, "DEFAULT_PROFILE", None)
     if profiles is None:
-        return  # Strategy doesn't define SYMBOL_PROFILES, skip validation
+        return
 
     for symbol in symbols:
-        # Convert NT symbol to Jesse format: BTCUSDT-PERP -> BTC-USDT
         jesse_sym = _nt_symbol_to_jesse(symbol)
         profile = profiles.get(jesse_sym)
 
@@ -421,8 +387,7 @@ def _warn_unrecognized_symbols(strategy_cls: type, symbols: list[str]) -> None:
             )
         elif not profile.get("enabled", True):
             logger.warning(
-                "Symbol '%s' (jesse: '%s') has enabled=False in SYMBOL_PROFILES. "
-                "Strategy may not generate signals for this symbol.",
+                "Symbol '%s' (jesse: '%s') has enabled=False in SYMBOL_PROFILES.",
                 symbol, jesse_sym,
             )
 
@@ -441,25 +406,7 @@ def _nt_symbol_to_jesse(symbol: str) -> str:
     return raw
 
 
-# --- Shared helpers (reused from runner.py to maintain single implementation) ---
-
-_INTERVAL_MAP = {
-    "1m": "1-MINUTE", "3m": "3-MINUTE", "5m": "5-MINUTE",
-    "15m": "15-MINUTE", "30m": "30-MINUTE",
-    "1h": "1-HOUR", "2h": "2-HOUR", "4h": "4-HOUR",
-    "6h": "6-HOUR", "8h": "8-HOUR", "12h": "12-HOUR",
-    "1d": "1-DAY",
-}
-
-
-def _normalize_symbol(symbol: str) -> str:
-    """Normalize symbol to NT format: BTCUSDT-PERP -> BTCUSDT-PERP.BINANCE"""
-    s = symbol.replace(".BINANCE", "")
-    return f"{s}.BINANCE"
-
-
-def _make_bar_type_str(symbol: str, interval: str) -> str:
-    """Build NT bar type string: BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-EXTERNAL"""
-    nt_symbol = _normalize_symbol(symbol)
-    interval_part = _INTERVAL_MAP.get(interval, "1-MINUTE")
-    return f"{nt_symbol}-{interval_part}-LAST-EXTERNAL"
+# Backward-compat aliases for private names
+_normalize_symbol = normalize_symbol
+_make_bar_type_str = make_bar_type_str
+_INTERVAL_MAP = INTERVAL_MAP

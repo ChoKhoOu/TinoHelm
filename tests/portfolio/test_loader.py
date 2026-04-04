@@ -5,8 +5,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from tinohelm.portfolio.config import PortfolioConfig, ActorRef, AccountSettings
-from tinohelm.portfolio.loader import (
+from tinohelm.portfolio.config import StrategyBundle, ActorRef, AccountSettings
+from tinohelm.strategy.loader import (
     create_strategies,
     create_actors,
     scan_actors,
@@ -43,8 +43,12 @@ class TestCreateStrategies:
         strategy_file = tmp_path / "my_strat.py"
         strategy_file.write_text("""\
 import msgspec
+from typing import List
 
 class FakeStrategyConfig(msgspec.Struct):
+    symbols: List[str] = []
+    interval: str = "5m"
+    resolved_bar_types: List[str] = []
     instrument_id: str = ""
     bar_type: str = ""
     lookback: int = 50
@@ -54,7 +58,7 @@ class FakeStrategy:
         self.config = config
 """)
 
-        config = PortfolioConfig(
+        config = StrategyBundle(
             strategy_class="my_strat:FakeStrategy",
             config_class="my_strat:FakeStrategyConfig",
             symbols=["BTCUSDT-PERP", "ETHUSDT-PERP", "XRPUSDT-PERP"],
@@ -64,8 +68,9 @@ class FakeStrategy:
         )
 
         # Mock NT type conversions since we're using fake classes
-        with patch("tinohelm.portfolio.loader.get_config_field_names") as mock_fields:
-            mock_fields.return_value = {"instrument_id", "bar_type", "lookback"}
+        with patch("tinohelm.strategy.loader.get_config_field_names") as mock_fields:
+            # New strategies declare symbols/interval; old ones have instrument_id/bar_type
+            mock_fields.return_value = {"symbols", "interval", "instrument_id", "bar_type", "lookback"}
 
             # Mock NT imports
             mock_iid = MagicMock()
@@ -79,18 +84,17 @@ class FakeStrategy:
             }):
                 strategies = create_strategies(config)
 
-        assert len(strategies) == 3
-        # Each should have its own instrument_id
-        symbols_found = [s.config.instrument_id for s in strategies]
-        assert "BTCUSDT-PERP.BINANCE" in symbols_found
-        assert "ETHUSDT-PERP.BINANCE" in symbols_found
-        assert "XRPUSDT-PERP.BINANCE" in symbols_found
+        # New behavior: single instance with all symbols
+        assert len(strategies) == 1
+        assert strategies[0].config.symbols == ["BTCUSDT-PERP", "ETHUSDT-PERP", "XRPUSDT-PERP"]
+        # Backward compat: instrument_id injected from first symbol
+        assert strategies[0].config.instrument_id == "BTCUSDT-PERP.BINANCE"
 
-    def test_empty_symbols_returns_empty(self, tmp_path):
+    def test_empty_symbols_still_creates_instance(self, tmp_path):
         strategy_file = tmp_path / "empty_strat.py"
-        strategy_file.write_text("class S: pass\nclass SC: pass\n")
+        strategy_file.write_text("class SC:\n    def __init__(self, **kw): pass\nclass S:\n    def __init__(self, config): self.config = config\n")
 
-        config = PortfolioConfig(
+        config = StrategyBundle(
             strategy_class="empty_strat:S",
             config_class="empty_strat:SC",
             symbols=[],
@@ -98,21 +102,22 @@ class FakeStrategy:
             source_path=tmp_path,
         )
 
-        with patch("tinohelm.portfolio.loader.get_config_field_names", return_value=set()):
+        with patch("tinohelm.strategy.loader.get_config_field_names", return_value={"symbols", "interval"}):
             with patch.dict("sys.modules", {
                 "nautilus_trader.model.identifiers": MagicMock(),
                 "nautilus_trader.model.data": MagicMock(),
             }):
                 strategies = create_strategies(config)
 
-        assert strategies == []
+        # Single instance even with empty symbols
+        assert len(strategies) == 1
 
 
 class TestCreateActors:
     """Test create_actors loading from different sources."""
 
     def test_empty_actors_returns_empty(self):
-        config = PortfolioConfig(
+        config = StrategyBundle(
             strategy_class="m:S",
             config_class="m:SC",
             symbols=["BTCUSDT-PERP"],
@@ -123,7 +128,7 @@ class TestCreateActors:
         assert result == []
 
     def test_actor_not_found_raises(self, tmp_path):
-        config = PortfolioConfig(
+        config = StrategyBundle(
             strategy_class="m:S",
             config_class="m:SC",
             symbols=["BTCUSDT-PERP"],
@@ -134,7 +139,7 @@ class TestCreateActors:
             create_actors(config, actors_dir=tmp_path)
 
     def test_actor_ref_needs_name_or_class(self):
-        config = PortfolioConfig(
+        config = StrategyBundle(
             strategy_class="m:S",
             config_class="m:SC",
             symbols=["BTCUSDT-PERP"],
@@ -161,7 +166,7 @@ class MyMonitor:
         self.config = config
 """)
 
-        config = PortfolioConfig(
+        config = StrategyBundle(
             strategy_class="m:S",
             config_class="m:SC",
             symbols=["BTCUSDT-PERP"],
@@ -171,7 +176,7 @@ class MyMonitor:
         )
 
         # Mock the actor class discovery to avoid NT base class check
-        with patch("tinohelm.portfolio.loader._discover_actor_classes") as mock_discover:
+        with patch("tinohelm.strategy.loader._discover_actor_classes") as mock_discover:
             mock_cls = MagicMock(__name__="MyMonitor")
             mock_config_cls = None
             mock_discover.return_value = (mock_cls, mock_config_cls)
@@ -186,7 +191,7 @@ class TestSymbolProfilesValidation:
 
     def test_warns_on_unrecognized_symbol(self, caplog):
         """Symbols not in SYMBOL_PROFILES should log a warning."""
-        from tinohelm.portfolio.loader import _warn_unrecognized_symbols, _nt_symbol_to_jesse
+        from tinohelm.strategy.loader import _warn_unrecognized_symbols, _nt_symbol_to_jesse
 
         # Create a mock strategy class with a module that has SYMBOL_PROFILES
         mock_module = MagicMock()
@@ -211,7 +216,7 @@ class TestSymbolProfilesValidation:
             del sys.modules["_test_sym_profiles"]
 
     def test_no_warning_when_all_recognized(self, caplog):
-        from tinohelm.portfolio.loader import _warn_unrecognized_symbols
+        from tinohelm.strategy.loader import _warn_unrecognized_symbols
 
         mock_module = MagicMock()
         mock_module.SYMBOL_PROFILES = {
@@ -231,7 +236,7 @@ class TestSymbolProfilesValidation:
             del sys.modules["_test_sym_ok"]
 
     def test_nt_symbol_to_jesse_conversion(self):
-        from tinohelm.portfolio.loader import _nt_symbol_to_jesse
+        from tinohelm.strategy.loader import _nt_symbol_to_jesse
         assert _nt_symbol_to_jesse("BTCUSDT-PERP") == "BTC-USDT"
         assert _nt_symbol_to_jesse("ETHUSDT-PERP.BINANCE") == "ETH-USDT"
         assert _nt_symbol_to_jesse("XRPUSDT-PERP") == "XRP-USDT"
