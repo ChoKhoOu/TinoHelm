@@ -1,10 +1,10 @@
 """LifecycleController — manages strategy and system lifecycle commands.
 
-Plain Python class (not Actor). Instantiated by BridgeActor after
+Plain Python class (not Actor). Instantiated by CommandActor after
 ``node.build()`` when trader and risk_engine references are available.
 
 All public methods MUST be called on the NT event loop thread (via the
-BridgeActor command-dispatch timer).
+CommandActor command-dispatch timer).
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class LifecycleController:
         self._log = log
         self._publish_ack = publish_ack  # callable(channel_suffix, data)
         self._paused_strategies: set[str] = set()
-        self._registry: Any = None  # PortfolioRegistry, set by BridgeActor
+        self._registry: Any = None  # StrategyRegistry, set by CommandActor
         self._flatten_stop_pending: dict[str, dict] = {}
 
         # Subscribe to RiskGuard breach actions for enforcement
@@ -55,8 +55,8 @@ class LifecycleController:
     # L1 — Soft Pause / Resume
     # ------------------------------------------------------------------
 
-    def pause_strategy(self, strategy_id: str) -> None:
-        """Pause a specific strategy via L1 soft pause."""
+    def pause_strategy_id(self, strategy_id: str) -> None:
+        """Pause a specific strategy by strategy_id via L1 soft pause."""
         sid = self._resolve_strategy_id(strategy_id)
         self._msgbus.publish(f"{LIFECYCLE_PAUSE}.{sid}", "pause")
         self._paused_strategies.add(str(sid))
@@ -66,8 +66,8 @@ class LifecycleController:
             {"cmd": "pause", "strategy_id": str(sid), "status": "ok"},
         )
 
-    def resume_strategy(self, strategy_id: str) -> None:
-        """Resume a paused strategy."""
+    def resume_strategy_id(self, strategy_id: str) -> None:
+        """Resume a paused strategy by strategy_id."""
         sid = self._resolve_strategy_id(strategy_id)
         self._msgbus.publish(f"{LIFECYCLE_RESUME}.{sid}", "resume")
         self._paused_strategies.discard(str(sid))
@@ -99,6 +99,16 @@ class LifecycleController:
             "commands_ack",
             {"cmd": "resume", "strategy_id": "all", "status": "ok"},
         )
+
+    def _pause_strategy_id(self, sid_str: str) -> None:
+        """Internal pause by strategy_id — no ack published. Used by bundle pause."""
+        try:
+            sid = self._resolve_strategy_id(sid_str)
+            self._msgbus.publish(f"{LIFECYCLE_PAUSE}.{sid}", "pause")
+            self._paused_strategies.add(str(sid))
+            self._log.info(f"L1 Pause (internal): strategy {sid}")
+        except Exception as e:
+            self._log.error(f"Failed to pause strategy {sid_str}: {e}")
 
     # ------------------------------------------------------------------
     # L2 — Flatten
@@ -171,40 +181,40 @@ class LifecycleController:
         os.kill(os.getpid(), _signal.SIGTERM)
 
     # ------------------------------------------------------------------
-    # Portfolio lifecycle operations
+    # Strategy lifecycle operations
     # ------------------------------------------------------------------
 
-    def start_portfolio(self, name: str) -> None:
-        """Load and start all strategies for a portfolio."""
+    def start_strategy(self, name: str) -> None:
+        """Load and start all strategies for a strategy bundle."""
         if self._registry is None:
-            raise ValueError("PortfolioRegistry not initialized")
+            raise ValueError("StrategyRegistry not initialized")
 
         entry = self._registry.get(name)
         if entry is None:
-            raise ValueError(f"Portfolio '{name}' not found")
+            raise ValueError(f"Strategy '{name}' not found")
         if entry.state != "available":
-            raise ValueError(f"Portfolio '{name}' is {entry.state}, not available")
+            raise ValueError(f"Strategy '{name}' is {entry.state}, not available")
 
         self._registry.mark_starting(name)
 
         try:
-            from tinohelm.portfolio.config import load_portfolio_config
-            from tinohelm.portfolio.loader import create_strategies, create_actors
+            from tinohelm.portfolio.config import load_strategy_bundle
+            from tinohelm.strategy.loader import create_strategies, create_actors
 
             import os
             _strategies_dir = os.environ.get("TINO_STRATEGIES_DIR")
-            portfolio_cfg = load_portfolio_config(name, strategies_dir=_strategies_dir)
+            strategy_cfg = load_strategy_bundle(name, strategies_dir=_strategies_dir)
 
             # Allocate tags with collision check
             existing_tags = {str(sid) for sid in self._trader.strategy_ids()}
-            tags = self._registry.allocate_tags(name, len(portfolio_cfg.symbols), existing_tags)
+            tags = self._registry.allocate_tags(name, 1, existing_tags)
 
             # Create instances
-            strategy_instances = create_strategies(portfolio_cfg, order_id_tags=tags)
+            strategy_instances = create_strategies(strategy_cfg, order_id_tag=tags[0])
             lc_entry = self._registry.get(name)
             actor_instances = create_actors(
-                portfolio_cfg,
-                portfolio_name=name,
+                strategy_cfg,
+                strategy_name=name,
                 strategy_tag_prefix=lc_entry.order_id_tag_prefix if lc_entry else None,
             )
 
@@ -240,29 +250,30 @@ class LifecycleController:
             strategy_ids = [str(s.id) for s in strategy_instances]
             self._registry.mark_running(name, strategy_ids)
 
-            self._log.info(f"Started portfolio '{name}' with {len(strategy_ids)} strategies")
+            self._log.info(f"Started strategy '{name}' with {len(strategy_ids)} strategies")
             self._publish_ack("commands_ack", {
-                "cmd": "start_portfolio", "name": name,
+                "cmd": "start_strategy", "name": name,
                 "status": "ok", "strategy_ids": strategy_ids,
             })
         except Exception as e:
             self._registry.mark_stopped(name)
-            self._log.error(f"Failed to start portfolio '{name}': {e}")
+            self._log.error(f"Failed to start strategy '{name}': {e}")
             self._publish_ack("commands_ack", {
-                "cmd": "start_portfolio", "name": name,
+                "cmd": "start_strategy", "name": name,
                 "status": "error", "reason": str(e),
             })
 
-    def flatten_stop_portfolio(self, name: str) -> None:
-        """Flatten all positions then stop all strategies for a portfolio."""
+
+    def flatten_stop_strategy(self, name: str) -> None:
+        """Flatten all positions then stop all strategies for a strategy bundle."""
         if self._registry is None:
-            raise ValueError("PortfolioRegistry not initialized")
+            raise ValueError("StrategyRegistry not initialized")
 
         entry = self._registry.get(name)
         if entry is None:
-            raise ValueError(f"Portfolio '{name}' not found")
+            raise ValueError(f"Strategy '{name}' not found")
         if entry.state not in ("running", "paused"):
-            raise ValueError(f"Portfolio '{name}' is {entry.state}, cannot flatten-stop")
+            raise ValueError(f"Strategy '{name}' is {entry.state}, cannot flatten-stop")
 
         self._registry.mark_flattening(name)
 
@@ -286,12 +297,12 @@ class LifecycleController:
         }
 
         self._publish_ack("commands_ack", {
-            "cmd": "flatten_stop_portfolio", "name": name,
+            "cmd": "flatten_stop_strategy", "name": name,
             "status": "flattening",
         })
 
     def check_flatten_stop_completion(self) -> None:
-        """Check if pending flatten-stops are complete. Called from BridgeActor timer."""
+        """Check if pending flatten-stops are complete. Called from CommandActor timer."""
         from nautilus_trader.model.identifiers import StrategyId
 
         for name, info in list(self._flatten_stop_pending.items()):
@@ -321,10 +332,10 @@ class LifecycleController:
                 self._registry.mark_stopped(name)
                 del self._flatten_stop_pending[name]
                 self._publish_ack("commands_ack", {
-                    "cmd": "flatten_stop_portfolio", "name": name,
+                    "cmd": "flatten_stop_strategy", "name": name,
                     "status": "ok",
                 })
-                self._log.info(f"Portfolio '{name}' fully stopped")
+                self._log.info(f"Strategy '{name}' fully stopped")
             elif elapsed > 60:
                 # Timeout -- still remove strategies to prevent orphans
                 for sid_str in info["strategy_ids"]:
@@ -336,51 +347,51 @@ class LifecycleController:
                 for sid_str in info["strategy_ids"]:
                     self._paused_strategies.discard(sid_str)
                 self._log.critical(
-                    f"Portfolio '{name}' flatten-stop timed out after 60s. "
+                    f"Strategy '{name}' flatten-stop timed out after 60s. "
                     f"Positions still open. Manual intervention required."
                 )
                 self._registry.mark_stopped(name)
                 del self._flatten_stop_pending[name]
                 self._publish_ack("commands_ack", {
-                    "cmd": "flatten_stop_portfolio", "name": name,
+                    "cmd": "flatten_stop_strategy", "name": name,
                     "status": "timeout",
                     "reason": "Positions not flat after 60s. Manual force-stop required.",
                 })
 
-    def pause_portfolio(self, name: str) -> None:
-        """Pause all strategies in a portfolio via soft pause."""
+    def pause_strategy(self, name: str) -> None:  # type: ignore[override]
+        """Pause all strategies in a strategy bundle via soft pause."""
         if self._registry is None:
-            raise ValueError("PortfolioRegistry not initialized")
+            raise ValueError("StrategyRegistry not initialized")
 
         entry = self._registry.get(name)
         if entry is None or entry.state != "running":
             raise ValueError(
-                f"Cannot pause portfolio '{name}' "
+                f"Cannot pause strategy '{name}' "
                 f"(state: {entry.state if entry else 'not found'})"
             )
         for sid_str in entry.strategy_ids:
-            self.pause_strategy(sid_str)
+            self._pause_strategy_id(sid_str)
         self._registry.mark_paused(name)
         self._publish_ack("commands_ack", {
-            "cmd": "pause_portfolio", "name": name, "status": "ok",
+            "cmd": "pause_strategy", "name": name, "status": "ok",
         })
 
-    def resume_portfolio(self, name: str) -> None:
-        """Resume all strategies in a paused portfolio."""
+    def resume_strategy(self, name: str) -> None:  # type: ignore[override]
+        """Resume all strategies in a paused strategy bundle."""
         if self._registry is None:
-            raise ValueError("PortfolioRegistry not initialized")
+            raise ValueError("StrategyRegistry not initialized")
 
         entry = self._registry.get(name)
         if entry is None or entry.state != "paused":
             raise ValueError(
-                f"Cannot resume portfolio '{name}' "
+                f"Cannot resume strategy '{name}' "
                 f"(state: {entry.state if entry else 'not found'})"
             )
         for sid_str in entry.strategy_ids:
-            self.resume_strategy(sid_str)
+            self._resume_strategy(sid_str)
         self._registry.mark_running(name, entry.strategy_ids)
         self._publish_ack("commands_ack", {
-            "cmd": "resume_portfolio", "name": name, "status": "ok",
+            "cmd": "resume_strategy", "name": name, "status": "ok",
         })
 
     # ------------------------------------------------------------------
@@ -413,9 +424,9 @@ class LifecycleController:
             "strategy_states": strategy_states,
         }
 
-        # Portfolio states
+        # Strategy bundle states
         if self._registry is not None:
-            state_dict["portfolios"] = self._registry.get_all_states()
+            state_dict["strategies"] = self._registry.get_all_states()
 
         return state_dict
 

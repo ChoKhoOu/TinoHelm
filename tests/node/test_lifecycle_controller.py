@@ -83,11 +83,11 @@ class TestInit:
 # ---------------------------------------------------------------------------
 
 class TestPauseStrategy:
-    """pause_strategy() publishes L1 msgbus signal and updates internal set."""
+    """pause_strategy_id() publishes L1 msgbus signal and updates internal set."""
 
     def test_pause_publishes_correct_topic(self):
         ctrl, _, _, msgbus, _, _ = _make_controller(["MyStrategy-000"])
-        ctrl.pause_strategy("MyStrategy-000")
+        ctrl.pause_strategy_id("MyStrategy-000")
 
         msgbus.publish.assert_called_once_with(
             f"{LIFECYCLE_PAUSE}.MyStrategy-000", "pause"
@@ -97,13 +97,13 @@ class TestPauseStrategy:
         ctrl, _, _, _, _, _ = _make_controller(["MyStrategy-000"])
         assert "MyStrategy-000" not in ctrl._paused_strategies
 
-        ctrl.pause_strategy("MyStrategy-000")
+        ctrl.pause_strategy_id("MyStrategy-000")
 
         assert "MyStrategy-000" in ctrl._paused_strategies
 
     def test_pause_calls_publish_ack_with_ok_status(self):
         ctrl, _, _, _, _, publish_ack = _make_controller(["MyStrategy-000"])
-        ctrl.pause_strategy("MyStrategy-000")
+        ctrl.pause_strategy_id("MyStrategy-000")
 
         publish_ack.assert_called_once_with(
             "commands_ack",
@@ -113,7 +113,7 @@ class TestPauseStrategy:
     def test_pause_unknown_strategy_raises_value_error(self):
         ctrl, _, _, _, _, _ = _make_controller(["MyStrategy-000"])
         with pytest.raises(ValueError, match="MyStrategy-001"):
-            ctrl.pause_strategy("MyStrategy-001")
+            ctrl.pause_strategy_id("MyStrategy-001")
 
 
 # ---------------------------------------------------------------------------
@@ -121,13 +121,13 @@ class TestPauseStrategy:
 # ---------------------------------------------------------------------------
 
 class TestResumeStrategy:
-    """resume_strategy() publishes L1 resume signal and removes from paused set."""
+    """resume_strategy_id() publishes L1 resume signal and removes from paused set."""
 
     def test_resume_publishes_correct_topic(self):
         ctrl, _, _, msgbus, _, _ = _make_controller(["MyStrategy-000"])
         ctrl._paused_strategies.add("MyStrategy-000")
 
-        ctrl.resume_strategy("MyStrategy-000")
+        ctrl.resume_strategy_id("MyStrategy-000")
 
         msgbus.publish.assert_called_once_with(
             f"{LIFECYCLE_RESUME}.MyStrategy-000", "resume"
@@ -137,7 +137,7 @@ class TestResumeStrategy:
         ctrl, _, _, _, _, _ = _make_controller(["MyStrategy-000"])
         ctrl._paused_strategies.add("MyStrategy-000")
 
-        ctrl.resume_strategy("MyStrategy-000")
+        ctrl.resume_strategy_id("MyStrategy-000")
 
         assert "MyStrategy-000" not in ctrl._paused_strategies
 
@@ -145,7 +145,7 @@ class TestResumeStrategy:
         ctrl, _, _, _, _, publish_ack = _make_controller(["MyStrategy-000"])
         ctrl._paused_strategies.add("MyStrategy-000")
 
-        ctrl.resume_strategy("MyStrategy-000")
+        ctrl.resume_strategy_id("MyStrategy-000")
 
         publish_ack.assert_called_once_with(
             "commands_ack",
@@ -155,13 +155,13 @@ class TestResumeStrategy:
     def test_resume_unknown_strategy_raises_value_error(self):
         ctrl, _, _, _, _, _ = _make_controller(["MyStrategy-000"])
         with pytest.raises(ValueError, match="NotExist-000"):
-            ctrl.resume_strategy("NotExist-000")
+            ctrl.resume_strategy_id("NotExist-000")
 
     def test_resume_strategy_not_in_paused_set_is_idempotent(self):
         """discard() is used so resuming a non-paused strategy doesn't raise."""
         ctrl, _, _, _, _, _ = _make_controller(["MyStrategy-000"])
         # Not in paused set — should not raise
-        ctrl.resume_strategy("MyStrategy-000")
+        ctrl.resume_strategy_id("MyStrategy-000")
         assert "MyStrategy-000" not in ctrl._paused_strategies
 
 
@@ -500,10 +500,10 @@ class TestCommandQueueOrdering:
     def test_pause_then_resume_updates_set_correctly(self):
         ctrl, _, _, _, _, _ = _make_controller(["Strat-000"])
 
-        ctrl.pause_strategy("Strat-000")
+        ctrl.pause_strategy_id("Strat-000")
         assert "Strat-000" in ctrl._paused_strategies
 
-        ctrl.resume_strategy("Strat-000")
+        ctrl.resume_strategy_id("Strat-000")
         assert "Strat-000" not in ctrl._paused_strategies
 
     def test_halt_then_unhalt_calls_both_states_in_order(self):
@@ -520,16 +520,16 @@ class TestCommandQueueOrdering:
     def test_multiple_pauses_accumulate_in_paused_set(self):
         ctrl, _, _, _, _, _ = _make_controller(["Alpha-000", "Beta-001"])
 
-        ctrl.pause_strategy("Alpha-000")
-        ctrl.pause_strategy("Beta-001")
+        ctrl.pause_strategy_id("Alpha-000")
+        ctrl.pause_strategy_id("Beta-001")
 
         assert ctrl._paused_strategies == {"Alpha-000", "Beta-001"}
 
     def test_publish_ack_called_for_each_command(self):
         ctrl, _, _, _, _, publish_ack = _make_controller(["Strat-000"])
 
-        ctrl.pause_strategy("Strat-000")
-        ctrl.resume_strategy("Strat-000")
+        ctrl.pause_strategy_id("Strat-000")
+        ctrl.resume_strategy_id("Strat-000")
         ctrl.halt()
         ctrl.unhalt()
 

@@ -5,7 +5,7 @@ When registered via ``TradingNodeConfig.controller``, this sets
 ``trader.add_strategy()`` and ``trader.remove_strategy()`` to work
 at runtime.  Without it, those calls silently fail.
 
-All actual lifecycle logic stays in LifecycleController + BridgeActor.
+All actual lifecycle logic stays in LifecycleController + CommandActor.
 """
 from __future__ import annotations
 

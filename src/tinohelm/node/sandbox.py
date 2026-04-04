@@ -4,7 +4,7 @@ Spawned as a Docker container via ``sandbox_main.py``.  The node connects to
 Binance Demo (demo.binance.com) for both market data **and** order execution.
 No real money is at risk — the balance comes from the Binance Demo account.
 
-Strategy/actor loading, BridgeActor wiring, and signal-based shutdown are
+Strategy/actor loading, 5-actor wiring, and signal-based shutdown are
 handled by the shared ``_common`` module.
 """
 from __future__ import annotations
@@ -53,7 +53,7 @@ def run_node(config: dict[str, Any]) -> None:
     )
     from nautilus_trader.live.node import TradingNode
 
-    from tinohelm.node._common import inject_lifecycle_deps, load_components, run_with_signals
+    from tinohelm.node._common import build_cache_config, inject_lifecycle_deps, load_components, run_with_signals
 
     instance_id = config["instance_id"]
 
@@ -79,20 +79,7 @@ def run_node(config: dict[str, Any]) -> None:
             config_path="nautilus_trader.config:ActorConfig",
             config={},
         ),
-        cache=CacheConfig(
-            database=DatabaseConfig(
-                type="redis",
-                host=redis_host,
-                port=redis_port,
-                password=redis_password,
-                timeout=2,
-            ),
-            encoding="msgpack",
-            timestamps_as_iso8601=True,
-            buffer_interval_ms=100,
-            flush_on_start=True,  # Clean slate each restart for paper trading
-            use_trader_prefix=True,
-        ),
+        cache=build_cache_config(redis_host, redis_port, redis_password, is_sandbox=True),
         data_engine=LiveDataEngineConfig(),
         exec_engine=LiveExecEngineConfig(
             # State snapshots (crash recovery)
@@ -154,7 +141,7 @@ def run_node(config: dict[str, Any]) -> None:
     node = TradingNode(config=node_config)
     node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
     node.add_exec_client_factory(BINANCE, BinanceLiveExecClientFactory)
-    bridge_actor = load_components(node, config)
+    actors = load_components(node, config)
     node.build()
-    inject_lifecycle_deps(node, bridge_actor)
+    inject_lifecycle_deps(node, actors["command"], actors.get("health"))
     run_with_signals(node, instance_id, "Sandbox")

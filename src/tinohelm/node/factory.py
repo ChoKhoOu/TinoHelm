@@ -20,7 +20,7 @@ def build_trading_node_config(
     strategies: list[str],
     settings: Settings,
     *,
-    portfolio_config: str | None = None,
+    strategy_bundle: str | None = None,
     for_redis: bool = False,
 ) -> dict[str, Any]:
     """Build a plain-dict config suitable for passing to a TradingNode subprocess.
@@ -35,12 +35,12 @@ def build_trading_node_config(
     strategies
         List of importable strategy class paths, e.g.
         ``["tinohelm.strategy.my_strat:MyStrat"]``.
-        Ignored when ``portfolio_config`` is provided.
+        Ignored when ``strategy_bundle`` is provided.
     settings
         The application :class:`Settings` instance.
-    portfolio_config
-        Optional portfolio name or path. When provided, the node uses
-        ``portfolio_loader`` for strategy/actor creation instead of
+    strategy_bundle
+        Optional strategy bundle name or path. When provided, the node uses
+        ``strategy_loader`` for strategy/actor creation instead of
         the legacy ``strategies`` list.
     for_redis
         When ``True``, the ``binance`` dict uses a ``{"from_env": True, ...}``
@@ -91,7 +91,7 @@ def build_trading_node_config(
         "redis_db": redis_db,
         "db_url": settings.database.url,
         "strategies": strategies,
-        "portfolio_config": portfolio_config,
+        "strategy_bundle": strategy_bundle,
         "binance": binance_config,
         "catalog_path": str(settings.paths.catalog),
         "log_path": str(settings.paths.logs),

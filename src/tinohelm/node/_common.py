@@ -15,6 +15,39 @@ import redis
 logger = logging.getLogger(__name__)
 
 
+def build_cache_config(
+    redis_host: str,
+    redis_port: int,
+    redis_password: str = "",
+    *,
+    is_sandbox: bool = False,
+) -> Any:
+    """Build a CacheConfig with Redis persistence and purge settings.
+
+    Centralizes CacheConfig construction shared by live.py and sandbox.py.
+    """
+    from nautilus_trader.config import CacheConfig, DatabaseConfig
+
+    db_kwargs: dict[str, Any] = {
+        "type": "redis",
+        "host": redis_host,
+        "port": redis_port,
+        "timeout": 2,
+    }
+    if redis_password:
+        db_kwargs["password"] = redis_password
+
+    return CacheConfig(
+        database=DatabaseConfig(**db_kwargs),
+        encoding="msgpack",
+        timestamps_as_iso8601=True,
+        buffer_interval_ms=100,
+        flush_on_start=is_sandbox,  # True for sandbox (clean slate), False for live (recover)
+        use_trader_prefix=True,
+        persist_account_events=True,
+    )
+
+
 def _redis_url_with_db(url: str, db: int) -> str:
     """Append database number to Redis URL if not already present."""
     parsed = urlparse(url)
@@ -74,17 +107,20 @@ def inject_credentials(
     config["binance"].pop("from_env", None)
 
 
-def inject_lifecycle_deps(node: Any, bridge_actor: Any) -> None:
-    """Inject trader and risk_engine references into BridgeActor.
+def inject_lifecycle_deps(node: Any, command_actor: Any, health_actor: Any = None) -> None:
+    """Inject trader and risk_engine references into CommandActor.
 
     MUST be called AFTER ``node.build()`` so that ``node.kernel`` is ready.
     """
     try:
-        bridge_actor.set_lifecycle_deps(
+        command_actor.set_lifecycle_deps(
             trader=node.trader,
             risk_engine=node.kernel.risk_engine,
         )
-        logger.info("Lifecycle deps injected into BridgeActor")
+        # Share CommandActor's lifecycle ref with HealthActor for state queries
+        if health_actor is not None:
+            health_actor._lifecycle = getattr(command_actor, '_lifecycle', None)
+        logger.info("Lifecycle deps injected into CommandActor")
     except Exception as e:
         logger.error("Failed to inject lifecycle deps: %s", e)
 
@@ -93,52 +129,58 @@ def load_components(
     node: Any,
     config: dict[str, Any],
 ) -> Any:
-    """Load strategies, actors, and BridgeActor onto a TradingNode.
+    """Load strategies, actors, and node Actors onto a TradingNode.
 
-    Handles both portfolio-based and legacy strategy-path loading.
+    Handles both strategy-bundle and legacy strategy-path loading.
 
-    Returns the BridgeActor instance for lifecycle dependency injection.
+    Returns a dict of actor instances for lifecycle dependency injection.
     """
     from nautilus_trader.config import ImportableStrategyConfig
 
-    from tinohelm.node.bridge_actor import BridgeActor, BridgeActorConfig
-    from tinohelm.node.portfolio_registry import PortfolioRegistry
-    from tinohelm.portfolio.config import load_portfolio_config
-    from tinohelm.portfolio.loader import create_actors, create_strategies
+    from tinohelm.node.actors import (
+        CommandActor, CommandActorConfig,
+        DbWriterActor, DbWriterActorConfig,
+        HealthActor, HealthActorConfig,
+        MetricsActor, MetricsActorConfig,
+        SnapshotActor, SnapshotActorConfig,
+    )
+    from tinohelm.node.strategy_registry import StrategyRegistry
+    from tinohelm.portfolio.config import load_strategy_bundle
+    from tinohelm.strategy.loader import create_actors, create_strategies
 
     node_type = config["node_type"]
 
-    # ---- Portfolio Registry setup ----------------------------------------
-    registry = PortfolioRegistry()
+    # ---- Strategy Registry setup ----------------------------------------
+    registry = StrategyRegistry()
     strategies_dir = Path(os.environ.get(
         "TINO_STRATEGIES_DIR",
         str(Path.home() / ".tino" / "strategies"),
     ))
 
-    # ---- Strategies and actors via portfolio_loader -----------------------
-    portfolio_config_name = config.get("portfolio_config")
-    if portfolio_config_name:
-        portfolio_cfg = load_portfolio_config(portfolio_config_name)
-        # Register boot-time portfolio and allocate prefixed tags
+    # ---- Strategies and actors via strategy loader -----------------------
+    strategy_config_name = config.get("strategy_bundle")
+    if strategy_config_name:
+        strategy_cfg = load_strategy_bundle(strategy_config_name)
+        # Register boot-time strategy and allocate prefixed tags
         registry.register(
-            portfolio_config_name,
-            portfolio_cfg.source_path or Path(""),
-            manual_tag=portfolio_cfg.tag,
+            strategy_config_name,
+            strategy_cfg.source_path or Path(""),
+            manual_tag=strategy_cfg.tag,
         )
         tags = registry.allocate_tags(
-            portfolio_config_name,
-            len(portfolio_cfg.symbols),
+            strategy_config_name,
+            count=1,
             existing_tags=set(),
         )
-        strategy_instances = create_strategies(portfolio_cfg, order_id_tags=tags)
-        entry = registry.get(portfolio_config_name)
+        strategy_instances = create_strategies(strategy_cfg, order_id_tag=tags[0])
+        entry = registry.get(strategy_config_name)
         actor_instances = create_actors(
-            portfolio_cfg,
-            portfolio_name=portfolio_config_name,
+            strategy_cfg,
+            strategy_name=strategy_config_name,
             strategy_tag_prefix=entry.order_id_tag_prefix if entry else None,
         )
     else:
-        # No boot-time portfolio — discover available portfolios
+        # No boot-time strategy — discover available strategies
         strategy_instances = []
         actor_instances = []
         # Legacy: load from strategy paths list
@@ -157,10 +199,10 @@ def load_components(
                 ).create()
             )
 
-    # Scan for available portfolios (both paths)
+    # Scan for available strategies (both paths)
     if strategies_dir.exists():
         registry.scan(strategies_dir)
-        logger.info("Discovered %d available portfolio(s)", len(registry.get_all_states()))
+        logger.info("Discovered %d available strategy(s)", len(registry.get_all_states()))
 
     for strategy in strategy_instances:
         node.trader.add_strategy(strategy)
@@ -171,42 +213,65 @@ def load_components(
     if actor_instances:
         logger.info("Added %d actor(s)", len(actor_instances))
 
-    # Mark boot-time portfolio as running
-    if portfolio_config_name:
+    # Mark boot-time strategy as running
+    if strategy_config_name:
         registry.mark_running(
-            portfolio_config_name,
+            strategy_config_name,
             [str(s.id) for s in strategy_instances],
         )
 
-    # ---- BridgeActor for Redis event bridging and commands ----------------
+    # ---- Node Actors -------------------------------------------------------
     redis_url = config["redis_url"]
     redis_db = config.get("redis_db", 0)
-    bridge_config = BridgeActorConfig(
-        redis_url=_redis_url_with_db(redis_url, redis_db),
-        node_type=node_type,
-        db_url=config.get("db_url", ""),
-    )
-    bridge_actor = BridgeActor(config=bridge_config)
-    # Attach registry for lifecycle operations and file watcher
-    bridge_actor._registry = registry
-    node.trader.add_actor(bridge_actor)
+    full_redis_url = _redis_url_with_db(redis_url, redis_db)
+    db_url = config.get("db_url", "")
+
+    # 1. SnapshotActor — events → Redis PubSub
+    snapshot_actor = SnapshotActor(config=SnapshotActorConfig(
+        redis_url=full_redis_url, node_type=node_type,
+    ))
+    node.trader.add_actor(snapshot_actor)
+
+    # 2. CommandActor — Redis commands → lifecycle dispatch
+    command_actor = CommandActor(config=CommandActorConfig(
+        redis_url=full_redis_url, node_type=node_type,
+    ))
+    command_actor._registry = registry
+    node.trader.add_actor(command_actor)
+
+    # 3. DbWriterActor — terminal events → PostgreSQL
+    if db_url:
+        db_writer = DbWriterActor(config=DbWriterActorConfig(db_url=db_url, node_type=node_type))
+        node.trader.add_actor(db_writer)
+
+    # 4. HealthActor — heartbeat + file watch + auto-resume
+    health_actor = HealthActor(config=HealthActorConfig(
+        redis_url=full_redis_url, node_type=node_type,
+    ))
+    health_actor._registry = registry
+    # Share CommandActor's deque so file watcher can enqueue rescan commands
+    health_actor._command_deque = command_actor._pending_commands
+    node.trader.add_actor(health_actor)
+
+    # 5. MetricsActor — equity snapshots
+    metrics_actor = MetricsActor(config=MetricsActorConfig(
+        redis_url=full_redis_url, node_type=node_type, db_url=db_url,
+    ))
+    node.trader.add_actor(metrics_actor)
 
     # Restore was_running state from Redis (best-effort)
     try:
-        r = redis.Redis.from_url(
-            _redis_url_with_db(redis_url, redis_db),
-            decode_responses=True,
-        )
-        saved = r.get(f"tino:{node_type}:portfolio_registry")
+        r = redis.Redis.from_url(full_redis_url, decode_responses=True)
+        saved = r.get(f"tino:{node_type}:strategy_registry")
         if saved:
             saved_state = json.loads(saved)
             registry.restore_was_running(saved_state)
-            logger.info("Restored portfolio registry state from Redis")
+            logger.info("Restored strategy registry state from Redis")
         r.close()
     except Exception:
-        logger.debug("Best-effort portfolio registry restore failed", exc_info=True)
+        logger.debug("Best-effort strategy registry restore failed", exc_info=True)
 
-    return bridge_actor
+    return {"command": command_actor, "health": health_actor}
 
 
 def run_with_signals(
