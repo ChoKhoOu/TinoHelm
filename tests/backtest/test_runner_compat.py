@@ -7,7 +7,7 @@ from __future__ import annotations
 
 
 class TestRunnerBackwardCompat:
-    """BacktestRunner should accept legacy params and auto-wrap into PortfolioConfig."""
+    """BacktestRunner should accept legacy params and auto-wrap into StrategyBundle."""
 
     def test_legacy_single_symbol_string(self):
         """Single symbol as string should work."""
@@ -49,8 +49,8 @@ class TestRunnerBackwardCompat:
         )
         assert runner.symbols == ["BTCUSDT-PERP", "ETHUSDT-PERP"]
 
-    def test_auto_wrap_portfolio_config(self):
-        """Legacy params should auto-wrap into PortfolioConfig."""
+    def test_auto_wrap_strategy_bundle(self):
+        """Legacy params should auto-wrap into StrategyBundle."""
         from tinohelm.backtest.runner import BacktestRunner
 
         runner = BacktestRunner(
@@ -61,19 +61,19 @@ class TestRunnerBackwardCompat:
             strategy_params={"starting_balance": 20000, "leverage": 3},
         )
 
-        cfg = runner._build_portfolio_config()
+        cfg = runner._build_strategy_bundle()
         assert cfg.symbols == ["BTCUSDT-PERP"]
         assert cfg.interval == "5m"
         assert cfg.account.starting_balance == 20000
         assert cfg.account.leverage == 3
         assert cfg.implicit is True
 
-    def test_explicit_portfolio_config_takes_precedence(self):
-        """If portfolio_config is passed, it should be used directly."""
+    def test_explicit_strategy_bundle_takes_precedence(self):
+        """If strategy_bundle is passed, it should be used directly."""
         from tinohelm.backtest.runner import BacktestRunner
-        from tinohelm.portfolio.config import PortfolioConfig, AccountSettings
+        from tinohelm.portfolio.config import StrategyBundle, AccountSettings
 
-        explicit_cfg = PortfolioConfig(
+        explicit_cfg = StrategyBundle(
             strategy_class="strat.py:X",
             config_class="strat.py:XConfig",
             symbols=["XRPUSDT-PERP"],
@@ -88,10 +88,10 @@ class TestRunnerBackwardCompat:
             config_path="ignored",
             symbol="BTCUSDT-PERP",
             interval="5m",
-            portfolio_config=explicit_cfg,
+            strategy_bundle=explicit_cfg,
         )
 
-        cfg = runner._build_portfolio_config()
+        cfg = runner._build_strategy_bundle()
         assert cfg is explicit_cfg
         assert cfg.symbols == ["XRPUSDT-PERP"]
 

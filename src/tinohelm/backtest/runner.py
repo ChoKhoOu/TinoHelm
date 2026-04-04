@@ -17,12 +17,12 @@ from nautilus_trader.model import TraderId
 from nautilus_trader.model.enums import AccountType, OmsType
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from tinohelm.portfolio.loader import (
+from tinohelm.strategy.loader import (
     create_strategies,
     create_actors,
-    _normalize_symbol,
-    _make_bar_type_str,
-    _INTERVAL_MAP,
+    normalize_symbol as _normalize_symbol,
+    make_bar_type_str as _make_bar_type_str,
+    INTERVAL_MAP as _INTERVAL_MAP,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,54 +39,49 @@ class _ProgressReporterConfig(ActorConfig, frozen=True):
 class _ProgressReporter(Actor):
     """Counts processed bars and periodically writes progress to Redis.
 
-    Uses class-level attributes set by BacktestRunner before engine.run().
-    This is safe because the worker processes one backtest at a time.
+    Instance attributes are set directly on the actor object by
+    BacktestRunner between add_actor() and engine.run().
     """
-
-    _redis = None       # sync redis.Redis client
-    _run_id: str = ""
-    _total_bars: int = 0
-    _bar_count: int = 0
-    _start_time: float = 0.0
-    _report_every: int = 2000
-    _bar_type_strs: list = []  # Set before engine.run() — explicit bar type strings
 
     def on_start(self) -> None:
         from nautilus_trader.model.data import BarType
 
-        cls = self.__class__
-        cls._bar_count = 0
-        cls._start_time = time.monotonic()
+        self._bar_count = 0
+        self._start_time = time.monotonic()
         # Subscribe to explicitly provided bar types (cache may be empty at this point)
-        for bt_str in cls._bar_type_strs:
+        for bt_str in getattr(self, "_bar_type_strs", []):
             try:
                 self.subscribe_bars(BarType.from_str(bt_str))
             except Exception:
                 pass
 
     def on_bar(self, bar) -> None:
-        cls = self.__class__
-        cls._bar_count += 1
+        self._bar_count += 1
+        report_every = getattr(self, "_report_every", 2000)
+        redis_client = getattr(self, "_redis", None)
+        total_bars = getattr(self, "_total_bars", 0)
+        run_id = getattr(self, "_run_id", "")
+
         if (
-            cls._bar_count % cls._report_every == 0
-            and cls._redis is not None
-            and cls._total_bars > 0
+            self._bar_count % report_every == 0
+            and redis_client is not None
+            and total_bars > 0
         ):
             # Map bar progress to 10-90% range (leaving 0-10 for setup, 90-100 for post)
-            pct = min(int(cls._bar_count / cls._total_bars * 80) + 10, 90)
-            elapsed = round(time.monotonic() - cls._start_time, 1)
+            pct = min(int(self._bar_count / total_bars * 80) + 10, 90)
+            elapsed = round(time.monotonic() - self._start_time, 1)
             try:
-                cls._redis.setex(
-                    f"tino:backtest:progress:{cls._run_id}", 86400, str(pct),
+                redis_client.setex(
+                    f"tino:backtest:progress:{run_id}", 86400, str(pct),
                 )
                 payload = json.dumps({
                     "type": "backtest.progress",
-                    "run_id": cls._run_id,
+                    "run_id": run_id,
                     "pct": pct,
                     "elapsed_secs": elapsed,
                 })
-                cls._redis.publish(
-                    f"tino:backtest:progress:{cls._run_id}", payload,
+                redis_client.publish(
+                    f"tino:backtest:progress:{run_id}", payload,
                 )
             except Exception:
                 pass  # Never let Redis errors crash the backtest
@@ -96,7 +91,7 @@ class BacktestRunner:
     """Runs a backtest using NautilusTrader BacktestEngine.
 
     Supports both:
-    - Portfolio mode: pass a ``PortfolioConfig`` directly
+    - Bundle mode: pass a ``StrategyBundle`` directly
     - Legacy mode: pass strategy_path/config_path/symbol/interval (auto-wrapped)
     """
 
@@ -114,7 +109,7 @@ class BacktestRunner:
         symbols: list[str] | None = None,
         intervals: list[str] | None = None,
         fill_model: dict | None = None,
-        portfolio_config: Any | None = None,
+        strategy_bundle: Any | None = None,
     ) -> None:
         self.strategy_path = strategy_path
         self.config_path = config_path
@@ -154,8 +149,8 @@ class BacktestRunner:
         self._run_id: str = ""
         self._job_start_time: float = 0.0  # set by worker for elapsed tracking
 
-        # Portfolio config (explicit or auto-wrapped from legacy params)
-        self._portfolio_config = portfolio_config
+        # Strategy bundle (explicit or auto-wrapped from legacy params)
+        self._strategy_bundle = strategy_bundle
 
     # Timeframes ordered from lowest to highest for composite source resolution
     _TIMEFRAME_PRIORITY: list[str] = [
@@ -233,38 +228,35 @@ class BacktestRunner:
         ivl: str,
         catalog: ParquetDataCatalog,
     ) -> list | None:
-        """Synchronously download bars from Binance and write to catalog.
+        """Download bars via BinanceVisionPipeline and write to catalog.
 
         Returns the loaded Bar objects, or None on failure.
         """
-        import asyncio
-        from tinohelm.data.providers.binance import fetch_klines
-        from tinohelm.data.catalog import klines_to_bars, write_bars
+        from tinohelm.data.pipeline import BinanceVisionPipeline
 
         try:
-            klines = asyncio.run(fetch_klines(
+            pipeline = BinanceVisionPipeline(catalog_path=str(catalog.path))
+            result = pipeline.ingest_sync(
                 symbol=sym,
+                data_type="klines",
+                start=self.start.date() if isinstance(self.start, datetime) else self.start,
+                end=self.end.date() if isinstance(self.end, datetime) else self.end,
                 interval=ivl,
-                start=self.start,
-                end=self.end,
-            ))
-            if not klines:
-                logger.warning("Binance returned no data for %s %s", sym, ivl)
+            )
+            if result.objects_count == 0:
+                logger.warning("Pipeline returned no data for %s %s", sym, ivl)
                 return None
 
-            bars = klines_to_bars(klines, sym, ivl)
-            if not bars:
-                logger.warning("Failed to convert klines to bars for %s %s", sym, ivl)
-                return None
-
-            write_bars(bars, sym, ivl, str(catalog.path))
-            logger.info("Wrote %d bars to catalog for %s %s", len(bars), sym, ivl)
+            logger.info(
+                "Pipeline ingested %d bars for %s %s (rest_fallback=%s)",
+                result.objects_count, sym, ivl, result.rest_fallback_used,
+            )
 
             # Reload from catalog to get properly indexed data
             bar_type_str = _make_bar_type_str(sym, ivl)
             return catalog.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
         except Exception:
-            logger.warning("Failed to download bars for %s %s from Binance", sym, ivl, exc_info=True)
+            logger.warning("Failed to download bars for %s %s via Pipeline", sym, ivl, exc_info=True)
             return None
 
     # ------------------------------------------------------------------
@@ -334,9 +326,8 @@ class BacktestRunner:
     ) -> None:
         """Load mark price and index price data for all symbols.
 
-        Fetches from Binance API and injects as MarkPriceUpdate / IndexPriceUpdate
-        so strategies can subscribe via ``subscribe_data(DataType(MarkPriceUpdate))``.
-        Uses the same interval as the primary bar data.
+        Uses BinanceVisionPipeline to download data, then builds
+        MarkPriceUpdate / IndexPriceUpdate objects for the engine.
         """
         import asyncio
         from tinohelm.data.providers.binance import (
@@ -349,7 +340,8 @@ class BacktestRunner:
         total_index = 0
 
         for sym, nt_sym in zip(self.symbols, nt_symbols):
-            # Mark price
+            # Mark price — still uses REST API directly since the data
+            # needs to be injected as MarkPriceUpdate (not Bar)
             try:
                 mark_klines = asyncio.run(fetch_mark_price_klines(
                     symbol=sym, interval=ivl, start=self.start, end=self.end,
@@ -503,40 +495,17 @@ class BacktestRunner:
         all_events.sort(key=lambda e: e["timestamp_ns"])
         return all_events
 
-    def _build_portfolio_config(self):
-        """Build a PortfolioConfig from legacy constructor params if not provided."""
-        if self._portfolio_config is not None:
-            return self._portfolio_config
+    def _build_strategy_bundle(self):
+        """Build a StrategyBundle from legacy constructor params if not provided."""
+        if self._strategy_bundle is not None:
+            return self._strategy_bundle
 
-        from tinohelm.portfolio.config import PortfolioConfig, AccountSettings, load_portfolio_config
+        from tinohelm.portfolio.config import StrategyBundle, AccountSettings
 
         starting_balance = self.strategy_params.get("starting_balance", 10000)
         leverage = self.strategy_params.get("leverage", 1)
 
-        # Detect portfolio strategy (strategy_path points to portfolio.yaml)
-        file_part = self.strategy_path.rsplit(":", 1)[0] if self.strategy_path else ""
-        if file_part.endswith("portfolio.yaml"):
-            folder = Path(file_part).parent
-            config = load_portfolio_config(str(folder))
-            # Override account settings from job params
-            config.account = AccountSettings(
-                starting_balance=starting_balance,
-                currency=config.account.currency,
-                leverage=leverage,
-            )
-            # Merge additional strategy params from the job (override yaml defaults)
-            for k, v in self.strategy_params.items():
-                if k not in ("starting_balance", "leverage"):
-                    config.params[k] = v
-            # Override symbols/interval from job if provided
-            if self.symbols:
-                config.symbols = self.symbols
-            if self.intervals:
-                config.interval = self.intervals[0]
-            return config
-
-        # For legacy mode, strategy_path is "file:ClassName", config_path is "file:ConfigName"
-        return PortfolioConfig(
+        return StrategyBundle(
             strategy_class=self.strategy_path,
             config_class=self.config_path,
             symbols=self.symbols,
@@ -573,16 +542,15 @@ class BacktestRunner:
         """Execute the backtest and return results dict."""
         logger.info("Starting backtest: %s on %s", self.strategy_path, self.symbols)
 
-        portfolio_config = self._build_portfolio_config()
+        strategy_bundle = self._build_strategy_bundle()
 
-        # Sync symbols/intervals from portfolio config when not provided by the job
-        # (portfolio strategies define their own symbols/interval in portfolio.yaml)
-        if not self.symbols and portfolio_config.symbols:
-            self.symbols = portfolio_config.symbols
+        # Sync symbols/intervals from strategy bundle when not provided by the job
+        if not self.symbols and strategy_bundle.symbols:
+            self.symbols = strategy_bundle.symbols
             self.symbol = self.symbols[0] if self.symbols else ""
-        if not self.intervals and portfolio_config.interval:
-            self.intervals = [portfolio_config.interval]
-            self.interval = portfolio_config.interval
+        if not self.intervals and strategy_bundle.interval:
+            self.intervals = [strategy_bundle.interval]
+            self.interval = strategy_bundle.interval
 
         # Configure engine
         engine_config = BacktestEngineConfig(
@@ -607,8 +575,8 @@ class BacktestRunner:
         from nautilus_trader.model.identifiers import Venue
         from nautilus_trader.model.objects import Money
 
-        starting_balance = portfolio_config.account.starting_balance
-        leverage = portfolio_config.account.leverage
+        starting_balance = strategy_bundle.account.starting_balance
+        leverage = strategy_bundle.account.leverage
         venue_kwargs: dict[str, Any] = {
             "venue": Venue("BINANCE"),
             "oms_type": OmsType.HEDGING,
@@ -681,27 +649,18 @@ class BacktestRunner:
         self.strategy_params.setdefault("bar_type", all_bar_type_strs[0] if all_bar_type_strs else "")
         self.strategy_params.setdefault("bar_types", all_bar_type_strs)
 
-        # Build per-symbol bar_type map so the portfolio loader can pick up
-        # composite bar types (e.g. INTERNAL@1-MINUTE-EXTERNAL) instead of
-        # building plain EXTERNAL bar types that don't match loaded data.
-        bar_type_map: dict[str, str] = {}
-        for bt_str in all_bar_type_strs:
-            # Extract NT symbol from bar_type string (everything before the interval part)
-            # e.g. "BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
-            for ns in nt_symbols:
-                if bt_str.startswith(ns):
-                    bar_type_map[ns] = bt_str
-                    break
-        portfolio_config.params["_bar_type_map"] = bar_type_map
+        # Inject resolved bar types so strategy on_start() uses composite
+        # bar types (e.g. INTERNAL@1-MINUTE-EXTERNAL) instead of plain EXTERNAL.
+        strategy_bundle.resolved_bar_types = all_bar_type_strs
 
-        # Create strategy instances via portfolio_loader
-        strategy_instances = create_strategies(portfolio_config)
+        # Create strategy instances via loader
+        strategy_instances = create_strategies(strategy_bundle)
         for strategy_instance in strategy_instances:
             engine.add_strategy(strategy_instance)
         logger.info("Added %d strategy instance(s) to engine", len(strategy_instances))
 
-        # Create and add actor instances via portfolio_loader
-        actor_instances = create_actors(portfolio_config)
+        # Create and add actor instances via strategy loader
+        actor_instances = create_actors(strategy_bundle)
         for actor_instance in actor_instances:
             engine.add_actor(actor_instance)
             # Inject RiskEngine reference into RiskGuardActor for direct
@@ -771,11 +730,11 @@ class BacktestRunner:
 
         # Add progress reporter actor for bar-level progress tracking
         if self._redis_client and self._run_id and total_bar_count > 0:
-            _ProgressReporter._redis = self._redis_client
-            _ProgressReporter._run_id = self._run_id
-            _ProgressReporter._total_bars = total_bar_count
-            _ProgressReporter._bar_count = 0
-            _ProgressReporter._bar_type_strs = loaded_bar_type_strs
+            reporter._redis = self._redis_client
+            reporter._run_id = self._run_id
+            reporter._total_bars = total_bar_count
+            reporter._report_every = 2000
+            reporter._bar_type_strs = loaded_bar_type_strs
             reporter = _ProgressReporter(config=_ProgressReporterConfig())
             engine.add_actor(reporter)
             logger.info(
@@ -809,7 +768,8 @@ class BacktestRunner:
         if self.artifacts_dir is not None:
             self._export_reports(engine)
             self._generate_tearsheet(engine, loaded_bar_type_strs)
-            self._enhance_tearsheet(results)
+            from tinohelm.backtest.tearsheet import enhance_tearsheet
+            enhance_tearsheet(self.artifacts_dir, results)
 
         # Cleanup
         engine.dispose()
@@ -829,16 +789,16 @@ class BacktestRunner:
         parameter set with ``engine.reset()`` between trials.
 
         Returns:
-            (engine, portfolio_config, starting_balance)
+            (engine, strategy_bundle, starting_balance)
         """
-        portfolio_config = self._build_portfolio_config()
+        strategy_bundle = self._build_strategy_bundle()
 
-        if not self.symbols and portfolio_config.symbols:
-            self.symbols = portfolio_config.symbols
+        if not self.symbols and strategy_bundle.symbols:
+            self.symbols = strategy_bundle.symbols
             self.symbol = self.symbols[0] if self.symbols else ""
-        if not self.intervals and portfolio_config.interval:
-            self.intervals = [portfolio_config.interval]
-            self.interval = portfolio_config.interval
+        if not self.intervals and strategy_bundle.interval:
+            self.intervals = [strategy_bundle.interval]
+            self.interval = strategy_bundle.interval
 
         engine_config = BacktestEngineConfig(
             trader_id=TraderId("BACKTESTER-001"),
@@ -858,8 +818,8 @@ class BacktestRunner:
         from nautilus_trader.model.identifiers import Venue
         from nautilus_trader.model.objects import Money
 
-        starting_balance = portfolio_config.account.starting_balance
-        leverage = portfolio_config.account.leverage
+        starting_balance = strategy_bundle.account.starting_balance
+        leverage = strategy_bundle.account.leverage
         venue_kwargs: dict[str, Any] = {
             "venue": Venue("BINANCE"),
             "oms_type": OmsType.HEDGING,
@@ -910,25 +870,19 @@ class BacktestRunner:
         self.strategy_params.setdefault("bar_type", all_bar_type_strs[0] if all_bar_type_strs else "")
         self.strategy_params.setdefault("bar_types", all_bar_type_strs)
 
-        # Build bar_type_map
-        bar_type_map: dict[str, str] = {}
-        for bt_str in all_bar_type_strs:
-            for ns in nt_symbols:
-                if bt_str.startswith(ns):
-                    bar_type_map[ns] = bt_str
-                    break
-        portfolio_config.params["_bar_type_map"] = bar_type_map
+        # Inject resolved bar types for strategy on_start()
+        strategy_bundle.resolved_bar_types = all_bar_type_strs
 
         logger.info(
             "Engine prepared: %d symbols, %d bar types",
             len(nt_symbols), len(all_bar_type_strs),
         )
-        return engine, portfolio_config, starting_balance
+        return engine, strategy_bundle, starting_balance
 
     def run_trial(
         self,
         engine: BacktestEngine,
-        portfolio_config: Any,
+        strategy_bundle: Any,
         starting_balance: float,
         trial_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -941,22 +895,16 @@ class BacktestRunner:
 
         engine.reset()
 
-        # Merge trial params into portfolio config
+        # Merge trial params into strategy bundle
         if trial_params:
-            pc = deepcopy(portfolio_config)
+            pc = deepcopy(strategy_bundle)
             pc.params.update(trial_params)
         else:
-            pc = portfolio_config
+            pc = strategy_bundle
 
-        # Ensure bar_type_map survives the copy
-        if "_bar_type_map" not in pc.params and hasattr(self, "_all_bar_type_strs"):
-            bar_type_map: dict[str, str] = {}
-            for bt_str in self._all_bar_type_strs:
-                for ns in self._nt_symbols:
-                    if bt_str.startswith(ns):
-                        bar_type_map[ns] = bt_str
-                        break
-            pc.params["_bar_type_map"] = bar_type_map
+        # Ensure resolved_bar_types survives the copy
+        if not pc.resolved_bar_types and hasattr(self, "_all_bar_type_strs"):
+            pc.resolved_bar_types = list(self._all_bar_type_strs)
 
         strategy_instances = create_strategies(pc)
         for s in strategy_instances:
@@ -1063,7 +1011,7 @@ class BacktestRunner:
         except Exception:
             logger.warning("Failed to generate tearsheet", exc_info=True)
 
-    def _enhance_tearsheet(self, results: dict[str, Any]) -> None:
+    def _enhance_tearsheet_DELETED(self, results: dict[str, Any]) -> None:
         """Inject per-instrument performance breakdown into the tearsheet HTML.
 
         Adds a Plotly horizontal bar chart and a detailed summary table

@@ -152,7 +152,7 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 from tinohelm.backtest.runner import BacktestRunner
 
                 # Backward compat: support both old single "symbol"/"interval" and new "symbols"/"intervals"
-                # Empty list is valid for portfolio strategies (symbols/interval come from portfolio.yaml)
+                # Empty list is valid when symbols/interval are defined in the strategy config
                 symbols = job.get("symbols")
                 if symbols is None:
                     sym = job.get("symbol")

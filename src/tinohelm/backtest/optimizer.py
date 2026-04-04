@@ -508,7 +508,7 @@ class BacktestOptimizer:
         # Shared engine state (simple mode only — set in run())
         self._shared_runner = None
         self._shared_engine = None
-        self._shared_portfolio_config = None
+        self._shared_strategy_bundle = None
         self._shared_starting_balance: float = 0.0
 
     # ------------------------------------------------------------------
@@ -559,7 +559,7 @@ class BacktestOptimizer:
             if self._shared_runner is not None:
                 result = self._shared_runner.run_trial(
                     self._shared_engine,
-                    self._shared_portfolio_config,
+                    self._shared_strategy_bundle,
                     self._shared_starting_balance,
                     trial_params=params,
                 )
@@ -692,7 +692,7 @@ class BacktestOptimizer:
                 engine, pc, sb = runner.prepare_engine()
                 self._shared_runner = runner
                 self._shared_engine = engine
-                self._shared_portfolio_config = pc
+                self._shared_strategy_bundle = pc
                 self._shared_starting_balance = sb
                 logger.info(
                     "Shared engine prepared for simple mode — "
