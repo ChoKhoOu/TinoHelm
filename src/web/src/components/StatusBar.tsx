@@ -1,18 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { api } from "@/lib/api";
+import { FillTicker } from "@/components/FillTicker";
 
-type ExchangeStatus = {
+type ExchangeLatency = {
   name: string;
-  connected: boolean;
-  latency?: number;
+  latency_ms: number | null;
+  reachable: boolean;
 };
 
-const exchanges: ExchangeStatus[] = [
-  { name: "Binance", connected: true, latency: 2 },
-  { name: "Hyperliquid", connected: true, latency: 8 },
-  { name: "OKX", connected: false, latency: 42 },
-];
+/** EMA smoothing over a 12-sample window (α = 2/(12+1) ≈ 0.1538). */
+const EMA_ALPHA = 2 / (12 + 1);
 
 function useClock() {
   const [now, setNow] = useState<string>("");
@@ -29,34 +28,57 @@ function useClock() {
   return now;
 }
 
+const POLL_INTERVAL = 5_000; // 5s
+
 export function StatusBar() {
   const clock = useClock();
+  const [exchanges, setExchanges] = useState<ExchangeLatency[]>([]);
+  const emaRef = useRef<Record<string, number>>({});
+
+  const fetchLatency = useCallback(async () => {
+    const data = await api<ExchangeLatency[]>("/api/exchanges/latency");
+    if (!data) return;
+
+    const smoothed = data.map((ex) => {
+      if (ex.latency_ms == null) return ex;
+      const prev = emaRef.current[ex.name];
+      const ema = prev == null
+        ? ex.latency_ms
+        : EMA_ALPHA * ex.latency_ms + (1 - EMA_ALPHA) * prev;
+      emaRef.current[ex.name] = ema;
+      return { ...ex, latency_ms: ema };
+    });
+    setExchanges(smoothed);
+  }, []);
+
+  useEffect(() => {
+    fetchLatency();
+    const id = setInterval(fetchLatency, POLL_INTERVAL);
+    return () => clearInterval(id);
+  }, [fetchLatency]);
 
   return (
     <footer
       className="flex items-center px-6 bg-input border-t font-mono text-[0.65rem] text-qds-t3 gap-6 overflow-hidden shrink-0"
       style={{ height: 28, minHeight: 28 }}
     >
-      {/* Exchange connection dots */}
+      {/* Exchange latency dots */}
       {exchanges.map((ex) => (
         <div key={ex.name} className="flex items-center gap-1.5 whitespace-nowrap">
           <span
             className="w-[5px] h-[5px] rounded-full"
             style={{
-              background: ex.connected ? "var(--suc)" : "var(--warn)",
+              background: ex.reachable ? "var(--suc)" : "var(--warn)",
             }}
           />
           <span>
-            {ex.name} {ex.latency != null ? `${ex.latency}ms` : ""}
+            {ex.name} {ex.latency_ms != null ? `${Math.round(ex.latency_ms)}ms` : "—"}
           </span>
         </div>
       ))}
 
-      {/* System stats — separated by border */}
-      <div className="flex items-center gap-6 whitespace-nowrap border-l pl-6">
-        <span>Mem <span className="text-qds-t1">4.2G</span></span>
-        <span>CPU <span className="text-qds-t1">12%</span></span>
-      </div>
+      {/* Fill ticker */}
+      <FillTicker />
 
       {/* Clock — right-aligned */}
       <span className="ml-auto whitespace-nowrap">{clock}</span>

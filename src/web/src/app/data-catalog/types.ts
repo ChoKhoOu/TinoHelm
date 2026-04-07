@@ -51,6 +51,50 @@ export const CATEGORY_LABELS: Record<string, string> = {
   funding_rate: "资金费率",
 };
 
+/** Filter groups for data catalog (design: qds-data-catalog.html) */
+export interface FilterGroup {
+  label: string;
+  dot: string; // CSS color value
+  types: string[] | null; // null = all
+}
+export const FILTER_GROUPS: Record<string, FilterGroup> = {
+  all:         { label: "全部",    dot: "var(--t1)",   types: null },
+  klines:      { label: "Klines",  dot: "var(--info)",  types: ["bar", "klines", "indexPriceKlines", "markPriceKlines", "premiumIndexKlines"] },
+  trades:      { label: "Trades",  dot: "var(--acc)",   types: ["trade_tick", "aggTrades", "trades"] },
+  fundingRate: { label: "Funding", dot: "var(--suc)",   types: ["funding_rate", "fundingRate"] },
+};
+
+/** Type badge CSS class mapping (vision data_type → dc-type-* class) */
+export const TYPE_BADGE_CLS: Record<string, string> = {
+  klines: "dc-type-kl",
+  indexPriceKlines: "dc-type-ipk",
+  markPriceKlines: "dc-type-mpk",
+  premiumIndexKlines: "dc-type-pik",
+  aggTrades: "dc-type-at",
+  trades: "dc-type-tr",
+  fundingRate: "dc-type-fr",
+  // DB categories (from catalog)
+  bar: "dc-type-kl",
+  trade_tick: "dc-type-at",
+  quote_tick: "dc-type-ipk",
+  funding_rate: "dc-type-fr",
+};
+
+/** Source type label (what to show in type badge for DB categories) */
+export const SOURCE_TYPE_LABELS: Record<string, string> = {
+  klines: "klines",
+  indexPriceKlines: "indexPriceKlines",
+  markPriceKlines: "markPriceKlines",
+  premiumIndexKlines: "premiumIndexKlines",
+  aggTrades: "aggTrades",
+  trades: "trades",
+  fundingRate: "fundingRate",
+  bar: "bar",
+  trade_tick: "trade_tick",
+  quote_tick: "quote_tick",
+  funding_rate: "funding_rate",
+};
+
 export const INTERVAL_OPTIONS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"];
 
 export function formatBytes(bytes: number): string {

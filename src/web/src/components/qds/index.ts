@@ -4,3 +4,4 @@ export { StatusBadge } from "./status-badge";
 export { HelpTip } from "./help-tip";
 export { SectionLabel } from "./section-label";
 export { PageHeader } from "./page-header";
+export { InlineError } from "./InlineError";

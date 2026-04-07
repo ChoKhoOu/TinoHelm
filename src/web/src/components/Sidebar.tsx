@@ -90,9 +90,6 @@ export function Sidebar() {
         className="flex items-center gap-2.5 border-b overflow-hidden shrink-0"
         style={{ height: 48, padding: collapsed ? "0 16px" : "0 16px" }}
       >
-        <div className="w-6 h-6 rounded-sm bg-primary flex items-center justify-center shrink-0">
-          <span className="font-mono text-[0.7rem] font-semibold text-white">T</span>
-        </div>
         <span
           className="font-mono text-[0.9rem] font-semibold text-foreground whitespace-nowrap overflow-hidden"
           style={{
@@ -100,7 +97,7 @@ export function Sidebar() {
             transition: `opacity var(--dur) var(--eo)`,
           }}
         >
-          TinoHelm<span className="text-primary">.</span>
+          <span className="text-primary">T</span>ino<span className="text-primary">.</span>Helm
         </span>
       </div>
 

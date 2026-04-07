@@ -1,50 +1,36 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
-import {
-  Download, ScanLine, HardDrive, Minimize2, ChevronUp, ChevronDown, X, Trash2,
-} from "lucide-react";
+import { Fragment, useState, useEffect, useMemo } from "react";
 import { apiGet, apiPost } from "@/lib/api";
-import { Skeleton } from "@/components/ui/skeleton";
-import { FadeIn } from "@/components/motion/FadeIn";
-import { Button } from "@/components/ui/button";
+import { useAction } from "@/hooks/use-action";
+import { InlineError } from "@/components/qds";
 
 import {
-  CatalogEntry, SortKey, SortDir, CATEGORY_LABELS, formatBytes, formatNumber,
+  CatalogEntry, SortKey, SortDir, formatBytes,
+  FILTER_GROUPS, TYPE_BADGE_CLS, SOURCE_TYPE_LABELS,
 } from "./types";
 import { FilterTabs } from "./FilterTabs";
 import { FetchDialog } from "./FetchDialog";
-import { CoveragePanel } from "./CoveragePanel";
+import { JobQueue } from "./JobQueue";
 import { DeleteDialog } from "./DeleteDialog";
-import { BatchFetchDialog } from "./BatchFetchDialog";
 
-/* ── Sort header cell ────────────────────────────────────────────── */
+/* ── helpers ─────────────────────────────────────────────────────── */
 
-function SortCell({
-  label, sortKey, current, dir, onSort, className,
-}: {
-  label: string;
-  sortKey: SortKey;
-  current: SortKey;
-  dir: SortDir;
-  onSort: (k: SortKey) => void;
-  className?: string;
-}) {
-  const active = current === sortKey;
-  return (
-    <Button
-      variant="ghost"
-      onClick={() => onSort(sortKey)}
-      className={`flex items-center gap-1 text-[10px] font-semibold tracking-[0.5px] text-muted-foreground hover:text-muted-foreground transition-colors ${className ?? ""}`}
-    >
-      {label}
-      {active ? (
-        dir === "asc" ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
-      ) : (
-        <ChevronDown className="w-3 h-3 opacity-30" />
-      )}
-    </Button>
-  );
+function fmtRecords(n: number | null | undefined): string {
+  if (n == null) return "—";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function staleness(dateStr: string | null): { label: string; cls: string } {
+  if (!dateStr) return { label: "—", cls: "" };
+  const d = new Date(dateStr);
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days <= 1) return { label: days === 0 ? "今天" : "昨天", cls: "cg" };
+  if (days <= 7) return { label: `${days}天前`, cls: "" };
+  if (days <= 30) return { label: `${days}天前`, cls: "ca" };
+  return { label: `${days}天前`, cls: "cr" };
 }
 
 /* ── Page ────────────────────────────────────────────────────────── */
@@ -52,83 +38,70 @@ function SortCell({
 export default function DataCatalogPage() {
   const [datasets, setDatasets] = useState<CatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   // Dialogs
   const [fetchOpen, setFetchOpen] = useState(false);
-  const [batchOpen, setBatchOpen] = useState(false);
+  const [jobRefresh, setJobRefresh] = useState(0);
   const [deleteEntry, setDeleteEntry] = useState<CatalogEntry | null>(null);
 
-  // Filtering
-  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  // Filter
+  const [activeGroup, setActiveGroup] = useState("all");
+  const [activeSub, setActiveSub] = useState<string | null>(null);
 
-  // Coverage panel
-  const [coverageSymbol, setCoverageSymbol] = useState<string | null>(null);
+  // Coverage
+  const [covId, setCovId] = useState<number | null>(null);
+  const [covRows, setCovRows] = useState<CatalogEntry[]>([]);
 
   // Sort
   const [sortKey, setSortKey] = useState<SortKey>("symbol");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
-  // Action states
-  const [actionState, setActionState] = useState<Record<string, boolean>>({});
-  const [actionMsg, setActionMsg] = useState<string | null>(null);
+  // Pagination
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
 
   useEffect(() => { loadCatalog(); }, []);
 
   async function loadCatalog() {
     setLoading(true);
-    setError(null);
     try {
       const data = await apiGet<CatalogEntry[]>("/api/data/catalog");
       if (data) setDatasets(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败");
     } finally {
       setLoading(false);
     }
   }
 
-  function handleSort(key: SortKey) {
-    if (sortKey === key) {
-      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setSortKey(key);
-      setSortDir("asc");
-    }
+  const compact = useAction(() => apiPost("/api/data/compact"), { onSuccess: loadCatalog });
+  const scan = useAction(() => apiPost("/api/data/scan"), { onSuccess: loadCatalog });
+
+  function handleSort(col: SortKey) {
+    if (sortKey === col) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(col); setSortDir("asc"); }
+    setPage(1);
   }
 
-  async function runAction(key: string, path: string, successMsg: string) {
-    setActionState((s) => ({ ...s, [key]: true }));
-    setActionMsg(null);
-    try {
-      await apiPost(path);
-      setActionMsg(successMsg);
-      await loadCatalog();
-    } catch (err) {
-      setActionMsg(err instanceof Error ? err.message : "操作失败");
-    } finally {
-      setActionState((s) => ({ ...s, [key]: false }));
+  /* ── derived data ──────────────────────────────────────────────── */
+
+  const typeCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    datasets.forEach((d) => { m[d.data_type] = (m[d.data_type] ?? 0) + 1; });
+    return m;
+  }, [datasets]);
+
+  const filtered = useMemo(() => {
+    const group = FILTER_GROUPS[activeGroup];
+    if (!group || group.types === null) {
+      return activeSub ? datasets.filter((d) => d.data_type === activeSub) : datasets;
     }
-  }
+    const types = activeSub ? [activeSub] : group.types;
+    return datasets.filter((d) => types.includes(d.data_type));
+  }, [datasets, activeGroup, activeSub]);
 
-  // Derive categories from actual data
-  const categories = useMemo(
-    () => [...new Set(datasets.map((d) => d.data_type))].sort(),
-    [datasets],
-  );
-
-  // Filter by active category
-  const filtered = useMemo(
-    () => activeCategory ? datasets.filter((d) => d.data_type === activeCategory) : datasets,
-    [datasets, activeCategory],
-  );
-
-  // Sort
   const sorted = useMemo(() => {
     const arr = [...filtered];
     arr.sort((a, b) => {
-      let va: string | number;
-      let vb: string | number;
+      let va: string | number, vb: string | number;
       switch (sortKey) {
         case "symbol": va = a.symbol; vb = b.symbol; break;
         case "data_type": va = a.data_type; vb = b.data_type; break;
@@ -145,227 +118,200 @@ export default function DataCatalogPage() {
     return arr;
   }, [filtered, sortKey, sortDir]);
 
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const slice = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
+
   // Stats
-  const totalSize = filtered.reduce((s, d) => s + d.size_bytes, 0);
   const totalRecords = filtered.reduce((s, d) => s + (d.record_count ?? 0), 0);
-  const allDates = filtered.flatMap((d) => [d.start_date, d.end_date]).filter(Boolean).sort();
-  const dateRange = allDates.length >= 2 ? `${allDates[0]} → ${allDates[allDates.length - 1]}` : "—";
+  const totalSize = filtered.reduce((s, d) => s + d.size_bytes, 0);
+  const latestDate = filtered.length > 0
+    ? filtered.reduce((m, d) => (d.end_date > m ? d.end_date : m), filtered[0].end_date)
+    : null;
+  const stale = staleness(latestDate);
 
-  const stats = [
-    { label: "数据集", value: String(filtered.length) },
-    { label: "总记录数", value: totalRecords > 0 ? totalRecords.toLocaleString() : "—" },
-    { label: "日期跨度", value: dateRange },
-    { label: "总大小", value: formatBytes(totalSize) },
-  ];
+  // Dynamic columns
+  const isKlineGrp = activeGroup === "klines";
+  const isTradeGrp = activeGroup === "trades";
+  const showType = activeGroup === "all" || (!activeSub && (isKlineGrp || isTradeGrp));
+  const showInterval = activeGroup === "all" || isKlineGrp;
+  const recLabel = isKlineGrp ? "Bars" : isTradeGrp ? "Ticks" : "记录数";
+  const visColCount = 3 + (showType ? 1 : 0) + (showInterval ? 1 : 0);
 
-  // Dynamic columns based on active category
-  const isBar = activeCategory === "bar";
-  const isTick = activeCategory === "trade_tick" || activeCategory === "quote_tick";
-  const showTypeCol = !activeCategory; // "All" view shows type column
+  function toggleCoverage(id: number, symbol: string) {
+    if (covId === id) { setCovId(null); return; }
+    setCovId(id);
+    setCovRows(datasets.filter((d) => d.symbol === symbol));
+  }
 
+  /* ── sort header ───────────────────────────────────────────────── */
+  function TH({ col, label, right }: { col: SortKey; label: string; right?: boolean }) {
+    const isSorted = sortKey === col;
+    const icon = isSorted ? (sortDir === "asc" ? "▲" : "▼") : "▽";
+    return (
+      <th className={`${right ? "dc-tr " : ""}${isSorted ? "dc-sorted" : ""}`} onClick={() => handleSort(col)}>
+        {label} <span className="dc-sort-icon">{icon}</span>
+      </th>
+    );
+  }
+
+  /* ── pagination ────────────────────────────────────────────────── */
+  function renderPager() {
+    if (totalPages <= 1) return null;
+    const start = (safePage - 1) * pageSize + 1;
+    const end = Math.min(safePage * pageSize, sorted.length);
+    const maxBtns = 7;
+    let pS = Math.max(1, safePage - 3);
+    const pE = Math.min(totalPages, pS + maxBtns - 1);
+    if (pE - pS < maxBtns - 1) pS = Math.max(1, pE - maxBtns + 1);
+    const btns: React.ReactNode[] = [];
+    btns.push(<button key="f" className="dc-pager-btn" disabled={safePage <= 1} onClick={() => setPage(1)}>«</button>);
+    btns.push(<button key="p" className="dc-pager-btn" disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>‹</button>);
+    if (pS > 1) { btns.push(<button key="p1" className="dc-pager-btn" onClick={() => setPage(1)}>1</button>); if (pS > 2) btns.push(<span key="d1" className="dc-pager-dots">…</span>); }
+    for (let i = pS; i <= pE; i++) btns.push(<button key={i} className={`dc-pager-btn${i === safePage ? " active" : ""}`} onClick={() => setPage(i)}>{i}</button>);
+    if (pE < totalPages) { if (pE < totalPages - 1) btns.push(<span key="d2" className="dc-pager-dots">…</span>); btns.push(<button key="pl" className="dc-pager-btn" onClick={() => setPage(totalPages)}>{totalPages}</button>); }
+    btns.push(<button key="n" className="dc-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>›</button>);
+    btns.push(<button key="l" className="dc-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(totalPages)}>»</button>);
+    return <div className="dc-pager"><span>{start}–{end} / {sorted.length}</span><div className="dc-pager-nav">{btns}</div></div>;
+  }
+
+  /* ── render ────────────────────────────────────────────────────── */
   return (
-    <div className="flex flex-col gap-4 p-6 h-full">
-      {/* Top bar */}
-      <div className="flex items-end justify-between shrink-0">
-        <div className="flex flex-col gap-0.5">
-          <h1 className="font-mono text-[22px] font-bold tracking-tight text-foreground">
-            数据目录
-          </h1>
-          <span className="qds-section-label">
-            // 本地 ParquetDataCatalog
-          </span>
+    <div className="flex flex-col h-full overflow-hidden">
+      <div className="flex-1 overflow-y-auto" style={{ padding: "1.25rem 2rem 4rem" }}>
+        {/* 1. Page header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1.5rem" }}>
+          <div>
+            <div style={{ fontSize: "1.1rem", fontWeight: 700, marginBottom: ".2rem" }}>数据目录</div>
+            <div style={{ fontSize: ".72rem", color: "var(--t2)", fontFamily: "var(--font-d)" }}>// 本地 ParquetDataCatalog</div>
+          </div>
+          <div style={{ display: "flex", gap: ".4rem", alignItems: "flex-start" }}>
+            <button className="btn btn-p" onClick={() => setFetchOpen(true)}>↓ 拉取数据</button>
+            <div>
+              <button
+                className={`btn ${compact.state === 'error' ? 'btn-d' : compact.state === 'success' ? 'btn-p' : 'btn-o'}`}
+                onClick={compact.execute}
+                disabled={compact.state === 'loading'}
+              >
+                {compact.state === 'loading' ? '压缩中...' : compact.state === 'success' ? '✓ 压缩完成' : compact.state === 'error' ? '✕ 失败' : '⊕ 压缩'}
+              </button>
+              {compact.state === 'error' && compact.error && <InlineError>{compact.error}</InlineError>}
+            </div>
+            <div>
+              <button
+                className={`btn ${scan.state === 'error' ? 'btn-d' : scan.state === 'success' ? 'btn-p' : 'btn-o'}`}
+                onClick={scan.execute}
+                disabled={scan.state === 'loading'}
+              >
+                {scan.state === 'loading' ? '扫描中...' : scan.state === 'success' ? '✓ 扫描完成' : scan.state === 'error' ? '✕ 失败' : '↻ 扫描'}
+              </button>
+              {scan.state === 'error' && scan.error && <InlineError>{scan.error}</InlineError>}
+            </div>
+          </div>
         </div>
-        {/* Toolbar */}
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={() => setFetchOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-qds-success text-input px-4 py-2 text-[11px] font-bold hover:opacity-90 transition-all"
-          >
-            <Download className="w-3 h-3" />
-            拉取数据
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => runAction("compact", "/api/data/compact", "压缩完成")}
-            disabled={actionState.compact}
-            className="inline-flex items-center gap-1.5 rounded-lg border bg-input px-3 py-2 text-[11px] font-semibold text-muted-foreground hover:border-qds-success hover:text-foreground transition-all disabled:opacity-50"
-          >
-            {actionState.compact ? (
-              <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-            ) : (
-              <Minimize2 className="w-3 h-3" />
-            )}
-            压缩
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => runAction("scan", "/api/data/scan", "扫描完成")}
-            disabled={actionState.scan}
-            className="inline-flex items-center gap-1.5 rounded-lg border bg-input px-3 py-2 text-[11px] font-semibold text-muted-foreground hover:border-qds-success hover:text-foreground transition-all disabled:opacity-50"
-          >
-            {actionState.scan ? (
-              <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-            ) : (
-              <ScanLine className="w-3 h-3" />
-            )}
-            扫描
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => setBatchOpen(true)}
-            disabled={actionState.batch}
-            className="inline-flex items-center gap-1.5 rounded-lg border bg-input px-3 py-2 text-[11px] font-semibold text-muted-foreground hover:border-qds-success hover:text-foreground transition-all disabled:opacity-50"
-          >
-            <HardDrive className="w-3 h-3" />
-            批量拉取
-          </Button>
+
+        {/* 2. Filter tabs */}
+        <FilterTabs
+          totalCount={datasets.length}
+          typeCounts={typeCounts}
+          activeGroup={activeGroup}
+          activeSub={activeSub}
+          onGroupChange={(g) => { setActiveGroup(g); setPage(1); }}
+          onSubChange={(s) => { setActiveSub(s); setPage(1); }}
+        />
+
+        {/* 3. Stats cards */}
+        <div className="g g4" style={{ marginBottom: "1.5rem" }}>
+          <div className="sc"><div className="sc-l">数据集</div><div className="sc-v">{filtered.length}</div></div>
+          <div className="sc"><div className="sc-l">总记录数</div><div className="sc-v">{totalRecords >= 1_000_000 ? `${(totalRecords / 1_000_000).toFixed(1)}M` : totalRecords > 0 ? totalRecords.toLocaleString() : "—"}</div></div>
+          <div className="sc"><div className="sc-l">最新数据</div><div className={`sc-v ${stale.cls}`}>{latestDate ?? "—"}</div>{latestDate && <div className={`sc-sub ${stale.cls}`}>{stale.label}</div>}</div>
+          <div className="sc"><div className="sc-l">磁盘占用</div><div className="sc-v">{formatBytes(totalSize)}</div></div>
         </div>
+
+        {/* 4. Queue */}
+        <JobQueue refreshTrigger={jobRefresh} onJobComplete={loadCatalog} />
+
+        {/* 5. Data table header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: ".65rem" }}>
+          <div className="dc-sl" style={{ marginBottom: 0 }}>数据集</div>
+          <div style={{ fontFamily: "var(--font-d)", fontSize: ".65rem" }}><select className="fsel" style={{ padding: ".22rem .45rem", fontSize: ".65rem", paddingRight: "1.6rem" }} value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
+            <option value={10}>10 条/页</option>
+            <option value={20}>20 条/页</option>
+            <option value={50}>50 条/页</option>
+          </select></div>
+        </div>
+
+        {loading ? (
+          <div className="list" style={{ padding: "2rem", textAlign: "center" }}>
+            <div style={{ color: "var(--t3)", fontSize: ".75rem" }}>加载中...</div>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="list">
+            <div className="empty">
+              <div className="empty-icon">⊞</div>
+              <div className="empty-text">{activeGroup !== "all" ? "该类型暂无数据集" : "暂无数据集，请先拉取数据"}</div>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="list">
+              <table className="dc-dtbl">
+                <thead>
+                  <tr>
+                    <TH col="symbol" label="品种" />
+                    {showType && <TH col="data_type" label="类型" />}
+                    {showInterval && <TH col="interval" label="周期" />}
+                    <TH col="record_count" label={recLabel} right />
+                    <TH col="start_date" label="日期范围" />
+                    <TH col="size_bytes" label="文件大小" right />
+                    <th style={{ width: 40 }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {slice.map((ds) => {
+                    const typeCls = TYPE_BADGE_CLS[ds.data_type] ?? "dc-type-kl";
+                    const typeLabel = SOURCE_TYPE_LABELS[ds.data_type] ?? ds.data_type;
+                    return (
+                      <Fragment key={ds.id}>
+                        <tr>
+                          <td><span className="dc-sym-link" onClick={() => toggleCoverage(ds.id, ds.symbol)}>{ds.symbol}</span></td>
+                          {showType && <td><span className={`dc-type ${typeCls}`}>{typeLabel}</span></td>}
+                          {showInterval && <td className="dim">{ds.interval}</td>}
+                          <td className="dc-tr">{fmtRecords(ds.record_count)}</td>
+                          <td className="dim">{ds.start_date && ds.end_date ? `${ds.start_date} → ${ds.end_date}` : "—"}</td>
+                          <td className="dc-tr">{formatBytes(ds.size_bytes)}</td>
+                          <td><button className="dc-del-btn" onClick={() => setDeleteEntry(ds)}>删除</button></td>
+                        </tr>
+                        <tr><td colSpan={visColCount} style={{ padding: 0 }}>
+                          <div className={`dc-cov-panel${covId === ds.id ? " open" : ""}`}>
+                            {covId === ds.id && (
+                              <div className="dc-cov-inner">
+                                <div style={{ fontFamily: "var(--font-d)", fontSize: ".72rem", fontWeight: 600, marginBottom: ".5rem" }}>{ds.symbol} — 数据覆盖</div>
+                                {covRows.map((r, i) => (
+                                  <div key={`${r.id}-${i}`} className="dc-cov-row">
+                                    <span className={`dc-type ${TYPE_BADGE_CLS[r.data_type] ?? "dc-type-kl"}`}>{SOURCE_TYPE_LABELS[r.data_type] ?? r.data_type}</span>
+                                    <span className="dim">{r.interval}</span>
+                                    <div className="dc-cov-bar-wrap"><div className="dc-cov-bar-fill" style={{ width: "60%" }} /></div>
+                                    <span className="dim">{r.start_date}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </td></tr>
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {renderPager()}
+          </>
+        )}
       </div>
 
-      {/* Action message */}
-      {actionMsg && (
-        <div className="shrink-0 flex items-center justify-between rounded-lg bg-input border px-4 py-2">
-          <span className="text-[11px] text-muted-foreground">{actionMsg}</span>
-          <Button variant="ghost" size="icon" onClick={() => setActionMsg(null)}>
-            <X className="w-3 h-3 text-muted-foreground hover:text-foreground" />
-          </Button>
-        </div>
-      )}
-
-      {/* Filter tabs */}
-      <FilterTabs
-        categories={categories}
-        activeCategory={activeCategory}
-        onCategoryChange={setActiveCategory}
-      />
-
-      {/* Stats row */}
-      <FadeIn className="grid grid-cols-4 gap-4 shrink-0">
-        {stats.map((s) => (
-          <div key={s.label} className="rounded-xl bg-card border p-4">
-            <span className="qds-stat-label">
-              {s.label}
-            </span>
-            <div className="font-mono text-2xl font-bold mt-2 text-foreground">
-              {s.value}
-            </div>
-          </div>
-        ))}
-      </FadeIn>
-
-      {/* Coverage panel */}
-      <CoveragePanel symbol={coverageSymbol} onClose={() => setCoverageSymbol(null)} />
-
-      {/* Table */}
-      {loading ? (
-        <div className="rounded-xl bg-card border p-5 flex flex-col gap-3">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-9 w-full bg-input" />
-          ))}
-        </div>
-      ) : error ? (
-        <div className="flex-1 flex items-center justify-center">
-          <span className="text-[11px] text-destructive">{error}</span>
-        </div>
-      ) : filtered.length === 0 ? (
-        <div className="flex-1 rounded-xl bg-card border flex items-center justify-center">
-          <span className="text-[11px] text-muted-foreground">
-            {activeCategory ? "该类型暂无数据集" : "暂无数据集，请先拉取数据"}
-          </span>
-        </div>
-      ) : (
-        <FadeIn delay={0.1} className="rounded-xl bg-card border overflow-hidden flex-1">
-          {/* Header */}
-          <div className="flex items-center px-5 py-3 border-b">
-            <div className="w-[160px]">
-              <SortCell label="品种" sortKey="symbol" current={sortKey} dir={sortDir} onSort={handleSort} />
-            </div>
-            {showTypeCol && (
-              <div className="w-[100px]">
-                <SortCell label="类型" sortKey="data_type" current={sortKey} dir={sortDir} onSort={handleSort} />
-              </div>
-            )}
-            {!isTick && (
-              <div className="w-[80px]">
-                <SortCell label="周期" sortKey="interval" current={sortKey} dir={sortDir} onSort={handleSort} />
-              </div>
-            )}
-            <div className="w-[100px]">
-              <SortCell
-                label={isBar ? "K线数" : isTick ? "Tick数" : "记录数"}
-                sortKey="record_count"
-                current={sortKey}
-                dir={sortDir}
-                onSort={handleSort}
-              />
-            </div>
-            <div className="flex-1">
-              <SortCell label="日期范围" sortKey="start_date" current={sortKey} dir={sortDir} onSort={handleSort} />
-            </div>
-            <div className="w-[80px]">
-              <SortCell label="文件大小" sortKey="size_bytes" current={sortKey} dir={sortDir} onSort={handleSort} />
-            </div>
-            <div className="w-[50px]" />
-          </div>
-          {/* Rows */}
-          <div className="overflow-y-auto">
-            {sorted.map((ds, i) => (
-              <div
-                key={`${ds.id}-${ds.symbol}-${ds.data_type}-${ds.interval}`}
-                className={`flex items-center px-5 py-[11px] text-[11px] font-medium hover:bg-input/50 transition-colors ${
-                  i < sorted.length - 1 ? "border-b" : ""
-                }`}
-              >
-                <div className="w-[160px] flex items-center gap-2">
-                  <button
-                    onClick={() => setCoverageSymbol(ds.symbol === coverageSymbol ? null : ds.symbol)}
-                    className="text-foreground font-mono hover:text-qds-info transition-colors cursor-pointer"
-                    title="查看数据覆盖"
-                  >
-                    {ds.symbol}
-                  </button>
-                </div>
-                {showTypeCol && (
-                  <div className="w-[100px]">
-                    <span className="inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold bg-qds-accent-dim text-qds-info">
-                      {CATEGORY_LABELS[ds.data_type] || ds.data_type}
-                    </span>
-                  </div>
-                )}
-                {!isTick && (
-                  <div className="w-[80px]">
-                    <span className="inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold bg-qds-info-dim text-qds-info">
-                      {ds.interval}
-                    </span>
-                  </div>
-                )}
-                <div className="w-[100px] text-muted-foreground font-mono">
-                  {formatNumber(ds.record_count)}
-                </div>
-                <div className="flex-1 text-muted-foreground">
-                  {ds.start_date && ds.end_date ? `${ds.start_date} → ${ds.end_date}` : "—"}
-                </div>
-                <div className="w-[80px] text-muted-foreground">
-                  {formatBytes(ds.size_bytes)}
-                </div>
-                <div className="w-[50px] flex justify-end">
-                  <button
-                    onClick={() => setDeleteEntry(ds)}
-                    className="text-muted-foreground hover:text-destructive transition-colors p-1 rounded"
-                    title="删除数据集"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </FadeIn>
-      )}
-
       {/* Dialogs */}
-      <FetchDialog open={fetchOpen} onClose={() => setFetchOpen(false)} onSuccess={loadCatalog} />
-      <BatchFetchDialog open={batchOpen} onClose={() => setBatchOpen(false)} onSuccess={loadCatalog} />
+      <FetchDialog open={fetchOpen} onClose={() => setFetchOpen(false)} onSuccess={() => { loadCatalog(); setJobRefresh((n) => n + 1); }} />
       <DeleteDialog entry={deleteEntry} open={!!deleteEntry} onClose={() => setDeleteEntry(null)} onDeleted={loadCatalog} />
     </div>
   );

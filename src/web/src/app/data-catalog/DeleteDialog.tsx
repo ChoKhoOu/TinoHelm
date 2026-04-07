@@ -1,16 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect } from "react";
 import { apiDelete } from "@/lib/api";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
-import { CatalogEntry, CATEGORY_LABELS } from "./types";
+import { useAction } from "@/hooks/use-action";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { CatalogEntry, CATEGORY_LABELS, formatBytes } from "./types";
 
 interface DeleteDialogProps {
   entry: CatalogEntry | null;
@@ -20,66 +14,71 @@ interface DeleteDialogProps {
 }
 
 export function DeleteDialog({ entry, open, onClose, onDeleted }: DeleteDialogProps) {
-  const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const deleteAction = useAction(
+    () => apiDelete(`/api/data/catalog/${entry!.id}`),
+    { onSuccess: () => { onDeleted(); setTimeout(onClose, 800); }, successDuration: 800 }
+  );
 
-  async function handleConfirm() {
-    if (!entry) return;
-    setDeleting(true);
-    setError(null);
-    try {
-      await apiDelete(`/api/data/catalog/${entry.id}`);
-      onDeleted();
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "删除失败");
-    } finally {
-      setDeleting(false);
-    }
-  }
+  useEffect(() => {
+    if (!open) deleteAction.reset();
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const typeLabel = entry ? (CATEGORY_LABELS[entry.data_type] || entry.data_type) : "";
 
+  const infoRows = entry ? [
+    { label: "品种", value: entry.symbol },
+    { label: "类型", value: typeLabel },
+    { label: "记录数", value: entry.record_count != null ? `${(entry.record_count / 1_000_000).toFixed(2)}M` : "—" },
+    { label: "释放空间", value: formatBytes(entry.size_bytes), cls: "cg" },
+  ] : [];
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="bg-card border sm:max-w-[420px]">
-        <DialogHeader>
-          <DialogTitle className="text-destructive">确认删除</DialogTitle>
-        </DialogHeader>
-        <div className="py-2 text-[12px] text-muted-foreground leading-relaxed">
-          确定删除{" "}
-          <span className="text-foreground font-semibold">{entry?.symbol}</span>{" "}
-          的{" "}
-          <span className="text-foreground font-semibold">{typeLabel}</span>{" "}
-          ({entry?.interval}) 数据集？
-          <br />
-          <span className="text-destructive text-[11px]">
-            此操作不可恢复，磁盘文件和数据库记录都将被删除。
-          </span>
+      <DialogContent className="bg-card border sm:max-w-[420px] p-0 overflow-hidden">
+        {/* Header */}
+        <div style={{ padding: "1rem 1.25rem .75rem", display: "flex", alignItems: "flex-start", gap: ".75rem" }}>
+          <div className="dc-modal-icon" style={{ background: "var(--dan-d)", color: "var(--dan)" }}>✕</div>
+          <div>
+            <div style={{ fontSize: ".9rem", fontWeight: 600, marginBottom: ".15rem" }}>
+              删除 {entry?.symbol} {typeLabel}?
+            </div>
+            <div style={{ fontSize: ".75rem", color: "var(--t2)", lineHeight: 1.5 }}>
+              此操作将删除 DB 记录和磁盘文件，不可恢复。
+            </div>
+          </div>
         </div>
-        {error && (
-          <span className="text-[11px] text-destructive">{error}</span>
-        )}
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={onClose}
-            className="h-8 text-[11px]"
+
+        {/* Info rows */}
+        <div style={{ padding: "0 1.25rem 1rem", display: "flex", flexDirection: "column", gap: ".35rem" }}>
+          {infoRows.map((r) => (
+            <div key={r.label} style={{
+              display: "flex", justifyContent: "space-between",
+              padding: ".35rem .5rem", background: "var(--bg-in)", borderRadius: "4px",
+              fontFamily: "var(--font-d)", fontSize: ".72rem",
+            }}>
+              <span className="dim">{r.label}</span>
+              <span className={r.cls ?? ""}>{r.value}</span>
+            </div>
+          ))}
+          {deleteAction.state === "error" && deleteAction.error && (
+            <div style={{ fontSize: ".72rem", color: "var(--dan)", marginTop: ".25rem" }}>✕ {deleteAction.error}</div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: ".75rem 1.25rem", borderTop: "1px solid var(--bd)", display: "flex", justifyContent: "flex-end", gap: ".5rem" }}>
+          <button className="btn btn-o" onClick={onClose}>取消</button>
+          <button
+            className={deleteAction.state === "success" ? "btn btn-p" : "btn btn-d"}
+            onClick={() => deleteAction.execute()}
+            disabled={deleteAction.state === "loading"}
           >
-            取消
-          </Button>
-          <Button
-            onClick={handleConfirm}
-            disabled={deleting}
-            className="h-8 text-[11px] bg-[var(--dan)] text-input hover:bg-[var(--dan)]"
-          >
-            {deleting ? (
-              <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-            ) : (
-              "确认删除"
-            )}
-          </Button>
-        </DialogFooter>
+            {deleteAction.state === "loading" && "删除中..."}
+            {deleteAction.state === "success" && "✓ 已删除"}
+            {deleteAction.state === "error" && "✕ 失败"}
+            {deleteAction.state === "idle" && "永久删除"}
+          </button>
+        </div>
       </DialogContent>
     </Dialog>
   );

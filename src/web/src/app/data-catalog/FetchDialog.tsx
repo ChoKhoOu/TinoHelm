@@ -1,24 +1,17 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { Download } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
-import { useWsEvent } from "@/providers/WebSocketProvider";
+import { useAction } from "@/hooks/use-action";
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   BAR_VISION_TYPES,
   INTERVAL_OPTIONS,
   DataTypeInfo,
-  DataProgressPayload,
 } from "./types";
 
 interface FetchDialogProps {
@@ -27,294 +20,359 @@ interface FetchDialogProps {
   onSuccess: () => void;
 }
 
+type SymbolInfo = { symbol: string; base: string; quote: string };
+
 export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
-  const [symbol, setSymbol] = useState("");
+  // Multi-symbol selection
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
+  const [symbolSearch, setSymbolSearch] = useState("");
+  const [symbolDropdownOpen, setSymbolDropdownOpen] = useState(false);
+  const [allSymbols, setAllSymbols] = useState<SymbolInfo[]>([]);
+
   const [dataType, setDataType] = useState("klines");
   const [dataTypes, setDataTypes] = useState<DataTypeInfo[]>([]);
   const [assetClass, setAssetClass] = useState("um");
   const [interval, setInterval] = useState("1m");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   // Progress tracking
   const [phase, setPhase] = useState<"form" | "progress">("form");
-  const [taskId, setTaskId] = useState<string | null>(null);
-  const [progress, setProgress] = useState(0);
+  const [jobCount, setJobCount] = useState(0);
   const [progressMsg, setProgressMsg] = useState("已提交，等待开始...");
 
-  const progressEvent = useWsEvent("data.progress");
   const onSuccessRef = useRef(onSuccess);
   onSuccessRef.current = onSuccess;
-  const refreshedRef = useRef(false);
+
+  const chipInputRef = useRef<HTMLInputElement>(null);
+
+  // Store interval/showInterval in refs so the apiFn closure stays stable
+  const intervalRef = useRef(interval);
+  intervalRef.current = interval;
+  const dataTypeRef = useRef(dataType);
+  dataTypeRef.current = dataType;
+  const assetClassRef = useRef(assetClass);
+  assetClassRef.current = assetClass;
+  const startDateRef = useRef(startDate);
+  startDateRef.current = startDate;
+  const endDateRef = useRef(endDate);
+  endDateRef.current = endDate;
+  const selectedSymbolsRef = useRef(selectedSymbols);
+  selectedSymbolsRef.current = selectedSymbols;
 
   const showInterval = BAR_VISION_TYPES.has(dataType);
 
-  // Fetch available data types on mount
+  const apiFn = useCallback(async () => {
+    const syms = selectedSymbolsRef.current;
+    const dt = dataTypeRef.current;
+    const showInt = BAR_VISION_TYPES.has(dt);
+    const body: Record<string, unknown> = {
+      symbols: syms,
+      intervals: showInt ? [intervalRef.current] : ["1m"],
+      data_type: dt,
+      asset_class: assetClassRef.current,
+      start: startDateRef.current,
+      end: endDateRef.current,
+    };
+    return apiPost<{ count: number }>("/api/data/fetch-batch", body);
+  }, []);
+
+  const { state: actionState, error: actionError, execute } = useAction(apiFn, {
+    successDuration: 1000,
+    onSuccess: (result) => {
+      const count = result?.count ?? selectedSymbolsRef.current.length;
+      setJobCount(count);
+      setProgressMsg(`已提交 ${selectedSymbolsRef.current.length} 个品种的拉取任务`);
+      onSuccessRef.current();
+      setTimeout(() => {
+        setPhase("progress");
+      }, 0);
+      setTimeout(() => {
+        onClose();
+      }, 1000);
+    },
+  });
+
+  // Fetch available data types and symbols on mount
   useEffect(() => {
     apiGet<DataTypeInfo[]>("/api/data/types")
       .then((res) => {
-        if (res) {
-          setDataTypes(res.filter((t) => t.implemented));
-        }
+        if (res) setDataTypes(res.filter((t) => t.implemented));
       })
-      .catch(() => {
-        // Silently ignore — form still works with the default "klines"
-      });
+      .catch(() => {});
+    apiGet<SymbolInfo[]>("/api/data/symbols")
+      .then((res) => {
+        if (res) setAllSymbols(res);
+      })
+      .catch(() => {});
   }, []);
 
-  // Track progress from WS events
-  useEffect(() => {
-    if (!progressEvent || !taskId || phase !== "progress") return;
-    const evt = progressEvent as unknown as DataProgressPayload;
-    if (evt.task_id !== taskId) return;
+  const filteredSymbols = useMemo(() => {
+    const q = symbolSearch.toUpperCase();
+    const available = allSymbols.filter(
+      (s) => !selectedSymbols.includes(s.symbol),
+    );
+    if (!q) return available.slice(0, 50);
+    return available.filter(
+      (s) => s.symbol.includes(q) || s.base.includes(q),
+    ).slice(0, 50);
+  }, [symbolSearch, allSymbols, selectedSymbols]);
 
-    setProgress(evt.progress);
-    setProgressMsg(evt.message);
-
-    if (evt.progress === 100 && !refreshedRef.current) {
-      refreshedRef.current = true;
-      onSuccessRef.current();
+  function addSymbol(sym: string) {
+    if (!selectedSymbols.includes(sym)) {
+      setSelectedSymbols((prev) => [...prev, sym]);
     }
-  }, [progressEvent, taskId, phase]);
+    setSymbolSearch("");
+    setSymbolDropdownOpen(false);
+  }
+
+  function removeSymbol(sym: string) {
+    setSelectedSymbols((prev) => prev.filter((s) => s !== sym));
+  }
 
   // Reset on dialog close
   useEffect(() => {
     if (!open) {
       const t = setTimeout(() => {
         setPhase("form");
-        setProgress(0);
+        setValidationError(null);
+        setJobCount(0);
         setProgressMsg("已提交，等待开始...");
-        setError(null);
-        setTaskId(null);
-        setSubmitting(false);
-        refreshedRef.current = false;
       }, 200);
       return () => clearTimeout(t);
     }
   }, [open]);
 
-  async function handleSubmit() {
-    if (!symbol.trim() || !startDate || !endDate) {
-      setError("请填写所有必填项");
-      return;
-    }
-    setSubmitting(true);
-    setError(null);
-    try {
-      const body: Record<string, string> = {
-        symbol: symbol.trim(),
-        data_type: dataType,
-        asset_class: assetClass,
-        start: startDate,
-        end: endDate,
-      };
-      if (showInterval) {
-        body.interval = interval;
-      }
-      const res = await apiPost<{ task_id: string }>("/api/data/fetch", body);
-      setTaskId(res?.task_id ?? null);
-      setPhase("progress");
-      setProgress(0);
-      setProgressMsg("已提交，等待开始...");
-      refreshedRef.current = false;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "提交失败");
-    } finally {
-      setSubmitting(false);
-    }
+  function validateDates(): string | null {
+    if (!startDate || !endDate) return "请填写开始和结束日期";
+    const s = new Date(startDate);
+    const e = new Date(endDate);
+    if (isNaN(s.getTime()) || isNaN(e.getTime())) return "日期格式无效";
+    if (s > e) return "开始日期不能晚于结束日期";
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (e > today) return "结束日期不能超过今天";
+    // Max 2 years range
+    const diffDays = (e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24);
+    if (diffDays > 730) return "日期范围不能超过 2 年";
+    return null;
   }
 
-  const isDone = progress === 100;
-  const isError = progress === -1;
+  function handleSubmit() {
+    if (selectedSymbols.length === 0) {
+      setValidationError("请至少选择一个品种");
+      return;
+    }
+    const dateErr = validateDates();
+    if (dateErr) {
+      setValidationError(dateErr);
+      return;
+    }
+    setValidationError(null);
+    execute();
+  }
 
-  // Human-readable label for data type in progress view
-  const dataTypeLabel = dataTypes.find((t) => t.data_type === dataType)?.data_type ?? dataType;
-  const progressSubtitle = showInterval
-    ? `${symbol.trim()} · ${interval}`
-    : `${symbol.trim()} · ${dataTypeLabel}`;
+  const displayError = validationError ?? actionError;
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="bg-card border sm:max-w-[480px]">
+      <DialogContent className="bg-card border sm:max-w-[520px] p-0 overflow-hidden">
         {phase === "form" ? (
           <>
-            <DialogHeader>
-              <DialogTitle>拉取数据</DialogTitle>
-            </DialogHeader>
-            <div className="flex flex-col gap-4 py-2">
-              {/* Data type */}
-              <div className="flex flex-col gap-1">
-                <label className="qds-stat-label">
-                  数据类型
-                </label>
-                <Select value={dataType} onValueChange={(v: string | null) => v && setDataType(v)}>
-                  <SelectTrigger className="h-8 text-sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
+            {/* Modal header */}
+            <div className="modal-head" style={{ padding: "1rem 1.25rem .75rem", display: "flex", alignItems: "flex-start", gap: ".75rem" }}>
+              <div className="dc-modal-icon" style={{ background: "var(--suc-d)", color: "var(--suc)" }}>↓</div>
+              <div>
+                <div style={{ fontSize: ".9rem", fontWeight: 600, marginBottom: ".15rem" }}>拉取数据</div>
+                <div style={{ fontSize: ".75rem", color: "var(--t2)", lineHeight: 1.5 }}>从 Binance 拉取历史数据到本地 ParquetDataCatalog</div>
+              </div>
+            </div>
+
+            {/* Modal body */}
+            <div style={{ padding: "0 1.25rem 1rem" }}>
+              {/* Data type + Asset class — 2-column row */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".75rem", marginBottom: ".85rem" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: ".3rem" }}>
+                  <div className="fl">数据类型 <span className="req" style={{ color: "var(--dan)" }}>*</span></div>
+                  <select
+                    className="fsel"
+                    value={dataType}
+                    onChange={(e) => setDataType(e.target.value)}
+                  >
                     {dataTypes.length > 0 ? (
                       dataTypes.map((t) => (
-                        <SelectItem key={t.data_type} value={t.data_type}>
-                          {t.data_type}
-                        </SelectItem>
+                        <option key={t.data_type} value={t.data_type}>{t.data_type}</option>
                       ))
                     ) : (
-                      /* Fallback while loading */
-                      <SelectItem value="klines">klines</SelectItem>
+                      <option value="klines">klines</option>
                     )}
-                  </SelectContent>
-                </Select>
+                  </select>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: ".3rem" }}>
+                  <div className="fl">资产类别</div>
+                  <select
+                    className="fsel"
+                    value={assetClass}
+                    onChange={(e) => setAssetClass(e.target.value)}
+                  >
+                    <option value="um">U 本位 (USDT-M)</option>
+                    <option value="cm">币本位 (COIN-M)</option>
+                  </select>
+                </div>
               </div>
-
-              {/* Asset class */}
-              <div className="flex flex-col gap-1">
-                <label className="qds-stat-label">
-                  资产类别
-                </label>
-                <Select value={assetClass} onValueChange={(v: string | null) => v && setAssetClass(v)}>
-                  <SelectTrigger className="h-8 text-sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="um">um (U本位合约)</SelectItem>
-                    <SelectItem value="cm">cm (币本位合约)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {/* Symbol */}
-              <Input
-                label="品种 (如 BTCUSDT-PERP)"
-                placeholder="BTCUSDT-PERP"
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-              />
 
               {/* Interval — only for bar types */}
               {showInterval && (
-                <div className="flex flex-col gap-1">
-                  <label className="qds-stat-label">
-                    周期
-                  </label>
-                  <Select value={interval} onValueChange={(v: string | null) => v && setInterval(v)}>
-                    <SelectTrigger className="h-8 text-sm">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {INTERVAL_OPTIONS.map((opt) => (
-                        <SelectItem key={opt} value={opt}>{opt}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                <div style={{ display: "flex", flexDirection: "column", gap: ".3rem", marginBottom: ".85rem" }}>
+                  <div className="fl">周期 <span className="req" style={{ color: "var(--dan)" }}>*</span></div>
+                  <select
+                    className="fsel"
+                    value={interval}
+                    onChange={(e) => setInterval(e.target.value)}
+                  >
+                    {INTERVAL_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
                 </div>
               )}
 
-              {/* Date range */}
-              <div className="grid grid-cols-2 gap-3">
-                <Input
-                  label="开始日期"
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                />
-                <Input
-                  label="结束日期"
-                  type="date"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                />
+              {/* Symbol — chip multi-select */}
+              <div style={{ display: "flex", flexDirection: "column", gap: ".3rem", marginBottom: ".85rem" }}>
+                <div className="fl">
+                  品种 <span className="req" style={{ color: "var(--dan)" }}>*</span>
+                  <span style={{ fontWeight: 400, color: "var(--t3)" }}>· 可多选</span>
+                </div>
+                <div style={{ position: "relative" }}>
+                  <div
+                    className="dc-chip-wrap"
+                    onClick={() => chipInputRef.current?.focus()}
+                  >
+                    {selectedSymbols.map((sym) => (
+                      <span key={sym} className="dc-chip">
+                        {sym}
+                        <span
+                          className="dc-chip-x"
+                          onClick={(e) => { e.stopPropagation(); removeSymbol(sym); }}
+                        >×</span>
+                      </span>
+                    ))}
+                    <input
+                      ref={chipInputRef}
+                      className="dc-chip-input"
+                      placeholder="搜索品种..."
+                      value={symbolSearch}
+                      onChange={(e) => {
+                        setSymbolSearch(e.target.value);
+                        setSymbolDropdownOpen(true);
+                      }}
+                      onFocus={() => setSymbolDropdownOpen(true)}
+                      onBlur={() => setTimeout(() => setSymbolDropdownOpen(false), 150)}
+                    />
+                  </div>
+                  {symbolDropdownOpen && filteredSymbols.length > 0 && (
+                    <div className="dc-chip-dropdown" style={{ display: "block" }}>
+                      {filteredSymbols.map((s) => (
+                        <div
+                          key={s.symbol}
+                          className="dc-chip-opt"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            addSymbol(s.symbol);
+                          }}
+                        >
+                          <span style={{ fontFamily: "var(--font-d)" }}>{s.symbol}</span>
+                          <span style={{ fontSize: ".62rem", color: "var(--t3)", marginLeft: ".5rem" }}>{s.base}/{s.quote}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
 
-              {error && (
-                <span className="text-[11px] text-destructive">{error}</span>
+              {/* Date range — 2-column row */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".75rem", marginBottom: ".85rem" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: ".3rem" }}>
+                  <div className="fl">开始日期 <span className="req" style={{ color: "var(--dan)" }}>*</span></div>
+                  <input
+                    className="fi"
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                  />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: ".3rem" }}>
+                  <div className="fl">结束日期 <span className="req" style={{ color: "var(--dan)" }}>*</span></div>
+                  <input
+                    className="fi"
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {displayError && (
+                <div style={{ fontSize: ".62rem", color: "var(--dan)", marginTop: ".1rem" }}>{displayError}</div>
               )}
             </div>
-            <DialogFooter>
-              <Button
-                variant="outline"
+
+            {/* Footer */}
+            <div style={{ padding: ".75rem 1.25rem", borderTop: "1px solid var(--bd)", display: "flex", justifyContent: "flex-end", gap: ".5rem" }}>
+              <button
+                className="btn btn-o"
                 onClick={onClose}
-                className="inline-flex items-center justify-center h-8 rounded-lg border bg-transparent px-4 text-[11px] font-semibold text-muted-foreground hover:bg-input transition-all"
               >
                 取消
-              </Button>
-              <Button
+              </button>
+              <button
+                className={actionState === "error" ? "btn btn-d" : "btn btn-p"}
                 onClick={handleSubmit}
-                disabled={submitting}
-                className="inline-flex items-center gap-1.5 justify-center h-8 rounded-lg bg-[var(--suc)] text-input px-4 text-[11px] font-bold hover:opacity-90 transition-all disabled:opacity-50"
+                disabled={actionState === "loading"}
               >
-                {submitting ? (
+                {actionState === "loading" ? (
                   <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
+                ) : actionState === "success" ? (
+                  <span>✓</span>
+                ) : actionState === "error" ? (
+                  <span>✕</span>
                 ) : (
-                  <Download className="w-3 h-3" />
+                  <Download style={{ width: "12px", height: "12px" }} />
                 )}
-                开始拉取
-              </Button>
-            </DialogFooter>
+                {actionState === "loading"
+                  ? "提交中..."
+                  : actionState === "success"
+                  ? `✓ ${jobCount > 0 ? jobCount + " 个" : ""}已入队`
+                  : actionState === "error"
+                  ? "✕ 失败"
+                  : selectedSymbols.length > 1
+                  ? `拉取 ${selectedSymbols.length} 个品种`
+                  : "提交拉取"}
+              </button>
+            </div>
           </>
         ) : (
           <>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                {isDone ? (
-                  <span className="text-qds-success">拉取完成</span>
-                ) : isError ? (
-                  <span className="text-destructive">拉取失败</span>
-                ) : (
-                  <>
-                    <div className="w-3.5 h-3.5 border-2 border-qds-info border-t-transparent rounded-full animate-spin" />
-                    正在拉取数据
-                  </>
-                )}
-              </DialogTitle>
-            </DialogHeader>
-            <div className="py-4 flex flex-col gap-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-muted-foreground font-mono">
-                  {progressSubtitle}
-                </span>
-                <span className={`text-xs font-mono font-bold ${
-                  isDone ? "text-qds-success" : isError ? "text-destructive" : "text-foreground"
-                }`}>
-                  {isError ? "错误" : `${Math.max(0, progress)}%`}
-                </span>
+            {/* Progress phase header */}
+            <div style={{ padding: "1rem 1.25rem .75rem", display: "flex", alignItems: "flex-start", gap: ".75rem" }}>
+              <div className="dc-modal-icon" style={{ background: "var(--suc-d)", color: "var(--suc)" }}>✓</div>
+              <div>
+                <div style={{ fontSize: ".9rem", fontWeight: 600, marginBottom: ".15rem", color: "var(--suc)" }}>任务已提交</div>
+                <div style={{ fontSize: ".75rem", color: "var(--t2)", lineHeight: 1.5 }}>拉取任务已加入队列，可在后台运行</div>
               </div>
-              {/* Progress bar */}
-              <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all duration-700 ease-out ${
-                    isError
-                      ? "bg-[var(--dan)]"
-                      : isDone
-                        ? "bg-[var(--suc)]"
-                        : "bg-qds-info"
-                  }`}
-                  style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
-                />
-              </div>
-              <p className="text-[11px] text-muted-foreground leading-relaxed">
-                {progressMsg}
+            </div>
+
+            <div style={{ padding: "0 1.25rem 1rem" }}>
+              <p style={{ fontSize: ".8rem", color: "var(--t1)", marginBottom: ".5rem" }}>{progressMsg}</p>
+              <p style={{ fontSize: ".68rem", color: "var(--t3)", fontFamily: "var(--font-d)" }}>
+                共 {jobCount} 个拉取任务已加入队列，可在后台运行。关闭此对话框不影响任务执行。
               </p>
             </div>
-            <DialogFooter>
-              {isDone ? (
-                <Button
-                  onClick={onClose}
-                  className="inline-flex items-center gap-1.5 justify-center h-8 rounded-lg bg-[var(--suc)] text-input px-4 text-[11px] font-bold hover:opacity-90 transition-all"
-                >
-                  完成
-                </Button>
-              ) : (
-                <Button
-                  variant="outline"
-                  onClick={onClose}
-                  className="inline-flex items-center justify-center h-8 rounded-lg border bg-transparent px-4 text-[11px] font-semibold text-muted-foreground hover:bg-input transition-all"
-                >
-                  {isError ? "关闭" : "后台运行"}
-                </Button>
-              )}
-            </DialogFooter>
+
+            <div style={{ padding: ".75rem 1.25rem", borderTop: "1px solid var(--bd)", display: "flex", justifyContent: "flex-end" }}>
+              <button className="btn btn-p" onClick={onClose}>完成</button>
+            </div>
           </>
         )}
       </DialogContent>

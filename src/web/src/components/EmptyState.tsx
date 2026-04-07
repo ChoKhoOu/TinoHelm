@@ -2,23 +2,66 @@
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { AlertCircle, Inbox, Search } from "lucide-react";
 import type { ReactNode } from "react";
 
+type EmptyVariant = "first-use" | "no-results" | "error" | "not-configured" | "data-cleared";
+
 interface EmptyStateProps {
-  variant: "first-use" | "no-results" | "error";
+  variant: EmptyVariant;
   icon?: ReactNode;
   title: string;
   description?: string;
   action?: { label: string; onClick: () => void };
-  hint?: string;
+  hint?: ReactNode;
+  errorCode?: string;
+  /** "full" = page-level (py-16), "section" = card-level (py-10), "table" = inline (py-8) */
+  size?: "full" | "section" | "table";
   className?: string;
 }
 
-const defaultIcons: Record<EmptyStateProps["variant"], ReactNode> = {
-  "first-use": <Inbox className="size-6 text-muted-foreground" />,
-  "no-results": <Search className="size-6 text-muted-foreground" />,
-  error: <AlertCircle className="size-6 text-destructive" />,
+/* QDS spec: single glyph in rounded square — no emoji, no complex illustration */
+const defaultGlyphs: Record<EmptyVariant, string> = {
+  "first-use":      "⧖",
+  "no-results":     "⊘",
+  error:            "!",
+  "not-configured": "⚙",
+  "data-cleared":   "⊡",
+};
+
+const iconBg: Record<EmptyVariant, string> = {
+  "first-use":      "bg-secondary",
+  "no-results":     "bg-secondary",
+  error:            "bg-qds-danger-dim",
+  "not-configured": "bg-qds-warning-dim",
+  "data-cleared":   "bg-secondary",
+};
+
+const iconColor: Record<EmptyVariant, string> = {
+  "first-use":      "text-muted-foreground",
+  "no-results":     "text-muted-foreground",
+  error:            "text-destructive",
+  "not-configured": "text-qds-warning",
+  "data-cleared":   "text-muted-foreground",
+};
+
+const btnVariant: Record<EmptyVariant, "default" | "ghost" | "warning"> = {
+  "first-use":      "default",
+  "no-results":     "ghost",
+  error:            "ghost",
+  "not-configured": "warning",
+  "data-cleared":   "default",
+};
+
+const sizePadding = {
+  full:    "py-16",
+  section: "py-10",
+  table:   "py-8",
+};
+
+const iconSize = {
+  full:    "size-14 text-[1.5rem]",
+  section: "size-10 text-[1.15rem]",
+  table:   "",  /* no icon for table */
 };
 
 export function EmptyState({
@@ -28,47 +71,68 @@ export function EmptyState({
   description,
   action,
   hint,
+  errorCode,
+  size = "full",
   className,
 }: EmptyStateProps) {
-  const resolvedIcon = icon ?? defaultIcons[variant];
+  const showIcon = size !== "table";
 
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center gap-3 py-16 text-center",
+        "flex flex-col items-center justify-center text-center",
+        sizePadding[size],
         className,
       )}
     >
-      <div
-        className={cn(
-          "flex size-14 items-center justify-center rounded-[16px]",
-          variant === "error" ? "bg-qds-danger-dim" : "bg-secondary",
-        )}
-      >
-        {resolvedIcon}
-      </div>
+      {showIcon && (
+        <div
+          className={cn(
+            "flex items-center justify-center rounded-[16px] mb-5",
+            iconBg[variant],
+            iconSize[size],
+          )}
+        >
+          {icon ?? (
+            <span className={iconColor[variant]}>{defaultGlyphs[variant]}</span>
+          )}
+        </div>
+      )}
 
-      <h3 className="text-[0.9rem] font-semibold text-foreground">{title}</h3>
+      <h3 className={cn(
+        "font-semibold text-foreground",
+        size === "section" ? "text-[0.82rem]" : "text-[0.9rem]",
+        size === "table" ? "text-[0.78rem]" : "",
+      )}>{title}</h3>
 
       {description && (
-        <p className="max-w-[320px] text-[0.78rem] text-muted-foreground">
+        <p className={cn(
+          "max-w-[360px] text-muted-foreground leading-relaxed mt-1.5",
+          size === "section" ? "text-[0.72rem]" : "text-[0.78rem]",
+        )}>
           {description}
         </p>
       )}
 
       {action && (
         <Button
-          variant={variant === "error" ? "destructive" : "default"}
+          variant={btnVariant[variant]}
           size="sm"
           onClick={action.onClick}
-          className="mt-1"
+          className="mt-4"
         >
           {action.label}
         </Button>
       )}
 
       {hint && (
-        <p className="text-[0.68rem] text-qds-t3">{hint}</p>
+        <p className="mt-3 font-mono text-[0.68rem] text-qds-t3">{hint}</p>
+      )}
+
+      {errorCode && (
+        <p className="mt-3 font-mono text-[0.65rem] text-qds-t3">
+          错误码: <span className="text-muted-foreground">{errorCode}</span>
+        </p>
       )}
     </div>
   );

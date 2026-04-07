@@ -7,6 +7,7 @@ import { Providers } from "@/components/Providers";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { StatusBar } from "@/components/StatusBar";
 import { Toaster } from "@/components/ui/sonner";
+import { NotificationListener } from "@/components/NotificationListener";
 
 export const metadata: Metadata = {
   title: "TinoHelm — 量化交易平台",
@@ -49,6 +50,7 @@ export default function RootLayout({
             </div>
           </div>
           <Toaster position="top-right" richColors />
+          <NotificationListener />
         </Providers>
       </body>
     </html>

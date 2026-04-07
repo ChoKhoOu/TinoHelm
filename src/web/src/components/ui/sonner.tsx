@@ -7,6 +7,9 @@ function Toaster({ ...props }: ToasterProps) {
     <Sonner
       className="toaster group"
       theme="dark"
+      position="bottom-right"
+      visibleToasts={3}
+      duration={5000}
       toastOptions={{
         classNames: {
           toast:

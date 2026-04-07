@@ -12,12 +12,18 @@ export function ThemeToggle() {
   const toggle = () => {
     const next = !light;
     setLight(next);
+    // Add transitioning class BEFORE theme change for uniform 280ms transition
+    document.documentElement.classList.add("theme-transitioning");
     if (next) {
       document.documentElement.classList.add("light");
     } else {
       document.documentElement.classList.remove("light");
     }
     localStorage.setItem("theme", next ? "light" : "dark");
+    // Remove after transition completes
+    setTimeout(() => {
+      document.documentElement.classList.remove("theme-transitioning");
+    }, 300);
   };
 
   return (

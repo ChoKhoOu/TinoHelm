@@ -534,8 +534,9 @@ export default function DashboardPage() {
 
             <div className="flex flex-col overflow-y-auto" style={{ maxHeight: runningBt ? 200 : 320 }}>
               {backtestRuns.length === 0 ? (
-                <div className="flex items-center justify-center px-5 py-8">
-                  <span className="font-mono text-[.72rem] text-muted-foreground">暂无回测记录</span>
+                <div className="flex flex-col items-center justify-center px-5 py-8 text-center">
+                  <div className="text-[0.82rem] font-semibold text-foreground">还没有回测记录</div>
+                  <p className="mt-1 text-[0.72rem] text-muted-foreground">创建回测以验证策略表现</p>
                 </div>
               ) : (
                 backtestRuns.map((run, i) => (
