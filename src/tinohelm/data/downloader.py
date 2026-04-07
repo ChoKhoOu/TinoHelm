@@ -74,7 +74,7 @@ class VisionDownloader:
         Root directory for raw downloaded files.
         Defaults to ``~/.tino/data/raw``.
     concurrency:
-        Reserved for future parallel implementation; currently unused.
+        Maximum number of parallel downloads.
     """
 
     def __init__(
@@ -121,8 +121,8 @@ class VisionDownloader:
         if data_type in _KLINES_TYPES:
             if interval is None:
                 raise ValueError(f"interval is required for data_type={data_type!r}")
-            # klines: extra interval directory + interval in filename
-            fname = f"{symbol}-{data_type}-{interval}-{date_or_month}.zip"
+            # klines: extra interval directory; filename is {symbol}-{interval}-{date}.zip
+            fname = f"{symbol}-{interval}-{date_or_month}.zip"
             path = f"{prefix}/{interval}/{fname}"
         else:
             fname = f"{symbol}-{data_type}-{date_or_month}.zip"
@@ -248,7 +248,7 @@ class VisionDownloader:
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         if data_type in _KLINES_TYPES and interval:
-            stem = f"{api_symbol}-{data_type}-{interval}-{date_str}"
+            stem = f"{api_symbol}-{interval}-{date_str}"
         else:
             stem = f"{api_symbol}-{data_type}-{date_str}"
 
@@ -443,7 +443,9 @@ class VisionDownloader:
         logger.info("Downloading %s [%s]", task.zip_path.name, task.granularity)
         await self.download_file(task.url, task.zip_path)
         await self.verify_checksum(task.zip_path, task.checksum_url)
-        csv_path = self.extract_zip(task.zip_path)
+        # Run sync extraction in thread pool to avoid blocking the event loop
+        loop = asyncio.get_running_loop()
+        csv_path = await loop.run_in_executor(None, self.extract_zip, task.zip_path)
         return csv_path
 
 

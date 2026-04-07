@@ -6,14 +6,16 @@ import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tinohelm.api.deps import get_db, get_settings_dep
+from tinohelm.api.deps import get_db, get_redis, get_settings_dep
 from tinohelm.core.config import Settings
-from tinohelm.db.models import DataCatalog
+from tinohelm.data.worker import enqueue_job
+from tinohelm.db.models import DataCatalog, DataFetchJob
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +37,6 @@ class DataCatalogItem(BaseModel):
     size_bytes: int
     record_count: int | None = None
     created_at: str | None = None
-
-
-class DataFetchRequest(BaseModel):
-    """Request body for POST /fetch."""
-
-    symbol: str
-    interval: str | None = None
-    start: date
-    end: date
-    data_type: str = "klines"
-    asset_class: str = "um"
 
 
 class DataFetchBatchRequest(BaseModel):
@@ -150,65 +141,6 @@ def _delete_storage_files(
     return (len(files), total_size)
 
 
-# ---- background task ----
-
-async def _run_data_fetch(
-    symbol: str, interval: str | None, start: date, end: date,
-    settings: Settings | None = None, task_id: str | None = None,
-    data_type: str = "klines", asset_class: str = "um",
-) -> None:
-    """Background task to fetch market data via BinanceVisionPipeline."""
-    import json as _json
-    import redis.asyncio as aioredis
-
-    redis_url = str(settings.redis.url) if settings else "redis://redis:6379"
-    progress_channel = f"tino:data:progress:{task_id or f'{symbol}:{data_type}'}"
-    r = aioredis.from_url(redis_url, decode_responses=True)
-
-    async def _pub(pct: int, msg: str):
-        payload: dict = {"symbol": symbol, "data_type": data_type, "progress": pct, "message": msg}
-        if interval:
-            payload["interval"] = interval
-        if task_id:
-            payload["task_id"] = task_id
-        await r.publish(progress_channel, _json.dumps(payload))
-
-    lock_key = f"tino:data:lock:{symbol}:{data_type}:{interval or 'none'}"
-    lock = r.lock(lock_key, timeout=3600)
-    acquired = await lock.acquire(blocking=False)
-    if not acquired:
-        await _pub(-1, f"{symbol} {data_type} 正在下载中，请等待完成后再试")
-        await r.close()
-        return
-
-    try:
-        from tinohelm.data.pipeline import BinanceVisionPipeline
-
-        catalog_path = str(settings.paths.catalog) if settings else "data/catalog"
-        pipeline = BinanceVisionPipeline(catalog_path=catalog_path)
-
-        result = await pipeline.ingest(
-            symbol=symbol,
-            data_type=data_type,
-            start=start,
-            end=end,
-            asset_class=asset_class,
-            interval=interval,
-            progress_cb=_pub,
-        )
-
-        logger.info(
-            "Data fetch completed: %s %s — %d objects (skipped=%s, rest_fallback=%s)",
-            symbol, data_type, result.objects_count,
-            result.skipped, result.rest_fallback_used,
-        )
-    except Exception as exc:
-        logger.exception("Data fetch failed: %s", exc)
-    finally:
-        await lock.release()
-        await r.close()
-
-
 # ---- routes ----
 
 @router.get("/catalog", response_model=list[DataCatalogItem])
@@ -235,29 +167,78 @@ async def list_data_catalog(
     ]
 
 
-@router.post("/fetch")
-async def trigger_data_fetch(
-    body: DataFetchRequest,
-    background_tasks: BackgroundTasks,
-    settings: Settings = Depends(get_settings_dep),
+@router.get("/jobs")
+async def list_data_fetch_jobs(
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """List data-fetch jobs, optionally filtered by status."""
+    stmt = select(DataFetchJob).order_by(DataFetchJob.created_at.desc()).limit(100)
+    if status:
+        stmt = stmt.where(DataFetchJob.status == status)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "job_id": j.job_id,
+            "symbol": j.symbol,
+            "data_type": j.data_type,
+            "interval": j.interval,
+            "start_date": j.start_date.isoformat(),
+            "end_date": j.end_date.isoformat(),
+            "status": j.status,
+            "progress": j.progress,
+            "message": j.message,
+            "error": j.error,
+            "created_at": (j.created_at.isoformat() + "Z") if j.created_at else None,
+            "completed_at": (j.completed_at.isoformat() + "Z") if j.completed_at else None,
+        }
+        for j in rows
+    ]
+
+
+@router.get("/jobs/{job_id}")
+async def get_data_fetch_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Trigger a background data fetch task."""
-    import uuid
-    task_id = str(uuid.uuid4())
-    background_tasks.add_task(
-        _run_data_fetch, body.symbol, body.interval, body.start, body.end,
-        settings, task_id, body.data_type, body.asset_class,
-    )
+    """Get status of a single data-fetch job."""
+    job = (await db.execute(
+        select(DataFetchJob).where(DataFetchJob.job_id == job_id)
+    )).scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     return {
-        "status": "accepted",
-        "task_id": task_id,
-        "message": f"Data fetch for {body.symbol} {body.data_type} queued",
-        "symbol": body.symbol,
-        "data_type": body.data_type,
-        "interval": body.interval,
-        "start": body.start.isoformat(),
-        "end": body.end.isoformat(),
+        "job_id": job.job_id,
+        "symbol": job.symbol,
+        "data_type": job.data_type,
+        "interval": job.interval,
+        "start_date": job.start_date.isoformat(),
+        "end_date": job.end_date.isoformat(),
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "error": job.error,
+        "created_at": (job.created_at.isoformat() + "Z") if job.created_at else None,
+        "completed_at": (job.completed_at.isoformat() + "Z") if job.completed_at else None,
     }
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_data_fetch_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Cancel a queued data-fetch job."""
+    from sqlalchemy import update as sa_update
+    result = await db.execute(
+        sa_update(DataFetchJob)
+        .where(DataFetchJob.job_id == job_id, DataFetchJob.status.in_(["queued", "running"]))
+        .values(status="cancelled")
+    )
+    await db.commit()
+    if result.rowcount == 0:  # type: ignore[union-attr]
+        raise HTTPException(status_code=404, detail="Job not found or already finished")
+    return {"status": "cancelled", "job_id": job_id}
 
 
 async def _run_compact(symbol: str, interval: str, settings: Settings) -> None:
@@ -295,29 +276,44 @@ async def _run_compact(symbol: str, interval: str, settings: Settings) -> None:
 @router.post("/fetch-batch")
 async def trigger_data_fetch_batch(
     body: DataFetchBatchRequest,
-    background_tasks: BackgroundTasks,
-    settings: Settings = Depends(get_settings_dep),
+    db: AsyncSession = Depends(get_db),
+    rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
-    """Trigger background data fetch for multiple symbols in parallel."""
+    """Create persistent data-fetch jobs for multiple symbols."""
     if not body.symbols:
         raise HTTPException(status_code=400, detail="symbols must not be empty")
-    count = 0
+
+    job_ids: list[str] = []
     for symbol in body.symbols:
         for interval in body.intervals:
-            background_tasks.add_task(
-                _run_data_fetch, symbol, interval, body.start, body.end,
-                settings, None, body.data_type, body.asset_class,
+            job = DataFetchJob(
+                symbol=symbol,
+                data_type=body.data_type,
+                interval=interval,
+                start_date=body.start,
+                end_date=body.end,
+                asset_class=body.asset_class,
+                status="queued",
             )
-            count += 1
+            db.add(job)
+            await db.flush()
+            job_ids.append(job.job_id)
+
+    await db.commit()
+
+    for jid in job_ids:
+        await enqueue_job(rds, jid)
+
     return {
         "status": "accepted",
-        "message": f"Data fetch for {count} task(s) queued ({len(body.symbols)} symbol(s) × {len(body.intervals)} interval(s))",
+        "message": f"Data fetch for {len(job_ids)} job(s) queued ({len(body.symbols)} symbol(s) × {len(body.intervals)} interval(s))",
+        "job_ids": job_ids,
         "symbols": body.symbols,
         "intervals": body.intervals,
         "data_type": body.data_type,
         "start": body.start.isoformat(),
         "end": body.end.isoformat(),
-        "count": count,
+        "count": len(job_ids),
     }
 
 
@@ -546,6 +542,39 @@ async def delete_catalog_entry(
         "deleted_files": deleted_files,
         "freed_bytes": freed_bytes,
     }
+
+
+@router.get("/symbols")
+async def list_symbols() -> list[dict]:
+    """Return all available Binance Futures perpetual symbols."""
+    from tinohelm.data.instruments import fetch_exchange_info
+
+    try:
+        info = fetch_exchange_info()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch exchange info: {exc}")
+
+    symbols = []
+    for s in info.get("symbols", []):
+        if s.get("contractType") != "PERPETUAL":
+            continue
+        if s.get("status") != "TRADING":
+            continue
+        raw = s.get("symbol", "")  # e.g. "BTCUSDT"
+        pair = s.get("pair", "")   # e.g. "BTCUSDT"
+        quote = s.get("quoteAsset", "")
+        base = s.get("baseAsset", "")
+        # TinoHelm convention: BTCUSDT-PERP
+        tino_symbol = f"{raw}-PERP"
+        symbols.append({
+            "symbol": tino_symbol,
+            "base": base,
+            "quote": quote,
+            "pair": pair,
+        })
+
+    symbols.sort(key=lambda x: x["symbol"])
+    return symbols
 
 
 @router.get("/types")

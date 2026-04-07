@@ -247,6 +247,30 @@ class DataCatalog(Base):
     )
 
 
+class DataFetchJob(Base):
+    """Persistent data-fetch job — survives API restarts."""
+    __tablename__ = "data_fetch_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, default=lambda: str(uuid4()))
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    data_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    interval: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(5), nullable=False, server_default="um")
+    status: Mapped[str] = mapped_column(String(20), default="queued", server_default="queued", nullable=False)
+    progress: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_data_fetch_jobs_status", "status"),
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
 

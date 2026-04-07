@@ -159,19 +159,28 @@ class BinanceVisionPipeline:
                 start=start, end=end, skipped=True,
             )
 
-        # 2. Download + checksum + extract
-        await _progress(5, f"Downloading {len(tasks)} file(s)...")
+        # 2. Download + checksum + extract (parallel with semaphore)
+        concurrency = self.downloader.concurrency
+        sem = asyncio.Semaphore(concurrency)
+        await _progress(5, f"Downloading {len(tasks)} file(s) (×{concurrency})...")
         csv_paths: list[Path] = []
-        for i, task in enumerate(tasks):
-            pct = 5 + int(70 * i / len(tasks))
-            await _progress(pct, f"File {i+1}/{len(tasks)}: {task.zip_path.name}")
-            try:
-                csv_path = await self.downloader.execute_task(task)
-                csv_paths.append(csv_path)
-            except Exception as exc:
-                logger.warning(
-                    "Download failed for %s: %s — skipping", task.url, exc,
-                )
+        done_count = 0
+
+        async def _download_one(task):
+            nonlocal done_count
+            async with sem:
+                try:
+                    csv_path = await self.downloader.execute_task(task)
+                    csv_paths.append(csv_path)
+                except Exception as exc:
+                    logger.warning(
+                        "Download failed for %s: %s — skipping", task.url, exc,
+                    )
+                done_count += 1
+                pct = 5 + int(70 * done_count / len(tasks))
+                await _progress(pct, f"Downloaded {done_count}/{len(tasks)}")
+
+        await asyncio.gather(*[_download_one(t) for t in tasks])
 
         if not csv_paths:
             await _progress(100, "All downloads failed")
@@ -270,6 +279,16 @@ class BinanceVisionPipeline:
     # Conversion strategies
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _detect_header(path: Path) -> int | None:
+        """Return 0 if the CSV has a text header row, else None (no header)."""
+        with open(path) as f:
+            first = f.readline()
+        # Binance Vision CSVs with headers start with column names like "open_time"
+        if first and not first[0].isdigit():
+            return 0
+        return None
+
     async def _ingest_full(
         self,
         csv_paths: list[Path],
@@ -285,7 +304,10 @@ class BinanceVisionPipeline:
         dfs = []
         for p in csv_paths:
             try:
-                df = pd.read_csv(p, header=None)
+                hdr = self._detect_header(p)
+                df = pd.read_csv(p, header=hdr)
+                if hdr == 0:
+                    df.columns = range(len(df.columns))
                 dfs.append(df)
             except Exception:
                 logger.warning("Failed to read CSV %s", p, exc_info=True)
@@ -327,13 +349,16 @@ class BinanceVisionPipeline:
 
         for csv_idx, csv_path in enumerate(csv_paths):
             try:
-                reader = pd.read_csv(csv_path, header=None, chunksize=_CHUNK_SIZE)
+                hdr = self._detect_header(csv_path)
+                reader = pd.read_csv(csv_path, header=hdr, chunksize=_CHUNK_SIZE)
             except Exception:
                 logger.warning("Failed to open CSV %s", csv_path, exc_info=True)
                 continue
 
             chunk_objects: list = []
             for chunk in reader:
+                if hdr == 0:
+                    chunk.columns = range(len(chunk.columns))
                 if not schema_validated:
                     converter.validate_schema(chunk)
                     schema_validated = True

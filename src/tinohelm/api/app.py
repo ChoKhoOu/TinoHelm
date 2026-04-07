@@ -20,6 +20,7 @@ from tinohelm.core.bridge import EventBridge
 from tinohelm.core.config import get_settings
 from tinohelm.core.process_manager import ProcessManager
 from tinohelm.core.watchdog import Watchdog
+from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker
 from tinohelm.db.models import Base
 from tinohelm.db.session import get_engine, get_session_factory
 from tinohelm.strategy.registry import persist_strategies, scan_strategies
@@ -85,12 +86,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await bridge.start()
     deps.set_event_bridge(bridge)
 
+    # Data-fetch worker (async, in-process)
+    await recover_interrupted_jobs(redis_client)
+    start_data_worker(redis_url=cfg.redis.url, catalog_path=str(cfg.paths.catalog))
+
     logger.info("TinoHelm API ready")
 
     yield
 
     # ---- shutdown ----
     logger.info("TinoHelm API shutting down")
+    stop_data_worker()
 
     from .routes.optimize import cleanup_optimizer_processes
     cleanup_optimizer_processes()
