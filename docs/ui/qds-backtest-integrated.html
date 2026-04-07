@@ -84,8 +84,8 @@ body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:
 .view-btn:hover{border-color:var(--acc);color:var(--acc);background:var(--acc-d);transform:translateX(2px)}
 
 /* Expand arrow */
-.exp-arrow{font-size:.68rem;color:var(--t2);transition:transform .3s var(--eo);padding:.75rem .65rem .75rem 0;cursor:pointer}
-.exp-arrow.open{transform:rotate(180deg)}
+.exp-arrow{font-size:.62rem;color:var(--t3);padding:.75rem .65rem .75rem .25rem;cursor:pointer;transition:color 150ms;line-height:1}
+.exp-arrow:hover{color:var(--t1)}
 
 /* Progress bar */
 .row-bar{position:absolute;bottom:0;left:3px;right:0;height:3px;transition:opacity .3s var(--eo);overflow:hidden;background:var(--bg-t);border-radius:2px}
@@ -217,6 +217,27 @@ body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:
 
 /* Param override table */
 .param-override{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden}
+
+/* Subscription row inline selects */
+.sub-select{padding:.25rem .45rem;font-family:var(--font-d);font-size:.68rem;background:var(--bg-in);border:1px solid var(--bd);border-radius:4px;color:var(--t0);outline:0;cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5' fill='%2373726C'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right .4rem center;padding-right:1.4rem;transition:border-color 200ms}
+.sub-select:focus{border-color:var(--acc)}
+.sub-detail{font-family:var(--font-d);font-size:.68rem;color:var(--t2)}
+.sub-detail strong{color:var(--t0);font-weight:500}
+.sub-del{width:22px;height:22px;border-radius:4px;border:1px solid transparent;background:0;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.68rem;transition:all 150ms}
+.sub-del:hover{border-color:var(--dan);color:var(--dan);background:var(--dan-d)}
+/* Subscription table overrides */
+#subTable thead th{font-size:.58rem;font-weight:400;color:var(--t3);padding:.45rem .65rem;letter-spacing:.08em;border-bottom:1px solid var(--bd)}
+#subTable tbody td{padding:.55rem .65rem;vertical-align:middle}
+#subTable tbody tr{border-bottom:1px solid var(--bd);transition:background 150ms}
+#subTable tbody tr:last-child{border-bottom:0}
+#subTable tbody tr:hover{background:var(--bg-t)}
+.sub-detail-text{font-family:var(--font-d);font-size:.72rem;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap}
+.sub-detail-text strong{font-weight:600;color:var(--t0)}
+.sub-detail-text .edit-icon{color:var(--t3);cursor:pointer;font-size:.6rem;transition:color 150ms;flex-shrink:0}
+.sub-detail-text .edit-icon:hover{color:var(--acc)}
+.sub-badge{font-family:var(--font-d);font-size:.55rem;padding:.1rem .3rem;border-radius:3px;display:inline-block;flex-shrink:0}
+.sub-auto{background:var(--info-d);color:var(--info)}
+.sub-manual{background:var(--bg-t);color:var(--t2)}
 .param-override .po-head{display:flex;justify-content:space-between;align-items:center;padding:.6rem .85rem;border-bottom:1px solid var(--bd);font-family:var(--font-d);font-size:.72rem;font-weight:600}
 .param-override .po-head .toggle-link{font-weight:400;font-size:.68rem;color:var(--acc);cursor:pointer;transition:opacity 150ms}
 .param-override .po-head .toggle-link:hover{opacity:.8}
@@ -307,7 +328,7 @@ body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:
       </div>
 
       <div class="form-section">
-        <div class="sl">基本配置</div>
+        <div class="sl">策略</div>
         <div class="form-row">
           <div class="form-group">
             <div class="form-label">策略 <span class="req">*</span></div>
@@ -319,45 +340,36 @@ body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:
               <option value="btc_multi_factor_v33">btc_multi_factor_v33 (BTCMultiFactorV33)</option>
               <option value="signed_flow_persistence_test">signed_flow_persistence_test</option>
             </select>
+            <div class="form-hint">选择策略后自动填充数据订阅</div>
           </div>
-          <div class="form-group">
-            <div class="form-label">交易所 <span class="req">*</span></div>
-            <select class="form-select" id="cfgExchange">
-              <option value="">选择交易所...</option>
-              <option value="binance">Binance Futures</option>
-              <option value="hyperliquid">Hyperliquid</option>
-              <option value="okx">OKX</option>
-            </select>
+          <div></div>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <div class="sl">数据订阅 <span style="font-weight:400;color:var(--t2);letter-spacing:0;text-transform:none;font-size:.55rem" id="subCount">· 选择策略后自动填充</span></div>
+        <div class="param-override" id="subListWrap">
+          <div id="subEmpty" style="padding:2.5rem 2rem;text-align:center">
+            <div style="font-size:1.2rem;color:var(--t3);margin-bottom:.6rem">⧖</div>
+            <div style="font-size:.78rem;color:var(--t2);margin-bottom:.2rem">选择策略后自动填充数据订阅</div>
+            <div style="font-size:.68rem;color:var(--t3)">策略定义需要订阅的交易所、品种和数据粒度</div>
+          </div>
+          <div id="subTableWrap" style="display:none">
+            <table class="ptbl" id="subTable">
+              <thead><tr><th>交易所</th><th>品种</th><th>粒度</th><th>详情</th><th style="width:28px"></th></tr></thead>
+              <tbody id="subBody"></tbody>
+            </table>
+            <div style="padding:.45rem .65rem;border-top:1px solid var(--bd);display:flex;justify-content:flex-end">
+              <button class="btn-cancel" style="font-size:.62rem;padding:.25rem .55rem" onclick="addSub()">+ 添加订阅</button>
+            </div>
           </div>
         </div>
-        <div class="form-row-3">
-          <div class="form-group">
-            <div class="form-label">品种 <span class="req">*</span></div>
-            <select class="form-select" id="cfgSymbol">
-              <option value="">选择品种...</option>
-              <option value="BTCUSDT">BTCUSDT-PERP</option>
-              <option value="ETHUSDT">ETHUSDT-PERP</option>
-              <option value="SOLUSDT">SOLUSDT-PERP</option>
-              <option value="ARBUSDT">ARBUSDT-PERP</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <div class="form-label">K线周期 <span class="req">*</span></div>
-            <select class="form-select" id="cfgTimeframe">
-              <option value="1min">1 min</option>
-              <option value="5min" selected>5 min</option>
-              <option value="15min">15 min</option>
-              <option value="1h">1 hour</option>
-              <option value="4h">4 hour</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <div class="form-label">数据类型</div>
-            <select class="form-select" id="cfgDataType">
-              <option value="bars">K线 (Bars)</option>
-              <option value="l1">L1 Quotes</option>
-              <option value="l2">L2 Orderbook</option>
-            </select>
+        <!-- Tick warning -->
+        <div id="tickWarning" style="display:none;margin-top:.65rem;padding:.6rem .85rem;background:var(--warn-d);border:1px solid color-mix(in srgb, var(--warn) 30%, transparent);border-radius:var(--rs);font-family:var(--font-d);font-size:.7rem;color:var(--warn);align-items:flex-start;gap:.5rem">
+          <span style="font-size:.85rem;line-height:1;flex-shrink:0">⚠</span>
+          <div>
+            <div style="font-weight:600;margin-bottom:.15rem">数据量提醒</div>
+            <div style="font-weight:400;line-height:1.5" id="tickWarningText"></div>
           </div>
         </div>
       </div>
@@ -388,14 +400,46 @@ body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:
             <div class="form-label">Taker 手续费</div>
             <input class="form-input" type="text" id="cfgTaker" value="0.05%" placeholder="e.g. 0.05%">
           </div>
+          <div></div>
+        </div>
+        <div class="form-row-3">
           <div class="form-group">
-            <div class="form-label">滑点模型</div>
-            <select class="form-select" id="cfgSlippage">
-              <option value="fixed">固定滑点</option>
-              <option value="latency" selected>延迟模拟</option>
-              <option value="none">无滑点</option>
+            <div class="form-label">延迟模拟</div>
+            <select class="form-select" id="cfgLatency" onchange="toggleLatencyInput(this.value)">
+              <option value="off">关闭</option>
+              <option value="fixed" selected>固定延迟</option>
+              <option value="sampled">采样分布</option>
             </select>
+            <div class="form-hint">模拟订单从发出到到达交易所的网络延迟</div>
           </div>
+          <div class="form-group" id="latencyParamGroup">
+            <div class="form-label">延迟参数 (ms)</div>
+            <input class="form-input" type="text" id="cfgLatencyMs" value="5" placeholder="e.g. 5">
+            <div class="form-hint" id="latencyHint">固定延迟，每笔订单延迟 N ms</div>
+          </div>
+          <div class="form-group">
+            <div class="form-label">交易滑点</div>
+            <select class="form-select" id="cfgSlippage" onchange="toggleSlippageInput(this.value)">
+              <option value="off">关闭</option>
+              <option value="fixed" selected>固定滑点</option>
+              <option value="volume">成交量模型</option>
+            </select>
+            <div class="form-hint">模拟市价单的价格冲击和 spread 穿越</div>
+          </div>
+        </div>
+        <div class="form-row-3" id="slippageDetailRow">
+          <div class="form-group" id="slippageBpsGroup">
+            <div class="form-label">滑点大小 (bps)</div>
+            <input class="form-input" type="text" id="cfgSlippageBps" value="1.0" placeholder="e.g. 1.0">
+            <div class="form-hint">1 bps = 0.01%，固定加到成交价上</div>
+          </div>
+          <div class="form-group" id="slippageVolGroup" style="display:none">
+            <div class="form-label">冲击系数</div>
+            <input class="form-input" type="text" id="cfgImpactCoeff" value="0.1" placeholder="e.g. 0.1">
+            <div class="form-hint">滑点 = 系数 × √(order_size / ADV)</div>
+          </div>
+          <div></div>
+          <div></div>
         </div>
       </div>
 
@@ -412,18 +456,11 @@ body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:
 
       <div class="form-section">
         <div class="sl">高级选项</div>
-        <div class="form-row-3">
+        <div class="form-row">
           <div class="form-group">
             <div class="form-label">预热周期 (bars)</div>
             <input class="form-input" type="text" id="cfgWarmup" value="200" placeholder="e.g. 200">
             <div class="form-hint">策略初始化需要的最少历史数据</div>
-          </div>
-          <div class="form-group">
-            <div class="form-label">引擎模式</div>
-            <select class="form-select" id="cfgEngine">
-              <option value="backtest" selected>标准回测</option>
-              <option value="sandbox">沙盒模拟</option>
-            </select>
           </div>
           <div class="form-group">
             <div class="form-label">标签</div>
@@ -494,12 +531,20 @@ for(let i=0;i<35;i++){
   const done=Math.random()>.15;const num=String(398-i).padStart(4,'0');
   const pnl=done?Math.round((Math.random()-.3)*500000):0;
   const dur=Math.floor(Math.random()*40+5);
+  const sharpe=done?(Math.random()*3-.5).toFixed(2):'—';
+  const winRate=done?(45+Math.random()*30).toFixed(1):'—';
+  const profitFactor=done?(0.5+Math.random()*2.5).toFixed(2):'—';
+  const maxDD=done?(-Math.random()*15-0.5).toFixed(1):'—';
+  const trades=done?Math.floor(Math.random()*2000+50):0;
+  const calmar=done?(Math.random()*4-.5).toFixed(2):'—';
   history.push({
     num:'BT-2026-'+num,strat:strats[i%strats.length],status:done?'done':'failed',
     tf:tfs[i%tfs.length],ex:exs[i%exs.length],
     range:(1+i%3).toString().padStart(2,'0')+'/01 → '+(1+i%3).toString().padStart(2,'0')+'/'+[28,31,15][i%3],
     uuid:rfull(),pnl,dur:dur+'m '+Math.floor(Math.random()*60)+'s',
     failMsg:done?'':['OOM @ 82%','Timeout','Data gap','Assertion error'][i%4],
+    sharpe,winRate,profitFactor,maxDD,trades,calmar,
+    id:'h'+i,
   });
 }
 
@@ -545,7 +590,39 @@ function renderHistory(){
   let h='';
   slice.forEach(t=>{
     const short=t.uuid.substring(0,8);const isDone=t.status==='done';
-    h+=`<div class="row"><div class="row-main" onclick="goDetail()"><div class="row-accent ${isDone?'done':'fail'}"></div><div class="row-info"><div class="row-name">${t.num} <span style="font-weight:400;color:var(--t2);font-size:.7rem">${t.strat}</span></div><div class="row-meta"><span class="id-badge" data-full="${t.uuid}" onclick="event.stopPropagation();copyId(this)">${short}</span>${t.tf} · ${t.ex} · ${t.range} · ${isDone?t.dur:'Failed'}</div></div><div class="row-status"><span class="status ${isDone?'status-done':'status-fail'}">${isDone?'✓ Done':'✕ Failed'}</span></div><div class="row-right ${isDone?(t.pnl>=0?'cg':'cr'):'cr'}" ${isDone?'':`style="font-size:.68rem"`}>${isDone?((t.pnl>=0?'+':'-')+'$'+Math.abs(t.pnl).toLocaleString()):t.failMsg}</div><div class="row-action"><button class="view-btn" onclick="event.stopPropagation();goDetail()">View →</button></div></div></div>`;
+    h+=`<div class="row" data-id="${t.id}">`;
+    h+=`<div class="row-main" onclick="toggleExp('${t.id}')">`;
+    h+=`<div class="row-accent ${isDone?'done':'fail'}"></div>`;
+    h+=`<div class="row-info"><div class="row-name">${t.num} <span style="font-weight:400;color:var(--t2);font-size:.7rem">${t.strat}</span></div><div class="row-meta"><span class="id-badge" data-full="${t.uuid}" onclick="event.stopPropagation();copyId(this)">${short}</span>${t.tf} · ${t.ex} · ${t.range} · ${isDone?t.dur:'Failed'}</div></div>`;
+    h+=`<div class="row-status"><span class="status ${isDone?'status-done':'status-fail'}">${isDone?'✓ Done':'✕ Failed'}</span></div>`;
+    h+=`<div class="row-right ${isDone?(t.pnl>=0?'cg':'cr'):'cr'}" ${isDone?'':`style="font-size:.68rem"`}>${isDone?((t.pnl>=0?'+':'-')+'$'+Math.abs(t.pnl).toLocaleString()):t.failMsg}</div>`;
+    h+=`<div class="exp-arrow" id="arrow-${t.id}">▾</div>`;
+    h+=`</div>`;
+    // Expand panel
+    h+=`<div class="row-expand" id="exp-${t.id}"><div class="row-expand-inner">`;
+    if(isDone){
+      const sc=v=>parseFloat(v)>=0?'cg':'cr';
+      h+=`<div class="d-stats" style="grid-template-columns:repeat(4,1fr);margin-bottom:.75rem">`;
+      h+=`<div class="d-stat"><div class="d-stat-l">Sharpe</div><div class="d-stat-v ${parseFloat(t.sharpe)>=1?'cg':parseFloat(t.sharpe)>=0?'':'cr'}">${t.sharpe}</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">Win Rate</div><div class="d-stat-v">${t.winRate}%</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">Profit Factor</div><div class="d-stat-v ${parseFloat(t.profitFactor)>=1.5?'cg':''}">${t.profitFactor}</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">Max DD</div><div class="d-stat-v cr">${t.maxDD}%</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">Calmar</div><div class="d-stat-v ${parseFloat(t.calmar)>=1?'cg':parseFloat(t.calmar)>=0?'':'cr'}">${t.calmar}</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">Trades</div><div class="d-stat-v">${t.trades.toLocaleString()}</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">PnL</div><div class="d-stat-v ${t.pnl>=0?'cg':'cr'}">${t.pnl>=0?'+':'-'}$${Math.abs(t.pnl).toLocaleString()}</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">Duration</div><div class="d-stat-v">${t.dur}</div></div>`;
+      h+=`</div>`;
+      h+=`<div style="display:flex;justify-content:flex-end"><button class="view-btn" onclick="event.stopPropagation();goDetail()">查看完整报告 →</button></div>`;
+    } else {
+      h+=`<div class="d-stats" style="grid-template-columns:repeat(3,1fr);margin-bottom:.75rem">`;
+      h+=`<div class="d-stat"><div class="d-stat-l">错误类型</div><div class="d-stat-v cr">${t.failMsg}</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">运行时长</div><div class="d-stat-v">${t.dur}</div></div>`;
+      h+=`<div class="d-stat"><div class="d-stat-l">策略</div><div class="d-stat-v">${t.strat}</div></div>`;
+      h+=`</div>`;
+      h+=`<div style="display:flex;gap:.4rem;justify-content:flex-end"><button class="view-btn" onclick="event.stopPropagation()">重试</button><button class="view-btn" onclick="event.stopPropagation();goDetail()">查看日志 →</button></div>`;
+    }
+    h+=`</div></div>`;
+    h+=`</div>`;
   });
   z.innerHTML=h;
 
@@ -572,7 +649,7 @@ function goPage(p){curPage=p;renderHistory();document.getElementById('historyZon
 function changePageSize(v){pageSize=parseInt(v);curPage=1;renderHistory()}
 
 /* ===== INTERACTIONS ===== */
-function toggleExp(id){const row=document.querySelector('[data-id="'+id+'"]');const exp=document.getElementById('exp-'+id);const arr=document.getElementById('arrow-'+id);const was=exp.classList.contains('open');document.querySelectorAll('.row-expand.open').forEach(e=>e.classList.remove('open'));document.querySelectorAll('.exp-arrow.open').forEach(a=>a.classList.remove('open'));document.querySelectorAll('.row.expanded').forEach(r=>r.classList.remove('expanded'));if(!was){exp.classList.add('open');arr.classList.add('open');row.classList.add('expanded')}}
+function toggleExp(id){const row=document.querySelector('[data-id="'+id+'"]');const exp=document.getElementById('exp-'+id);const arr=document.getElementById('arrow-'+id);const was=exp.classList.contains('open');document.querySelectorAll('.row-expand.open').forEach(e=>e.classList.remove('open'));document.querySelectorAll('.row.expanded').forEach(r=>r.classList.remove('expanded'));document.querySelectorAll('.exp-arrow').forEach(a=>a.textContent='▾');if(!was){exp.classList.add('open');row.classList.add('expanded');arr.textContent='▴'}}
 function copyId(el){const f=el.dataset.full,s=f.substring(0,8);navigator.clipboard.writeText(f).then(()=>{el.textContent='✓ copied';el.style.color='var(--suc)';setTimeout(()=>{el.style.color='';el.textContent=s},1200)})}
 
 function goDetail(){
@@ -630,6 +707,134 @@ const tw=document.getElementById('tabBarWrap');if(tw){const sen=document.createE
 /* Clock */
 setInterval(()=>{const d=new Date();document.getElementById('clock').textContent=d.getFullYear()+'-'+(d.getMonth()+1).toString().padStart(2,'0')+'-'+d.getDate().toString().padStart(2,'0')+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')+':'+d.getSeconds().toString().padStart(2,'0')},1000);
 
+/* ===== LATENCY & SLIPPAGE ===== */
+function toggleLatencyInput(val){
+  const g=document.getElementById('latencyParamGroup');
+  const inp=document.getElementById('cfgLatencyMs');
+  const hint=document.getElementById('latencyHint');
+  if(val==='off'){g.style.opacity='.35';inp.disabled=true;return}
+  g.style.opacity='1';inp.disabled=false;
+  if(val==='fixed'){inp.value='5';inp.placeholder='e.g. 5';hint.textContent='固定延迟，每笔订单延迟 N ms'}
+  if(val==='sampled'){inp.value='5 ± 3';inp.placeholder='e.g. 5 ± 3';hint.textContent='均值 ± 标准差，从正态分布采样'}
+}
+function toggleSlippageInput(val){
+  const bps=document.getElementById('slippageBpsGroup');
+  const vol=document.getElementById('slippageVolGroup');
+  const row=document.getElementById('slippageDetailRow');
+  if(val==='off'){row.style.display='none';return}
+  row.style.display='';
+  bps.style.display=val==='fixed'?'':'none';
+  vol.style.display=val==='volume'?'':'none';
+}
+
+/* ===== DATA SUBSCRIPTIONS ===== */
+const stratSubs={
+  btc_multi_factor:[
+    {ex:'binance',sym:'BTCUSDT-PERP',gran:'bar',tf:'5min',auto:true},
+    {ex:'binance',sym:'BTCUSDT-PERP',gran:'tick',tickType:'trades',auto:true},
+    {ex:'binance',sym:'ETHUSDT-PERP',gran:'bar',tf:'15min',auto:true},
+  ],
+  btc_multi_factor_v31:[
+    {ex:'binance',sym:'BTCUSDT-PERP',gran:'bar',tf:'5min',auto:true},
+  ],
+  btc_multi_factor_v32:[
+    {ex:'binance',sym:'BTCUSDT-PERP',gran:'bar',tf:'5min',auto:true},
+    {ex:'binance',sym:'BTCUSDT-PERP',gran:'tick',tickType:'quotes',auto:true},
+  ],
+  btc_multi_factor_v33:[
+    {ex:'binance',sym:'BTCUSDT-PERP',gran:'bar',tf:'15min',auto:true},
+  ],
+  signed_flow_persistence_test:[
+    {ex:'binance',sym:'BTCUSDT-PERP',gran:'tick',tickType:'trades',auto:true},
+    {ex:'binance',sym:'BTCUSDT-PERP',gran:'tick',tickType:'l2',depth:10,snap:250,auto:true},
+  ],
+};
+
+let subs=[];
+function renderSubs(){
+  const tb=document.getElementById('subBody');
+  const cnt=document.getElementById('subCount');
+  const empty=document.getElementById('subEmpty');
+  const tableWrap=document.getElementById('subTableWrap');
+  if(subs.length===0){
+    empty.style.display='';tableWrap.style.display='none';
+    cnt.textContent='· 选择策略后自动填充';checkTickWarning();return;
+  }
+  empty.style.display='none';tableWrap.style.display='';
+  cnt.textContent='· '+subs.length+' 个数据源';
+  const exOpts=['binance','hyperliquid','okx'].map(e=>`<option value="${e}">${e==='binance'?'Binance':e==='hyperliquid'?'Hyperliquid':'OKX'}</option>`).join('');
+  const symOpts=['BTCUSDT-PERP','ETHUSDT-PERP','SOLUSDT-PERP','ARBUSDT-PERP','DOGEUSDT-PERP'].map(s=>`<option value="${s}">${s}</option>`).join('');
+  tb.innerHTML='';
+  subs.forEach((s,i)=>{
+    const exSel=exOpts.replace(`value="${s.ex}"`,`value="${s.ex}" selected`);
+    const symSel=symOpts.replace(`value="${s.sym}"`,`value="${s.sym}" selected`);
+    const badge=s.auto?'<span class="sub-badge sub-auto">auto</span>':'<span class="sub-badge sub-manual">manual</span>';
+    let detail='';
+    if(s.gran==='bar'){
+      detail=`<strong>${s.tf||'5min'}</strong>`;
+    } else {
+      const tl={trades:'Trade ticks',quotes:'Quote BBO',l2:'L2 Orderbook'};
+      detail=`<strong>${tl[s.tickType]||'Trade ticks'}</strong>`;
+      if(s.tickType==='l2') detail+=` · ${s.depth||10}档 ${s.snap||250}ms`;
+    }
+    tb.innerHTML+=`<tr>
+      <td><select class="sub-select" onchange="subs[${i}].ex=this.value">${exSel}</select></td>
+      <td><select class="sub-select" onchange="subs[${i}].sym=this.value">${symSel}</select></td>
+      <td><select class="sub-select" onchange="subGranChange(${i},this.value)"><option value="bar"${s.gran==='bar'?' selected':''}>Bar</option><option value="tick"${s.gran==='tick'?' selected':''}>Tick</option></select></td>
+      <td id="sub-detail-${i}"><div class="sub-detail-text">${badge} ${detail} <span class="edit-icon" onclick="editSubDetail(${i})">✎</span></div></td>
+      <td><button class="sub-del" onclick="removeSub(${i})" title="删除">×</button></td>
+    </tr>`;
+  });
+  checkTickWarning();
+}
+
+function subGranChange(i,val){subs[i].gran=val;if(val==='bar'){subs[i].tf=subs[i].tf||'5min';delete subs[i].tickType}else{subs[i].tickType=subs[i].tickType||'trades';delete subs[i].tf}renderSubs()}
+
+function editSubDetail(i){
+  const s=subs[i];const td=document.getElementById('sub-detail-'+i);
+  if(s.gran==='bar'){
+    const opts=['1min','5min','15min','1h','4h'].map(t=>`<option value="${t}"${s.tf===t?' selected':''}>${t}</option>`).join('');
+    td.innerHTML=`<div class="sub-detail-text"><select class="sub-select" onchange="subs[${i}].tf=this.value;renderSubs()">${opts}</select></div>`;
+  } else {
+    let h=`<div class="sub-detail-text"><select class="sub-select" onchange="subs[${i}].tickType=this.value;renderSubs()" style="margin-right:.25rem"><option value="trades"${s.tickType==='trades'?' selected':''}>Trades</option><option value="quotes"${s.tickType==='quotes'?' selected':''}>Quotes</option><option value="l2"${s.tickType==='l2'?' selected':''}>L2</option></select>`;
+    if(s.tickType==='l2'){
+      h+=`<select class="sub-select" onchange="subs[${i}].depth=+this.value;renderSubs()" style="margin-right:.25rem"><option value="5"${s.depth===5?' selected':''}>5档</option><option value="10"${(s.depth===10||!s.depth)?' selected':''}>10档</option><option value="20"${s.depth===20?' selected':''}>20档</option></select>`;
+      h+=`<select class="sub-select" onchange="subs[${i}].snap=+this.value;renderSubs()"><option value="100"${s.snap===100?' selected':''}>100ms</option><option value="250"${(s.snap===250||!s.snap)?' selected':''}>250ms</option><option value="1000"${s.snap===1000?' selected':''}>1s</option></select>`;
+    }
+    h+='</div>';td.innerHTML=h;
+  }
+}
+
+function addSub(){subs.push({ex:'binance',sym:'BTCUSDT-PERP',gran:'bar',tf:'5min',auto:false});renderSubs()}
+function removeSub(i){subs.splice(i,1);renderSubs()}
+
+function checkTickWarning(){
+  const hasTick=subs.some(s=>s.gran==='tick');
+  const w=document.getElementById('tickWarning');
+  if(!hasTick){w.style.display='none';return}
+  w.style.display='flex';
+  const tickSubs=subs.filter(s=>s.gran==='tick');
+  const lines=tickSubs.map(s=>{
+    const tl={trades:'Trade ticks',quotes:'Quote ticks',l2:'L2 snapshots'};
+    return `${s.sym} ${tl[s.tickType]||'trades'}`;
+  });
+  document.getElementById('tickWarningText').innerHTML=
+    `包含 <strong>${tickSubs.length} 个 tick 数据源</strong>（${lines.join('、')}）。`+
+    `Tick 回测数据量大、运行时间长。建议先用短时间范围验证策略逻辑。`;
+  updateEstimate();
+}
+
+function updateEstimate(){
+  const est=document.querySelector('.submit-bar .est');if(!est)return;
+  const hasTick=subs.some(s=>s.gran==='tick');
+  if(hasTick){
+    const hasL2=subs.some(s=>s.tickType==='l2');
+    est.innerHTML=`预估运行时间 <span style="color:var(--dan)">${hasL2?'~4 小时':'~2.5 小时'}</span> · ${subs.length} 个数据源 · 含 tick 数据`;
+  } else {
+    est.innerHTML=`预估运行时间 <span style="color:var(--acc)">~15 min</span> · ${subs.length} 个数据源 · 约 ${(subs.length*1.3).toFixed(1)}M bars`;
+  }
+}
+
 /* ===== CREATE FORM ===== */
 function goCreate(){
   document.getElementById('btList').classList.add('hide');
@@ -671,6 +876,11 @@ const stratParams={
 };
 
 function onStrategyChange(val){
+  /* Subscriptions */
+  const subDef=stratSubs[val];
+  if(subDef){subs=subDef.map(s=>({...s}));renderSubs()}else{subs=[];renderSubs()}
+
+  /* Params */
   const params=stratParams[val];
   const body=document.getElementById('poBody');
   const toggle=document.getElementById('poToggle');
