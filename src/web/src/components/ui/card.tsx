@@ -13,7 +13,7 @@ function Card({
       data-slot="card"
       data-size={size}
       className={cn(
-        "group/card flex flex-col gap-4 overflow-hidden rounded-xl bg-card py-4 text-sm text-card-foreground ring-1 ring-foreground/10 has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:gap-3 data-[size=sm]:py-3 data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
+        "card flex flex-col gap-4 has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
         className
       )}
       {...props}
@@ -26,7 +26,7 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card-header"
       className={cn(
-        "group/card-header @container/card-header grid auto-rows-min items-start gap-1 rounded-t-xl px-4 group-data-[size=sm]/card:px-3 has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto] [.border-b]:pb-4 group-data-[size=sm]/card:[.border-b]:pb-3",
+        "card-header group/card-header grid auto-rows-min items-start gap-1 has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto]",
         className
       )}
       {...props}
@@ -34,24 +34,23 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   )
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+function CardTitle({ className, style, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-title"
-      className={cn(
-        "font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm",
-        className
-      )}
+      className={cn("leading-snug", className)}
+      style={{ fontSize: ".8rem", fontWeight: 600, ...style }}
       {...props}
     />
   )
 }
 
-function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
+function CardDescription({ className, style, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-description"
-      className={cn("text-sm text-muted-foreground", className)}
+      className={cn(className)}
+      style={{ fontSize: ".68rem", color: "var(--t2)", ...style }}
       {...props}
     />
   )
@@ -74,20 +73,18 @@ function CardContent({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-content"
-      className={cn("px-4 group-data-[size=sm]/card:px-3", className)}
+      className={cn("card-body", className)}
       {...props}
     />
   )
 }
 
-function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
+function CardFooter({ className, style, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-footer"
-      className={cn(
-        "flex items-center rounded-b-xl border-t bg-muted/50 p-4 group-data-[size=sm]/card:p-3",
-        className
-      )}
+      className={cn("flex items-center", className)}
+      style={{ borderTop: "1px solid var(--border-default)", padding: "1rem 1.5rem", ...style }}
       {...props}
     />
   )
@@ -102,30 +99,19 @@ interface MetricCardProps {
 }
 
 function MetricCard({ label, value, change, changeType = "neutral", className }: MetricCardProps) {
-  const changeColor =
+  const changeClass =
     changeType === "positive"
-      ? "text-[var(--accent-green)]"
+      ? "color-success"
       : changeType === "negative"
-      ? "text-destructive"
-      : "text-muted-foreground";
+      ? "color-danger"
+      : "";
 
   return (
-    <div
-      className={cn(
-        "flex flex-col gap-2 rounded-xl bg-card border border-border px-5 py-4",
-        className
-      )}
-    >
-      <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-        {label}
-      </span>
-      <span className="font-heading text-[24px] font-bold tracking-[-0.5px] text-foreground">
-        {value}
-      </span>
+    <div className={cn("stat-card flex flex-col gap-2", className)}>
+      <span className="stat-label">{label}</span>
+      <span className="stat-value">{value}</span>
       {change && (
-        <span className={cn("text-[11px] font-medium font-mono", changeColor)}>
-          {change}
-        </span>
+        <span className={cn("stat-sub", changeClass)}>{change}</span>
       )}
     </div>
   );

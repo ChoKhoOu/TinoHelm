@@ -86,6 +86,7 @@ class BacktestRunItem(BaseModel):
     end_date: date
     status: str
     progress_pct: int | None = None
+    error: str | None = None
     created_at: str | None = None
     completed_at: str | None = None
     result_summary: dict | None = None
@@ -309,6 +310,7 @@ async def list_backtest_runs(
             end_date=r.end_date,
             status=r.status.value,
             progress_pct=progress_map.get(r.run_id),
+            error=r.error,
             created_at=r.created_at.isoformat() if r.created_at else None,
             completed_at=r.completed_at.isoformat() if r.completed_at else None,
             result_summary=r.result_summary_json,

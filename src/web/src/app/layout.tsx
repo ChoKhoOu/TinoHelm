@@ -5,6 +5,7 @@ import { TopBar } from "@/components/TopBar";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Providers } from "@/components/Providers";
 import { PageTransition } from "@/components/motion/PageTransition";
+import { StatusBar } from "@/components/StatusBar";
 import { Toaster } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
@@ -18,14 +19,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh" className="h-full dark">
+    <html lang="zh" className="h-full" suppressHydrationWarning>
       <head>
         <link
-          href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+          href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap"
           rel="stylesheet"
         />
+        {/* FOUC prevention: set theme class before paint */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{if(localStorage.getItem('theme')==='light')document.documentElement.classList.add('light')}catch(e){}})()`,
+          }}
+        />
       </head>
-      <body className="h-full bg-background text-foreground font-mono antialiased">
+      <body className="h-full bg-background text-foreground antialiased">
         <Providers>
           <div className="flex h-full">
             <Sidebar />
@@ -38,6 +45,7 @@ export default function RootLayout({
                   </PageTransition>
                 </main>
               </ErrorBoundary>
+              <StatusBar />
             </div>
           </div>
           <Toaster position="top-right" richColors />

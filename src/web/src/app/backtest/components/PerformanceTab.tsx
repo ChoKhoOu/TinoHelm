@@ -19,7 +19,6 @@ import {
   Scatter,
   ComposedChart,
 } from "recharts";
-import { motion } from "framer-motion";
 import { HelpCircle } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -38,6 +37,7 @@ import {
 } from "@/components/ui/table";
 import { API_BASE } from "@/lib/api";
 import { useCountUp } from "@/hooks/useCountUp";
+import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
 import type {
   BacktestResult,
   AnnualReturn,
@@ -88,17 +88,6 @@ function fmtDateFull(ts: string): string {
   }
 }
 
-const tooltipStyle: React.CSSProperties = {
-  background: "rgba(15, 20, 25, 0.95)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 10,
-  fontSize: 11,
-  color: "#E8EAED",
-  backdropFilter: "blur(8px)",
-  boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-};
-const tooltipLabelStyle: React.CSSProperties = { color: "rgba(255,255,255,0.5)" };
-const tooltipItemStyle: React.CSSProperties = { color: "#E8EAED" };
 
 
 function fmtNum(v: number | null | undefined, decimals = 2): string {
@@ -115,7 +104,7 @@ function HelpTip({ text }: { text: string }) {
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger className="inline-flex items-center justify-center ml-1 cursor-help">
-          <HelpCircle className="w-3 h-3 text-muted-foreground/30 hover:text-muted-foreground/60 transition-colors" />
+          <HelpCircle className="w-3 h-3 text-qds-t3 hover:text-muted-foreground transition-colors" />
         </TooltipTrigger>
         <TooltipContent
           side="top"
@@ -141,7 +130,7 @@ function GlassCard({
 }) {
   return (
     <div
-      className={`rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm overflow-hidden ${className}`}
+      className={`rounded-xl border bg-card overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)] ${className}`}
     >
       {children}
     </div>
@@ -160,21 +149,14 @@ function SectionHeader({
   index: number;
 }) {
   return (
-    <motion.div
-      initial={{ opacity: 0, x: -8 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{
-        duration: 0.4,
-        delay: index * 0.06,
-        ease: [0.22, 1, 0.36, 1],
-      }}
+    <div
       className="flex items-center gap-2"
     >
-      <div className="w-1 h-4 rounded-full bg-[var(--accent-blue)] opacity-70" />
-      <span className="text-xs font-semibold tracking-[1.2px] uppercase text-muted-foreground/60">
+      <div className="w-1 h-4 rounded-full bg-qds-info opacity-70" />
+      <span className="text-xs font-semibold tracking-[1.2px] uppercase text-muted-foreground">
         {title}
       </span>
-    </motion.div>
+    </div>
   );
 }
 
@@ -212,10 +194,10 @@ function MetricCard({
 
   const colorClass =
     positive === null || positive === undefined
-      ? "text-foreground/90"
+      ? "text-foreground"
       : positive
-        ? "text-[var(--accent-green)]"
-        : "text-[var(--accent-red)]";
+        ? "text-qds-success"
+        : "text-destructive";
 
   const accentColor =
     positive === null || positive === undefined
@@ -234,15 +216,8 @@ function MetricCard({
           : `${prefix}${animated.toFixed(decimals)}${suffix}`;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{
-        duration: 0.45,
-        delay: 0.1 + index * 0.06,
-        ease: [0.22, 1, 0.36, 1],
-      }}
-      className="group relative flex flex-col gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm p-4 hover:bg-white/[0.05] transition-all duration-300 overflow-hidden"
+    <div
+      className="group relative flex flex-col gap-2.5 rounded-xl border bg-card p-4 hover:bg-secondary transition-all duration-300 overflow-hidden"
     >
       <div
         className="absolute bottom-0 left-0 right-0 h-[2px] opacity-30 group-hover:opacity-70 transition-opacity duration-500"
@@ -250,21 +225,21 @@ function MetricCard({
           background: `linear-gradient(90deg, transparent, ${accentColor}, transparent)`,
         }}
       />
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 inline-flex items-center">
+      <span className="qds-section-label inline-flex items-center">
         {label}
         <HelpTip text={tooltip} />
       </span>
       <span
-        className={`text-2xl font-bold font-heading tracking-tight leading-none ${colorClass}`}
+        className={`text-2xl font-bold font-mono tracking-tight leading-none ${colorClass}`}
       >
         {formatted}
       </span>
       {sublabel && (
-        <span className="text-[9px] text-muted-foreground/40 leading-tight">
+        <span className="text-[9px] text-qds-t3 leading-tight">
           {sublabel}
         </span>
       )}
-    </motion.div>
+    </div>
   );
 }
 
@@ -275,7 +250,7 @@ function MetricCard({
 function ChartPlaceholder({ message = "暂无数据" }: { message?: string }) {
   return (
     <div className="flex items-center justify-center h-full min-h-[120px]">
-      <span className="text-xs text-muted-foreground/40">{message}</span>
+      <span className="text-xs text-qds-t3">{message}</span>
     </div>
   );
 }
@@ -298,8 +273,8 @@ function TogglePill({
       onClick={onClick}
       className={`text-[9px] px-2 py-0.5 rounded border transition-all duration-200 ${
         active
-          ? "border-[var(--accent-blue)] text-[var(--accent-blue)] bg-[var(--accent-blue)]/10"
-          : "border-white/[0.08] text-muted-foreground/40 hover:text-muted-foreground/70"
+          ? "border-qds-info text-qds-info bg-qds-info/10"
+          : "border text-qds-t3 hover:text-qds-t1"
       }`}
     >
       {children}
@@ -313,7 +288,7 @@ function TogglePill({
 
 function RollingLegend({ items }: { items: { color: string; label: string }[] }) {
   return (
-    <div className="flex items-center gap-3 text-[9px] text-muted-foreground/50">
+    <div className="flex items-center gap-3 text-[9px] text-muted-foreground">
       {items.map((item) => (
         <span key={item.label} className="flex items-center gap-1">
           <span
@@ -385,49 +360,46 @@ function EnhancedEquityCurve({
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           权益曲线
         </span>
         <div className="flex items-center gap-1">
           <TogglePill active={mode === "$"} onClick={() => setMode("$")}>$</TogglePill>
           <TogglePill active={mode === "%"} onClick={() => setMode("%")}>%</TogglePill>
-          <div className="w-px h-3 bg-white/[0.08] mx-1" />
+          <div className="w-px h-3 bg-secondary mx-1" />
           <TogglePill active={scaleMode === "linear"} onClick={() => setScaleMode("linear")}>Linear</TogglePill>
           <TogglePill active={scaleMode === "log"} onClick={() => setScaleMode("log")}>Log</TogglePill>
           {hasBenchmarkData && (
             <>
-              <div className="w-px h-3 bg-white/[0.08] mx-1" />
+              <div className="w-px h-3 bg-secondary mx-1" />
               <TogglePill active={showBM} onClick={() => setShowBM(!showBM)}>BM</TogglePill>
             </>
           )}
         </div>
       </div>
       {/* Legend */}
-      <div className="flex items-center gap-4 text-[9px] text-muted-foreground/50 px-1">
+      <div className="flex items-center gap-4 text-[9px] text-muted-foreground px-1">
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-4 h-[2px] rounded" style={{ background: "linear-gradient(90deg, #4C9EEB, #A78BFA)" }} />
+          <span className="inline-block w-4 h-[2px] rounded" style={{ background: "linear-gradient(90deg, var(--info), var(--info))" }} />
           策略 (盈利)
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-4 h-[2px] rounded" style={{ background: "#EF5350" }} />
+          <span className="inline-block w-4 h-[2px] rounded" style={{ background: "var(--dan)" }} />
           策略 (亏损)
         </span>
         {hasBenchmarkData && showBM && (
           <span className="flex items-center gap-1.5">
-            <span className="inline-block w-4 h-[2px] rounded border-t border-dashed" style={{ borderColor: "#8B949E" }} />
+            <span className="inline-block w-4 h-[2px] rounded border-t border-dashed" style={{ borderColor: "var(--t1)" }} />
             Benchmark (B&H)
           </span>
         )}
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-4 h-[2px] rounded" style={{ background: "#F0B429", opacity: 0.4 }} />
+          <span className="inline-block w-4 h-[2px] rounded" style={{ background: "var(--warn)", opacity: 0.4 }} />
           {mode === "%" ? "零线" : "初始资金"}
         </span>
       </div>
-      <motion.div
+      <div
         key={`${mode}-${scaleMode}`}
-        initial={{ opacity: 0.5, scale: 0.995 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
         style={{ width: "100%", height: 260 }}
       >
         <ResponsiveContainer width="100%" height="100%">
@@ -437,31 +409,31 @@ function EnhancedEquityCurve({
           >
           <defs>
             <linearGradient id="perfEqStroke" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#A78BFA" />
-              <stop offset={balanceStop * 0.6} stopColor="#4C9EEB" />
-              <stop offset={balanceStop} stopColor="#4C9EEB" />
-              <stop offset={balanceStop} stopColor="#EF5350" />
-              <stop offset="100%" stopColor="#EF5350" />
+              <stop offset="0%" stopColor="var(--info)" />
+              <stop offset={balanceStop * 0.6} stopColor="var(--info)" />
+              <stop offset={balanceStop} stopColor="var(--info)" />
+              <stop offset={balanceStop} stopColor="var(--dan)" />
+              <stop offset="100%" stopColor="var(--dan)" />
             </linearGradient>
             <linearGradient id="perfEqFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#4C9EEB" stopOpacity={0.2} />
-              <stop offset="100%" stopColor="#4C9EEB" stopOpacity={0} />
+              <stop offset="0%" stopColor="var(--info)" stopOpacity={0.2} />
+              <stop offset="100%" stopColor="var(--info)" stopOpacity={0} />
             </linearGradient>
             <filter id="perfEqGlow" x="-20%" y="-20%" width="140%" height="140%">
               <feGaussianBlur in="SourceGraphic" stdDeviation="4" />
             </filter>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
           <XAxis
             dataKey="t"
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             interval="preserveStartEnd"
           />
           <YAxis
             scale={scaleMode}
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) =>
@@ -473,12 +445,12 @@ function EnhancedEquityCurve({
             domain={scaleMode === "log" ? ["auto", "auto"] : undefined}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               if (name === "benchmark") {
                 return [
-                  <span key="v" style={{ color: "#8B949E" }}>
+                  <span key="v" className="text-qds-t1">
                     {mode === "%"
                       ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`
                       : `$${v.toLocaleString("en-US", { maximumFractionDigits: 0 })}`}
@@ -486,7 +458,7 @@ function EnhancedEquityCurve({
                   "基准 (B&H)",
                 ];
               }
-              const color = mode === "%" ? (v >= 0 ? "#4C9EEB" : "#EF5350") : (v >= startingBalance ? "#4C9EEB" : "#EF5350");
+              const color = mode === "%" ? (v >= 0 ? "var(--info)" : "var(--dan)") : (v >= startingBalance ? "var(--info)" : "var(--dan)");
               return [
                 <span key="v" style={{ color }}>
                   {mode === "%"
@@ -499,7 +471,7 @@ function EnhancedEquityCurve({
           />
           <ReferenceLine
             y={refValue}
-            stroke="#F0B429"
+            stroke="var(--warn)"
             strokeDasharray="6 4"
             strokeWidth={1}
             strokeOpacity={0.4}
@@ -527,7 +499,7 @@ function EnhancedEquityCurve({
             dot={false}
             activeDot={{
               r: 4,
-              fill: "#4C9EEB",
+              fill: "var(--info)",
               stroke: "rgba(76,158,235,0.3)",
               strokeWidth: 6,
             }}
@@ -540,7 +512,7 @@ function EnhancedEquityCurve({
             <Line
               type="monotone"
               dataKey="benchmark"
-              stroke="#8B949E"
+              stroke="var(--t1)"
               strokeWidth={1}
               strokeDasharray="6 4"
               dot={false}
@@ -552,7 +524,7 @@ function EnhancedEquityCurve({
           )}
         </ComposedChart>
       </ResponsiveContainer>
-      </motion.div>
+      </div>
     </GlassCard>
   );
 }
@@ -574,7 +546,7 @@ function DrawdownChart({
 
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+      <span className="qds-section-label">
         水下回撤曲线
       </span>
       <ResponsiveContainer width="100%" height={160}>
@@ -584,32 +556,32 @@ function DrawdownChart({
         >
           <defs>
             <linearGradient id="perfDdGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#EF5350" stopOpacity={0.35} />
-              <stop offset="100%" stopColor="#EF5350" stopOpacity={0.02} />
+              <stop offset="0%" stopColor="var(--dan)" stopOpacity={0.35} />
+              <stop offset="100%" stopColor="var(--dan)" stopOpacity={0.02} />
             </linearGradient>
             <filter id="perfDdGlow" x="-20%" y="-20%" width="140%" height="140%">
               <feGaussianBlur in="SourceGraphic" stdDeviation="3" />
             </filter>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
           <XAxis
             dataKey="t"
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             interval="preserveStartEnd"
           />
           <YAxis
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) => `${Number(v).toFixed(0)}%`}
             width={42}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown) => [
-              <span key="v" style={{ color: "#EF5350" }}>
+              <span key="v" className="text-destructive">
                 {Number(value).toFixed(2)}%
               </span>,
               "回撤",
@@ -619,7 +591,7 @@ function DrawdownChart({
           <Area
             type="monotone"
             dataKey="drawdown"
-            stroke="#EF5350"
+            stroke="var(--dan)"
             strokeWidth={4}
             fill="none"
             dot={false}
@@ -632,7 +604,7 @@ function DrawdownChart({
           <Area
             type="monotone"
             dataKey="drawdown"
-            stroke="#EF5350"
+            stroke="var(--dan)"
             strokeWidth={1.2}
             fill="url(#perfDdGrad)"
             dot={false}
@@ -659,7 +631,7 @@ function Top5DrawdownsTable({
   if (!top5.length) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           Top 5 最大回撤
         </span>
         <ChartPlaceholder />
@@ -669,31 +641,31 @@ function Top5DrawdownsTable({
 
   return (
     <GlassCard className="p-4">
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-3">
+      <span className="qds-section-label block">
         Top 5 最大回撤
       </span>
       <Table>
         <TableHeader>
-          <TableRow className="border-white/[0.06] hover:bg-transparent">
-            <TableHead className="text-[9px] text-muted-foreground/50 font-semibold h-8">#</TableHead>
-            <TableHead className="text-[9px] text-muted-foreground/50 font-semibold h-8">开始日期</TableHead>
-            <TableHead className="text-[9px] text-muted-foreground/50 font-semibold h-8">谷底日期</TableHead>
-            <TableHead className="text-[9px] text-muted-foreground/50 font-semibold h-8 text-right">深度</TableHead>
-            <TableHead className="text-[9px] text-muted-foreground/50 font-semibold h-8 text-right">持续 (天)</TableHead>
-            <TableHead className="text-[9px] text-muted-foreground/50 font-semibold h-8 text-right">恢复 (天)</TableHead>
+          <TableRow className="border hover:bg-transparent">
+            <TableHead className="text-[9px] text-muted-foreground font-semibold h-8">#</TableHead>
+            <TableHead className="text-[9px] text-muted-foreground font-semibold h-8">开始日期</TableHead>
+            <TableHead className="text-[9px] text-muted-foreground font-semibold h-8">谷底日期</TableHead>
+            <TableHead className="text-[9px] text-muted-foreground font-semibold h-8 text-right">深度</TableHead>
+            <TableHead className="text-[9px] text-muted-foreground font-semibold h-8 text-right">持续 (天)</TableHead>
+            <TableHead className="text-[9px] text-muted-foreground font-semibold h-8 text-right">恢复 (天)</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {top5.map((dd, i) => (
-            <TableRow key={i} className="border-white/[0.04] hover:bg-white/[0.03]">
-              <TableCell className="text-[10px] text-muted-foreground/60 py-2">{i + 1}</TableCell>
-              <TableCell className="text-[10px] text-muted-foreground/70 py-2">{fmtDateFull(dd.start)}</TableCell>
-              <TableCell className="text-[10px] text-muted-foreground/70 py-2">{fmtDateFull(dd.trough_date)}</TableCell>
-              <TableCell className="text-[10px] text-[var(--accent-red)] font-medium py-2 text-right">
+            <TableRow key={i} className="border hover:bg-secondary">
+              <TableCell className="text-[10px] text-muted-foreground py-2">{i + 1}</TableCell>
+              <TableCell className="text-[10px] text-qds-t1 py-2">{fmtDateFull(dd.start)}</TableCell>
+              <TableCell className="text-[10px] text-qds-t1 py-2">{fmtDateFull(dd.trough_date)}</TableCell>
+              <TableCell className="text-[10px] text-destructive font-medium py-2 text-right">
                 {dd.max_drawdown_pct.toFixed(2)}%
               </TableCell>
-              <TableCell className="text-[10px] text-muted-foreground/70 py-2 text-right">{dd.duration_days}</TableCell>
-              <TableCell className="text-[10px] text-muted-foreground/70 py-2 text-right">
+              <TableCell className="text-[10px] text-qds-t1 py-2 text-right">{dd.duration_days}</TableCell>
+              <TableCell className="text-[10px] text-qds-t1 py-2 text-right">
                 {dd.recovery_days != null ? dd.recovery_days : "—"}
               </TableCell>
             </TableRow>
@@ -742,7 +714,7 @@ function MonthlyHeatmap({
   if (!years.length) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-3">
+        <span className="qds-section-label block">
           月度收益热力图
         </span>
         <ChartPlaceholder />
@@ -763,13 +735,13 @@ function MonthlyHeatmap({
   }
 
   function textColor(val: number | undefined): string {
-    if (val == null) return "rgba(255,255,255,0.2)";
-    return val >= 0 ? "#26D97F" : "#EF5350";
+    if (val == null) return "var(--t3)";
+    return val >= 0 ? "var(--suc)" : "var(--dan)";
   }
 
   return (
     <GlassCard className="p-4">
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-3">
+      <span className="qds-section-label block">
         月度收益热力图
       </span>
       <div className="overflow-x-auto">
@@ -784,7 +756,7 @@ function MonthlyHeatmap({
           {monthLabels.map((m) => (
             <div
               key={m}
-              className="text-center text-muted-foreground/40 font-medium pb-1"
+              className="text-center text-qds-t3 font-medium pb-1"
             >
               {m}
             </div>
@@ -792,7 +764,7 @@ function MonthlyHeatmap({
           {years.map((year) => (
             <div key={`row-${year}`} className="contents">
               <div
-                className="flex items-center text-muted-foreground/50 font-medium pr-1"
+                className="flex items-center text-muted-foreground font-medium pr-1"
                 style={{ fontSize: 9 }}
               >
                 {year}
@@ -836,7 +808,7 @@ function AnnualReturnsChart({
   if (!annualReturns?.length) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           年度收益
         </span>
         <ChartPlaceholder />
@@ -846,7 +818,7 @@ function AnnualReturnsChart({
 
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+      <span className="qds-section-label">
         年度收益
       </span>
       <ResponsiveContainer width="100%" height={180}>
@@ -854,27 +826,27 @@ function AnnualReturnsChart({
           data={annualReturns}
           margin={{ top: 8, right: 8, left: 8, bottom: 4 }}
         >
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
           <XAxis
             dataKey="year"
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
           />
           <YAxis
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) => `${Number(v).toFixed(0)}%`}
             width={42}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
-            cursor={{ fill: "rgba(255,255,255,0.04)" }}
+            {...CHART_TOOLTIP_PROPS}
+            cursor={{ fill: "var(--bd)" }}
             formatter={(value: unknown) => {
               const v = Number(value);
               return [
-                <span key="v" style={{ color: v >= 0 ? "#26D97F" : "#EF5350" }}>
+                <span key="v" style={{ color: v >= 0 ? "var(--suc)" : "var(--dan)" }}>
                   {v >= 0 ? "+" : ""}{v.toFixed(2)}%
                 </span>,
                 "年度收益",
@@ -886,7 +858,7 @@ function AnnualReturnsChart({
             {annualReturns.map((entry, index) => (
               <Cell
                 key={`ar-${index}`}
-                fill={entry.return_pct >= 0 ? "#26D97F" : "#EF5350"}
+                fill={entry.return_pct >= 0 ? "var(--suc)" : "var(--dan)"}
                 fillOpacity={0.8}
               />
             ))}
@@ -913,7 +885,7 @@ function WeeklyReturnsChart({
   if (!data.length) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           周度收益
         </span>
         <ChartPlaceholder />
@@ -923,7 +895,7 @@ function WeeklyReturnsChart({
 
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+      <span className="qds-section-label">
         周度收益
       </span>
       <ResponsiveContainer width="100%" height={160}>
@@ -931,28 +903,28 @@ function WeeklyReturnsChart({
           data={data}
           margin={{ top: 4, right: 8, left: 8, bottom: 4 }}
         >
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
           <XAxis
             dataKey="t"
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             interval="preserveStartEnd"
           />
           <YAxis
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) => `${Number(v).toFixed(0)}%`}
             width={38}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
-            cursor={{ fill: "rgba(255,255,255,0.04)" }}
+            {...CHART_TOOLTIP_PROPS}
+            cursor={{ fill: "var(--bd)" }}
             formatter={(value: unknown) => {
               const v = Number(value);
               return [
-                <span key="v" style={{ color: v >= 0 ? "#26D97F" : "#EF5350" }}>
+                <span key="v" style={{ color: v >= 0 ? "var(--suc)" : "var(--dan)" }}>
                   {v >= 0 ? "+" : ""}{v.toFixed(2)}%
                 </span>,
                 "周收益",
@@ -964,7 +936,7 @@ function WeeklyReturnsChart({
             {data.map((entry, index) => (
               <Cell
                 key={`wr-${index}`}
-                fill={entry.return_pct >= 0 ? "#26D97F" : "#EF5350"}
+                fill={entry.return_pct >= 0 ? "var(--suc)" : "var(--dan)"}
                 fillOpacity={0.75}
               />
             ))}
@@ -1001,7 +973,7 @@ function RollingSharpeChart({
   if (!hasData) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           滚动 Sharpe 比率
         </span>
         <ChartPlaceholder message="数据不足（需要 3 个月以上）" />
@@ -1012,44 +984,44 @@ function RollingSharpeChart({
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           滚动 Sharpe 比率
         </span>
         <RollingLegend items={[
-          { color: "#4C9EEB", label: "3m" },
-          { color: "#A78BFA", label: "6m" },
-          { color: "#F0B429", label: "12m" },
+          { color: "var(--info)", label: "3m" },
+          { color: "var(--info)", label: "6m" },
+          { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
           <XAxis
             dataKey="t"
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             interval="preserveStartEnd"
           />
           <YAxis
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             width={36}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               const colorMap: Record<string, string> = {
-                rolling_3m: "#4C9EEB", rolling_6m: "#A78BFA", rolling_12m: "#F0B429",
+                rolling_3m: "var(--info)", rolling_6m: "var(--info)", rolling_12m: "var(--warn)",
               };
               const labelMap: Record<string, string> = {
                 rolling_3m: "3m Sharpe", rolling_6m: "6m Sharpe", rolling_12m: "12m Sharpe",
               };
               const key = String(name);
               return [
-                <span key="v" style={{ color: colorMap[key] ?? "#E8EAED" }}>
+                <span key="v" style={{ color: colorMap[key] ?? "var(--t0)" }}>
                   {v.toFixed(3)}
                 </span>,
                 labelMap[key] ?? key,
@@ -1057,9 +1029,9 @@ function RollingSharpeChart({
             }}
           />
           <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
-          <Line type="monotone" dataKey="rolling_3m" stroke="#4C9EEB" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
-          <Line type="monotone" dataKey="rolling_6m" stroke="#A78BFA" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
-          <Line type="monotone" dataKey="rolling_12m" stroke="#F0B429" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_3m" stroke="var(--info)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_6m" stroke="var(--info)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </LineChart>
       </ResponsiveContainer>
     </GlassCard>
@@ -1085,7 +1057,7 @@ function RollingSortinoChart({
   if (!hasData) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           滚动 Sortino 比率
         </span>
         <ChartPlaceholder message="数据不足（需要 6 个月以上）" />
@@ -1096,35 +1068,35 @@ function RollingSortinoChart({
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           滚动 Sortino 比率
         </span>
         <RollingLegend items={[
-          { color: "#A78BFA", label: "6m" },
-          { color: "#F0B429", label: "12m" },
+          { color: "var(--info)", label: "6m" },
+          { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="t" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-          <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} width={36} />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+          <XAxis dataKey="t" tick={{ fill: "var(--t2)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+          <YAxis tick={{ fill: "var(--t2)", fontSize: 9 }} tickLine={false} axisLine={false} width={36} />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
-              const colorMap: Record<string, string> = { rolling_6m: "#A78BFA", rolling_12m: "#F0B429" };
+              const colorMap: Record<string, string> = { rolling_6m: "var(--info)", rolling_12m: "var(--warn)" };
               const labelMap: Record<string, string> = { rolling_6m: "6m Sortino", rolling_12m: "12m Sortino" };
               const key = String(name);
               return [
-                <span key="v" style={{ color: colorMap[key] ?? "#E8EAED" }}>{v.toFixed(3)}</span>,
+                <span key="v" style={{ color: colorMap[key] ?? "var(--t0)" }}>{v.toFixed(3)}</span>,
                 labelMap[key] ?? key,
               ];
             }}
           />
           <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
-          <Line type="monotone" dataKey="rolling_6m" stroke="#A78BFA" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
-          <Line type="monotone" dataKey="rolling_12m" stroke="#F0B429" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_6m" stroke="var(--info)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </LineChart>
       </ResponsiveContainer>
     </GlassCard>
@@ -1150,7 +1122,7 @@ function RollingVolatilityChart({
   if (!hasData) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           滚动波动率
         </span>
         <ChartPlaceholder message="数据不足（需要 6 个月以上）" />
@@ -1161,44 +1133,44 @@ function RollingVolatilityChart({
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           滚动波动率
         </span>
         <RollingLegend items={[
-          { color: "#A78BFA", label: "6m" },
-          { color: "#F0B429", label: "12m" },
+          { color: "var(--info)", label: "6m" },
+          { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
       <ResponsiveContainer width="100%" height={180}>
         <AreaChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
           <defs>
             <linearGradient id="perfVol6mFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#A78BFA" stopOpacity={0.15} />
-              <stop offset="100%" stopColor="#A78BFA" stopOpacity={0.02} />
+              <stop offset="0%" stopColor="var(--info)" stopOpacity={0.15} />
+              <stop offset="100%" stopColor="var(--info)" stopOpacity={0.02} />
             </linearGradient>
             <linearGradient id="perfVol12mFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#F0B429" stopOpacity={0.12} />
-              <stop offset="100%" stopColor="#F0B429" stopOpacity={0.02} />
+              <stop offset="0%" stopColor="var(--warn)" stopOpacity={0.12} />
+              <stop offset="100%" stopColor="var(--warn)" stopOpacity={0.02} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="t" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-          <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${(Number(v) * 100).toFixed(0)}%`} width={42} />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+          <XAxis dataKey="t" tick={{ fill: "var(--t2)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+          <YAxis tick={{ fill: "var(--t2)", fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${(Number(v) * 100).toFixed(0)}%`} width={42} />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
-              const colorMap: Record<string, string> = { rolling_6m: "#A78BFA", rolling_12m: "#F0B429" };
+              const colorMap: Record<string, string> = { rolling_6m: "var(--info)", rolling_12m: "var(--warn)" };
               const labelMap: Record<string, string> = { rolling_6m: "6m 波动率", rolling_12m: "12m 波动率" };
               const key = String(name);
               return [
-                <span key="v" style={{ color: colorMap[key] ?? "#E8EAED" }}>{(v * 100).toFixed(2)}%</span>,
+                <span key="v" style={{ color: colorMap[key] ?? "var(--t0)" }}>{(v * 100).toFixed(2)}%</span>,
                 labelMap[key] ?? key,
               ];
             }}
           />
-          <Area type="monotone" dataKey="rolling_6m" stroke="#A78BFA" strokeWidth={1.5} fill="url(#perfVol6mFill)" dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
-          <Area type="monotone" dataKey="rolling_12m" stroke="#F0B429" strokeWidth={1.5} fill="url(#perfVol12mFill)" dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Area type="monotone" dataKey="rolling_6m" stroke="var(--info)" strokeWidth={1.5} fill="url(#perfVol6mFill)" dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Area type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} fill="url(#perfVol12mFill)" dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </AreaChart>
       </ResponsiveContainer>
     </GlassCard>
@@ -1224,7 +1196,7 @@ function RollingBetaChart({
   if (!hasData) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           滚动 Beta
         </span>
         <ChartPlaceholder message="数据不足或无基准" />
@@ -1235,35 +1207,35 @@ function RollingBetaChart({
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           滚动 Beta
         </span>
         <RollingLegend items={[
-          { color: "#A78BFA", label: "6m" },
-          { color: "#F0B429", label: "12m" },
+          { color: "var(--info)", label: "6m" },
+          { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="t" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-          <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} width={36} />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+          <XAxis dataKey="t" tick={{ fill: "var(--t2)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+          <YAxis tick={{ fill: "var(--t2)", fontSize: 9 }} tickLine={false} axisLine={false} width={36} />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
-              const colorMap: Record<string, string> = { rolling_6m: "#A78BFA", rolling_12m: "#F0B429" };
+              const colorMap: Record<string, string> = { rolling_6m: "var(--info)", rolling_12m: "var(--warn)" };
               const labelMap: Record<string, string> = { rolling_6m: "6m Beta", rolling_12m: "12m Beta" };
               const key = String(name);
               return [
-                <span key="v" style={{ color: colorMap[key] ?? "#E8EAED" }}>{v.toFixed(3)}</span>,
+                <span key="v" style={{ color: colorMap[key] ?? "var(--t0)" }}>{v.toFixed(3)}</span>,
                 labelMap[key] ?? key,
               ];
             }}
           />
-          <ReferenceLine y={1} stroke="#F0B429" strokeDasharray="4 3" strokeWidth={1} strokeOpacity={0.4} />
-          <Line type="monotone" dataKey="rolling_6m" stroke="#A78BFA" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
-          <Line type="monotone" dataKey="rolling_12m" stroke="#F0B429" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <ReferenceLine y={1} stroke="var(--warn)" strokeDasharray="4 3" strokeWidth={1} strokeOpacity={0.4} />
+          <Line type="monotone" dataKey="rolling_6m" stroke="var(--info)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </LineChart>
       </ResponsiveContainer>
     </GlassCard>
@@ -1292,7 +1264,7 @@ function RollingReturnsChart({
   if (!hasData) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           滚动收益 (3m / 6m / 12m)
         </span>
         <ChartPlaceholder message="数据不足（需要 3 个月以上）" />
@@ -1303,33 +1275,33 @@ function RollingReturnsChart({
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           滚动收益
         </span>
         <RollingLegend items={[
-          { color: "#4C9EEB", label: "3m" },
-          { color: "#A78BFA", label: "6m" },
-          { color: "#F0B429", label: "12m" },
+          { color: "var(--info)", label: "3m" },
+          { color: "var(--info)", label: "6m" },
+          { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="t" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-          <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${Number(v).toFixed(0)}%`} width={42} />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+          <XAxis dataKey="t" tick={{ fill: "var(--t2)", fontSize: 9 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+          <YAxis tick={{ fill: "var(--t2)", fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${Number(v).toFixed(0)}%`} width={42} />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               const colorMap: Record<string, string> = {
-                rolling_3m: "#4C9EEB", rolling_6m: "#A78BFA", rolling_12m: "#F0B429",
+                rolling_3m: "var(--info)", rolling_6m: "var(--info)", rolling_12m: "var(--warn)",
               };
               const labelMap: Record<string, string> = {
                 rolling_3m: "3m 滚动", rolling_6m: "6m 滚动", rolling_12m: "12m 滚动",
               };
               const key = String(name);
               return [
-                <span key="v" style={{ color: colorMap[key] ?? "#E8EAED" }}>
+                <span key="v" style={{ color: colorMap[key] ?? "var(--t0)" }}>
                   {v >= 0 ? "+" : ""}{v.toFixed(2)}%
                 </span>,
                 labelMap[key] ?? key,
@@ -1337,9 +1309,9 @@ function RollingReturnsChart({
             }}
           />
           <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
-          <Line type="monotone" dataKey="rolling_3m" stroke="#4C9EEB" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
-          <Line type="monotone" dataKey="rolling_6m" stroke="#A78BFA" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
-          <Line type="monotone" dataKey="rolling_12m" stroke="#F0B429" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_3m" stroke="var(--info)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_6m" stroke="var(--info)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
+          <Line type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </LineChart>
       </ResponsiveContainer>
     </GlassCard>
@@ -1419,7 +1391,7 @@ function DistributionHistogram({
   if (!barData.length) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           日收益分布
         </span>
         <ChartPlaceholder />
@@ -1430,17 +1402,17 @@ function DistributionHistogram({
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           日收益分布
         </span>
         {normalCurve.length > 0 && (
-          <div className="flex items-center gap-3 text-[9px] text-muted-foreground/50">
+          <div className="flex items-center gap-3 text-[9px] text-muted-foreground">
             <span className="flex items-center gap-1">
-              <span className="inline-block w-3 h-[2px] rounded bg-[#4C9EEB]" />
+              <span className="inline-block w-3 h-[2px] rounded bg-qds-info" />
               实际
             </span>
             <span className="flex items-center gap-1">
-              <span className="inline-block w-3 h-[1px] rounded" style={{ borderTop: "1px dashed #A78BFA" }} />
+              <span className="inline-block w-3 h-[1px] rounded" style={{ borderTop: "1px dashed var(--info)" }} />
               正态拟合
             </span>
           </div>
@@ -1451,43 +1423,43 @@ function DistributionHistogram({
           data={mergedData}
           margin={{ top: 8, right: 8, left: 8, bottom: 4 }}
         >
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
           <XAxis
             dataKey="mid"
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) => `${Number(v).toFixed(1)}%`}
             interval="preserveStartEnd"
           />
           <YAxis
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             width={32}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown, name: unknown) => {
               const v = Number(value);
               if (name === "normal") {
                 return [
-                  <span key="v" style={{ color: "#A78BFA" }}>{v.toFixed(1)}</span>,
+                  <span key="v" style={{ color: "var(--info)" }}>{v.toFixed(1)}</span>,
                   "正态拟合",
                 ];
               }
               return [
-                <span key="v" style={{ color: "#4C9EEB" }}>{v} 天</span>,
+                <span key="v" style={{ color: "var(--info)" }}>{v} 天</span>,
                 "实际频次",
               ];
             }}
           />
-          <ReferenceLine x={0} stroke="rgba(255,255,255,0.2)" strokeWidth={1} />
+          <ReferenceLine x={0} stroke="var(--t3)" strokeWidth={1} />
           <Bar dataKey="count" radius={[2, 2, 0, 0]}>
             {mergedData.map((entry, index) => (
               <Cell
                 key={`dist-${index}`}
-                fill={entry.mid >= 0 ? "#26D97F" : "#EF5350"}
+                fill={entry.mid >= 0 ? "var(--suc)" : "var(--dan)"}
                 fillOpacity={0.75}
               />
             ))}
@@ -1496,7 +1468,7 @@ function DistributionHistogram({
             <Line
               type="monotone"
               dataKey="normal"
-              stroke="#A78BFA"
+              stroke="var(--info)"
               strokeWidth={1.5}
               strokeDasharray="4 2"
               dot={false}
@@ -1531,7 +1503,7 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
   if (!data.length) {
     return (
       <GlassCard className="p-4">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-2">
+        <span className="qds-section-label block">
           Q-Q 正态图
         </span>
         <ChartPlaceholder />
@@ -1542,21 +1514,21 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
   return (
     <GlassCard className="p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           Q-Q 正态图
         </span>
-        <span className="text-[9px] text-muted-foreground/30">
+        <span className="text-[9px] text-qds-t3">
           偏离对角线 = 非正态
         </span>
       </div>
       <ResponsiveContainer width="100%" height={220}>
         <ScatterChart margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
           <XAxis
             type="number"
             dataKey="theoretical"
             name="理论分位数"
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) => Number(v).toFixed(1)}
@@ -1565,7 +1537,7 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
               value: "理论分位数 (正态)",
               position: "insideBottom",
               offset: -2,
-              fill: "rgba(255,255,255,0.2)",
+              fill: "var(--t3)",
               fontSize: 8,
             }}
           />
@@ -1573,7 +1545,7 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
             type="number"
             dataKey="empirical"
             name="实际分位数"
-            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+            tick={{ fill: "var(--t2)", fontSize: 9 }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) => Number(v).toFixed(3)}
@@ -1582,12 +1554,12 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
               value: "实际日收益",
               angle: -90,
               position: "insideLeft",
-              fill: "rgba(255,255,255,0.2)",
+              fill: "var(--t3)",
               fontSize: 8,
             }}
           />
           <RechartsTooltip
-            contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+            {...CHART_TOOLTIP_PROPS}
             formatter={(value: unknown, name: string | undefined) => [
               Number(value).toFixed(4),
               name ?? "",
@@ -1598,12 +1570,12 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
               { x: refMin, y: refMin },
               { x: refMax, y: refMax },
             ]}
-            stroke="#F0B429"
+            stroke="var(--warn)"
             strokeDasharray="5 3"
             strokeWidth={1}
             strokeOpacity={0.5}
           />
-          <Scatter data={data} fill="#4C9EEB" fillOpacity={0.6} r={2} />
+          <Scatter data={data} fill="var(--info)" fillOpacity={0.6} r={2} />
         </ScatterChart>
       </ResponsiveContainer>
     </GlassCard>
@@ -1640,25 +1612,25 @@ function MetricsSummaryTable({
           label: "Sharpe Ratio",
           tooltip: "年化超额收益 / 年化波动率。>1 为良好，>2 为优秀",
           value: fmtNum(s.sharpe_ratio),
-          color: s.sharpe_ratio != null ? (s.sharpe_ratio >= 1 ? "#26D97F" : s.sharpe_ratio >= 0 ? "#E8EAED" : "#EF5350") : undefined,
+          color: s.sharpe_ratio != null ? (s.sharpe_ratio >= 1 ? "var(--suc)" : s.sharpe_ratio >= 0 ? "var(--t0)" : "var(--dan)") : undefined,
         },
         {
           label: "Sortino Ratio",
           tooltip: "年化超额收益 / 下行波动率。只惩罚负收益，比 Sharpe 更公平",
           value: fmtNum(s.sortino_ratio),
-          color: s.sortino_ratio != null ? (s.sortino_ratio >= 1 ? "#26D97F" : s.sortino_ratio >= 0 ? "#E8EAED" : "#EF5350") : undefined,
+          color: s.sortino_ratio != null ? (s.sortino_ratio >= 1 ? "var(--suc)" : s.sortino_ratio >= 0 ? "var(--t0)" : "var(--dan)") : undefined,
         },
         {
           label: "Calmar Ratio",
           tooltip: "年化收益 / 最大回撤。衡量收益相对于最坏情况的能力",
           value: fmtNum(s.calmar_ratio),
-          color: s.calmar_ratio != null ? (s.calmar_ratio >= 1 ? "#26D97F" : s.calmar_ratio >= 0 ? "#E8EAED" : "#EF5350") : undefined,
+          color: s.calmar_ratio != null ? (s.calmar_ratio >= 1 ? "var(--suc)" : s.calmar_ratio >= 0 ? "var(--t0)" : "var(--dan)") : undefined,
         },
         {
           label: "Omega Ratio",
           tooltip: "收益概率加权的积极/消极比。>1 表示收益分布偏向盈利",
           value: fmtNum(s.omega_ratio),
-          color: s.omega_ratio != null ? (s.omega_ratio >= 1 ? "#26D97F" : "#EF5350") : undefined,
+          color: s.omega_ratio != null ? (s.omega_ratio >= 1 ? "var(--suc)" : "var(--dan)") : undefined,
         },
       ],
     },
@@ -1669,7 +1641,7 @@ function MetricsSummaryTable({
           label: "最大回撤",
           tooltip: "峰值到谷底的最大跌幅百分比",
           value: s.max_drawdown != null ? `${s.max_drawdown.toFixed(2)}%` : "N/A",
-          color: "#EF5350",
+          color: "var(--dan)",
         },
         {
           label: "最大回撤持续",
@@ -1680,25 +1652,25 @@ function MetricsSummaryTable({
           label: "恢复时间",
           tooltip: "最严重回撤从谷底恢复到新高的天数",
           value: worstDD?.recovery_days != null ? `${worstDD.recovery_days} 天` : "未恢复",
-          color: worstDD?.recovery_days == null ? "#EF5350" : undefined,
+          color: worstDD?.recovery_days == null ? "var(--dan)" : undefined,
         },
         {
           label: "VaR (95%)",
           tooltip: "95% 置信度下单日最大预期亏损",
           value: s.var_95 != null ? `${s.var_95.toFixed(2)}%` : "N/A",
-          color: "#EF5350",
+          color: "var(--dan)",
         },
         {
           label: "VaR (99%)",
           tooltip: "99% 置信度下单日最大预期亏损",
           value: s.var_99 != null ? `${s.var_99.toFixed(2)}%` : "N/A",
-          color: "#EF5350",
+          color: "var(--dan)",
         },
         {
           label: "CVaR (95%)",
           tooltip: "条件在险价值，超过 VaR 时的平均损失",
           value: s.cvar_95 != null ? `${s.cvar_95.toFixed(2)}%` : "N/A",
-          color: "#EF5350",
+          color: "var(--dan)",
         },
         {
           label: "下行偏差",
@@ -1719,7 +1691,7 @@ function MetricsSummaryTable({
           label: "偏度 (Skewness)",
           tooltip: "收益分布的不对称性。正偏=右尾更长，负偏=左尾更长",
           value: fmtNum(s.skewness, 3),
-          color: s.skewness != null ? (s.skewness > 0 ? "#26D97F" : "#EF5350") : undefined,
+          color: s.skewness != null ? (s.skewness > 0 ? "var(--suc)" : "var(--dan)") : undefined,
         },
         {
           label: "峰度 (Kurtosis)",
@@ -1730,19 +1702,19 @@ function MetricsSummaryTable({
           label: "尾部比率 (Tail Ratio)",
           tooltip: "95%分位 / |5%分位|，>1 表示上行尾部更厚",
           value: fmtNum(s.tail_ratio, 3),
-          color: s.tail_ratio != null ? (s.tail_ratio > 1 ? "#26D97F" : "#EF5350") : undefined,
+          color: s.tail_ratio != null ? (s.tail_ratio > 1 ? "var(--suc)" : "var(--dan)") : undefined,
         },
         {
           label: "稳定性 (R²)",
           tooltip: "累计收益对线性回归的拟合度，越接近 1 越稳定",
           value: fmtNum(s.stability, 4),
-          color: s.stability != null ? (s.stability > 0.8 ? "#26D97F" : "#EF5350") : undefined,
+          color: s.stability != null ? (s.stability > 0.8 ? "var(--suc)" : "var(--dan)") : undefined,
         },
         {
           label: "最大单日亏损",
           tooltip: "回测期间单日最大亏损率",
           value: s.max_daily_loss != null ? `${s.max_daily_loss.toFixed(2)}%` : "N/A",
-          color: "#EF5350",
+          color: "var(--dan)",
         },
       ],
     },
@@ -1754,7 +1726,7 @@ function MetricsSummaryTable({
           label: "Alpha",
           tooltip: "超越基准的年化超额收益",
           value: s.alpha != null ? `${(s.alpha * 100).toFixed(2)}%` : "N/A",
-          color: s.alpha != null ? (s.alpha > 0 ? "#26D97F" : "#EF5350") : undefined,
+          color: s.alpha != null ? (s.alpha > 0 ? "var(--suc)" : "var(--dan)") : undefined,
         },
         {
           label: "Beta",
@@ -1770,7 +1742,7 @@ function MetricsSummaryTable({
           label: "Information Ratio",
           tooltip: "超额收益 / 跟踪误差。衡量主动管理的效率",
           value: fmtNum(s.information_ratio, 3),
-          color: s.information_ratio != null ? (s.information_ratio > 0 ? "#26D97F" : "#EF5350") : undefined,
+          color: s.information_ratio != null ? (s.information_ratio > 0 ? "var(--suc)" : "var(--dan)") : undefined,
         },
       ],
     },
@@ -1778,7 +1750,7 @@ function MetricsSummaryTable({
 
   return (
     <GlassCard className="p-5">
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 block mb-4">
+      <span className="qds-section-label block">
         Performance 指标汇总
       </span>
       <div className="grid grid-cols-2 gap-6">
@@ -1786,22 +1758,22 @@ function MetricsSummaryTable({
           .filter((cat) => !cat.hidden)
           .map((cat) => (
             <div key={cat.title}>
-              <span className="text-[9px] font-semibold tracking-[1px] uppercase text-[var(--accent-blue)] opacity-70 block mb-2">
+              <span className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-info opacity-70 block mb-2">
                 {cat.title}
               </span>
               <div className="flex flex-col">
                 {cat.rows.map((row) => (
                   <div
                     key={row.label}
-                    className="flex items-center justify-between py-1.5 border-b border-white/[0.04] last:border-0"
+                    className="flex items-center justify-between py-1.5 border-b border last:border-0"
                   >
-                    <span className="text-[10px] text-muted-foreground/60 inline-flex items-center">
+                    <span className="text-[10px] text-muted-foreground inline-flex items-center">
                       {row.label}
                       <HelpTip text={row.tooltip} />
                     </span>
                     <span
-                      className="text-[11px] font-medium font-heading"
-                      style={{ color: row.color ?? "#E8EAED" }}
+                      className="text-[11px] font-medium font-mono"
+                      style={{ color: row.color ?? "var(--t0)" }}
                     >
                       {row.value}
                     </span>
@@ -1890,7 +1862,7 @@ export function PerformanceTab({ runId }: { runId: string }) {
   if (error || !result) {
     return (
       <div className="flex items-center justify-center h-48">
-        <span className="text-xs text-[var(--accent-red)]">
+        <span className="text-xs text-destructive">
           {error ?? "加载失败"}
         </span>
       </div>
@@ -1942,10 +1914,7 @@ export function PerformanceTab({ runId }: { runId: string }) {
       {/* ============================================================ */}
       {/* Section 2.1: 权益表现                                        */}
       {/* ============================================================ */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, delay: 0, ease: [0.22, 1, 0.36, 1] }}
+      <div
         className="flex flex-col gap-4"
       >
         <SectionHeader title="权益表现" index={0} />
@@ -2012,15 +1981,12 @@ export function PerformanceTab({ runId }: { runId: string }) {
             index={4}
           />
         </div>
-      </motion.div>
+      </div>
 
       {/* ============================================================ */}
       {/* Section 2.2: 周期收益                                        */}
       {/* ============================================================ */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, delay: 0.12, ease: [0.22, 1, 0.36, 1] }}
+      <div
         className="flex flex-col gap-4"
       >
         <SectionHeader title="周期收益" index={1} />
@@ -2067,15 +2033,12 @@ export function PerformanceTab({ runId }: { runId: string }) {
             index={2}
           />
         </div>
-      </motion.div>
+      </div>
 
       {/* ============================================================ */}
       {/* Section 2.3: 滚动分析                                        */}
       {/* ============================================================ */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, delay: 0.24, ease: [0.22, 1, 0.36, 1] }}
+      <div
         className="flex flex-col gap-4"
       >
         <SectionHeader title="滚动分析" index={2} />
@@ -2092,15 +2055,12 @@ export function PerformanceTab({ runId }: { runId: string }) {
 
         {/* Rolling returns — full width */}
         <RollingReturnsChart rollingReturns={rolling_returns} />
-      </motion.div>
+      </div>
 
       {/* ============================================================ */}
       {/* Section 2.4: 收益分布                                        */}
       {/* ============================================================ */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, delay: 0.36, ease: [0.22, 1, 0.36, 1] }}
+      <div
         className="flex flex-col gap-4"
       >
         <SectionHeader title="收益分布" index={3} />
@@ -2113,15 +2073,12 @@ export function PerformanceTab({ runId }: { runId: string }) {
           />
           <QQPlotChart qqData={qq_plot_data} />
         </div>
-      </motion.div>
+      </div>
 
       {/* ============================================================ */}
       {/* Section 2.5: Performance 指标汇总                             */}
       {/* ============================================================ */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, delay: 0.48, ease: [0.22, 1, 0.36, 1] }}
+      <div
         className="flex flex-col gap-4"
       >
         <SectionHeader title="Performance 指标汇总" index={4} />
@@ -2131,7 +2088,7 @@ export function PerformanceTab({ runId }: { runId: string }) {
           drawdownPeriods={drawdown_periods}
           benchmarkType={benchmark_type}
         />
-      </motion.div>
+      </div>
     </div>
   );
 }

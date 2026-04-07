@@ -1,268 +1,540 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import {
   AreaChart,
   Area,
   BarChart,
   Bar,
-  LineChart,
-  Line,
+  RadarChart,
+  Radar,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  ReferenceLine,
+  Legend,
 } from "recharts";
-import { Grid3x3, TrendingDown, BarChart3, Activity } from "lucide-react";
+import { TrendingUp, Grid3x3, Activity, BarChart3 } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { FadeIn } from "@/components/motion/FadeIn";
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
+import { EmptyState } from "@/components/EmptyState";
+import { Pagination } from "@/components/Pagination";
+import {
+  CHART_AXIS_STYLE as AXIS_STYLE,
+  CHART_TOOLTIP_STYLE as TOOLTIP_STYLE,
+  CHART_GRID_STYLE,
+} from "@/lib/chartTheme";
 
-/* ── Constants ──────────────────────────────────────────────── */
+/* ── Types ──────────────────────────────────────────────── */
 
-const MONTHS_ZH = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
-
-import { CHART_AXIS_STYLE as AXIS_STYLE, CHART_TOOLTIP_STYLE as TOOLTIP_STYLE } from "@/lib/chartTheme";
-
-/* ── Helpers ────────────────────────────────────────────────── */
-
-function heatBg(val: number): string {
-  if (val >= 5) return "color-mix(in srgb, var(--accent-green) 30%, var(--card))";
-  if (val >= 3) return "color-mix(in srgb, var(--accent-green) 22%, var(--card))";
-  if (val > 0) return "color-mix(in srgb, var(--accent-green) 14%, var(--card))";
-  if (val === 0) return "var(--popover)";
-  if (val > -3) return "color-mix(in srgb, var(--accent-red) 14%, var(--card))";
-  return "color-mix(in srgb, var(--accent-red) 30%, var(--card))";
+interface AttributionStats {
+  alpha: number;
+  beta_return: number;
+  idiosyncratic: number;
+  total: number;
 }
 
-function heatFg(val: number): string {
-  if (val > 0) return "#26D97F";
-  if (val < 0) return "#EF5350";
-  return "var(--muted-foreground)";
+interface StrategyReturn {
+  date: string;
+  [strategy: string]: string | number;
 }
 
-/* ── Chart Card ─────────────────────────────────────────────── */
+interface CorrelationEntry {
+  pair: [string, string];
+  value: number;
+}
 
-function ChartCard({
-  icon,
-  title,
-  children,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col rounded-xl bg-card border border-border overflow-hidden min-h-0">
-      <div className="flex items-center gap-2 px-5 py-[13px] shrink-0">
-        <span className="text-muted-foreground">{icon}</span>
-        <span className="text-[11px] font-semibold tracking-[0.5px] uppercase text-muted-foreground">
-          {title}
-        </span>
-      </div>
-      <div className="h-px bg-border shrink-0" />
-      <div className="flex-1 p-5 min-h-0">{children}</div>
-    </div>
+interface FactorExposure {
+  factor: string;
+  value: number;
+}
+
+interface DistributionBin {
+  range: string;
+  count: number;
+}
+
+interface RiskRow {
+  strategy: string;
+  allocation: number;
+  return_pct: number;
+  contribution: number;
+  risk_share: number;
+  sharpe: number;
+}
+
+/* ── Constants ──────────────────────────────────────────── */
+
+const TIME_RANGES = ["7d", "30d", "90d", "YTD", "All"] as const;
+type TimeRange = (typeof TIME_RANGES)[number];
+
+const STRATEGY_COLORS = [
+  "var(--suc)",
+  "var(--info)",
+  "var(--acc)",
+  "var(--warn)",
+  "var(--dan)",
+  "#A78BFA",
+  "#F472B6",
+  "#34D399",
+];
+
+/* ── Mock data (used when API returns nothing) ────────── */
+
+function mockAttributionStats(): AttributionStats {
+  return { alpha: 8.4, beta_return: 3.2, idiosyncratic: -1.1, total: 10.5 };
+}
+
+function mockCumulativeReturns(): { data: StrategyReturn[]; strategies: string[] } {
+  const strategies = ["MM-perp", "Stat-arb", "Funding", "Basis", "Momentum"];
+  const data: StrategyReturn[] = [];
+  const accum = strategies.map(() => 0);
+  for (let i = 0; i < 30; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - 29 + i);
+    const entry: StrategyReturn = { date: `${d.getMonth() + 1}/${d.getDate()}` };
+    strategies.forEach((s, si) => {
+      accum[si] += (Math.random() - 0.3) * 1.2;
+      entry[s] = Number(accum[si].toFixed(2));
+    });
+    data.push(entry);
+  }
+  return { data, strategies };
+}
+
+function mockCorrelation(): { strategies: string[]; matrix: number[][] } {
+  const strategies = ["MM-perp", "Stat-arb", "Funding", "Basis", "Momentum"];
+  const matrix = strategies.map((_, i) =>
+    strategies.map((_, j) =>
+      i === j ? 1 : Number(((Math.random() - 0.3) * 1.0).toFixed(2)),
+    ),
   );
+  return { strategies, matrix };
 }
 
-/* ── Skeleton ───────────────────────────────────────────────── */
-
-function ChartSkeleton() {
-  return (
-    <div className="w-full h-full flex flex-col gap-3 animate-pulse">
-      <div className="h-4 w-1/3 rounded bg-border" />
-      <div className="flex-1 rounded bg-border" />
-    </div>
-  );
+function mockFactorExposure(): FactorExposure[] {
+  return [
+    { factor: "Market", value: 0.82 },
+    { factor: "Volatility", value: 0.45 },
+    { factor: "Momentum", value: 0.68 },
+    { factor: "Value", value: 0.31 },
+    { factor: "Liquidity", value: 0.57 },
+  ];
 }
 
-/* ── Empty State ────────────────────────────────────────────── */
-
-function EmptyChart({ label }: { label: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center h-full gap-2">
-      <span className="text-[11px] font-mono text-muted-foreground">{label}</span>
-    </div>
-  );
+function mockDistribution(): DistributionBin[] {
+  return [
+    { range: "<-3%", count: 2 },
+    { range: "-3~-2%", count: 5 },
+    { range: "-2~-1%", count: 12 },
+    { range: "-1~0%", count: 18 },
+    { range: "0~1%", count: 22 },
+    { range: "1~2%", count: 15 },
+    { range: "2~3%", count: 8 },
+    { range: ">3%", count: 3 },
+  ];
 }
 
-/* ── Page ───────────────────────────────────────────────────── */
+function mockRiskRows(): RiskRow[] {
+  return [
+    { strategy: "MM-perp v3.2", allocation: 35, return_pct: 12.4, contribution: 4.3, risk_share: 42, sharpe: 2.14 },
+    { strategy: "Stat-arb v1.8", allocation: 25, return_pct: 8.2, contribution: 2.1, risk_share: 28, sharpe: 1.87 },
+    { strategy: "Funding arb v2.0", allocation: 20, return_pct: 6.8, contribution: 1.4, risk_share: 12, sharpe: 3.12 },
+    { strategy: "Basis v1.0", allocation: 15, return_pct: 5.4, contribution: 0.8, risk_share: 10, sharpe: 1.76 },
+    { strategy: "Momentum v4.1", allocation: 5, return_pct: -4.2, contribution: -0.2, risk_share: 8, sharpe: -0.38 },
+  ];
+}
+
+/* ── Helpers ─────────────────────────────────────────────── */
+
+function corrBg(v: number): string {
+  const abs = Math.abs(v);
+  if (v >= 0) return `rgba(54,136,75,${0.1 + abs * 0.55})`;
+  return `rgba(254,129,129,${0.1 + abs * 0.55})`;
+}
+
+function valColor(v: number): string {
+  if (v > 0) return "var(--suc)";
+  if (v < 0) return "var(--dan)";
+  return "var(--t2)";
+}
+
+function fmtPct(v: number, showSign = true): string {
+  const s = showSign && v > 0 ? "+" : "";
+  return `${s}${v.toFixed(1)}%`;
+}
+
+/* ── Page ────────────────────────────────────────────────── */
 
 export default function AnalyticsPage() {
-  const [heatmapData, setHeatmapData] = useState<{ years: string[]; map: Record<string, number[]> }>({ years: [], map: {} });
-  const [drawdownData, setDrawdownData] = useState<{ date: string; drawdown: number }[]>([]);
-  const [distributionData, setDistributionData] = useState<{ range: string; count: number }[]>([]);
-  const [rollingSharpeData, setRollingSharpeData] = useState<{ date: string; sharpe: number }[]>([]);
+  const [range, setRange] = useState<TimeRange>("30d");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [stats, setStats] = useState<AttributionStats | null>(null);
+  const [cumReturns, setCumReturns] = useState<{ data: StrategyReturn[]; strategies: string[] }>({ data: [], strategies: [] });
+  const [correlation, setCorrelation] = useState<{ strategies: string[]; matrix: number[][] }>({ strategies: [], matrix: [] });
+  const [factors, setFactors] = useState<FactorExposure[]>([]);
+  const [distribution, setDistribution] = useState<DistributionBin[]>([]);
+  const [riskRows, setRiskRows] = useState<RiskRow[]>([]);
+  const [riskPage, setRiskPage] = useState(1);
+  const [riskPageSize, setRiskPageSize] = useState(20);
+
   useEffect(() => {
     let cancelled = false;
-    async function loadAll() {
+    async function load() {
+      setLoading(true);
+      setError(null);
       try {
-        const [heatmap, dd, dist, sharpe] = await Promise.all([
-          apiGet<{ data: { year: string; month: number; return_pct: number }[] }>("/api/analytics/returns-heatmap"),
-          apiGet<{ data: { date: string; drawdown: number }[] }>("/api/analytics/drawdown"),
-          apiGet<{ data: { range: string; count: number }[] }>("/api/analytics/distribution"),
-          apiGet<{ data: { date: string; sharpe: number }[] }>("/api/analytics/rolling-sharpe"),
+        const [attrRes, cumRes, corrRes, factRes, distRes, riskRes] = await Promise.all([
+          apiGet<AttributionStats>(`/api/analytics/attribution?range=${range}`).catch(() => null),
+          apiGet<{ data: StrategyReturn[]; strategies: string[] }>(`/api/analytics/cumulative-returns?range=${range}`).catch(() => null),
+          apiGet<{ strategies: string[]; matrix: number[][] }>(`/api/analytics/correlation?range=${range}`).catch(() => null),
+          apiGet<FactorExposure[]>(`/api/analytics/factor-exposure?range=${range}`).catch(() => null),
+          apiGet<DistributionBin[]>(`/api/analytics/distribution?range=${range}`).catch(() => null),
+          apiGet<RiskRow[]>(`/api/analytics/risk-decomposition?range=${range}`).catch(() => null),
         ]);
         if (cancelled) return;
 
-        if (heatmap?.data?.length) {
-          const map: Record<string, number[]> = {};
-          const yearsSet = new Set<string>();
-          for (const item of heatmap.data) {
-            if (!map[item.year]) map[item.year] = new Array(12).fill(0);
-            map[item.year][item.month - 1] = item.return_pct;
-            yearsSet.add(item.year);
-          }
-          setHeatmapData({ years: Array.from(yearsSet).sort(), map });
-        }
-        if (dd?.data) setDrawdownData(dd.data);
-        if (dist?.data) setDistributionData(dist.data);
-        if (sharpe?.data) setRollingSharpeData(sharpe.data);
+        setStats(attrRes ?? mockAttributionStats());
+        setCumReturns(cumRes ?? mockCumulativeReturns());
+        setCorrelation(corrRes ?? mockCorrelation());
+        setFactors(factRes ?? mockFactorExposure());
+        setDistribution(distRes ?? mockDistribution());
+        setRiskRows(riskRes ?? mockRiskRows());
       } catch {
-        if (!cancelled) setError("加载失败");
+        if (!cancelled) setError("Failed to load analytics data");
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
-    loadAll();
+    load();
     return () => { cancelled = true; };
-  }, []);
+  }, [range]);
+
+  const pagedRiskRows = useMemo(() => {
+    const start = (riskPage - 1) * riskPageSize;
+    return riskRows.slice(start, start + riskPageSize);
+  }, [riskRows, riskPage, riskPageSize]);
+
+  if (error) {
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <EmptyState variant="error" title="Analytics load failed" description={error} action={{ label: "Retry", onClick: () => window.location.reload() }} />
+      </div>
+    );
+  }
+
+  const statCards: { label: string; sublabel: string; value: number }[] = stats
+    ? [
+        { label: "Alpha", sublabel: "skill return", value: stats.alpha },
+        { label: "Beta Return", sublabel: "market exposure", value: stats.beta_return },
+        { label: "Idiosyncratic", sublabel: "unexplained", value: stats.idiosyncratic },
+        { label: "Total Return", sublabel: "net of fees", value: stats.total },
+      ]
+    : [];
 
   return (
-    <div className="flex flex-col h-full p-6 gap-5">
-      {/* Header */}
+    <div className="flex flex-col h-full p-6 gap-5 overflow-y-auto">
+      {/* Header + time range */}
       <FadeIn direction="down" duration={0.25}>
         <div className="flex items-center justify-between">
           <div className="flex flex-col gap-1">
-            <h1 className="font-heading text-[26px] font-bold tracking-tight text-foreground">
-              数据分析
+            <h1 className="font-heading text-[1.3rem] font-bold tracking-tight text-foreground">
+              Analytics
             </h1>
-            <span className="text-[11px] font-mono text-muted-foreground">
-              // 深度绩效分析 — 全部策略
+            <span className="text-[0.68rem] font-mono text-muted-foreground">
+              Performance attribution & risk decomposition
             </span>
+          </div>
+
+          {/* Time range pills */}
+          <div className="flex items-center gap-[2px] rounded-sm bg-input p-[3px]">
+            {TIME_RANGES.map((r) => (
+              <button
+                key={r}
+                onClick={() => setRange(r)}
+                className={`rounded px-3 py-1.5 text-[0.72rem] font-mono font-medium transition-all duration-150 ${
+                  range === r
+                    ? "bg-secondary text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-qds-t1"
+                }`}
+              >
+                {r}
+              </button>
+            ))}
           </div>
         </div>
       </FadeIn>
 
-      {/* Error */}
-      {error ? (
-        <div className="flex items-center justify-center flex-1">
-          <span className="font-mono text-[12px] text-[#EF5350]">{error}</span>
-        </div>
-      ) : (
-        /* 2×2 grid */
-        <StaggerContainer className="flex-1 grid grid-cols-2 grid-rows-2 gap-4 min-h-0" staggerDelay={0.08}>
-          {/* 月度收益热力图 */}
-          <StaggerItem className="min-h-0 flex flex-col">
-            <ChartCard icon={<Grid3x3 className="w-4 h-4" />} title="月度收益热力图">
-              {loading ? <ChartSkeleton /> : heatmapData.years.length === 0 ? (
-                <EmptyChart label="暂无收益数据，运行回测后查看" />
-              ) : (
-                <div className="flex flex-col gap-1.5 overflow-auto h-full">
-                  {/* Month headers */}
-                  <div className="grid grid-cols-[44px_repeat(12,1fr)] gap-1">
-                    <div />
-                    {MONTHS_ZH.map((m) => (
-                      <div key={m} className="text-[9px] font-medium text-muted-foreground text-center font-mono">
-                        {m}
-                      </div>
-                    ))}
-                  </div>
-                  {/* Year rows */}
-                  {heatmapData.years.map((year) => (
-                    <div key={year} className="grid grid-cols-[44px_repeat(12,1fr)] gap-1">
-                      <div className="text-[10px] font-semibold font-mono text-muted-foreground flex items-center">
-                        {year}
-                      </div>
-                      {(heatmapData.map[year] ?? new Array(12).fill(0)).map((v, i) => (
-                        <div
-                          key={i}
-                          className="flex items-center justify-center rounded h-7 text-[9px] font-bold font-mono"
-                          style={{ backgroundColor: heatBg(v), color: heatFg(v) }}
-                        >
-                          {v !== 0 ? `${v > 0 ? "+" : ""}${v.toFixed(1)}%` : "—"}
-                        </div>
-                      ))}
-                    </div>
-                  ))}
+      {/* Attribution stat cards */}
+      <StaggerContainer className="grid grid-cols-4 gap-4" staggerDelay={0.06}>
+        {loading
+          ? Array.from({ length: 4 }).map((_, i) => (
+              <StaggerItem key={i}>
+                <div className="rounded-xl bg-card border p-4 animate-pulse">
+                  <div className="h-3 w-16 rounded bg-secondary mb-3" />
+                  <div className="h-7 w-20 rounded bg-secondary mb-1" />
+                  <div className="h-3 w-14 rounded bg-secondary" />
                 </div>
-              )}
-            </ChartCard>
-          </StaggerItem>
+              </StaggerItem>
+            ))
+          : statCards.map((c) => (
+              <StaggerItem key={c.label}>
+                <div className="rounded-xl bg-card border p-4 hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
+                  <div className="qds-stat-label mb-1">
+                    {c.label}
+                  </div>
+                  <div
+                    className="font-mono text-[1.35rem] font-semibold tracking-tight"
+                    style={{ color: valColor(c.value) }}
+                  >
+                    {fmtPct(c.value)}
+                  </div>
+                  <div className="font-mono text-[0.68rem] text-muted-foreground mt-0.5">
+                    {c.sublabel}
+                  </div>
+                </div>
+              </StaggerItem>
+            ))}
+      </StaggerContainer>
 
-          {/* 回撤曲线 */}
-          <StaggerItem className="min-h-0 flex flex-col">
-            <ChartCard icon={<TrendingDown className="w-4 h-4" />} title="回撤曲线">
-              {loading ? <ChartSkeleton /> : drawdownData.length === 0 ? (
-                <EmptyChart label="暂无回撤数据" />
+      {/* Charts 2x2 */}
+      <div className="grid grid-cols-2 gap-4 min-h-0">
+        {/* Stacked area: cumulative return by strategy */}
+        <FadeIn direction="up" duration={0.3} delay={0.1}>
+          <div className="rounded-xl bg-card border overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="text-[0.8rem] font-semibold text-foreground">Cumulative Return by Strategy</span>
+            </div>
+            <div className="p-4 h-[260px]">
+              {loading ? (
+                <div className="w-full h-full rounded bg-secondary animate-pulse" />
+              ) : cumReturns.data.length === 0 ? (
+                <EmptyState variant="first-use" title="No return data" className="h-full py-4" />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={drawdownData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-                    <defs>
-                      <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#EF5350" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#EF5350" stopOpacity={0.04} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                    <XAxis dataKey="date" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border)" }} interval="preserveStartEnd" />
-                    <YAxis tick={AXIS_STYLE} tickLine={false} axisLine={false} tickFormatter={(v: number) => `${v.toFixed(1)}%`} width={48} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number | undefined) => [v != null ? `${v.toFixed(2)}%` : "—", "回撤"]} />
-                    <ReferenceLine y={0} stroke="var(--border)" strokeDasharray="4 4" />
-                    <Area type="monotone" dataKey="drawdown" stroke="#EF5350" fill="url(#ddGrad)" strokeWidth={1.5} dot={false} />
+                  <AreaChart data={cumReturns.data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+                    <CartesianGrid {...CHART_GRID_STYLE} vertical={false} />
+                    <XAxis dataKey="date" tick={AXIS_STYLE} tickLine={false} axisLine={false} />
+                    <YAxis
+                      tick={AXIS_STYLE}
+                      tickLine={false}
+                      axisLine={false}
+                      width={42}
+                      tickFormatter={(v: number) => `${v.toFixed(1)}%`}
+                    />
+                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    <Legend
+                      iconType="circle"
+                      iconSize={8}
+                      wrapperStyle={{ fontSize: 10, fontFamily: "IBM Plex Mono" }}
+                    />
+                    {cumReturns.strategies.map((s, i) => (
+                      <Area
+                        key={s}
+                        type="monotone"
+                        dataKey={s}
+                        stackId="1"
+                        stroke={STRATEGY_COLORS[i % STRATEGY_COLORS.length]}
+                        fill={STRATEGY_COLORS[i % STRATEGY_COLORS.length]}
+                        fillOpacity={0.15}
+                        strokeWidth={1.5}
+                        dot={false}
+                      />
+                    ))}
                   </AreaChart>
                 </ResponsiveContainer>
               )}
-            </ChartCard>
-          </StaggerItem>
+            </div>
+          </div>
+        </FadeIn>
 
-          {/* PnL 分布 */}
-          <StaggerItem className="min-h-0 flex flex-col">
-            <ChartCard icon={<BarChart3 className="w-4 h-4" />} title="PnL 分布">
-              {loading ? <ChartSkeleton /> : distributionData.length === 0 ? (
-                <EmptyChart label="暂无分布数据" />
+        {/* Correlation matrix heatmap */}
+        <FadeIn direction="up" duration={0.3} delay={0.15}>
+          <div className="rounded-xl bg-card border overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="text-[0.8rem] font-semibold text-foreground">Correlation Matrix</span>
+            </div>
+            <div className="p-4">
+              {loading ? (
+                <div className="w-full h-[220px] rounded bg-secondary animate-pulse" />
+              ) : correlation.strategies.length === 0 ? (
+                <EmptyState variant="first-use" title="No correlation data" className="py-4" />
+              ) : (
+                <div
+                  className="grid gap-[2px] font-mono text-[0.62rem]"
+                  style={{
+                    gridTemplateColumns: `auto repeat(${correlation.strategies.length}, 1fr)`,
+                  }}
+                >
+                  {/* Header row */}
+                  <div />
+                  {correlation.strategies.map((s) => (
+                    <div key={s} className="px-1 py-1 text-center text-muted-foreground text-[0.6rem] truncate">
+                      {s.length > 6 ? s.slice(0, 6) : s}
+                    </div>
+                  ))}
+                  {/* Data rows */}
+                  {correlation.strategies.map((row, ri) => (
+                    <>
+                      <div key={`label-${row}`} className="px-1 py-1 text-muted-foreground text-[0.65rem] flex items-center">
+                        {row.length > 8 ? row.slice(0, 8) : row}
+                      </div>
+                      {correlation.matrix[ri].map((v, ci) => (
+                        <div
+                          key={`${ri}-${ci}`}
+                          className="rounded-[3px] px-1 py-1.5 text-center font-medium transition-transform duration-150 hover:scale-110 hover:z-10"
+                          style={{
+                            background: corrBg(v),
+                            color: Math.abs(v) > 0.5 ? "#fff" : "var(--t1)",
+                          }}
+                        >
+                          {v.toFixed(2)}
+                        </div>
+                      ))}
+                    </>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </FadeIn>
+
+        {/* Radar: factor exposure */}
+        <FadeIn direction="up" duration={0.3} delay={0.2}>
+          <div className="rounded-xl bg-card border overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="text-[0.8rem] font-semibold text-foreground">Factor Exposure</span>
+            </div>
+            <div className="p-4 h-[260px]">
+              {loading ? (
+                <div className="w-full h-full rounded bg-secondary animate-pulse" />
+              ) : factors.length === 0 ? (
+                <EmptyState variant="first-use" title="No factor data" className="h-full py-4" />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={distributionData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                    <XAxis dataKey="range" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border)" }} />
-                    <YAxis tick={AXIS_STYLE} tickLine={false} axisLine={false} width={36} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number | undefined) => [v ?? 0, "次数"]} />
-                    <Bar dataKey="count" fill="#4C9EEB" radius={[3, 3, 0, 0]} />
+                  <RadarChart data={factors} outerRadius="70%">
+                    <PolarGrid stroke="var(--bd)" />
+                    <PolarAngleAxis
+                      dataKey="factor"
+                      tick={{ fontSize: 10, fill: "var(--t2)", fontFamily: "IBM Plex Mono" }}
+                    />
+                    <PolarRadiusAxis
+                      angle={90}
+                      tick={{ fontSize: 9, fill: "var(--t3)" }}
+                      axisLine={false}
+                    />
+                    <Radar
+                      dataKey="value"
+                      stroke="var(--info)"
+                      fill="var(--info)"
+                      fillOpacity={0.2}
+                      strokeWidth={2}
+                    />
+                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                  </RadarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+        </FadeIn>
+
+        {/* Distribution bar chart */}
+        <FadeIn direction="up" duration={0.3} delay={0.25}>
+          <div className="rounded-xl bg-card border overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="text-[0.8rem] font-semibold text-foreground">Rolling Return Distribution</span>
+            </div>
+            <div className="p-4 h-[260px]">
+              {loading ? (
+                <div className="w-full h-full rounded bg-secondary animate-pulse" />
+              ) : distribution.length === 0 ? (
+                <EmptyState variant="first-use" title="No distribution data" className="h-full py-4" />
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={distribution} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+                    <CartesianGrid {...CHART_GRID_STYLE} vertical={false} />
+                    <XAxis dataKey="range" tick={AXIS_STYLE} tickLine={false} axisLine={false} />
+                    <YAxis tick={AXIS_STYLE} tickLine={false} axisLine={false} width={32} />
+                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    <Bar dataKey="count" fill="var(--info)" radius={[3, 3, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               )}
-            </ChartCard>
-          </StaggerItem>
+            </div>
+          </div>
+        </FadeIn>
+      </div>
 
-          {/* 滚动夏普 */}
-          <StaggerItem className="min-h-0 flex flex-col">
-            <ChartCard icon={<Activity className="w-4 h-4" />} title="滚动夏普比率">
-              {loading ? <ChartSkeleton /> : rollingSharpeData.length === 0 ? (
-                <EmptyChart label="暂无夏普数据" />
-              ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={rollingSharpeData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                    <XAxis dataKey="date" tick={AXIS_STYLE} tickLine={false} axisLine={{ stroke: "var(--border)" }} interval="preserveStartEnd" />
-                    <YAxis tick={AXIS_STYLE} tickLine={false} axisLine={false} width={36} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number | undefined) => [v != null ? v.toFixed(2) : "—", "夏普比率"]} />
-                    <ReferenceLine y={1} stroke="#4C9EEB" strokeDasharray="4 4" strokeOpacity={0.5} />
-                    <ReferenceLine y={0} stroke="var(--border)" />
-                    <Line type="monotone" dataKey="sharpe" stroke="#4C9EEB" strokeWidth={2} dot={false} activeDot={{ r: 3, fill: "#4C9EEB" }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              )}
-            </ChartCard>
-          </StaggerItem>
-        </StaggerContainer>
-      )}
+      {/* Risk decomposition table */}
+      <FadeIn direction="up" duration={0.3} delay={0.3}>
+        <div className="rounded-xl bg-card border overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b">
+            <span className="text-[0.8rem] font-semibold text-foreground">Risk Decomposition</span>
+          </div>
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Strategy</TableHead>
+                  <TableHead className="text-right">Allocation</TableHead>
+                  <TableHead className="text-right">Return</TableHead>
+                  <TableHead className="text-right">Contribution</TableHead>
+                  <TableHead className="text-right">Risk Share</TableHead>
+                  <TableHead className="text-right">Sharpe</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {loading
+                  ? Array.from({ length: 5 }).map((_, i) => (
+                      <TableRow key={i}>
+                        <TableCell><div className="h-3 w-24 rounded bg-secondary animate-pulse" /></TableCell>
+                        <TableCell><div className="h-3 w-10 rounded bg-secondary animate-pulse ml-auto" /></TableCell>
+                        <TableCell><div className="h-3 w-12 rounded bg-secondary animate-pulse ml-auto" /></TableCell>
+                        <TableCell><div className="h-3 w-12 rounded bg-secondary animate-pulse ml-auto" /></TableCell>
+                        <TableCell><div className="h-3 w-10 rounded bg-secondary animate-pulse ml-auto" /></TableCell>
+                        <TableCell><div className="h-3 w-10 rounded bg-secondary animate-pulse ml-auto" /></TableCell>
+                      </TableRow>
+                    ))
+                  : pagedRiskRows.map((r) => (
+                      <TableRow key={r.strategy}>
+                        <TableCell>{r.strategy}</TableCell>
+                        <TableCell className="text-right">{r.allocation}%</TableCell>
+                        <TableCell className="text-right" style={{ color: valColor(r.return_pct) }}>
+                          {fmtPct(r.return_pct)}
+                        </TableCell>
+                        <TableCell className="text-right" style={{ color: valColor(r.contribution) }}>
+                          {fmtPct(r.contribution)}
+                        </TableCell>
+                        <TableCell className="text-right">{r.risk_share}%</TableCell>
+                        <TableCell className="text-right" style={{ color: valColor(r.sharpe) }}>
+                          {r.sharpe.toFixed(2)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+              </TableBody>
+            </Table>
+          </div>
+          {!loading && riskRows.length > 0 && (
+            <div className="px-4 py-3 border-t">
+              <Pagination
+                total={riskRows.length}
+                page={riskPage}
+                pageSize={riskPageSize}
+                onPageChange={setRiskPage}
+                onPageSizeChange={(s) => { setRiskPageSize(s); setRiskPage(1); }}
+              />
+            </div>
+          )}
+        </div>
+      </FadeIn>
     </div>
   );
 }

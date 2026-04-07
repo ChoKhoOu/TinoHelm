@@ -15,6 +15,7 @@ import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContai
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { HelpTip } from "@/components/qds";
 import { API_BASE } from "@/lib/api";
 import { useCountUp } from "@/hooks/useCountUp";
 import type { BacktestResult, MonthlyReturn, DrawdownPeriod, PerInstrumentEntry } from "../types";
@@ -48,7 +49,7 @@ function stripVenue(s: string): string {
   return s.replace(/\.BINANCE$/i, "");
 }
 
-const pnlColor = (v: number) => (v >= 0 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]");
+const pnlColor = (v: number) => (v >= 0 ? "text-qds-success" : "text-destructive");
 
 /* ------------------------------------------------------------------ */
 /*  Section label                                                      */
@@ -56,7 +57,7 @@ const pnlColor = (v: number) => (v >= 0 ? "text-[var(--accent-green)]" : "text-[
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-muted-foreground">
+    <span className="qds-section-label">
       {children}
     </span>
   );
@@ -68,7 +69,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={`rounded-lg bg-popover border border-border p-4 ${className}`}>
+    <div className={`rounded-lg bg-input border p-4 ${className}`}>
       {children}
     </div>
   );
@@ -88,7 +89,7 @@ function StatRow({ label, value, color }: { label: string; value: string; color?
 }
 
 /* ------------------------------------------------------------------ */
-/*  KPI Card                                                           */
+/*  KPI Card (used in secondary row)                                   */
 /* ------------------------------------------------------------------ */
 
 interface KpiCardProps {
@@ -124,57 +125,18 @@ function KpiCard({ label, value, format, positive, prefix = "", suffix = "", sho
     positive === null || positive === undefined
       ? "text-foreground"
       : positive
-      ? "text-[var(--accent-green)]"
-      : "text-[var(--accent-red)]";
+      ? "text-qds-success"
+      : "text-destructive";
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg bg-popover border border-border p-4">
-      <span className="text-[10px] font-semibold tracking-[0.5px] uppercase text-muted-foreground">
+    <div className="flex flex-col gap-1.5 rounded-lg bg-input border p-4">
+      <span className="qds-section-label">
         {label}
       </span>
-      <span className={`${small ? "text-lg" : "text-2xl"} font-bold font-heading tracking-tight ${colorClass}`}>
+      <span className={`${small ? "text-lg" : "text-2xl"} font-bold font-mono tracking-tight ${colorClass}`}>
         {prefix}{formatted}{suffix}
       </span>
     </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Hero PnL Banner                                                    */
-/* ------------------------------------------------------------------ */
-
-function HeroBanner({ s }: { s: BacktestResult["statistics"] }) {
-  const pnl = s.total_pnl;
-  const retPct = s.total_return_pct;
-  const isPositive = pnl >= 0;
-
-  // Parse final balance (e.g. "10114.60 USDT" → 10114.60)
-  const finalBal = s.final_balance
-    ? parseFloat(s.final_balance.split(" ")[0])
-    : null;
-
-  return (
-    <Card className="flex items-center justify-between">
-      <div className="flex flex-col gap-1">
-        <SectionLabel>总盈亏</SectionLabel>
-        <div className="flex items-baseline gap-3">
-          <span className={`text-3xl font-bold font-heading tracking-tight ${isPositive ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}`}>
-            {fmtSigned(pnl, 2)} USDT
-          </span>
-          <span className={`text-sm font-semibold ${isPositive ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}`}>
-            ({fmtSigned(retPct, 2)}%)
-          </span>
-        </div>
-      </div>
-      {finalBal !== null && (
-        <div className="flex flex-col items-end gap-1">
-          <SectionLabel>最终余额</SectionLabel>
-          <span className="text-xl font-bold font-heading text-foreground">
-            {fmtCurrency(finalBal)}
-          </span>
-        </div>
-      )}
-    </Card>
   );
 }
 
@@ -191,15 +153,15 @@ function WinLossBar({ s }: { s: BacktestResult["statistics"] }) {
     <Card className="flex flex-col gap-3">
       <SectionLabel>胜负分布</SectionLabel>
       <div className="flex items-center gap-3">
-        <span className="text-xs font-medium text-[var(--accent-green)]">{s.winning_trades}W</span>
-        <div className="flex-1 h-3 rounded-full overflow-hidden bg-[var(--accent-red)]/30 flex">
+        <span className="text-xs font-medium text-qds-success">{s.winning_trades}W</span>
+        <div className="flex-1 h-3 rounded-full overflow-hidden bg-[var(--dan)]/30 flex">
           <div
-            className="h-full rounded-l-full bg-[var(--accent-green)]"
+            className="h-full rounded-l-full bg-[var(--suc)]"
             style={{ width: `${winPct}%` }}
           />
-          <div className="h-full flex-1 bg-[var(--accent-red)]" />
+          <div className="h-full flex-1 bg-[var(--dan)]" />
         </div>
-        <span className="text-xs font-medium text-[var(--accent-red)]">{s.losing_trades}L</span>
+        <span className="text-xs font-medium text-destructive">{s.losing_trades}L</span>
       </div>
       <div className="flex items-center justify-between text-[10px] text-muted-foreground">
         <span>总计 {total} 笔 · 胜率 {fmt(winPct, 1)}%</span>
@@ -228,9 +190,9 @@ function LongShortBar({ s }: { s: BacktestResult["statistics"] }) {
             className="h-full rounded-l-full bg-primary"
             style={{ width: `${longPct}%` }}
           />
-          <div className="h-full flex-1 bg-[#D4A843]" />
+          <div className="h-full flex-1 bg-[var(--warn)]" />
         </div>
-        <span className="text-xs font-medium text-[#D4A843]">做空</span>
+        <span className="text-xs font-medium text-qds-warning">做空</span>
       </div>
       <div className="flex items-center justify-between text-[10px] text-muted-foreground">
         <span>做多 {fmt(longPct, 1)}%</span>
@@ -309,13 +271,13 @@ function MonthlyHeatmap({ data }: { data: MonthlyReturn[] }) {
                         {val !== undefined ? (
                           <Tooltip>
                             <TooltipTrigger className="w-full h-full flex items-center justify-center">
-                              <span className={val >= 0 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+                              <span className={val >= 0 ? "text-qds-success" : "text-destructive"}>
                                 {val >= 0 ? "+" : ""}{Math.abs(val) > 99 ? `${fmt(val, 0)}` : fmt(val, 1)}%
                               </span>
                             </TooltipTrigger>
                             <TooltipContent>
                               <span className="font-medium">{yr}年{MONTHS[m]}</span>
-                              <span className={val >= 0 ? "text-green-400" : "text-red-400"}>
+                              <span className={val >= 0 ? "text-qds-success" : "text-destructive"}>
                                 {" "}{fmtSigned(val, 2)}%
                               </span>
                             </TooltipContent>
@@ -350,10 +312,10 @@ function TopTrades({ tradeLog }: { tradeLog: BacktestResult["trade_log"] }) {
   const renderTrade = (t: (typeof tradeLog)[0], idx: number) => {
     const pnl = Number(t.realized_pnl);
     return (
-      <div key={idx} className="flex items-center justify-between py-1 border-b border-border/30 last:border-0">
+      <div key={idx} className="flex items-center justify-between py-1 border-b border last:border-0">
         <div className="flex items-center gap-2">
           <span className="text-xs text-primary font-medium w-28 truncate">{stripVenue(t.instrument)}</span>
-          <span className={`text-[10px] font-medium ${t.side === "BUY" ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}`}>
+          <span className={`text-[10px] font-medium ${t.side === "BUY" ? "text-qds-success" : "text-destructive"}`}>
             {t.side}
           </span>
         </div>
@@ -371,13 +333,13 @@ function TopTrades({ tradeLog }: { tradeLog: BacktestResult["trade_log"] }) {
       <div className="grid grid-cols-2 gap-4">
         {best.length > 0 && (
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] font-medium text-[var(--accent-green)] mb-1">最佳交易</span>
+            <span className="text-[10px] font-medium text-qds-success mb-1">最佳交易</span>
             {best.map(renderTrade)}
           </div>
         )}
         {worst.length > 0 && (
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] font-medium text-[var(--accent-red)] mb-1">最差交易</span>
+            <span className="text-[10px] font-medium text-destructive mb-1">最差交易</span>
             {worst.map(renderTrade)}
           </div>
         )}
@@ -400,7 +362,7 @@ function DrawdownTable({ periods }: { periods: DrawdownPeriod[] }) {
       <div className="overflow-x-auto">
         <Table className="w-full text-xs">
           <TableHeader>
-            <TableRow className="border-b border-border text-muted-foreground">
+            <TableRow className="border-b border text-muted-foreground">
               <TableHead className="text-left py-1.5 pr-3 font-medium">开始日期</TableHead>
               <TableHead className="text-right py-1.5 pr-3 font-medium">最大回撤</TableHead>
               <TableHead className="text-right py-1.5 pr-3 font-medium">持续天数</TableHead>
@@ -409,15 +371,15 @@ function DrawdownTable({ periods }: { periods: DrawdownPeriod[] }) {
           </TableHeader>
           <TableBody>
             {top5.map((dd, i) => (
-              <TableRow key={i} className="border-b border-border/30">
+              <TableRow key={i} className="border-b border">
                 <TableCell className="py-1.5 pr-3 text-muted-foreground">{dd.start.slice(0, 10)}</TableCell>
-                <TableCell className="py-1.5 pr-3 text-right text-[var(--accent-red)] font-medium">
+                <TableCell className="py-1.5 pr-3 text-right text-destructive font-medium">
                   {fmt(dd.max_drawdown_pct, 2)}%
                 </TableCell>
                 <TableCell className="py-1.5 pr-3 text-right text-muted-foreground">{dd.duration_days}天</TableCell>
                 <TableCell className="py-1.5 text-right">
                   {dd.recovery_days !== null ? (
-                    <span className="text-[var(--accent-green)]">{dd.recovery_days}天</span>
+                    <span className="text-qds-success">{dd.recovery_days}天</span>
                   ) : (
                     <span className="text-muted-foreground">未恢复</span>
                   )}
@@ -442,7 +404,6 @@ function InstrumentBreakdown({ data }: { data: Record<string, PerInstrumentEntry
 
   if (entries.length === 0) return null;
 
-  // Max |PnL| for bar scaling
   const maxAbsPnl = Math.max(...entries.map((e) => Math.abs(e.total_pnl)), 1);
 
   return (
@@ -451,7 +412,7 @@ function InstrumentBreakdown({ data }: { data: Record<string, PerInstrumentEntry
       <div className="overflow-x-auto">
         <Table className="w-full text-xs">
           <TableHeader>
-            <TableRow className="border-b border-border text-muted-foreground">
+            <TableRow className="border-b border text-muted-foreground">
               <TableHead className="text-left py-2 pr-3 font-medium">品种</TableHead>
               <TableHead className="text-right py-2 pr-3 font-medium">交易数</TableHead>
               <TableHead className="text-right py-2 pr-3 font-medium">胜率</TableHead>
@@ -465,11 +426,11 @@ function InstrumentBreakdown({ data }: { data: Record<string, PerInstrumentEntry
             {entries.map((row) => {
               const barWidth = Math.round((Math.abs(row.total_pnl) / maxAbsPnl) * 100);
               return (
-                <TableRow key={row.instrument} className="border-b border-border/30 hover:bg-muted/50">
+                <TableRow key={row.instrument} className="border-b border hover:bg-secondary">
                   <TableCell className="py-1.5 pr-3 text-primary font-medium">{row.instrument}</TableCell>
                   <TableCell className="py-1.5 pr-3 text-right text-muted-foreground">{row.total_trades}</TableCell>
                   <TableCell className="py-1.5 pr-3 text-right">
-                    <span className={(row.win_rate ?? 0) >= 0.5 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+                    <span className={(row.win_rate ?? 0) >= 0.5 ? "text-qds-success" : "text-destructive"}>
                       {fmt((row.win_rate ?? 0) * 100, 1)}%
                     </span>
                   </TableCell>
@@ -479,9 +440,9 @@ function InstrumentBreakdown({ data }: { data: Record<string, PerInstrumentEntry
                     </span>
                   </TableCell>
                   <TableCell className="py-1.5 pr-3 pl-2">
-                    <div className="h-2 rounded-full overflow-hidden bg-muted">
+                    <div className="h-2 rounded-full overflow-hidden bg-secondary">
                       <div
-                        className={`h-full rounded-full ${row.total_pnl >= 0 ? "bg-[var(--accent-green)]" : "bg-[var(--accent-red)]"}`}
+                        className={`h-full rounded-full ${row.total_pnl >= 0 ? "bg-[var(--suc)]" : "bg-[var(--dan)]"}`}
                         style={{ width: `${barWidth}%` }}
                       />
                     </div>
@@ -489,7 +450,7 @@ function InstrumentBreakdown({ data }: { data: Record<string, PerInstrumentEntry
                   <TableCell className="py-1.5 pr-3 text-right text-muted-foreground">{fmt(row.sharpe_ratio, 2)}</TableCell>
                   <TableCell className="py-1.5 text-right">
                     {row.max_drawdown !== null && Math.abs(row.max_drawdown) > 0.0001 ? (
-                      <span className="text-[var(--accent-red)]">{fmt(Math.abs(row.max_drawdown) * 100, 1)}%</span>
+                      <span className="text-destructive">{fmt(Math.abs(row.max_drawdown) * 100, 1)}%</span>
                     ) : "—"}
                   </TableCell>
                 </TableRow>
@@ -507,11 +468,9 @@ function InstrumentBreakdown({ data }: { data: Record<string, PerInstrumentEntry
 /* ------------------------------------------------------------------ */
 
 function CorrelationMatrix({ data }: { data: Record<string, Record<string, number>> }) {
-  const instruments = Object.keys(data).map(stripVenue);
   const rawKeys = Object.keys(data);
-  if (instruments.length < 2) return null;
+  if (rawKeys.length < 2) return null;
 
-  // Collect all pairs
   const pairs: { a: string; b: string; corr: number }[] = [];
   for (let i = 0; i < rawKeys.length; i++) {
     for (let j = i + 1; j < rawKeys.length; j++) {
@@ -529,7 +488,7 @@ function CorrelationMatrix({ data }: { data: Record<string, Record<string, numbe
   const corrColor = (v: number) => {
     if (v > 0.7) return "text-destructive";
     if (v > 0.3) return "text-muted-foreground";
-    if (v < 0) return "text-[var(--accent-green)]";
+    if (v < 0) return "text-qds-success";
     return "text-primary";
   };
 
@@ -538,7 +497,7 @@ function CorrelationMatrix({ data }: { data: Record<string, Record<string, numbe
       <SectionLabel>品种相关性</SectionLabel>
       <div className="grid grid-cols-2 gap-4">
         <div className="flex flex-col gap-1">
-          <span className="text-[10px] font-medium text-[var(--accent-red)] mb-1">高相关 (风险集中)</span>
+          <span className="text-[10px] font-medium text-destructive mb-1">高相关 (风险集中)</span>
           {top.map((p, i) => (
             <div key={i} className="flex items-center justify-between py-0.5">
               <span className="text-xs text-muted-foreground">{p.a} / {p.b}</span>
@@ -547,7 +506,7 @@ function CorrelationMatrix({ data }: { data: Record<string, Record<string, numbe
           ))}
         </div>
         <div className="flex flex-col gap-1">
-          <span className="text-[10px] font-medium text-[var(--accent-green)] mb-1">低相关 (分散化)</span>
+          <span className="text-[10px] font-medium text-qds-success mb-1">低相关 (分散化)</span>
           {bottom.map((p, i) => (
             <div key={i} className="flex items-center justify-between py-0.5">
               <span className="text-xs text-muted-foreground">{p.a} / {p.b}</span>
@@ -603,14 +562,21 @@ export function OverviewTab({ runId }: OverviewTabProps) {
   if (loading) {
     return (
       <div className="flex flex-col gap-4 p-4">
-        <Skeleton className="h-24 rounded-lg" />
-        <div className="grid grid-cols-3 gap-3">
-          {Array.from({ length: 6 }).map((_, i) => (
+        <div className="grid grid-cols-5 gap-5">
+          {Array.from({ length: 5 }).map((_, i) => (
             <Skeleton key={i} className="h-20 rounded-lg" />
           ))}
         </div>
+        <div className="grid grid-cols-6 gap-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-16 rounded-lg" />
+          ))}
+        </div>
+        <div className="grid grid-cols-2 gap-5">
+          <Skeleton className="h-64 rounded-lg" />
+          <Skeleton className="h-64 rounded-lg" />
+        </div>
         <Skeleton className="h-48 rounded-lg" />
-        <Skeleton className="h-32 rounded-lg" />
       </div>
     );
   }
@@ -618,7 +584,7 @@ export function OverviewTab({ runId }: OverviewTabProps) {
   if (error || !result) {
     return (
       <div className="flex items-center justify-center h-48">
-        <span className="text-xs text-[var(--accent-red)]">
+        <span className="text-xs text-destructive">
           {error ?? "加载结果失败"}
         </span>
       </div>
@@ -640,119 +606,220 @@ export function OverviewTab({ runId }: OverviewTabProps) {
       drawdown: p.drawdown_pct ?? 0,
     }));
 
+  const totalPnl = s.total_pnl;
+  const totalRetPct = s.total_return_pct;
+  const isPnlPositive = totalPnl >= 0;
+
+  const maxDdPct = s.max_drawdown !== null ? Math.abs(s.max_drawdown) * 100 : null;
+  const chartMaxDd = chartData.length > 0
+    ? Math.min(...chartData.map((d) => d.drawdown))
+    : null;
+
   return (
-    <div className="flex flex-col gap-4 p-4">
+    <div className="flex flex-col gap-5 p-4">
 
-      {/* 1. Hero PnL Banner */}
-      <HeroBanner s={s} />
+      {/* 1. Core Metrics — 5-column grid */}
+      <div className="bt-sec v">
+        <SectionLabel>Core Metrics</SectionLabel>
+        <div className="grid grid-cols-5 gap-5">
+          {/* Total PnL */}
+          <div className="bt-sc">
+            <div className="bt-sc-label">
+              Total PnL
+              <HelpTip text="总盈亏" />
+            </div>
+            <div className={`bt-sc-value ${isPnlPositive ? "text-qds-success" : "text-destructive"}`}>
+              {isPnlPositive ? "+" : ""}{fmtCurrency(totalPnl)}
+            </div>
+            <div className={`bt-sc-sub ${isPnlPositive ? "text-qds-success" : "text-destructive"}`}>
+              {fmtSigned(totalRetPct, 2)}%
+            </div>
+          </div>
 
-      {/* 2. KPI Grid */}
-      <StaggerContainer className="grid grid-cols-3 gap-3" staggerDelay={0.05}>
-        <StaggerItem>
-          <KpiCard label="夏普比率" value={s.sharpe_ratio} format="ratio"
-            positive={s.sharpe_ratio !== null ? s.sharpe_ratio >= 1 : null} />
-        </StaggerItem>
+          {/* Sharpe */}
+          <div className="bt-sc">
+            <div className="bt-sc-label">
+              Sharpe
+              <HelpTip text="夏普比率。>1 可接受，>2 优秀" />
+            </div>
+            <div className="bt-sc-value">
+              {s.sharpe_ratio !== null ? fmt(s.sharpe_ratio, 2) : "—"}
+            </div>
+          </div>
+
+          {/* Max DD */}
+          <div className="bt-sc">
+            <div className="bt-sc-label">
+              Max DD
+              <HelpTip text="最大回撤" />
+            </div>
+            <div className="bt-sc-value text-destructive">
+              {maxDdPct !== null ? `-${fmt(maxDdPct, 1)}%` : "—"}
+            </div>
+          </div>
+
+          {/* Win Rate */}
+          <div className="bt-sc">
+            <div className="bt-sc-label">
+              Win Rate
+              <HelpTip text="胜率" />
+            </div>
+            <div className="bt-sc-value">
+              {fmt(s.win_rate * 100, 1)}%
+            </div>
+          </div>
+
+          {/* Profit Factor */}
+          <div className="bt-sc">
+            <div className="bt-sc-label">
+              Profit Factor
+              <HelpTip text="盈亏比。>1.5 良好" />
+            </div>
+            <div className="bt-sc-value">
+              {s.profit_factor !== null ? fmt(s.profit_factor, 2) : "—"}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. Secondary KPI row — 6 additional metrics */}
+      <StaggerContainer className="grid grid-cols-6 gap-3" staggerDelay={0.04}>
         <StaggerItem>
           <KpiCard label="索提诺比率" value={s.sortino_ratio} format="ratio"
-            positive={s.sortino_ratio !== null ? s.sortino_ratio >= 1 : null} />
-        </StaggerItem>
-        <StaggerItem>
-          <KpiCard label="最大回撤" value={s.max_drawdown !== null ? Math.abs(s.max_drawdown) * 100 : null}
-            format="pct" showSign={false}
-            positive={s.max_drawdown !== null ? s.max_drawdown > -0.2 : null} />
+            positive={s.sortino_ratio !== null ? s.sortino_ratio >= 1 : null} small />
         </StaggerItem>
         <StaggerItem>
           <KpiCard label="卡尔马比率" value={s.calmar_ratio} format="ratio"
-            positive={s.calmar_ratio !== null ? s.calmar_ratio >= 1 : null} />
+            positive={s.calmar_ratio !== null ? s.calmar_ratio >= 1 : null} small />
         </StaggerItem>
         <StaggerItem>
           <KpiCard label="年化收益" value={s.annual_return !== null ? s.annual_return * 100 : null}
             format="pct" showSign={true}
-            positive={s.annual_return !== null ? s.annual_return >= 0 : null} />
+            positive={s.annual_return !== null ? s.annual_return >= 0 : null} small />
         </StaggerItem>
         <StaggerItem>
           <KpiCard label="波动率" value={s.returns_volatility !== null ? s.returns_volatility * 100 : null}
-            format="pct" showSign={false} positive={null} />
+            format="pct" showSign={false} positive={null} small />
+        </StaggerItem>
+        <StaggerItem>
+          <KpiCard label="期望值" value={s.expectancy} format="currency" positive={s.expectancy !== null ? s.expectancy >= 0 : null} small />
+        </StaggerItem>
+        <StaggerItem>
+          <KpiCard label="总手续费" value={s.total_fees} format="currency" positive={null} small />
         </StaggerItem>
       </StaggerContainer>
 
-      {/* 3. Equity Curve + Drawdown */}
+      {/* 3. Equity & Drawdown — side by side */}
       {chartData.length > 0 && (
-        <Card className="flex flex-col gap-2">
-          <SectionLabel>权益曲线</SectionLabel>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
-              <defs>
-                <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#4C9EEB" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#4C9EEB" stopOpacity={0.02} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis dataKey="t" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-              <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false}
-                tickFormatter={(v) => `$${fmt(Number(v) / 1000, 0, "0")}k`} width={48} />
-              <RechartsTooltip
-                contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11, color: "var(--foreground)" }}
-                formatter={(value: unknown) => [`$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })}`, "权益"]}
-              />
-              <ReferenceLine
-                y={chartData[0]?.equity ?? 0}
-                stroke="#D4A843"
-                strokeDasharray="4 4"
-                strokeWidth={1}
-                label={{ value: `本金 $${fmt((chartData[0]?.equity ?? 0) / 1000, 0, "0")}k`, fill: "#D4A843", fontSize: 10, position: "insideTopLeft" }}
-              />
-              <Area type="monotone" dataKey="equity" stroke="#4C9EEB" strokeWidth={1.5} fill="url(#eqGrad)" dot={false} activeDot={{ r: 3, fill: "#4C9EEB" }} />
-            </AreaChart>
-          </ResponsiveContainer>
+        <div className="bt-sec v">
+          <SectionLabel>Equity &amp; Drawdown</SectionLabel>
+          <div className="grid grid-cols-2 gap-5">
+            {/* Equity Curve */}
+            <div className="bt-cd">
+              <div className="bt-cd-header">
+                <span>Equity Curve</span>
+                <span className={`bt-badge ${isPnlPositive ? "bt-badge-g" : "bt-badge-r"}`}>
+                  {fmtSigned(totalRetPct, 1)}%
+                </span>
+              </div>
+              <div className="bt-cd-body">
+                <ResponsiveContainer width="100%" height={240}>
+                  <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
+                    <defs>
+                      <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="var(--info)" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="var(--info)" stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="t" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+                    <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false}
+                      tickFormatter={(v) => `$${fmt(Number(v) / 1000, 0, "0")}k`} width={48} />
+                    <RechartsTooltip
+                      contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11, color: "var(--foreground)" }}
+                      formatter={(value: unknown) => [`$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })}`, "权益"]}
+                    />
+                    <ReferenceLine
+                      y={chartData[0]?.equity ?? 0}
+                      stroke="var(--warn)"
+                      strokeDasharray="4 4"
+                      strokeWidth={1}
+                      label={{ value: `本金 $${fmt((chartData[0]?.equity ?? 0) / 1000, 0, "0")}k`, fill: "var(--warn)", fontSize: 10, position: "insideTopLeft" }}
+                    />
+                    <Area type="monotone" dataKey="equity" stroke="var(--info)" strokeWidth={1.5} fill="url(#eqGrad)" dot={false} activeDot={{ r: 3, fill: "var(--info)" }} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
 
-          {/* Drawdown chart */}
-          <SectionLabel>回撤曲线</SectionLabel>
-          <ResponsiveContainer width="100%" height={100}>
-            <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
-              <defs>
-                <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#E5534B" stopOpacity={0.4} />
-                  <stop offset="95%" stopColor="#E5534B" stopOpacity={0.02} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis dataKey="t" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" hide />
-              <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false}
-                tickFormatter={(v) => `${fmt(v, 0)}%`} width={48} />
-              <RechartsTooltip
-                contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11, color: "var(--foreground)" }}
-                formatter={(value: unknown) => [`${fmt(value, 2)}%`, "回撤"]}
-              />
-              <Area type="monotone" dataKey="drawdown" stroke="#E5534B" strokeWidth={1} fill="url(#ddGrad)" dot={false} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </Card>
+            {/* Drawdown */}
+            <div className="bt-cd">
+              <div className="bt-cd-header">
+                <span>Drawdown</span>
+                <span className="bt-badge bt-badge-r">
+                  Max {chartMaxDd !== null ? fmt(chartMaxDd, 1) : (maxDdPct !== null ? `-${fmt(maxDdPct, 1)}` : "—")}%
+                </span>
+              </div>
+              <div className="bt-cd-body">
+                <ResponsiveContainer width="100%" height={240}>
+                  <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
+                    <defs>
+                      <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#E5534B" stopOpacity={0.4} />
+                        <stop offset="95%" stopColor="#E5534B" stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="t" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+                    <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false}
+                      tickFormatter={(v) => `${fmt(v, 0)}%`} width={48} />
+                    <RechartsTooltip
+                      contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11, color: "var(--foreground)" }}
+                      formatter={(value: unknown) => [`${fmt(value, 2)}%`, "回撤"]}
+                    />
+                    <Area type="monotone" dataKey="drawdown" stroke="#E5534B" strokeWidth={1.5} fill="url(#ddGrad)" dot={false} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* 4. Win/Loss + Long/Short Bars */}
+      {/* 4. Monthly Returns Heatmap */}
+      {monthly_returns && monthly_returns.length > 0 && (
+        <div className="bt-sec v">
+          <SectionLabel>Monthly Returns</SectionLabel>
+          <div className="bt-cd">
+            <div className="bt-cd-body">
+              <MonthlyHeatmap data={monthly_returns} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 5. Win/Loss + Long/Short Bars */}
       <div className="grid grid-cols-2 gap-3">
         <WinLossBar s={s} />
         <LongShortBar s={s} />
       </div>
 
-      {/* 5. Expanded Trade & PnL Statistics */}
+      {/* 6. Expanded Trade & PnL Statistics */}
       <div className="grid grid-cols-3 gap-3">
         {/* Trade Stats */}
         <Card className="flex flex-col gap-2">
           <SectionLabel>交易统计</SectionLabel>
           <div className="flex flex-col gap-0.5">
             <StatRow label="总交易" value={String(s.total_trades)} />
-            <StatRow label="盈利笔数" value={String(s.winning_trades)} color="text-[var(--accent-green)]" />
-            <StatRow label="亏损笔数" value={String(s.losing_trades)} color="text-[var(--accent-red)]" />
+            <StatRow label="盈利笔数" value={String(s.winning_trades)} color="text-qds-success" />
+            <StatRow label="亏损笔数" value={String(s.losing_trades)} color="text-destructive" />
             <StatRow label="总订单" value={String(s.total_orders)} />
             <StatRow label="已成交" value={String(s.filled_orders)} />
             <StatRow label="未平仓" value={String(s.open_positions)} />
             <StatRow label="胜率" value={`${fmt(s.win_rate * 100, 1)}%`}
-              color={s.win_rate >= 0.5 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"} />
+              color={s.win_rate >= 0.5 ? "text-qds-success" : "text-destructive"} />
             <StatRow label="盈亏比" value={fmt(s.profit_factor, 2)}
-              color={s.profit_factor !== null && s.profit_factor >= 1 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"} />
+              color={s.profit_factor !== null && s.profit_factor >= 1 ? "text-qds-success" : "text-destructive"} />
           </div>
         </Card>
 
@@ -760,13 +827,13 @@ export function OverviewTab({ runId }: OverviewTabProps) {
         <Card className="flex flex-col gap-2">
           <SectionLabel>收益统计</SectionLabel>
           <div className="flex flex-col gap-0.5">
-            <StatRow label="总盈利" value={fmtCurrency(s.gross_profit)} color="text-[var(--accent-green)]" />
-            <StatRow label="总亏损" value={fmtCurrency(s.gross_loss)} color="text-[var(--accent-red)]" />
+            <StatRow label="总盈利" value={fmtCurrency(s.gross_profit)} color="text-qds-success" />
+            <StatRow label="总亏损" value={fmtCurrency(s.gross_loss)} color="text-destructive" />
             <StatRow label="总手续费" value={fmtCurrency(s.total_fees)} />
-            <StatRow label="最大单笔盈利" value={fmtCurrency(s.largest_win)} color="text-[var(--accent-green)]" />
-            <StatRow label="最大单笔亏损" value={fmtCurrency(s.largest_loss)} color="text-[var(--accent-red)]" />
-            <StatRow label="平均盈利" value={fmtCurrency(s.avg_win)} color="text-[var(--accent-green)]" />
-            <StatRow label="平均亏损" value={fmtCurrency(s.avg_loss)} color="text-[var(--accent-red)]" />
+            <StatRow label="最大单笔盈利" value={fmtCurrency(s.largest_win)} color="text-qds-success" />
+            <StatRow label="最大单笔亏损" value={fmtCurrency(s.largest_loss)} color="text-destructive" />
+            <StatRow label="平均盈利" value={fmtCurrency(s.avg_win)} color="text-qds-success" />
+            <StatRow label="平均亏损" value={fmtCurrency(s.avg_loss)} color="text-destructive" />
             <StatRow label="期望值" value={fmtCurrency(s.expectancy)} />
           </div>
         </Card>
@@ -779,8 +846,8 @@ export function OverviewTab({ runId }: OverviewTabProps) {
             <StatRow label="盈利持仓" value={s.avg_winning_holding_time ?? "—"} />
             <StatRow label="亏损持仓" value={s.avg_losing_holding_time ?? "—"} />
             <StatRow label="盈亏比率" value={fmt(s.avg_win_loss_ratio, 2)} />
-            <StatRow label="最长连胜" value={`${s.winning_streak} 笔`} color="text-[var(--accent-green)]" />
-            <StatRow label="最长连负" value={`${s.losing_streak} 笔`} color="text-[var(--accent-red)]" />
+            <StatRow label="最长连胜" value={`${s.winning_streak} 笔`} color="text-qds-success" />
+            <StatRow label="最长连负" value={`${s.losing_streak} 笔`} color="text-destructive" />
             {hasMultiInst && portfolio_analytics?.diversification_ratio && (
               <>
                 <StatRow label="分散化比率" value={fmt(portfolio_analytics.diversification_ratio, 2)} color="text-primary" />
@@ -791,15 +858,8 @@ export function OverviewTab({ runId }: OverviewTabProps) {
         </Card>
       </div>
 
-      {/* 6. Top Trades */}
+      {/* 7. Top Trades */}
       <TopTrades tradeLog={trade_log} />
-
-      {/* 7. Monthly Returns Heatmap */}
-      {monthly_returns && monthly_returns.length > 0 && (
-        <Card>
-          <MonthlyHeatmap data={monthly_returns} />
-        </Card>
-      )}
 
       {/* 8. Notable Drawdowns */}
       {drawdown_periods && drawdown_periods.length > 0 && (

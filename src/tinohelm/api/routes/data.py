@@ -33,6 +33,7 @@ class DataCatalogItem(BaseModel):
     end_date: date
     file_path: str
     size_bytes: int
+    record_count: int | None = None
     created_at: str | None = None
 
 
@@ -107,6 +108,46 @@ def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
     if not bar_type_dir.exists():
         return 0
     return sum(f.stat().st_size for f in bar_type_dir.glob("*.parquet"))
+
+
+def _delete_storage_files(
+    symbol: str, data_type: str, interval: str, catalog_path: str,
+) -> tuple[int, int]:
+    """Delete storage files for a catalog entry. Returns (deleted_files, freed_bytes)."""
+    if data_type == "bar":
+        from tinohelm.strategy.loader import normalize_symbol
+        nt_sym = normalize_symbol(symbol)
+        nt_interval = _interval_to_nt(interval)
+        target_dir = Path(catalog_path) / "data" / "bar" / f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
+    elif data_type == "trade_tick":
+        from tinohelm.strategy.loader import normalize_symbol
+        nt_sym = normalize_symbol(symbol)
+        target_dir = Path(catalog_path) / "data" / "trade_tick" / nt_sym
+    elif data_type == "funding_rate":
+        from tinohelm.data.funding_cache import _CACHE_DIR
+        json_path = _CACHE_DIR / f"{symbol.lower()}.json"
+        if json_path.exists():
+            size = json_path.stat().st_size
+            json_path.unlink()
+            return (1, size)
+        return (0, 0)
+    elif data_type == "quote_tick":
+        from tinohelm.strategy.loader import normalize_symbol
+        nt_sym = normalize_symbol(symbol)
+        target_dir = Path(catalog_path) / "data" / "quote_tick" / nt_sym
+    else:
+        logger.warning("No storage handler for data_type=%r, removing DB row only", data_type)
+        return (0, 0)
+
+    if not target_dir.exists():
+        return (0, 0)
+    files = list(target_dir.glob("*.parquet"))
+    total_size = sum(f.stat().st_size for f in files)
+    for f in files:
+        f.unlink()
+    if target_dir.exists() and not list(target_dir.iterdir()):
+        target_dir.rmdir()
+    return (len(files), total_size)
 
 
 # ---- background task ----
@@ -187,6 +228,7 @@ async def list_data_catalog(
             end_date=r.end_date,
             file_path=r.file_path,
             size_bytes=r.size_bytes,
+            record_count=r.record_count,
             created_at=r.created_at.isoformat() if r.created_at else None,
         )
         for r in rows
@@ -331,8 +373,6 @@ async def scan_data_catalog(
 
     catalog_path = str(settings.paths.catalog)
     bar_dir = Path(catalog_path) / "data" / "bar"
-    if not bar_dir.exists():
-        return {"status": "ok", "scanned": 0, "created": 0, "updated": 0}
 
     # Parse bar_type directory names:
     #   BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL
@@ -342,74 +382,170 @@ async def scan_data_catalog(
     updated = 0
     scanned = 0
 
-    for entry in sorted(bar_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        m = pattern.match(entry.name)
-        if not m:
-            continue
-
-        nt_sym = m.group(1)          # e.g. BTCUSDT-PERP.BINANCE
-        nt_interval = m.group(2)     # e.g. 1-MINUTE
-        interval = _nt_to_interval(nt_interval)
-        if interval is None:
-            logger.warning("Scan: unknown interval %s in %s, skipping", nt_interval, entry.name)
-            continue
-
-        # Strip .BINANCE suffix for user-facing symbol
-        symbol = nt_sym.removesuffix(".BINANCE")
-
-        parquet_files = list(entry.glob("*.parquet"))
-        if not parquet_files:
-            continue
-
-        scanned += 1
-        size_bytes = sum(f.stat().st_size for f in parquet_files)
-
-        # Read actual date range from Parquet data
-        bar_type_str = f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
-        try:
-            catalog = ParquetDataCatalog(catalog_path)
-            bars = catalog.bars(bar_types=[bar_type_str])
-            if not bars:
-                logger.warning("Scan: no bars readable for %s, skipping", bar_type_str)
+    if bar_dir.exists():
+        for entry in sorted(bar_dir.iterdir()):
+            if not entry.is_dir():
                 continue
-            ts_min = min(b.ts_event for b in bars)
-            ts_max = max(b.ts_event for b in bars)
-            start_date = datetime.fromtimestamp(ts_min / 1_000_000_000, tz=timezone.utc).date()
-            end_date = datetime.fromtimestamp(ts_max / 1_000_000_000, tz=timezone.utc).date()
-        except Exception:
-            logger.warning("Scan: failed to read bars for %s", bar_type_str, exc_info=True)
-            continue
+            m = pattern.match(entry.name)
+            if not m:
+                continue
 
-        # Upsert DB
-        stmt = select(DataCatalog).where(
-            DataCatalog.symbol == symbol,
-            DataCatalog.data_type == "bar",
-            DataCatalog.interval == interval,
-        )
-        existing = (await db.execute(stmt)).scalar_one_or_none()
-        if existing:
-            existing.start_date = min(existing.start_date, start_date)
-            existing.end_date = max(existing.end_date, end_date)
-            existing.size_bytes = size_bytes
-            updated += 1
-        else:
-            db.add(DataCatalog(
-                symbol=symbol,
-                data_type="bar",
-                interval=interval,
-                start_date=start_date,
-                end_date=end_date,
-                file_path=catalog_path,
-                size_bytes=size_bytes,
-            ))
-            created += 1
+            nt_sym = m.group(1)          # e.g. BTCUSDT-PERP.BINANCE
+            nt_interval = m.group(2)     # e.g. 1-MINUTE
+            interval = _nt_to_interval(nt_interval)
+            if interval is None:
+                logger.warning("Scan: unknown interval %s in %s, skipping", nt_interval, entry.name)
+                continue
 
-        logger.info("Scan: %s %s [%s..%s] %d bytes", symbol, interval, start_date, end_date, size_bytes)
+            # Strip .BINANCE suffix for user-facing symbol
+            symbol = nt_sym.removesuffix(".BINANCE")
+
+            parquet_files = list(entry.glob("*.parquet"))
+            if not parquet_files:
+                continue
+
+            scanned += 1
+            size_bytes = sum(f.stat().st_size for f in parquet_files)
+
+            # Read actual date range from Parquet data
+            bar_type_str = f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
+            try:
+                catalog = ParquetDataCatalog(catalog_path)
+                bars = catalog.bars(bar_types=[bar_type_str])
+                if not bars:
+                    logger.warning("Scan: no bars readable for %s, skipping", bar_type_str)
+                    continue
+                record_count = len(bars)
+                ts_min = min(b.ts_event for b in bars)
+                ts_max = max(b.ts_event for b in bars)
+                start_date = datetime.fromtimestamp(ts_min / 1_000_000_000, tz=timezone.utc).date()
+                end_date = datetime.fromtimestamp(ts_max / 1_000_000_000, tz=timezone.utc).date()
+            except Exception:
+                logger.warning("Scan: failed to read bars for %s", bar_type_str, exc_info=True)
+                continue
+
+            # Upsert DB
+            stmt = select(DataCatalog).where(
+                DataCatalog.symbol == symbol,
+                DataCatalog.data_type == "bar",
+                DataCatalog.interval == interval,
+            )
+            existing = (await db.execute(stmt)).scalar_one_or_none()
+            if existing:
+                existing.start_date = min(existing.start_date, start_date)
+                existing.end_date = max(existing.end_date, end_date)
+                existing.size_bytes = size_bytes
+                existing.record_count = record_count
+                updated += 1
+            else:
+                db.add(DataCatalog(
+                    symbol=symbol,
+                    data_type="bar",
+                    interval=interval,
+                    start_date=start_date,
+                    end_date=end_date,
+                    file_path=catalog_path,
+                    size_bytes=size_bytes,
+                    record_count=record_count,
+                ))
+                created += 1
+
+            logger.info("Scan: %s %s [%s..%s] %d bytes", symbol, interval, start_date, end_date, size_bytes)
+
+    # Scan trade_tick directories
+    trade_tick_dir = Path(catalog_path) / "data" / "trade_tick"
+    if trade_tick_dir.exists():
+        sym_pattern = re.compile(r"^(.+)\.BINANCE$")
+        for entry in sorted(trade_tick_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            m = sym_pattern.match(entry.name)
+            if not m:
+                continue
+            symbol = m.group(1)
+            parquet_files = list(entry.glob("*.parquet"))
+            if not parquet_files:
+                continue
+            scanned += 1
+            sz = sum(f.stat().st_size for f in parquet_files)
+
+            try:
+                import pyarrow.parquet as pq
+                total_rows = 0
+                ts_min_val, ts_max_val = float("inf"), 0
+                for pf in parquet_files:
+                    meta = pq.read_metadata(pf)
+                    total_rows += meta.num_rows
+                start_dt = datetime.fromtimestamp(ts_min_val / 1e9, tz=timezone.utc).date() if ts_min_val != float("inf") else None
+                end_dt = datetime.fromtimestamp(ts_max_val / 1e9, tz=timezone.utc).date() if ts_max_val != 0 else None
+            except Exception:
+                # Fallback: use file modification times
+                import os
+                file_times = [os.path.getmtime(pf) for pf in parquet_files]
+                start_dt = datetime.fromtimestamp(min(file_times), tz=timezone.utc).date()
+                end_dt = datetime.fromtimestamp(max(file_times), tz=timezone.utc).date()
+                total_rows = None
+
+            if start_dt is None or end_dt is None:
+                continue
+
+            stmt = select(DataCatalog).where(
+                DataCatalog.symbol == symbol,
+                DataCatalog.data_type == "trade_tick",
+                DataCatalog.interval == "tick",
+            )
+            existing = (await db.execute(stmt)).scalar_one_or_none()
+            if existing:
+                existing.start_date = min(existing.start_date, start_dt)
+                existing.end_date = max(existing.end_date, end_dt)
+                existing.size_bytes = sz
+                if total_rows is not None:
+                    existing.record_count = total_rows
+                updated += 1
+            else:
+                db.add(DataCatalog(
+                    symbol=symbol,
+                    data_type="trade_tick",
+                    interval="tick",
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    file_path=catalog_path,
+                    size_bytes=sz,
+                    record_count=total_rows,
+                ))
+                created += 1
 
     await db.commit()
     return {"status": "ok", "scanned": scanned, "created": created, "updated": updated}
+
+
+@router.delete("/catalog/{catalog_id}")
+async def delete_catalog_entry(
+    catalog_id: int,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    """Delete a data catalog entry and its underlying storage files."""
+    row = (await db.execute(
+        select(DataCatalog).where(DataCatalog.id == catalog_id)
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Catalog entry not found")
+
+    deleted_files, freed_bytes = _delete_storage_files(
+        row.symbol, row.data_type, row.interval,
+        str(settings.paths.catalog),
+    )
+
+    await db.delete(row)
+    await db.commit()
+    return {
+        "status": "deleted",
+        "symbol": row.symbol,
+        "data_type": row.data_type,
+        "deleted_files": deleted_files,
+        "freed_bytes": freed_bytes,
+    }
 
 
 @router.get("/types")
@@ -417,6 +553,7 @@ async def list_data_types() -> list[dict]:
     """Return supported data types and their availability."""
     from tinohelm.data.downloader import DATA_TYPE_AVAILABILITY
     from tinohelm.data.converters import CONVERTER_REGISTRY
+    from tinohelm.data.pipeline import _WRITE_CATEGORY
 
     result = []
     for dt, (has_daily, has_monthly) in DATA_TYPE_AVAILABILITY.items():
@@ -441,6 +578,7 @@ async def list_data_types() -> list[dict]:
             "has_daily": has_daily,
             "has_monthly": has_monthly,
             "implemented": implemented,
+            "db_category": _WRITE_CATEGORY.get(dt, dt),
         })
     return result
 

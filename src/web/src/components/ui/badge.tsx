@@ -4,22 +4,22 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const badgeVariants = cva(
-  "inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-full border border-transparent px-2 py-0.5 text-xs font-medium whitespace-nowrap transition-all [&>svg]:pointer-events-none [&>svg]:size-3",
+  "qds-badge inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-full border border-transparent px-2 py-0.5 text-xs font-medium whitespace-nowrap transition-all [&>svg]:pointer-events-none [&>svg]:size-3",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground",
-        secondary: "bg-secondary text-secondary-foreground",
-        destructive: "bg-destructive/10 text-destructive",
-        outline: "border-border text-foreground",
+        default: "bg-secondary text-qds-t1",
+        secondary: "bg-secondary text-qds-t1",
+        destructive: "bg-qds-danger-dim text-destructive",
+        outline: "border text-qds-t1",
         ghost: "bg-muted text-muted-foreground",
         link: "text-primary underline-offset-4 hover:underline",
-        success: "bg-[var(--accent-green-20)] text-[var(--accent-green)] border-[var(--accent-green-20)]",
-        warning: "bg-[var(--accent-amber-20)] text-[var(--accent-amber)] border-[var(--accent-amber-20)]",
-        error: "bg-[var(--accent-red-20)] text-[var(--accent-red)] border-[var(--accent-red-20)]",
-        info: "bg-[var(--accent-blue-20)] text-[var(--accent-blue)] border-[var(--accent-blue-20)]",
-        connected: "bg-[var(--accent-green-20)] text-[var(--accent-green)] border-[var(--accent-green-20)]",
-        disconnected: "bg-[var(--accent-red-20)] text-[var(--accent-red)] border-[var(--accent-red-20)]",
+        success: "bg-qds-success-dim text-qds-success border-qds-success-dim",
+        warning: "bg-qds-warning-dim text-qds-warning border-qds-warning-dim",
+        error: "bg-qds-danger-dim text-destructive border-qds-danger-dim",
+        info: "bg-qds-info-dim text-qds-info border-qds-info-dim",
+        connected: "bg-qds-success-dim text-qds-success border-qds-success-dim",
+        disconnected: "bg-qds-danger-dim text-destructive border-qds-danger-dim",
         neutral: "bg-muted text-muted-foreground border-transparent",
       },
     },

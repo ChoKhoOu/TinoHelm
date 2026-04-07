@@ -238,6 +238,8 @@ class DataCatalog(Base):
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    record_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     __table_args__ = (

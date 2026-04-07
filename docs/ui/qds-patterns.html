@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QDS — Supplementary Patterns</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --font-d:'IBM Plex Mono',monospace;--font-u:'IBM Plex Sans',sans-serif;
+  --eo:cubic-bezier(.16,1,.3,1);--dur:280ms;--r:12px;--rs:6px;
+  --bg-p:#302f2d;--bg-s:#262624;--bg-t:#3b3a37;--bg-in:#141413;
+  --t0:#E8E6E0;--t1:#9C9A92;--t2:#73726C;--t3:#5F5E5A;
+  --bd:#3b3a37;--bdh:#5F5E5A;
+  --acc:#D97857;--acc-d:rgba(217,120,87,.12);
+  --suc:#36884B;--suc-d:rgba(54,136,75,.12);
+  --dan:#FE8181;--dan-d:rgba(254,129,129,.12);
+  --info:#85B7EB;--info-d:rgba(133,183,235,.12);
+  --warn:#FAC775;--warn-d:rgba(250,199,117,.12);
+}
+html.light{
+  --bg-p:#f5f4ed;--bg-s:#faf9f5;--bg-t:#eae8e0;--bg-in:#fcfbf8;
+  --t0:#2C2C2A;--t1:#73726C;--t2:#9C9A92;--t3:#B0ADA5;
+  --bd:#dedbd3;--bdh:#c7c4bb;
+  --acc:#D97857;--acc-d:rgba(217,120,87,.08);
+  --suc:#36884B;--suc-d:rgba(54,136,75,.08);
+  --dan:#8A2425;--dan-d:rgba(138,36,37,.08);
+  --info:#3266AD;--info-d:rgba(50,102,173,.08);
+  --warn:#854F0B;--warn-d:rgba(250,199,117,.08);
+}
+body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;transition:background var(--dur) var(--eo),color var(--dur) var(--eo)}
+.page{max-width:960px;margin:0 auto;padding:1.5rem 2rem 6rem}
+.mono{font-family:var(--font-d)}.dim{color:var(--t2)}.cg{color:var(--suc)}.cr{color:var(--dan)}.ca{color:var(--acc)}
+
+.top-bar{display:flex;justify-content:space-between;align-items:center;padding:1.5rem 0 1.25rem;border-bottom:1px solid var(--bd);margin-bottom:2.5rem}
+.top-bar h1{font-family:var(--font-d);font-size:1.1rem;font-weight:600}
+.top-bar .dot{color:var(--acc)}
+.theme-toggle{display:flex;align-items:center;gap:.5rem;font-size:.8rem;color:var(--t2)}
+.theme-toggle button{width:44px;height:22px;border-radius:11px;border:1px solid var(--bd);background:var(--bg-t);cursor:pointer;position:relative;transition:all var(--dur) var(--eo)}
+.theme-toggle button::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--t1);transition:all var(--dur) var(--eo)}
+html.light .theme-toggle button::after{left:24px;background:var(--acc)}
+
+.sec{margin-bottom:3rem}
+.sec-num{font-family:var(--font-d);font-size:.6rem;letter-spacing:.15em;text-transform:uppercase;color:var(--acc);margin-bottom:.5rem;display:flex;align-items:center;gap:.5rem}
+.sec-num::after{content:'';flex:1;height:1px;background:var(--bd)}
+.sec-title{font-size:1rem;font-weight:600;margin-bottom:.35rem}
+.sec-desc{font-size:.78rem;color:var(--t2);margin-bottom:1.25rem;line-height:1.6}
+.sub-sec{margin-top:1.5rem}
+.sub-label{font-family:var(--font-d);font-size:.68rem;color:var(--t2);margin-bottom:.75rem}
+.g{display:grid;gap:1.25rem}.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:1fr 1fr 1fr}
+.cd{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;transition:border-color 150ms}
+.cd:hover{border-color:var(--bdh)}
+.cd-b{padding:1.25rem}
+.badge{font-family:var(--font-d);font-size:.65rem;padding:.2rem .5rem;border-radius:100px}
+
+/* ===== 1. EMPTY STATES ===== */
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:3.5rem 2rem;text-align:center}
+.empty-icon{width:56px;height:56px;border-radius:16px;background:var(--bg-t);display:flex;align-items:center;justify-content:center;margin-bottom:1.25rem;font-size:1.5rem;color:var(--t3)}
+.empty-title{font-size:.9rem;font-weight:600;margin-bottom:.35rem}
+.empty-desc{font-size:.78rem;color:var(--t2);max-width:320px;margin-bottom:1.25rem;line-height:1.6}
+.empty-action{font-family:var(--font-d);font-size:.75rem;padding:.5rem 1.1rem;border-radius:var(--rs);border:1px solid var(--acc);background:var(--acc-d);color:var(--acc);cursor:pointer;transition:all 150ms var(--eo);display:inline-flex;align-items:center;gap:.4rem}
+.empty-action:hover{background:var(--acc);color:#fff;transform:translateY(-1px)}
+.empty-hint{font-family:var(--font-d);font-size:.68rem;color:var(--t3);margin-top:.75rem}
+
+/* Error empty state */
+.empty-icon.error{background:var(--dan-d)}
+.empty-icon.error span{color:var(--dan)}
+.empty-retry{font-family:var(--font-d);font-size:.72rem;padding:.4rem .9rem;border-radius:var(--rs);border:1px solid var(--bd);background:0;color:var(--t1);cursor:pointer;transition:all 150ms var(--eo)}
+.empty-retry:hover{border-color:var(--bdh);color:var(--t0);background:var(--bg-t)}
+
+/* ===== 2. CONFIRMATION MODALS ===== */
+.modal-backdrop{background:rgba(0,0,0,.55);border-radius:var(--r);display:flex;align-items:center;justify-content:center;padding:2rem;min-height:320px;position:relative}
+.modal{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);width:100%;max-width:420px;overflow:hidden;animation:modalIn .28s var(--eo)}
+@keyframes modalIn{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:scale(1)}}
+.modal-header{padding:1rem 1.25rem .75rem;display:flex;align-items:flex-start;gap:.75rem}
+.modal-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:1.1rem}
+.modal-icon.danger{background:var(--dan-d);color:var(--dan)}
+.modal-icon.warn{background:var(--warn-d);color:var(--warn)}
+.modal-title{font-size:.9rem;font-weight:600;margin-bottom:.2rem}
+.modal-desc{font-size:.78rem;color:var(--t2);line-height:1.5}
+.modal-body{padding:0 1.25rem 1rem}
+.modal-input-label{font-family:var(--font-d);font-size:.68rem;color:var(--t2);margin-bottom:.35rem}
+.modal-input{width:100%;padding:.45rem .65rem;font-family:var(--font-d);font-size:.78rem;background:var(--bg-in);border:1px solid var(--bd);border-radius:var(--rs);color:var(--t0);outline:0;transition:border-color 200ms}
+.modal-input:focus{border-color:var(--dan)}
+.modal-input::placeholder{color:var(--t3)}
+.modal-footer{padding:.75rem 1.25rem;border-top:1px solid var(--bd);display:flex;justify-content:flex-end;gap:.5rem}
+.btn{font-family:var(--font-d);font-size:.75rem;padding:.45rem .9rem;border-radius:var(--rs);cursor:pointer;transition:all 150ms var(--eo);display:inline-flex;align-items:center;gap:.35rem}
+.btn-ghost{border:1px solid var(--bd);background:0;color:var(--t1)}
+.btn-ghost:hover{border-color:var(--bdh);color:var(--t0);background:var(--bg-t)}
+.btn-danger{border:1px solid var(--dan);background:var(--dan-d);color:var(--dan)}
+.btn-danger:hover{background:var(--dan);color:#fff}
+.btn-danger:disabled{opacity:.35;cursor:default;pointer-events:none}
+.btn-warn{border:1px solid var(--warn);background:var(--warn-d);color:var(--warn)}
+.btn-warn:hover{background:var(--warn);color:#141413}
+/* Loading button */
+.btn-loading{position:relative;color:transparent !important;pointer-events:none}
+.btn-loading::after{content:'';position:absolute;width:14px;height:14px;border:2px solid var(--t2);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ===== 3. TOAST SYSTEM ===== */
+.toast-demo{display:flex;flex-direction:column;align-items:flex-end;gap:.5rem;min-height:220px;padding:1rem;background:var(--bg-in);border-radius:var(--r)}
+.toast{display:flex;align-items:flex-start;gap:.6rem;padding:.75rem 1rem;background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--rs);min-width:320px;max-width:400px;animation:toastIn .28s var(--eo);position:relative;font-size:.78rem}
+@keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+.toast-icon{width:20px;height:20px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.7rem;margin-top:1px}
+.toast-icon.suc{background:var(--suc-d);color:var(--suc)}
+.toast-icon.dan{background:var(--dan-d);color:var(--dan)}
+.toast-icon.warn{background:var(--warn-d);color:var(--warn)}
+.toast-icon.info{background:var(--info-d);color:var(--info)}
+.toast-content{flex:1}
+.toast-title{font-weight:600;margin-bottom:.15rem;font-size:.78rem}
+.toast-msg{color:var(--t2);font-size:.72rem;line-height:1.4}
+.toast-action{font-family:var(--font-d);font-size:.68rem;color:var(--acc);cursor:pointer;margin-top:.35rem;display:inline-block}
+.toast-action:hover{text-decoration:underline}
+.toast-close{position:absolute;top:.5rem;right:.5rem;background:0;border:0;color:var(--t3);cursor:pointer;font-size:.8rem;padding:2px;line-height:1;transition:color 150ms}
+.toast-close:hover{color:var(--t0)}
+/* Auto-dismiss progress bar */
+.toast-timer{position:absolute;bottom:0;left:0;height:2px;background:var(--acc);border-radius:0 0 var(--rs) var(--rs);animation:timerShrink 5s linear forwards}
+@keyframes timerShrink{from{width:100%}to{width:0}}
+
+/* ===== 4. DATA STALENESS ===== */
+.stale-cell{position:relative}
+.stale-cell.stale{color:var(--t3) !important;font-style:italic}
+.stale-badge{font-family:var(--font-d);font-size:.55rem;padding:.1rem .35rem;border-radius:3px;background:var(--warn-d);color:var(--warn);margin-left:.35rem;vertical-align:middle;letter-spacing:.03em}
+.stale-row{opacity:.5}
+.stale-overlay{display:inline-flex;align-items:center;gap:.35rem;font-family:var(--font-d);font-size:.68rem;color:var(--warn);padding:.35rem .65rem;background:var(--warn-d);border-radius:var(--rs)}
+.disco-bar{display:flex;align-items:center;gap:.5rem;padding:.5rem .85rem;background:var(--dan-d);border:1px solid var(--dan);border-radius:var(--rs);font-family:var(--font-d);font-size:.72rem;color:var(--dan);margin-bottom:1rem}
+.disco-bar .pulse{width:8px;height:8px;border-radius:50%;background:var(--dan);animation:discoPulse 1.5s ease-in-out infinite}
+@keyframes discoPulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* ===== 5. FORM STATES ===== */
+.form-group{margin-bottom:1rem}
+.form-label{font-family:var(--font-d);font-size:.68rem;color:var(--t2);margin-bottom:.35rem;display:flex;align-items:center;gap:.35rem}
+.form-label .req{color:var(--dan);font-size:.7rem}
+.form-input{width:100%;padding:.5rem .7rem;font-family:var(--font-d);font-size:.78rem;background:var(--bg-in);border:1px solid var(--bd);border-radius:var(--rs);color:var(--t0);outline:0;transition:border-color 200ms var(--eo),box-shadow 200ms var(--eo)}
+.form-input:hover{border-color:var(--bdh)}
+.form-input:focus{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-d)}
+.form-input.error{border-color:var(--dan);box-shadow:0 0 0 3px var(--dan-d)}
+.form-input:disabled{opacity:.4;cursor:not-allowed;background:var(--bg-t)}
+.form-error{font-family:var(--font-d);font-size:.68rem;color:var(--dan);margin-top:.3rem;display:flex;align-items:center;gap:.3rem}
+.form-hint{font-size:.68rem;color:var(--t3);margin-top:.3rem}
+.form-success{font-family:var(--font-d);font-size:.68rem;color:var(--suc);margin-top:.3rem}
+/* API key masked */
+.key-wrap{display:flex;align-items:center;gap:.5rem}
+.key-mask{flex:1;font-family:var(--font-d);font-size:.78rem;padding:.5rem .7rem;background:var(--bg-in);border:1px solid var(--bd);border-radius:var(--rs);color:var(--t2);letter-spacing:.1em}
+.key-toggle{font-family:var(--font-d);font-size:.68rem;padding:.4rem .65rem;border:1px solid var(--bd);border-radius:var(--rs);background:0;color:var(--t2);cursor:pointer;transition:all 150ms}
+.key-toggle:hover{border-color:var(--bdh);color:var(--t0)}
+/* Save bar */
+.save-bar{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1rem;background:var(--bg-in);border:1px solid var(--bd);border-radius:var(--rs);margin-top:1.25rem}
+.save-bar .unsaved{font-family:var(--font-d);font-size:.72rem;color:var(--warn);display:flex;align-items:center;gap:.35rem}
+.save-bar .saved{font-family:var(--font-d);font-size:.72rem;color:var(--suc);display:flex;align-items:center;gap:.35rem}
+.btn-primary{border:1px solid var(--acc);background:var(--acc);color:#fff;font-family:var(--font-d);font-size:.72rem;padding:.4rem .9rem;border-radius:var(--rs);cursor:pointer;transition:all 150ms var(--eo)}
+.btn-primary:hover{opacity:.9;transform:translateY(-1px)}
+.btn-primary:disabled{opacity:.35;cursor:default;pointer-events:none}
+
+@media(max-width:700px){.g2,.g3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="top-bar">
+  <h1>QDS<span class="dot">.</span>Supplementary Patterns</h1>
+  <div class="theme-toggle"><span>☀</span><button onclick="document.documentElement.classList.toggle('light')"></button><span>☾</span></div>
+</div>
+
+<!-- ===== 1. EMPTY STATES ===== -->
+<div class="sec">
+  <div class="sec-num">01 — Empty states</div>
+  <div class="sec-title">空状态 & 错误状态</div>
+  <div class="sec-desc">没有数据、首次使用、请求失败时的 UI 引导。每种空状态都应告诉用户"为什么是空的"和"下一步做什么"。</div>
+  <div class="g g3">
+    <div class="cd">
+      <div class="sub-label" style="padding:.6rem 1rem 0;font-size:.62rem">首次使用</div>
+      <div class="empty">
+        <div class="empty-icon"><span>⧖</span></div>
+        <div class="empty-title">还没有回测记录</div>
+        <div class="empty-desc">创建你的第一个回测，验证策略在历史数据上的表现</div>
+        <button class="empty-action">+ 创建回测</button>
+        <div class="empty-hint">支持 Binance / Hyperliquid / OKX</div>
+      </div>
+    </div>
+    <div class="cd">
+      <div class="sub-label" style="padding:.6rem 1rem 0;font-size:.62rem">搜索无结果</div>
+      <div class="empty">
+        <div class="empty-icon"><span>⊘</span></div>
+        <div class="empty-title">未找到匹配结果</div>
+        <div class="empty-desc">尝试调整筛选条件或使用不同的关键词</div>
+        <button class="empty-retry">清除筛选</button>
+      </div>
+    </div>
+    <div class="cd">
+      <div class="sub-label" style="padding:.6rem 1rem 0;font-size:.62rem">请求失败</div>
+      <div class="empty">
+        <div class="empty-icon error"><span>!</span></div>
+        <div class="empty-title">加载失败</div>
+        <div class="empty-desc">无法连接到服务器，请检查网络或稍后重试</div>
+        <button class="empty-retry" onclick="this.classList.add('btn-loading');setTimeout(()=>this.classList.remove('btn-loading'),1500)">重试</button>
+        <div class="empty-hint">错误码: ECONNREFUSED</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 2. CONFIRMATION MODALS ===== -->
+<div class="sec">
+  <div class="sec-num">02 — Confirmation modals</div>
+  <div class="sec-title">确认弹窗 & 危险操作</div>
+  <div class="sec-desc">不可逆操作需要二次确认。危险操作（删除、停止）用红色主色调，需要用户输入确认文本才能提交。</div>
+  <div class="g g2">
+    <!-- Delete confirm -->
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <div class="modal-icon danger">✕</div>
+          <div>
+            <div class="modal-title">删除回测 BT-2026-0401?</div>
+            <div class="modal-desc">此操作不可逆。所有回测数据、交易日志和分析报告将被永久删除。</div>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div class="modal-input-label">输入 <span class="mono" style="color:var(--dan)">BT-2026-0401</span> 确认删除</div>
+          <input class="modal-input" placeholder="BT-2026-0401" oninput="document.getElementById('delBtn').disabled=this.value!=='BT-2026-0401'">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost">取消</button>
+          <button class="btn btn-danger" id="delBtn" disabled>永久删除</button>
+        </div>
+      </div>
+    </div>
+    <!-- Stop strategy confirm -->
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <div class="modal-icon warn">⏸</div>
+          <div>
+            <div class="modal-title">停止策略 MM-perp v3.2?</div>
+            <div class="modal-desc">策略将立即停止下单。当前持仓不会自动平仓，需要手动处理。</div>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div style="display:flex;flex-direction:column;gap:.4rem;font-family:var(--font-d);font-size:.72rem">
+            <div style="display:flex;justify-content:space-between;padding:.35rem .5rem;background:var(--bg-in);border-radius:4px"><span class="dim">Open positions</span><span>3</span></div>
+            <div style="display:flex;justify-content:space-between;padding:.35rem .5rem;background:var(--bg-in);border-radius:4px"><span class="dim">Unrealized PnL</span><span class="cg">+$1,240</span></div>
+            <div style="display:flex;justify-content:space-between;padding:.35rem .5rem;background:var(--bg-in);border-radius:4px"><span class="dim">Pending orders</span><span>8</span></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost">取消</button>
+          <button class="btn btn-warn">停止策略</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 3. TOAST SYSTEM ===== -->
+<div class="sec">
+  <div class="sec-num">03 — Toast notifications</div>
+  <div class="sec-title">通知系统</div>
+  <div class="sec-desc">从右侧滑入，最多堆叠 3 个，最新在上。5 秒后自动消失（底部进度条指示），支持关闭按钮和 action。</div>
+  <div class="g g2">
+    <div>
+      <div class="sub-label">4 种类型</div>
+      <div style="display:flex;flex-direction:column;gap:.5rem">
+        <div class="toast" style="position:relative;animation:none">
+          <div class="toast-icon suc">✓</div>
+          <div class="toast-content"><div class="toast-title">回测完成</div><div class="toast-msg">BT-2026-0401 · Sharpe 2.14 · 22m 14s</div><span class="toast-action">查看结果 →</span></div>
+          <button class="toast-close">×</button>
+          <div class="toast-timer" style="animation:none;width:60%"></div>
+        </div>
+        <div class="toast" style="position:relative;animation:none">
+          <div class="toast-icon dan">✕</div>
+          <div class="toast-content"><div class="toast-title">回测失败</div><div class="toast-msg">BT-2026-0395 · OutOfMemoryError at 82%</div></div>
+          <button class="toast-close">×</button>
+        </div>
+        <div class="toast" style="position:relative;animation:none">
+          <div class="toast-icon warn">!</div>
+          <div class="toast-content"><div class="toast-title">OKX 连接降级</div><div class="toast-msg">延迟升至 280ms，已切换到备用节点</div></div>
+          <button class="toast-close">×</button>
+        </div>
+        <div class="toast" style="position:relative;animation:none">
+          <div class="toast-icon info">i</div>
+          <div class="toast-content"><div class="toast-title">策略已部署</div><div class="toast-msg">Stat-arb v1.8 正在启动</div></div>
+          <button class="toast-close">×</button>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="sub-label">实时堆叠效果</div>
+      <div class="toast-demo" id="toastContainer">
+        <div style="font-size:.72rem;color:var(--t3);margin-bottom:.5rem">点击按钮触发 toast</div>
+      </div>
+      <div style="display:flex;gap:.5rem;margin-top:.75rem">
+        <button class="btn btn-ghost" onclick="addToast('suc','✓','交易已成交','BTC-PERP Long 0.5 @ 67,240')">Success</button>
+        <button class="btn btn-ghost" onclick="addToast('dan','✕','止损触发','ETH-PERP -$420 · 自动平仓')">Error</button>
+        <button class="btn btn-ghost" onclick="addToast('warn','!','内存警告','策略 MM-perp 使用 14.2 GB / 16 GB')">Warning</button>
+        <button class="btn btn-ghost" onclick="addToast('info','i','数据同步','已加载 2,400,000 bars')">Info</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 4. DATA STALENESS ===== -->
+<div class="sec">
+  <div class="sec-num">04 — Data staleness</div>
+  <div class="sec-title">数据时效性指示</div>
+  <div class="sec-desc">盯盘场景下，必须让用户知道数据是否过期。断连时显示全局告警条，过期数据变灰并标记 stale。</div>
+
+  <div class="sub-sec">
+    <div class="sub-label">全局断连告警条</div>
+    <div class="disco-bar"><span class="pulse"></span>WebSocket 连接断开 · 正在重连 (3/5) · 数据可能已过期<button class="empty-retry" style="margin-left:auto;font-size:.65rem;padding:.25rem .6rem">手动重连</button></div>
+  </div>
+
+  <div class="sub-sec">
+    <div class="sub-label">持仓表 — 正常 vs 过期</div>
+    <div class="cd"><div style="padding:0;overflow-x:auto"><table class="tbl"><thead><tr><th>Symbol</th><th>Side</th><th class="tr">Mark Price</th><th class="tr">PnL</th><th class="tr">Status</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">BTC-PERP</td><td><span class="cg">Long</span></td><td class="tr mono">67,120.50</td><td class="tr mono cg">+$1,240</td><td class="tr"><span class="badge" style="background:var(--suc-d);color:var(--suc);font-size:.58rem">Live</span></td></tr>
+      <tr><td class="mono">ETH-PERP</td><td><span class="cr">Short</span></td><td class="tr mono stale-cell stale">3,445.20<span class="stale-badge">stale 8s</span></td><td class="tr mono stale-cell stale">-$382</td><td class="tr"><span class="badge" style="background:var(--warn-d);color:var(--warn);font-size:.58rem">Stale 8s</span></td></tr>
+      <tr class="stale-row"><td class="mono" style="color:var(--t3)">SOL-PERP</td><td><span style="color:var(--t3)">Long</span></td><td class="tr mono" style="color:var(--t3)">171.20<span class="stale-badge" style="background:var(--dan-d);color:var(--dan)">lost 45s</span></td><td class="tr mono" style="color:var(--t3)">—</td><td class="tr"><span class="badge" style="background:var(--dan-d);color:var(--dan);font-size:.58rem">Disconnected</span></td></tr>
+    </tbody></table></div></div>
+  </div>
+
+  <div class="sub-sec">
+    <div class="sub-label">三级时效标记</div>
+    <div style="display:flex;gap:1rem;font-family:var(--font-d);font-size:.75rem;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:.5rem"><span class="badge" style="background:var(--suc-d);color:var(--suc);font-size:.58rem">Live</span> 实时数据正常（&lt;2s）</div>
+      <div style="display:flex;align-items:center;gap:.5rem"><span class="badge" style="background:var(--warn-d);color:var(--warn);font-size:.58rem">Stale</span> 数据过期（2-30s），数字变灰斜体</div>
+      <div style="display:flex;align-items:center;gap:.5rem"><span class="badge" style="background:var(--dan-d);color:var(--dan);font-size:.58rem">Disconnected</span> 断连（&gt;30s），整行半透明</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 5. FORM STATES ===== -->
+<div class="sec">
+  <div class="sec-num">05 — Form states</div>
+  <div class="sec-title">表单状态</div>
+  <div class="sec-desc">Input 的完整生命周期：默认 → hover → focus → 校验错误 → disabled。API key 遮罩显示，保存状态反馈。</div>
+  <div class="g g2">
+    <div class="cd"><div class="cd-b">
+      <div style="font-weight:600;font-size:.82rem;margin-bottom:1rem">Risk Parameters</div>
+      <div class="form-group">
+        <div class="form-label">Max position size (USD) <span class="req">*</span></div>
+        <input class="form-input" value="500,000" placeholder="e.g. 500000">
+        <div class="form-hint">单个策略最大持仓市值限制</div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">Daily loss limit (USD) <span class="req">*</span></div>
+        <input class="form-input error" value="-200">
+        <div class="form-error">✕ 必须为正数</div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">Max leverage</div>
+        <input class="form-input" value="10" style="border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-d)">
+        <div class="form-hint">Focus 状态：accent 边框 + 3px 外发光</div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">Emergency stop (admin only)</div>
+        <input class="form-input" value="Locked by admin" disabled>
+      </div>
+      <div class="save-bar" id="saveBar">
+        <div class="unsaved">● 有未保存的更改</div>
+        <div style="display:flex;gap:.5rem">
+          <button class="btn btn-ghost" onclick="this.closest('.save-bar').querySelector('.unsaved').style.display='none';this.closest('.save-bar').querySelector('.saved').style.display='flex'">放弃</button>
+          <button class="btn-primary" onclick="this.classList.add('btn-loading');setTimeout(()=>{this.classList.remove('btn-loading');const b=this.closest('.save-bar');b.querySelector('.unsaved').style.display='none';b.querySelector('.saved').style.display='flex'},1000)">保存</button>
+        </div>
+        <div class="saved" style="display:none">✓ 已保存</div>
+      </div>
+    </div></div>
+
+    <div class="cd"><div class="cd-b">
+      <div style="font-weight:600;font-size:.82rem;margin-bottom:1rem">API Keys</div>
+      <div class="form-group">
+        <div class="form-label">Binance API Key</div>
+        <div class="key-wrap">
+          <div class="key-mask" id="key1">••••••••••••••••FqX8</div>
+          <button class="key-toggle" onclick="const k=document.getElementById('key1');if(k.textContent.includes('••')){k.textContent='aK7x9mP2vB4nR5tY3wFqX8';this.textContent='隐藏'}else{k.textContent='••••••••••••••••FqX8';this.textContent='显示'}">显示</button>
+          <button class="key-toggle" style="color:var(--dan);border-color:var(--dan-d)" onclick="this.classList.add('btn-loading')">撤销</button>
+        </div>
+        <div class="form-hint">创建于 2026-01-15 · 最后使用 2 分钟前</div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">Binance API Secret</div>
+        <div class="key-wrap">
+          <div class="key-mask">••••••••••••••••••••••••••••9d2E</div>
+          <button class="key-toggle">显示</button>
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:1.5rem">
+        <div class="form-label">添加新 API Key</div>
+        <input class="form-input" placeholder="粘贴 API Key">
+      </div>
+      <div class="form-group">
+        <div class="form-label">API Secret</div>
+        <input class="form-input" type="password" placeholder="粘贴 API Secret">
+        <div class="form-hint">密钥仅加密存储，不会明文传输</div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:.75rem">
+        <button class="btn-primary" disabled>添加 Key</button>
+      </div>
+    </div></div>
+  </div>
+</div>
+
+</div>
+
+<script>
+/* Toast system */
+let toastId=0;
+function addToast(type,icon,title,msg){
+  const c=document.getElementById('toastContainer');
+  const ts=c.querySelectorAll('.toast');
+  if(ts.length>=3)ts[ts.length-1].remove();
+  const id='toast-'+toastId++;
+  const t=document.createElement('div');
+  t.className='toast';t.id=id;
+  t.innerHTML=`<div class="toast-icon ${type}">${icon}</div><div class="toast-content"><div class="toast-title">${title}</div><div class="toast-msg">${msg}</div></div><button class="toast-close" onclick="this.parentElement.remove()">×</button><div class="toast-timer"></div>`;
+  c.insertBefore(t,c.firstChild);
+  setTimeout(()=>{const el=document.getElementById(id);if(el)el.remove()},5000);
+}
+</script>
+</body>
+</html>

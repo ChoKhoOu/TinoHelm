@@ -14,9 +14,10 @@ import {
   Bar,
   Cell,
 } from "recharts";
-import { motion } from "framer-motion";
 import { apiGet } from "@/lib/api";
+import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
 import { useWsEvent } from "@/providers/WebSocketProvider";
+import { FadeIn } from "@/components/motion/FadeIn";
 
 interface Props {
   nodeType: "sandbox" | "live";
@@ -44,104 +45,29 @@ interface DataStatus {
   balance_free?: number;
 }
 
-const tooltipStyle: React.CSSProperties = {
-  background: "rgba(15, 20, 25, 0.95)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 10,
-  fontSize: 11,
-  color: "#E8EAED",
-  backdropFilter: "blur(8px)",
-  boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-};
 
-function GlassCard({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={`rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm overflow-hidden ${className}`}
-    >
-      {children}
-    </div>
-  );
-}
-
-function KpiCard({
-  label,
-  value,
-  sub,
-  color,
-  index,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  color?: string;
-  index: number;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, delay: index * 0.06, ease: [0.22, 1, 0.36, 1] }}
-    >
-      <GlassCard className="p-4 hover:bg-white/[0.05] transition-all duration-300">
-        <div className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 mb-2">
-          {label}
-        </div>
-        <div
-          className="text-2xl font-bold font-heading tracking-tight"
-          style={{ color: color ?? "var(--foreground)" }}
-        >
-          {value}
-        </div>
-        {sub && (
-          <div className="text-[9px] text-muted-foreground/40 mt-1">{sub}</div>
-        )}
-      </GlassCard>
-    </motion.div>
-  );
-}
-
-function MarginBar({ pct }: { pct: number }) {
+function GaugeBar({ label, pct, thresholds }: { label: string; pct: number; thresholds?: { warn: number; danger: number } }) {
   const clamped = Math.min(100, Math.max(0, pct));
-  const color =
-    clamped > 80
-      ? "var(--accent-red)"
-      : clamped > 50
-      ? "var(--accent-amber)"
-      : "var(--accent-green)";
+  const warn = thresholds?.warn ?? 30;
+  const danger = thresholds?.danger ?? 70;
+  const color = clamped > danger ? "var(--dan)" : clamped > warn ? "var(--warn)" : "var(--suc)";
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
-          保证金使用率
-        </span>
-        <span
-          className="text-[12px] font-bold font-mono"
-          style={{ color }}
-        >
-          {clamped.toFixed(1)}%
-        </span>
+        <span className="qds-section-label">{label}</span>
+        <span className="text-[0.72rem] font-bold font-mono" style={{ color }}>{clamped.toFixed(1)}%</span>
       </div>
-      <div className="h-2 rounded-full bg-white/[0.06] overflow-hidden">
+      <div className="h-2 rounded-full bg-secondary overflow-hidden">
         <div
-          className="h-full rounded-full transition-all duration-500"
-          style={{
-            width: `${clamped}%`,
-            background: `linear-gradient(90deg, ${color}99, ${color})`,
-          }}
+          className="h-full rounded-full transition-all"
+          style={{ width: `${clamped}%`, background: `linear-gradient(90deg, color-mix(in srgb, ${color} 60%, transparent), ${color})`, transitionDuration: "500ms" }}
         />
       </div>
-      <div className="flex justify-between text-[9px] text-muted-foreground/30">
+      <div className="flex justify-between text-[0.56rem] text-qds-t3">
         <span>0%</span>
-        <span className="text-[var(--accent-amber)]">50%</span>
-        <span className="text-[var(--accent-red)]">80%</span>
+        <span style={{ color: "var(--warn)" }}>{warn}%</span>
+        <span style={{ color: "var(--dan)" }}>{danger}%</span>
         <span>100%</span>
       </div>
     </div>
@@ -153,10 +79,8 @@ export function RiskTab({ nodeType }: Props) {
   const [equityPoints, setEquityPoints] = useState<EquityPoint[]>([]);
   const [dataStatus, setDataStatus] = useState<DataStatus>({});
 
-  // Initial load
   useEffect(() => {
     let cancelled = false;
-
     async function load() {
       try {
         const [rm, eq, ds] = await Promise.all([
@@ -172,7 +96,6 @@ export function RiskTab({ nodeType }: Props) {
         // silent
       }
     }
-
     load();
     return () => { cancelled = true; };
   }, [nodeType]);
@@ -186,7 +109,6 @@ export function RiskTab({ nodeType }: Props) {
     setMetrics((prev) => ({ ...prev, ...d }));
   }, [riskMsg, nodeType]);
 
-  // Compute drawdown series
   const drawdownSeries = useMemo(() => {
     if (equityPoints.length === 0) return [];
     let peak = -Infinity;
@@ -208,198 +130,107 @@ export function RiskTab({ nodeType }: Props) {
     .map(([instrument, exposure]) => ({ instrument, exposure }))
     .sort((a, b) => b.exposure - a.exposure);
 
-  const fmtDollar = (v: number) =>
-    v >= 1_000_000
-      ? `$${(v / 1_000_000).toFixed(2)}M`
-      : v >= 1_000
-      ? `$${(v / 1_000).toFixed(1)}K`
-      : `$${v.toFixed(0)}`;
-
+  const fmtDollar = (v: number) => v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(2)}M` : v >= 1_000 ? `$${(v / 1_000).toFixed(1)}K` : `$${v.toFixed(0)}`;
   const fmtPct = (v?: number) => (v != null ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}%` : "N/A");
 
-  const ddColor = (metrics.drawdown_pct ?? 0) < 0 ? "var(--accent-red)" : "var(--foreground)";
-  const pnlColor =
-    (metrics.daily_pnl_pct ?? 0) >= 0 ? "var(--accent-green)" : "var(--accent-red)";
+  const ddColor = (metrics.drawdown_pct ?? 0) < 0 ? "var(--dan)" : "var(--t0)";
+  const pnlColor = (metrics.daily_pnl_pct ?? 0) >= 0 ? "var(--suc)" : "var(--dan)";
 
   return (
-    <div className="flex flex-col gap-4 p-4 min-h-0">
+    <div className="flex flex-col gap-5 p-5 min-h-0">
       {/* Breach alert */}
       {metrics.breached && (
-        <motion.div
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="p-3 rounded-lg bg-red-500/10 border border-red-500/20"
-        >
-          <span className="text-[12px] font-bold text-red-400">
-            风控告警: {metrics.breach_reason}
-          </span>
-        </motion.div>
+        <div className="p-3 rounded-lg bg-qds-danger-dim border border-destructive" style={{ borderColor: "color-mix(in srgb, var(--dan) 30%, transparent)" }}>
+          <span className="text-[0.72rem] font-bold text-destructive">风控告警: {metrics.breach_reason}</span>
+        </div>
       )}
 
       {/* KPI row */}
       <div className="grid grid-cols-4 gap-3">
-        <KpiCard
-          label="最大回撤"
-          value={fmtPct(metrics.drawdown_pct)}
-          color={ddColor}
-          index={0}
-        />
-        <KpiCard
-          label="日度盈亏"
-          value={fmtPct(metrics.daily_pnl_pct)}
-          color={pnlColor}
-          index={1}
-        />
-        <KpiCard
-          label="总风险敞口"
-          value={metrics.total_exposure != null ? fmtDollar(metrics.total_exposure) : "N/A"}
-          color="var(--accent-blue)"
-          index={2}
-        />
-        <KpiCard
-          label="持仓数量"
-          value={String(metrics.position_count ?? 0)}
-          index={3}
-        />
+        {[
+          { label: "日亏损限额使用", value: fmtPct(metrics.daily_pnl_pct), color: pnlColor },
+          { label: "最大回撤", value: fmtPct(metrics.drawdown_pct), color: ddColor },
+          { label: "总风险敞口", value: metrics.total_exposure != null ? fmtDollar(metrics.total_exposure) : "N/A", color: "var(--info)" },
+          { label: "持仓数量", value: String(metrics.position_count ?? 0), color: "var(--t0)" },
+        ].map((kpi, i) => (
+          <FadeIn key={kpi.label} delay={i * 0.05}>
+            <div className="rounded-lg border bg-card p-3 hover:bg-secondary transition-colors" style={{ transitionDuration: "var(--dur)" }}>
+              <div className="qds-stat-label">{kpi.label}</div>
+              <div className="text-[1.1rem] font-bold font-mono" style={{ color: kpi.color }}>{kpi.value}</div>
+            </div>
+          </FadeIn>
+        ))}
       </div>
 
       {/* Charts row */}
       <div className="grid grid-cols-[1fr_280px] gap-3">
         {/* Drawdown chart */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.25, ease: [0.22, 1, 0.36, 1] }}
-        >
-          <GlassCard className="p-4">
-            <div className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 mb-3">
-              水下曲线 (Drawdown)
+        <FadeIn delay={0.25}>
+          <div className="rounded-lg border bg-card overflow-hidden">
+            <div className="qds-card-header">
+              <span>水下曲线 (Drawdown)</span>
             </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <AreaChart data={drawdownSeries} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-                <defs>
-                  <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#EF5350" stopOpacity={0.25} />
-                    <stop offset="95%" stopColor="#EF5350" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-                <XAxis
-                  dataKey="ts"
-                  tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(v) => {
-                    try { return new Date(v).toLocaleDateString("zh-CN", { month: "short", day: "numeric" }); }
-                    catch { return v; }
-                  }}
-                />
-                <YAxis
-                  tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(v) => `${v.toFixed(1)}%`}
-                  width={48}
-                />
-                <RechartsTooltip
-                  contentStyle={tooltipStyle}
-                  labelStyle={{ color: "rgba(255,255,255,0.5)" }}
-                  formatter={(v: unknown) => [`${(v as number).toFixed(2)}%`, "回撤"]}
-                />
-                {metrics.drawdown_threshold != null && (
-                  <ReferenceLine
-                    y={-Math.abs(metrics.drawdown_threshold)}
-                    stroke="#F0B429"
-                    strokeDasharray="4 4"
-                    strokeOpacity={0.5}
-                    label={{ value: "阈值", fill: "#F0B429", fontSize: 9 }}
-                  />
-                )}
-                <Area
-                  type="monotone"
-                  dataKey="drawdown"
-                  stroke="#EF5350"
-                  strokeWidth={1.5}
-                  fill="url(#ddGrad)"
-                  animationDuration={1500}
-                  animationEasing="ease-out"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </GlassCard>
-        </motion.div>
+            <div className="p-4">
+              <ResponsiveContainer width="100%" height={220}>
+                <AreaChart data={drawdownSeries} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                  <defs>
+                    <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="var(--dan)" stopOpacity={0.25} />
+                      <stop offset="95%" stopColor="var(--dan)" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+                  <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => { try { return new Date(v).toLocaleDateString("zh-CN", { month: "short", day: "numeric" }); } catch { return v; } }} />
+                  <YAxis tick={{ fill: "var(--t3)", fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => `${v.toFixed(1)}%`} width={48} />
+                  <RechartsTooltip {...CHART_TOOLTIP_PROPS} formatter={(v: unknown) => [`${(v as number).toFixed(2)}%`, "回撤"]} />
+                  {metrics.drawdown_threshold != null && (
+                    <ReferenceLine y={-Math.abs(metrics.drawdown_threshold)} stroke="var(--warn)" strokeDasharray="4 4" strokeOpacity={0.5} label={{ value: "阈值", fill: "var(--warn)", fontSize: 9 }} />
+                  )}
+                  <Area type="monotone" dataKey="drawdown" stroke="var(--dan)" strokeWidth={1.5} fill="url(#ddGrad)" animationDuration={1500} animationEasing="ease-out" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </FadeIn>
 
         {/* Exposure per instrument */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
-        >
-          <GlassCard className="p-4 h-full">
-            <div className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 mb-3">
-              各品种敞口
+        <FadeIn delay={0.3}>
+          <div className="rounded-lg border bg-card overflow-hidden h-full">
+            <div className="qds-card-header">
+              <span>各品种敞口</span>
             </div>
-            {exposureEntries.length > 0 ? (
-              <ResponsiveContainer width="100%" height={180}>
-                <BarChart
-                  data={exposureEntries}
-                  layout="vertical"
-                  margin={{ top: 0, right: 8, bottom: 0, left: 0 }}
-                >
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke="rgba(255,255,255,0.04)"
-                    horizontal={false}
-                  />
-                  <XAxis
-                    type="number"
-                    tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
-                    axisLine={false}
-                    tickLine={false}
-                    tickFormatter={(v) =>
-                      v >= 1000 ? `${(v / 1000).toFixed(0)}K` : String(v)
-                    }
-                  />
-                  <YAxis
-                    type="category"
-                    dataKey="instrument"
-                    tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 9 }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={80}
-                    tickFormatter={(v: string) => v.replace(".BINANCE", "").replace("-PERP", "")}
-                  />
-                  <RechartsTooltip
-                    contentStyle={tooltipStyle}
-                    labelStyle={{ color: "rgba(255,255,255,0.5)" }}
-                    formatter={(v: unknown) => [fmtDollar(v as number), "敞口"]}
-                  />
-                  <Bar dataKey="exposure" radius={[0, 3, 3, 0]} animationDuration={1200}>
-                    {exposureEntries.map((_, i) => (
-                      <Cell key={i} fill="#4C9EEB" fillOpacity={0.8 - i * 0.08} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="flex items-center justify-center h-[180px] text-muted-foreground/30 text-xs">
-                暂无持仓数据
-              </div>
-            )}
-          </GlassCard>
-        </motion.div>
+            <div className="p-4">
+              {exposureEntries.length > 0 ? (
+                <ResponsiveContainer width="100%" height={180}>
+                  <BarChart data={exposureEntries} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" horizontal={false} />
+                    <XAxis type="number" tick={{ fill: "var(--t3)", fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : String(v)} />
+                    <YAxis type="category" dataKey="instrument" tick={{ fill: "var(--t2)", fontSize: 9 }} axisLine={false} tickLine={false} width={80} tickFormatter={(v: string) => v.replace(".BINANCE", "").replace("-PERP", "")} />
+                    <RechartsTooltip {...CHART_TOOLTIP_PROPS} formatter={(v: unknown) => [fmtDollar(v as number), "敞口"]} />
+                    <Bar dataKey="exposure" radius={[0, 3, 3, 0]} animationDuration={1200}>
+                      {exposureEntries.map((_, i) => (
+                        <Cell key={i} fill="var(--info)" fillOpacity={0.8 - i * 0.08} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex items-center justify-center h-[180px] text-qds-t3 text-[0.72rem]">暂无持仓数据</div>
+              )}
+            </div>
+          </div>
+        </FadeIn>
       </div>
 
-      {/* Margin gauge */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, delay: 0.35, ease: [0.22, 1, 0.36, 1] }}
-      >
-        <GlassCard className="p-4">
-          <MarginBar pct={marginPct} />
-        </GlassCard>
-      </motion.div>
+      {/* Gauge bars */}
+      <FadeIn delay={0.35}>
+        <div className="rounded-lg border bg-card p-4 space-y-5">
+          <GaugeBar label="保证金使用率" pct={marginPct} thresholds={{ warn: 50, danger: 80 }} />
+          {metrics.daily_loss_threshold != null && metrics.daily_pnl_pct != null && (
+            <GaugeBar label="日亏损限额" pct={Math.abs(metrics.daily_pnl_pct / metrics.daily_loss_threshold * 100)} thresholds={{ warn: 30, danger: 70 }} />
+          )}
+        </div>
+      </FadeIn>
     </div>
   );
 }

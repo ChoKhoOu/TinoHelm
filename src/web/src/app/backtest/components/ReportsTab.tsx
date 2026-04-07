@@ -115,7 +115,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
           const num = parseFloat(val);
           if (!isNaN(num)) {
             return (
-              <span className={num >= 0 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+              <span className={num >= 0 ? "text-qds-success" : "text-destructive"}>
                 {num >= 0 ? "+" : ""}{val}
               </span>
             );
@@ -162,7 +162,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
   return (
     <div className="flex flex-col h-full">
       {/* Source selector + search + export */}
-      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border bg-card shrink-0 flex-wrap">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b bg-card shrink-0 flex-wrap">
         {/* Pills */}
         <div className="flex items-center gap-1">
           {SOURCES.map(({ key, label }) => (
@@ -171,7 +171,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
               onClick={() => setActiveSource(key)}
               className={`px-3 py-1 rounded-full text-[11px] font-semibold transition-colors ${
                 activeSource === key
-                  ? "bg-[var(--accent-blue-20)] text-primary"
+                  ? "bg-qds-info-dim text-primary"
                   : "text-muted-foreground hover:text-muted-foreground"
               }`}
             >
@@ -193,7 +193,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
         {/* Export */}
         <button
           onClick={handleExport}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-muted-foreground hover:text-primary hover:bg-[var(--accent-blue-20)] border border-border hover:border-primary transition-colors"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-muted-foreground hover:text-primary hover:bg-qds-info-dim border hover:border-primary transition-colors"
         >
           <Download className="w-3 h-3" />
           导出 CSV
@@ -222,7 +222,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
             <Table className="w-full text-xs border-collapse">
               <TableHeader className="sticky top-0 z-10 bg-card">
                 {table.getHeaderGroups().map((hg) => (
-                  <TableRow key={hg.id} className="border-b border-border">
+                  <TableRow key={hg.id} className="border-b">
                     {hg.headers.map((header) => {
                       const canSort = header.column.getCanSort();
                       const sorted = header.column.getIsSorted();
@@ -258,8 +258,8 @@ export function ReportsTab({ runId }: ReportsTabProps) {
                 {table.getRowModel().rows.map((row, i) => (
                   <TableRow
                     key={row.id}
-                    className={`border-b border-border/30 hover:bg-muted/50 transition-colors ${
-                      i % 2 === 0 ? "" : "bg-background/30"
+                    className={`border-b hover:bg-secondary transition-colors ${
+                      i % 2 === 0 ? "" : "bg-background"
                     }`}
                   >
                     {row.getVisibleCells().map((cell) => (
@@ -274,7 +274,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
           </div>
 
           {/* Pagination */}
-          <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-card shrink-0">
+          <div className="flex items-center justify-between px-4 py-2 border-t bg-card shrink-0">
             <span className="text-[11px] text-muted-foreground">
               {from}–{to} / {filteredCount} 条
               {globalFilter && ` (筛选自 ${csvData.length} 条)`}
@@ -297,7 +297,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
                 <button
                   onClick={() => table.previousPage()}
                   disabled={!table.getCanPreviousPage()}
-                  className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-secondary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 >
                   上一页
                 </button>
@@ -307,7 +307,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
                 <button
                   onClick={() => table.nextPage()}
                   disabled={!table.getCanNextPage()}
-                  className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-secondary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 >
                   下一页
                 </button>

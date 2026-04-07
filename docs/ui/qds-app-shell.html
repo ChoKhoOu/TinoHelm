@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QDS — Quantitative Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --font-d:'IBM Plex Mono',monospace;--font-u:'IBM Plex Sans',sans-serif;
+  --eo:cubic-bezier(.16,1,.3,1);--dur:280ms;--r:12px;--rs:6px;
+  --bg-p:#302f2d;--bg-s:#262624;--bg-t:#3b3a37;--bg-in:#141413;
+  --t0:#E8E6E0;--t1:#9C9A92;--t2:#73726C;--t3:#5F5E5A;
+  --bd:#3b3a37;--bdh:#5F5E5A;
+  --acc:#D97857;--acc-d:rgba(217,120,87,.12);
+  --suc:#36884B;--suc-d:rgba(54,136,75,.12);
+  --dan:#FE8181;--dan-d:rgba(254,129,129,.12);
+  --info:#85B7EB;--info-d:rgba(133,183,235,.12);
+  --warn:#FAC775;--warn-d:rgba(250,199,117,.12);
+  --shimmer:rgba(255,255,255,.35);
+  --side-w:220px;
+}
+html.light{
+  --bg-p:#f5f4ed;--bg-s:#faf9f5;--bg-t:#eae8e0;--bg-in:#fcfbf8;
+  --t0:#2C2C2A;--t1:#73726C;--t2:#9C9A92;--t3:#B0ADA5;
+  --bd:#dedbd3;--bdh:#c7c4bb;
+  --acc:#D97857;--acc-d:rgba(217,120,87,.08);
+  --suc:#36884B;--suc-d:rgba(54,136,75,.08);
+  --dan:#8A2425;--dan-d:rgba(138,36,37,.08);
+  --info:#3266AD;--info-d:rgba(50,102,173,.08);
+  --warn:#854F0B;--warn-d:rgba(250,199,117,.08);
+  --shimmer:rgba(255,255,255,.7);
+}
+body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;display:flex;height:100vh;overflow:hidden;transition:background var(--dur) var(--eo),color var(--dur) var(--eo)}
+.mono{font-family:var(--font-d)}.dim{color:var(--t2)}.cg{color:var(--suc)}.cr{color:var(--dan)}.ca{color:var(--acc)}
+
+/* ===== SIDEBAR ===== */
+.sidebar{width:var(--side-w);min-width:var(--side-w);height:100vh;background:var(--bg-in);border-right:1px solid var(--bd);display:flex;flex-direction:column;transition:width var(--dur) var(--eo),min-width var(--dur) var(--eo);overflow:hidden;z-index:100}
+.sidebar.collapsed{--side-w:56px}
+.side-logo{padding:1rem;display:flex;align-items:center;gap:.6rem;border-bottom:1px solid var(--bd);height:48px;overflow:hidden}
+.side-logo .mark{width:24px;height:24px;border-radius:6px;background:var(--acc);display:flex;align-items:center;justify-content:center;font-family:var(--font-d);font-size:.7rem;font-weight:600;color:#fff;flex-shrink:0}
+.side-logo .wordmark{font-family:var(--font-d);font-size:.9rem;font-weight:600;white-space:nowrap;overflow:hidden}
+.side-logo .wordmark .dot{color:var(--acc)}
+
+.side-nav{flex:1;padding:.75rem .5rem;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
+.side-group{margin-top:.75rem}
+.side-group:first-child{margin-top:0}
+.side-group-label{font-family:var(--font-d);font-size:.58rem;letter-spacing:.12em;text-transform:uppercase;color:var(--t3);padding:0 .5rem .4rem;white-space:nowrap;overflow:hidden}
+.nav-item{display:flex;align-items:center;gap:.6rem;padding:.5rem .65rem;border-radius:var(--rs);cursor:pointer;transition:all 150ms var(--eo);white-space:nowrap;overflow:hidden;position:relative;border-left:3px solid transparent;font-size:.82rem;color:var(--t1)}
+.nav-item:hover{background:var(--bg-t);color:var(--t0)}
+.nav-item.active{color:var(--acc);border-left-color:var(--acc);background:var(--acc-d)}
+.nav-icon{width:18px;height:18px;flex-shrink:0;opacity:.6;display:flex;align-items:center;justify-content:center;font-size:.9rem}
+.nav-item.active .nav-icon{opacity:1}
+
+.side-bottom{padding:.5rem;border-top:1px solid var(--bd);display:flex;flex-direction:column;gap:.35rem}
+.side-status{display:flex;align-items:center;gap:.5rem;padding:.35rem .65rem;font-family:var(--font-d);font-size:.65rem;color:var(--t2);overflow:hidden;white-space:nowrap}
+.dot-g{width:6px;height:6px;border-radius:50%;background:var(--suc);flex-shrink:0}
+.dot-o{width:6px;height:6px;border-radius:50%;background:var(--warn);flex-shrink:0}
+.side-collapse{display:flex;align-items:center;justify-content:center;padding:.5rem;cursor:pointer;color:var(--t2);transition:color 150ms}
+.side-collapse:hover{color:var(--t0)}
+
+/* ===== MAIN AREA ===== */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.topbar{height:48px;min-height:48px;display:flex;align-items:center;justify-content:space-between;padding:0 1.5rem;border-bottom:1px solid var(--bd);background:var(--bg-s)}
+.breadcrumb{font-family:var(--font-d);font-size:.75rem;color:var(--t2);display:flex;align-items:center;gap:.4rem}
+.breadcrumb .sep{opacity:.4}
+.breadcrumb .current{color:var(--t0);font-weight:500}
+.topbar-right{display:flex;align-items:center;gap:1rem}
+.search-btn{font-family:var(--font-d);font-size:.72rem;padding:.3rem .75rem;border:1px solid var(--bd);border-radius:var(--rs);background:0;color:var(--t2);cursor:pointer;display:flex;align-items:center;gap:.35rem;transition:all 150ms var(--eo)}
+.search-btn:hover{border-color:var(--bdh);color:var(--t0)}
+.search-btn kbd{font-size:.6rem;background:var(--bg-t);padding:.1rem .35rem;border-radius:3px}
+.theme-btn{width:28px;height:28px;border-radius:50%;border:1px solid var(--bd);background:0;color:var(--t2);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.8rem;transition:all 150ms var(--eo)}
+.theme-btn:hover{border-color:var(--bdh);color:var(--t0);background:var(--bg-t)}
+
+.content{flex:1;overflow-y:auto;padding:1.5rem 2rem 4rem}
+
+/* Page transitions */
+.page{display:none;animation:pageIn .35s var(--eo)}
+.page.active{display:block}
+@keyframes pageIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+
+/* ===== STATUS BAR ===== */
+.statusbar{height:28px;min-height:28px;display:flex;align-items:center;padding:0 1.5rem;background:var(--bg-in);border-top:1px solid var(--bd);font-family:var(--font-d);font-size:.65rem;color:var(--t3);gap:1.5rem;overflow:hidden}
+.sb-item{display:flex;align-items:center;gap:.35rem;white-space:nowrap}
+.sb-dot{width:5px;height:5px;border-radius:50%}
+
+/* ===== SHARED COMPONENTS ===== */
+.g{display:grid;gap:1.25rem}.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:1fr 1fr 1fr}.g4{grid-template-columns:repeat(4,1fr)}.g5{grid-template-columns:repeat(5,1fr)}
+.sc{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);padding:1rem 1.1rem;transition:border-color 150ms}
+.sc:hover{border-color:var(--bdh)}
+.sc-l{font-size:.68rem;color:var(--t2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem}
+.sc-v{font-family:var(--font-d);font-size:1.35rem;font-weight:600;letter-spacing:-.03em}
+.sc-sub{font-family:var(--font-d);font-size:.68rem;margin-top:.2rem}
+.cd{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;transition:border-color 150ms}
+.cd:hover{border-color:var(--bdh)}
+.cd-h{display:flex;justify-content:space-between;align-items:center;padding:.75rem 1rem;border-bottom:1px solid var(--bd);font-size:.8rem;font-weight:600}
+.cd-h .sub{font-family:var(--font-d);font-size:.65rem;font-weight:400;color:var(--t2)}
+.cd-b{padding:1rem}
+.sec-label{font-family:var(--font-d);font-size:.6rem;letter-spacing:.15em;text-transform:uppercase;color:var(--acc);margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem}
+.sec-label::after{content:'';flex:1;height:1px;background:var(--bd)}
+.badge{font-family:var(--font-d);font-size:.68rem;padding:.2rem .55rem;border-radius:100px}
+.badge-g{background:var(--suc-d);color:var(--suc)}.badge-r{background:var(--dan-d);color:var(--dan)}.badge-a{background:var(--acc-d);color:var(--acc)}.badge-i{background:var(--info-d);color:var(--info)}
+
+/* Table */
+.tbl{width:100%;border-collapse:collapse;font-family:var(--font-d);font-size:.75rem}
+.tbl thead th{padding:.6rem .75rem;text-align:left;font-weight:500;font-size:.65rem;color:var(--t2);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--bd)}
+.tbl thead th.tr{text-align:right}
+.tbl tbody tr{border-bottom:1px solid var(--bd);transition:background 150ms}
+.tbl tbody tr:last-child{border-bottom:0}
+.tbl tbody tr:hover{background:var(--bg-t)}
+.tbl td{padding:.55rem .75rem;white-space:nowrap}.tbl td.tr{text-align:right}
+.side-l{color:var(--suc);font-weight:500}.side-s{color:var(--dan);font-weight:500}
+
+/* Tick flash */
+@keyframes tickG{0%{background:var(--suc-d)}100%{background:transparent}}
+@keyframes tickR{0%{background:var(--dan-d)}100%{background:transparent}}
+.tick-g{animation:tickG .6s ease-out}.tick-r{animation:tickR .6s ease-out}
+
+/* Strategy cards */
+.strat-card{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);padding:1.1rem;transition:border-color 150ms,transform 150ms var(--eo);cursor:pointer}
+.strat-card:hover{border-color:var(--bdh);transform:translateY(-2px)}
+.strat-name{font-family:var(--font-d);font-size:.85rem;font-weight:600;margin-bottom:.25rem}
+.strat-meta{font-size:.72rem;color:var(--t2);margin-bottom:.75rem}
+.strat-row{display:flex;justify-content:space-between;align-items:center;margin-top:.5rem}
+.strat-stat{font-family:var(--font-d);font-size:.72rem}
+.strat-stat .k{color:var(--t2);margin-right:.35rem}
+.toggle-sm{width:36px;height:20px;border-radius:10px;border:1px solid var(--bd);background:var(--bg-t);position:relative;cursor:pointer;transition:all 200ms var(--eo)}
+.toggle-sm.on{background:var(--suc);border-color:var(--suc)}
+.toggle-sm::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--t1);transition:all 200ms var(--eo)}
+.toggle-sm.on::after{left:18px;background:#fff}
+.sparkline{height:32px;display:flex;align-items:end;gap:2px}
+.spark-bar{width:6px;border-radius:2px;transition:height 300ms var(--eo)}
+
+@media(max-width:900px){.g2,.g3,.g4,.g5{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.g2,.g3,.g4,.g5{grid-template-columns:1fr}.sidebar{position:fixed;left:-220px}.sidebar.open{left:0}}
+</style>
+</head>
+<body>
+
+<!-- ===== SIDEBAR ===== -->
+<aside class="sidebar" id="sidebar">
+  <div class="side-logo">
+    <div class="mark">Q</div>
+    <div class="wordmark">QDS<span class="dot">.</span></div>
+  </div>
+  <nav class="side-nav">
+    <div class="side-group">
+      <div class="side-group-label">Core</div>
+      <div class="nav-item active" onclick="goPage('dashboard',this)"><span class="nav-icon">◫</span>Dashboard</div>
+      <div class="nav-item" onclick="goPage('strategies',this)"><span class="nav-icon">⟐</span>Strategies</div>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Trading</div>
+      <div class="nav-item" onclick="goPage('live',this)"><span class="nav-icon">◉</span>Live Monitor</div>
+      <div class="nav-item" onclick="goPage('backtests',this)"><span class="nav-icon">⧖</span>Backtests</div>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Data</div>
+      <div class="nav-item" onclick="goPage('data',this)"><span class="nav-icon">⊞</span>Data Feeds</div>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">System</div>
+      <div class="nav-item" onclick="goPage('settings',this)"><span class="nav-icon">⚙</span>Settings</div>
+    </div>
+  </nav>
+  <div class="side-bottom">
+    <div class="side-status"><span class="dot-g"></span>System OK</div>
+    <div class="side-status" style="color:var(--t3);font-size:.6rem">QDS v0.4.2 · <span id="uptime">12d 4h</span></div>
+    <div class="side-collapse" onclick="document.getElementById('sidebar').classList.toggle('collapsed')">⟨⟩</div>
+  </div>
+</aside>
+
+<!-- ===== MAIN ===== -->
+<div class="main">
+  <header class="topbar">
+    <div class="breadcrumb"><span>QDS</span><span class="sep">/</span><span class="current" id="breadcrumb">Dashboard</span></div>
+    <div class="topbar-right">
+      <button class="search-btn">Search <kbd>⌘K</kbd></button>
+      <button class="theme-btn" onclick="document.documentElement.classList.toggle('light')">◑</button>
+    </div>
+  </header>
+
+  <div class="content">
+
+    <!-- ===== PAGE: Dashboard ===== -->
+    <div class="page active" id="page-dashboard">
+      <div class="sec-label">Overview — Today</div>
+      <div class="g g4" style="margin-bottom:2rem">
+        <div class="sc"><div class="sc-l">Today PnL</div><div class="sc-v cg">+$12,480</div><div class="sc-sub cg">+0.62%</div></div>
+        <div class="sc"><div class="sc-l">Open PnL</div><div class="sc-v cr">-$3,240</div><div class="sc-sub dim">5 positions</div></div>
+        <div class="sc"><div class="sc-l">Strategies Running</div><div class="sc-v">4</div><div class="sc-sub dim">of 7 total</div></div>
+        <div class="sc"><div class="sc-l">Fills Today</div><div class="sc-v">342</div><div class="sc-sub dim">$18.4M volume</div></div>
+      </div>
+      <div class="sec-label">Equity & PnL</div>
+      <div class="g g2" style="margin-bottom:2rem">
+        <div class="cd"><div class="cd-h"><span>Cumulative PnL (30d)</span><span class="badge badge-g">+$284K</span></div><div class="cd-b" style="height:260px"><canvas id="cDash1"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>PnL by Strategy</span></div><div class="cd-b" style="height:260px"><canvas id="cDash2"></canvas></div></div>
+      </div>
+      <div class="sec-label">Recent Fills</div>
+      <div class="cd"><div style="padding:0;overflow-x:auto"><table class="tbl"><thead><tr><th>Time</th><th>Strategy</th><th>Symbol</th><th>Side</th><th class="tr">Price</th><th class="tr">Size</th><th class="tr">PnL</th></tr></thead><tbody id="dashFills"></tbody></table></div></div>
+    </div>
+
+    <!-- ===== PAGE: Live Monitor ===== -->
+    <div class="page" id="page-live">
+      <div class="sec-label">Real-time</div>
+      <div class="g g4" style="margin-bottom:2rem">
+        <div class="sc"><div class="sc-l">Unrealized PnL</div><div class="sc-v cr" id="livePnl">-$3,240</div></div>
+        <div class="sc"><div class="sc-l">Realized Today</div><div class="sc-v cg">+$12,480</div></div>
+        <div class="sc"><div class="sc-l">Open Positions</div><div class="sc-v">5</div></div>
+        <div class="sc"><div class="sc-l">Pending Orders</div><div class="sc-v">12</div></div>
+      </div>
+      <div class="sec-label">Positions</div>
+      <div class="cd" style="margin-bottom:2rem"><div style="padding:0;overflow-x:auto"><table class="tbl"><thead><tr><th>Symbol</th><th>Strategy</th><th>Side</th><th class="tr">Size</th><th class="tr">Entry</th><th class="tr" id="hMark">Mark</th><th class="tr">PnL</th><th class="tr">PnL%</th><th class="tr">Liq. Price</th></tr></thead><tbody id="livePos"></tbody></table></div></div>
+      <div class="sec-label">Live PnL</div>
+      <div class="cd"><div class="cd-b" style="height:240px"><canvas id="cLive"></canvas></div></div>
+    </div>
+
+    <!-- ===== PAGE: Strategies ===== -->
+    <div class="page" id="page-strategies">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
+        <div class="sec-label" style="margin-bottom:0">Strategies · 7 total</div>
+        <button style="font-family:var(--font-d);font-size:.72rem;padding:.4rem .85rem;border-radius:var(--rs);border:1px solid var(--acc);background:var(--acc-d);color:var(--acc);cursor:pointer">+ New Strategy</button>
+      </div>
+      <div class="g g2" id="stratGrid"></div>
+    </div>
+
+    <!-- ===== PAGE: Backtests (placeholder) ===== -->
+    <div class="page" id="page-backtests">
+      <div style="text-align:center;padding:4rem 2rem">
+        <div style="font-size:2rem;margin-bottom:1rem;opacity:.3">⧖</div>
+        <div style="font-size:.9rem;font-weight:600;margin-bottom:.5rem">Backtests module</div>
+        <div class="dim" style="font-size:.8rem">See <span class="mono">qds-backtest-full.html</span> for the complete implementation with progress tracking, 7-tab detail page, paginated trade logs, and 34 help tooltips.</div>
+      </div>
+    </div>
+
+    <!-- ===== PAGE: Data (placeholder) ===== -->
+    <div class="page" id="page-data">
+      <div class="sec-label">Data Sources</div>
+      <div class="cd"><div style="padding:0;overflow-x:auto"><table class="tbl"><thead><tr><th>Exchange</th><th>Type</th><th>Symbols</th><th class="tr">Latency</th><th class="tr">Last Update</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">Binance</td><td>L2 Orderbook</td><td class="mono">BTC, ETH, SOL +12</td><td class="tr mono">2ms</td><td class="tr mono dim">just now</td><td><span class="badge badge-g" style="font-size:.62rem">Connected</span></td></tr>
+        <tr><td class="mono">Hyperliquid</td><td>BBO + Trades</td><td class="mono">BTC, ETH, ARB +8</td><td class="tr mono">8ms</td><td class="tr mono dim">just now</td><td><span class="badge badge-g" style="font-size:.62rem">Connected</span></td></tr>
+        <tr><td class="mono">OKX</td><td>L1 Ticker</td><td class="mono">BTC, ETH +5</td><td class="tr mono" style="color:var(--warn)">42ms</td><td class="tr mono dim">2s ago</td><td><span class="badge badge-a" style="font-size:.62rem">Degraded</span></td></tr>
+        <tr><td class="mono">Polygon</td><td>Equities</td><td class="mono">SPY, QQQ +20</td><td class="tr mono">120ms</td><td class="tr mono dim">closed</td><td><span class="badge" style="font-size:.62rem;background:var(--bg-t);color:var(--t2)">Market Closed</span></td></tr>
+      </tbody></table></div></div>
+    </div>
+
+    <!-- ===== PAGE: Settings (placeholder) ===== -->
+    <div class="page" id="page-settings">
+      <div style="text-align:center;padding:4rem 2rem">
+        <div style="font-size:2rem;margin-bottom:1rem;opacity:.3">⚙</div>
+        <div style="font-size:.9rem;font-weight:600;margin-bottom:.5rem">Settings</div>
+        <div class="dim" style="font-size:.8rem">API keys, risk parameters, notifications, theme</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Status bar -->
+  <footer class="statusbar">
+    <div class="sb-item"><div class="sb-dot" style="background:var(--suc)"></div>Binance 2ms</div>
+    <div class="sb-item"><div class="sb-dot" style="background:var(--suc)"></div>Hyperliquid 8ms</div>
+    <div class="sb-item"><div class="sb-dot" style="background:var(--warn)"></div>OKX 42ms</div>
+    <div class="sb-item" style="border-left:1px solid var(--bd);padding-left:1.5rem">Mem <span style="color:var(--t1)">4.2G</span></div>
+    <div class="sb-item">CPU <span style="color:var(--t1)">12%</span></div>
+    <div style="margin-left:auto" class="sb-item" id="footerClock"></div>
+  </footer>
+</div>
+
+<script>
+/* === PAGE NAVIGATION === */
+function goPage(id,el){
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  const names={dashboard:'Dashboard',strategies:'Strategies',live:'Live Monitor',backtests:'Backtests',data:'Data Feeds',settings:'Settings'};
+  document.getElementById('breadcrumb').textContent=names[id]||id;
+  if(id==='dashboard')buildDashCharts();
+  if(id==='live')buildLive();
+  if(id==='strategies')buildStrats();
+}
+
+/* === CHART HELPERS === */
+function lt(){return document.documentElement.classList.contains('light')}
+function cSuc(){return'#36884B'}function cDan(){return lt()?'#8A2425':'#FE8181'}
+function cAcc(){return'#D97857'}function cInfo(){return lt()?'#3266AD':'#85B7EB'}
+function cWarn(){return lt()?'#854F0B':'#FAC775'}
+function cGry(){return lt()?'rgba(0,0,0,.15)':'rgba(255,255,255,.2)'}
+function cGrid(){return lt()?'rgba(0,0,0,.05)':'rgba(255,255,255,.05)'}
+function cTick(){return lt()?'rgba(44,44,42,.4)':'rgba(232,230,224,.4)'}
+function cTxt(){return lt()?'#2C2C2A':'#E8E6E0'}
+const ttCfg=()=>({backgroundColor:lt()?'#f5f4ed':'#302f2d',titleColor:cTxt(),bodyColor:cTick(),borderColor:lt()?'#dedbd3':'#3b3a37',borderWidth:1,cornerRadius:8,padding:10,bodyFont:{family:"'IBM Plex Mono'"},titleFont:{family:"'IBM Plex Mono'",weight:'600'}});
+const bo=()=>({responsive:true,maintainAspectRatio:false,animation:{duration:800,easing:'easeOutQuart'},interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},tooltip:ttCfg()},scales:{x:{grid:{color:cGrid(),drawBorder:false},ticks:{color:cTick(),font:{family:"'IBM Plex Mono'",size:10},maxRotation:0}},y:{grid:{color:cGrid(),drawBorder:false},ticks:{color:cTick(),font:{family:"'IBM Plex Mono'",size:10}}}}});
+function cumR(n,mu,sig){const r=[100];for(let i=1;i<n;i++)r.push(r[i-1]*(1+(mu+sig*(Math.random()-.5)*2)/100));return r}
+const CH={};function mc(id,cfg){if(CH[id])CH[id].destroy();CH[id]=new Chart(document.getElementById(id),cfg)}
+
+/* === DASHBOARD === */
+function buildDashCharts(){
+  const d30=Array.from({length:30},(_,i)=>{const d=new Date(2026,2,i+1);return(d.getMonth()+1)+'/'+d.getDate()});
+  const pnl=cumR(30,.3,.6);
+  const o=bo();o.scales.y.ticks.callback=v=>'$'+Math.round(v/10)+'k';
+  o.plugins.legend={display:true,labels:{color:cTick(),font:{family:"'IBM Plex Mono'",size:10},boxWidth:10,usePointStyle:true}};
+  mc('cDash1',{type:'line',data:{labels:d30,datasets:[
+    {label:'Portfolio',data:pnl.map(v=>v*23),borderColor:cSuc(),backgroundColor:cSuc()+'15',fill:true,tension:.3,pointRadius:0,borderWidth:2},
+    {label:'BTC B&H',data:cumR(30,.15,.8).map(v=>v*22.5),borderColor:cGry(),borderDash:[5,4],fill:false,tension:.3,pointRadius:0,borderWidth:1.5}
+  ]},options:o});
+
+  const strats=['MM-perp','Stat-arb','Funding','Basis','Mom.'];
+  const vals=[124520,68400,52300,28100,-12800];
+  const o2=bo();o2.indexAxis='y';o2.scales.x.ticks.callback=v=>(v>=0?'+':'')+v/1000+'k';o2.scales.y.grid.display=false;
+  mc('cDash2',{type:'bar',data:{labels:strats,datasets:[{data:vals,backgroundColor:vals.map(v=>v>=0?cSuc()+'aa':cDan()+'aa'),borderRadius:4,barPercentage:.6}]},options:o2});
+
+  const fills=document.getElementById('dashFills');fills.innerHTML='';
+  const syms=['BTC-PERP','ETH-PERP','SOL-PERP'];const ss=['MM-perp','Stat-arb','Funding'];
+  for(let i=0;i<10;i++){const sym=syms[Math.floor(Math.random()*3)];const strat=ss[Math.floor(Math.random()*3)];const side=Math.random()>.5?'Long':'Short';const price=sym==='BTC-PERP'?67000+Math.random()*2000:sym==='ETH-PERP'?3400+Math.random()*200:170+Math.random()*15;const size=sym==='BTC-PERP'?(Math.random()*2).toFixed(3):(Math.random()*20).toFixed(2);const pnl=Math.round((Math.random()-.4)*2000);const t=new Date();t.setMinutes(t.getMinutes()-i*3);const ts=t.getHours().toString().padStart(2,'0')+':'+t.getMinutes().toString().padStart(2,'0');
+    fills.innerHTML+=`<tr><td class="mono dim">${ts}</td><td class="mono">${strat}</td><td class="mono">${sym}</td><td><span class="${side==='Long'?'side-l':'side-s'}">${side}</span></td><td class="tr mono">${price.toFixed(2)}</td><td class="tr mono">${size}</td><td class="tr mono ${pnl>=0?'cg':'cr'}">${pnl>=0?'+':''}$${pnl}</td></tr>`}
+}
+
+/* === LIVE MONITOR === */
+const posData=[
+  {sym:'BTC-PERP',strat:'MM-perp',side:'Long',size:'1.240',entry:66800,mark:67120,liq:52400},
+  {sym:'ETH-PERP',strat:'Stat-arb',side:'Short',size:'15.50',entry:3420,mark:3445,liq:4100},
+  {sym:'SOL-PERP',strat:'MM-perp',side:'Long',size:'180.0',entry:172.50,mark:171.20,liq:120},
+  {sym:'BTC-PERP',strat:'Funding',side:'Short',size:'0.800',entry:67200,mark:67120,liq:82000},
+  {sym:'ARB-PERP',strat:'Stat-arb',side:'Long',size:'5000',entry:1.12,mark:1.10,liq:0.65}
+];
+function buildLive(){
+  renderPositions();
+  const d=Array.from({length:60},(_,i)=>i+'m');
+  const pnl=cumR(60,.05,.8).map(v=>(v-100)*500);
+  const o=bo();o.scales.y.ticks.callback=v=>(v>=0?'+':'')+Math.round(v);o.scales.x.ticks.maxTicksLimit=10;
+  mc('cLive',{type:'line',data:{labels:d,datasets:[{data:pnl,borderColor:pnl[pnl.length-1]>=0?cSuc():cDan(),backgroundColor:(pnl[pnl.length-1]>=0?cSuc():cDan())+'15',fill:true,tension:.3,pointRadius:0,borderWidth:2}]},options:o});
+}
+function renderPositions(){
+  const tbody=document.getElementById('livePos');tbody.innerHTML='';
+  posData.forEach(p=>{
+    const pnl=p.side==='Long'?(p.mark-p.entry)*parseFloat(p.size):(p.entry-p.mark)*parseFloat(p.size);
+    const pnlP=p.side==='Long'?((p.mark-p.entry)/p.entry*100):((p.entry-p.mark)/p.entry*100);
+    tbody.innerHTML+=`<tr><td class="mono">${p.sym}</td><td class="mono dim">${p.strat}</td><td><span class="${p.side==='Long'?'side-l':'side-s'}">${p.side}</span></td><td class="tr mono">${p.size}</td><td class="tr mono">${p.entry.toFixed(2)}</td><td class="tr mono" id="mark-${p.sym}">${p.mark.toFixed(2)}</td><td class="tr mono ${pnl>=0?'cg':'cr'}" id="pnl-${p.sym}">${pnl>=0?'+':'-'}$${Math.abs(pnl).toFixed(0)}</td><td class="tr mono ${pnlP>=0?'cg':'cr'}">${pnlP>=0?'+':''}${pnlP.toFixed(2)}%</td><td class="tr mono dim">${p.liq.toFixed(2)}</td></tr>`;
+  });
+}
+setInterval(()=>{
+  posData.forEach(p=>{
+    const delta=p.mark*(Math.random()-.5)*.001;
+    p.mark+=delta;
+    const el=document.getElementById('mark-'+p.sym);
+    if(el){el.textContent=p.mark.toFixed(2);el.classList.remove('tick-g','tick-r');void el.offsetWidth;el.classList.add(delta>=0?'tick-g':'tick-r')}
+    const pnl=p.side==='Long'?(p.mark-p.entry)*parseFloat(p.size):(p.entry-p.mark)*parseFloat(p.size);
+    const pel=document.getElementById('pnl-'+p.sym);
+    if(pel){pel.textContent=(pnl>=0?'+':'-')+'$'+Math.abs(pnl).toFixed(0);pel.className='tr mono '+(pnl>=0?'cg':'cr')}
+  });
+},2000);
+
+/* === STRATEGIES === */
+function buildStrats(){
+  const grid=document.getElementById('stratGrid');grid.innerHTML='';
+  const strats=[
+    {name:'MM-perp v3.2',ex:'Binance',sym:'BTC-PERP',tf:'15min',on:true,pnl:124520},
+    {name:'Stat-arb v1.8',ex:'Hyperliquid',sym:'ETH/BTC',tf:'1min',on:true,pnl:68400},
+    {name:'Funding arb v2.0',ex:'Binance',sym:'BTC-PERP',tf:'5min',on:true,pnl:52300},
+    {name:'Basis v1.0',ex:'OKX',sym:'BTC-PERP',tf:'15min',on:true,pnl:28100},
+    {name:'Momentum v4.1',ex:'OKX',sym:'ETH-PERP',tf:'1h',on:false,pnl:-12800},
+    {name:'Grid v0.3',ex:'Binance',sym:'SOL-PERP',tf:'5min',on:false,pnl:0},
+    {name:'Pairs v0.1',ex:'Hyperliquid',sym:'ARB/OP',tf:'1min',on:false,pnl:-4200}
+  ];
+  strats.forEach(s=>{
+    const bars=Array.from({length:7},()=>Math.random()*100);
+    const sparkHtml=bars.map(b=>`<div class="spark-bar" style="height:${Math.max(4,b)}%;background:${s.pnl>=0?'var(--suc)':'var(--dan)'};opacity:${.3+b/150}"></div>`).join('');
+    grid.innerHTML+=`<div class="strat-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div><div class="strat-name">${s.name}</div><div class="strat-meta">${s.ex} · ${s.sym} · ${s.tf}</div></div>
+        <div class="toggle-sm${s.on?' on':''}" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="sparkline">${sparkHtml}</div>
+      <div class="strat-row">
+        <div class="strat-stat"><span class="k">PnL</span><span class="${s.pnl>=0?'cg':'cr'}">${s.pnl>=0?'+':'-'}$${Math.abs(s.pnl).toLocaleString()}</span></div>
+        <span class="badge ${s.on?'badge-g':'badge-r'}" style="font-size:.62rem">${s.on?'Running':'Stopped'}</span>
+      </div>
+    </div>`;
+  });
+}
+
+buildDashCharts();
+setInterval(()=>{const d=new Date();const fc=document.getElementById('footerClock');if(fc)fc.textContent=d.getFullYear()+'-'+(d.getMonth()+1).toString().padStart(2,'0')+'-'+d.getDate().toString().padStart(2,'0')+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')+':'+d.getSeconds().toString().padStart(2,'0')},1000);
+</script>
+</body>
+</html>

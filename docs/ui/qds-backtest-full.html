@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QDS — Backtest System</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --font-d:'IBM Plex Mono',monospace;--font-u:'IBM Plex Sans',sans-serif;
+  --eo:cubic-bezier(.16,1,.3,1);--ei:cubic-bezier(.4,0,1,1);--dur:280ms;--r:12px;--rs:6px;
+  --bg-p:#302f2d;--bg-s:#262624;--bg-t:#3b3a37;--bg-in:#141413;
+  --t0:#E8E6E0;--t1:#9C9A92;--t2:#73726C;--t3:#5F5E5A;
+  --bd:#3b3a37;--bdh:#5F5E5A;
+  --acc:#D97857;--acc-d:rgba(217,120,87,.12);
+  --suc:#36884B;--suc-d:rgba(54,136,75,.12);
+  --dan:#FE8181;--dan-d:rgba(254,129,129,.12);
+  --info:#85B7EB;--info-d:rgba(133,183,235,.12);
+  --warn:#FAC775;--warn-d:rgba(250,199,117,.12);
+  --shimmer:rgba(255,255,255,.35);
+}
+html.light{
+  --bg-p:#f5f4ed;--bg-s:#faf9f5;--bg-t:#eae8e0;--bg-in:#fcfbf8;
+  --t0:#2C2C2A;--t1:#73726C;--t2:#9C9A92;--t3:#B0ADA5;
+  --bd:#dedbd3;--bdh:#c7c4bb;
+  --acc:#D97857;--acc-d:rgba(217,120,87,.08);
+  --suc:#36884B;--suc-d:rgba(54,136,75,.08);
+  --dan:#8A2425;--dan-d:rgba(138,36,37,.08);
+  --info:#3266AD;--info-d:rgba(50,102,173,.08);
+  --warn:#854F0B;--warn-d:rgba(250,199,117,.08);
+  --shimmer:rgba(255,255,255,.7);
+}
+body{background:var(--bg-s);color:var(--t0);font-family:var(--font-u);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;transition:background var(--dur) var(--eo),color var(--dur) var(--eo)}
+.page{max-width:1100px;margin:0 auto;padding:1.5rem 2rem 6rem}
+.mono{font-family:var(--font-d)}.dim{color:var(--t2)}.cg{color:var(--suc)}.cr{color:var(--dan)}.ca{color:var(--acc)}
+.g{display:grid;gap:1.25rem}.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:1fr 1fr 1fr}.g5{grid-template-columns:repeat(5,1fr)}
+.badge{font-family:var(--font-d);font-size:.68rem;padding:.2rem .55rem;border-radius:100px}
+.badge-g{background:var(--suc-d);color:var(--suc)}.badge-r{background:var(--dan-d);color:var(--dan)}
+
+/* Top bar */
+.top-bar{display:flex;justify-content:space-between;align-items:center;padding:1.5rem 0 1.25rem;border-bottom:1px solid var(--bd);margin-bottom:1.5rem}
+.top-bar h1{font-family:var(--font-d);font-size:1.1rem;font-weight:600}
+.top-bar .dot{color:var(--acc)}
+.top-bar .cnt{font-family:var(--font-d);font-size:.72rem;color:var(--t2);margin-left:.5rem}
+.theme-toggle{display:flex;align-items:center;gap:.5rem;font-size:.8rem;color:var(--t2)}
+.theme-toggle button{width:44px;height:22px;border-radius:11px;border:1px solid var(--bd);background:var(--bg-t);cursor:pointer;position:relative;transition:all var(--dur) var(--eo)}
+.theme-toggle button::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--t1);transition:all var(--dur) var(--eo)}
+html.light .theme-toggle button::after{left:24px;background:var(--acc)}
+
+/* Summary strip */
+.summary{display:flex;gap:1.5rem;margin-bottom:1.5rem;font-family:var(--font-d);font-size:.75rem}
+.summary-item{display:flex;align-items:center;gap:.4rem}
+.summary-dot{width:8px;height:8px;border-radius:50%}
+
+/* Status badges */
+.status{display:inline-flex;align-items:center;gap:.35rem;font-family:var(--font-d);font-size:.68rem;font-weight:500;padding:.2rem .55rem;border-radius:100px}
+.status-done{background:var(--suc-d);color:var(--suc)}
+.status-fail{background:var(--dan-d);color:var(--dan)}
+.status-queue{background:var(--bg-t);color:var(--t2)}
+.status-run{background:var(--acc-d);color:var(--acc)}
+.pulse-ring{width:6px;height:6px;border-radius:50%;background:var(--acc);position:relative;flex-shrink:0}
+.pulse-ring::after{content:'';position:absolute;inset:-3px;border-radius:50%;border:1.5px solid var(--acc);animation:ringP 2s var(--eo) infinite;opacity:0}
+@keyframes ringP{0%{transform:scale(.8);opacity:.7}100%{transform:scale(2.2);opacity:0}}
+
+/* ===== LIST (Design A) ===== */
+.list{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;transition:background var(--dur) var(--eo)}
+.row{position:relative;border-bottom:1px solid var(--bd);transition:background 150ms}
+.row:last-child{border-bottom:0}
+.row:hover{background:var(--bg-t)}
+.row-main{display:grid;grid-template-columns:3px 1fr auto auto auto;align-items:center;cursor:pointer;user-select:none}
+.row-accent{width:3px;align-self:stretch;border-radius:2px 0 0 2px;transition:background var(--dur) var(--eo)}
+.row-accent.run{background:var(--info)}.row-accent.done{background:var(--suc)}.row-accent.fail{background:var(--dan)}.row-accent.queue{background:var(--t3)}
+.row-info{padding:.85rem 1rem;display:flex;flex-direction:column;gap:.15rem}
+.row-name{font-family:var(--font-d);font-size:.82rem;font-weight:600;display:flex;align-items:center;gap:.5rem}
+.row-meta{font-size:.72rem;color:var(--t2);display:flex;align-items:center;gap:.5rem}
+/* ID — subtle inline mono text, click to copy */
+.id-badge{font-family:var(--font-d);font-size:.68rem;color:var(--t3);cursor:pointer;transition:color 150ms var(--eo);position:relative;white-space:nowrap;display:inline-flex;align-items:center;gap:.25rem;border-bottom:1px dashed transparent;padding-bottom:1px}
+.id-badge:hover{color:var(--t1);border-bottom-color:var(--t2)}
+.id-badge .copy-icon{font-size:.58rem;opacity:0;transition:opacity 150ms}
+.id-badge:hover .copy-icon{opacity:.6}
+.id-badge.copied{color:var(--suc);border-bottom-color:transparent}
+/* Help tooltip — ? icon with hover explanation */
+.help{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;font-family:var(--font-d);font-size:.58rem;color:var(--t3);border:1px solid var(--bd);cursor:help;position:relative;vertical-align:middle;margin-left:.35rem;transition:all 150ms var(--eo);flex-shrink:0}
+.help:hover{color:var(--t1);border-color:var(--bdh);background:var(--bg-t)}
+.help::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%) translateY(4px);background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--rs);padding:.5rem .7rem;font-family:var(--font-u);font-size:.72rem;font-weight:400;color:var(--t1);line-height:1.5;white-space:normal;width:max-content;max-width:240px;pointer-events:none;opacity:0;transition:all 200ms var(--eo);box-shadow:0 8px 24px rgba(0,0,0,.15);z-index:50;text-align:left}
+.help::before{content:'';position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%) translateY(4px);border:5px solid transparent;border-top-color:var(--bd);pointer-events:none;opacity:0;transition:all 200ms var(--eo);z-index:50}
+.help:hover::after,.help:hover::before{opacity:1;transform:translateX(-50%) translateY(0)}
+/* Edge-safe: if too close to right edge, align left */
+.help.left::after{left:auto;right:-8px;transform:translateX(0) translateY(4px)}
+.help.left::before{left:auto;right:4px;transform:translateX(0) translateY(4px)}
+.help.left:hover::after,.help.left:hover::before{transform:translateX(0) translateY(0)}
+.row-status{padding:.85rem .5rem}
+.row-right{padding:.85rem .75rem;font-family:var(--font-d);font-size:.75rem;min-width:90px;text-align:right;font-variant-numeric:tabular-nums}
+.row-action{padding:.85rem .75rem .85rem 0}
+/* View button */
+.view-btn{font-family:var(--font-d);font-size:.72rem;padding:.35rem .75rem;border-radius:var(--rs);border:1px solid var(--bd);background:0;color:var(--t1);cursor:pointer;transition:all 150ms var(--eo);display:flex;align-items:center;gap:.35rem}
+.view-btn:hover{border-color:var(--acc);color:var(--acc);background:var(--acc-d);transform:translateX(2px)}
+.view-btn:hover .varrow{transform:translateX(3px)}
+.varrow{transition:transform 150ms var(--eo)}
+/* Expand arrow for running/queued */
+.exp-arrow{font-size:.7rem;color:var(--t2);transition:transform .3s var(--eo);padding:.85rem .75rem .85rem 0;cursor:pointer}
+.exp-arrow.open{transform:rotate(180deg)}
+/* Inline progress bar */
+.row-bar{position:absolute;bottom:0;left:3px;right:0;height:3px;transition:opacity .3s var(--eo);overflow:hidden;background:var(--bg-t);border-radius:2px}
+/* Shimmer sweeps full track width */
+.row-bar::after{content:'';position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(90deg,transparent 0%,var(--shimmer) 40%,transparent 100%);animation:shimmer 2.5s ease-in-out infinite;z-index:1}
+.row-bar-fill{height:100%;border-radius:0 1px 1px 0;transition:width 1.5s var(--eo);position:relative;background:var(--acc)}
+/* Hide entire row bar when panel is expanded */
+.row.expanded .row-bar{opacity:0;transition:opacity .3s var(--eo)}
+@keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+/* Queued dots */
+.q-dots{display:flex;align-items:center;gap:3px;color:var(--t3);font-family:var(--font-d);font-size:.68rem}
+.q-dots span{width:4px;height:4px;border-radius:50%;background:var(--t3);animation:qd 1.2s ease-in-out infinite}
+.q-dots span:nth-child(2){animation-delay:.2s}.q-dots span:nth-child(3){animation-delay:.4s}
+@keyframes qd{0%,100%{opacity:.3}50%{opacity:1}}
+
+/* ===== EXPAND PANEL (Design D for running, E for queued) ===== */
+.row-expand{max-height:0;overflow:hidden;transition:max-height .4s var(--eo);background:var(--bg-in);border-top:0 solid var(--bd)}
+.row-expand.open{max-height:400px;border-top-width:1px}
+.row-expand-inner{padding:1.25rem 1.25rem 1.25rem calc(1.25rem + 3px)}
+/* Detail progress bar */
+.d-bar-wrap{height:6px;background:var(--bg-t);border-radius:3px;overflow:hidden;margin-bottom:.85rem;position:relative}
+/* Shimmer sweeps full track */
+.d-bar-wrap.running::after{content:'';position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(90deg,transparent 0%,var(--shimmer) 40%,transparent 100%);animation:shimmer 2.5s ease-in-out infinite;z-index:1}
+.d-bar-fill{height:100%;border-radius:3px;transition:width 1.5s var(--eo);position:relative}
+.d-bar-fill.acc{background:var(--acc)}.d-bar-fill.suc{background:var(--suc)}.d-bar-fill.dan{background:var(--dan)}
+.d-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem}
+.d-stat{display:flex;flex-direction:column;gap:.1rem}
+.d-stat-l{font-size:.62rem;color:var(--t2);text-transform:uppercase;letter-spacing:.05em}
+.d-stat-v{font-family:var(--font-d);font-size:.78rem;font-weight:500;color:var(--t0)}
+.d-stat-v.acc{color:var(--acc)}.d-stat-v.suc{color:var(--suc)}.d-stat-v.dan{color:var(--dan)}
+/* Skeleton */
+.skel{border-radius:4px;background:var(--bg-t);position:relative;overflow:hidden}
+.skel::after{content:'';position:absolute;top:0;left:0;width:200%;height:100%;background:linear-gradient(90deg,transparent 25%,rgba(255,255,255,.04) 50%,transparent 75%);animation:skelS 1.8s ease-in-out infinite}
+@keyframes skelS{0%{transform:translateX(-50%)}100%{transform:translateX(50%)}}
+
+/* ===== VIEW TRANSITION ===== */
+#listView,#detailView{transition:opacity .35s var(--eo),transform .35s var(--eo)}
+#listView.hide{opacity:0;transform:translateX(-30px);pointer-events:none;position:absolute;width:calc(100% - 4rem)}
+#detailView{opacity:0;transform:translateX(30px);pointer-events:none;max-height:0;overflow:hidden}
+#detailView.show{opacity:1;transform:translateX(0);pointer-events:auto;max-height:none;overflow:visible}
+
+/* ===== DETAIL PAGE ===== */
+/* Tab bar — sticky with solid background */
+.tab-bar{display:flex;gap:2px;background:var(--bg-in);border-radius:var(--rs);padding:3px;width:fit-content}
+/* When stuck, add full-width backdrop */
+.tab-bar-wrap{position:sticky;top:0;z-index:20;background:var(--bg-s);padding:.75rem 0;margin:0 -2rem;padding-left:2rem;padding-right:2rem;border-bottom:1px solid transparent;transition:border-color .2s,box-shadow .2s}
+.tab-bar-wrap.stuck{border-bottom-color:var(--bd);box-shadow:0 4px 20px rgba(0,0,0,.1)}
+.dtab{font-family:var(--font-d);font-size:.72rem;padding:.45rem .9rem;border-radius:4px;border:0;background:0;color:var(--t2);cursor:pointer;transition:all 150ms var(--eo);white-space:nowrap}
+.dtab:hover{color:var(--t1)}
+.dtab.a{background:var(--bg-t);color:var(--t0);box-shadow:0 1px 3px rgba(0,0,0,.15)}
+/* Tab panels */
+.tab-panel{display:none;animation:tabIn .3s var(--eo)}
+.tab-panel.active{display:block}
+@keyframes tabIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+.detail-top{display:flex;align-items:center;gap:1rem;margin-bottom:1rem;padding-bottom:1.25rem;border-bottom:1px solid var(--bd)}
+.back-btn{font-family:var(--font-d);font-size:.78rem;padding:.45rem .85rem;border-radius:var(--rs);border:1px solid var(--bd);background:0;color:var(--t1);cursor:pointer;transition:all 150ms var(--eo);display:flex;align-items:center;gap:.4rem}
+.back-btn:hover{border-color:var(--bdh);color:var(--t0);background:var(--bg-t)}
+.back-btn:hover .ba{transform:translateX(-3px)}
+.ba{transition:transform 150ms var(--eo)}
+.detail-title{font-family:var(--font-d);font-size:1.1rem;font-weight:600}
+.detail-actions{display:flex;gap:.5rem;margin-left:auto}
+.act-btn{font-family:var(--font-d);font-size:.7rem;padding:.35rem .7rem;border-radius:var(--rs);border:1px solid var(--bd);background:0;color:var(--t1);cursor:pointer;transition:all 150ms var(--eo)}
+.act-btn:hover{border-color:var(--bdh);color:var(--t0);background:var(--bg-t)}
+.sec{margin-bottom:2rem;opacity:0;transform:translateY(20px);transition:opacity .5s var(--eo),transform .5s var(--eo)}
+.sec.v{opacity:1;transform:translateY(0)}
+.sec:nth-child(2){transition-delay:.05s}.sec:nth-child(3){transition-delay:.1s}.sec:nth-child(4){transition-delay:.15s}
+.sec:nth-child(5){transition-delay:.2s}.sec:nth-child(6){transition-delay:.25s}.sec:nth-child(7){transition-delay:.3s}.sec:nth-child(8){transition-delay:.35s}
+.sec-label{font-family:var(--font-d);font-size:.6rem;letter-spacing:.15em;text-transform:uppercase;color:var(--acc);margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem}
+.sec-label::after{content:'';flex:1;height:1px;background:var(--bd)}
+.sc{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);padding:1rem 1.1rem;transition:border-color 150ms,box-shadow var(--dur) var(--eo)}
+.sc:hover{border-color:var(--bdh);box-shadow:0 4px 20px rgba(0,0,0,.08)}
+.sc-l{font-size:.68rem;color:var(--t2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem}
+.sc-v{font-family:var(--font-d);font-size:1.35rem;font-weight:600;letter-spacing:-.03em}
+.sc-sub{font-family:var(--font-d);font-size:.68rem;margin-top:.2rem}
+.cd{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;transition:border-color 150ms,box-shadow var(--dur) var(--eo),background var(--dur) var(--eo)}
+.cd:hover{border-color:var(--bdh);box-shadow:0 4px 20px rgba(0,0,0,.08)}
+.cd-h{display:flex;justify-content:space-between;align-items:center;padding:.75rem 1rem;border-bottom:1px solid var(--bd);font-size:.8rem;font-weight:600}
+.cd-h .sub{font-family:var(--font-d);font-size:.65rem;font-weight:400;color:var(--t2)}
+.cd-b{padding:1rem}
+.cfg{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem;font-family:var(--font-d);font-size:.75rem}
+.cfg-item{display:flex;justify-content:space-between;padding:.45rem .65rem;background:var(--bg-in);border-radius:var(--rs)}
+.cfg-item .k{color:var(--t2)}.cfg-item .val{color:var(--t0);font-weight:500}
+/* Monthly heatmap */
+.hm-grid{display:grid;grid-template-columns:auto repeat(12,1fr);gap:2px;font-family:var(--font-d);font-size:.65rem}
+.hm-label{padding:.3rem .5rem;color:var(--t2);text-align:center;display:flex;align-items:center;justify-content:center}
+.hm-cell{padding:.4rem .3rem;text-align:center;border-radius:3px;font-weight:500;transition:transform 150ms var(--eo)}
+.hm-cell:hover{transform:scale(1.15);z-index:1}
+/* Trade log */
+.tbl{width:100%;border-collapse:collapse;font-family:var(--font-d);font-size:.75rem}
+.tbl thead th{padding:.6rem .75rem;text-align:left;font-weight:500;font-size:.65rem;color:var(--t2);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--bd)}
+.tbl thead th.tr{text-align:right}
+.tbl tbody tr{border-bottom:1px solid var(--bd);transition:background 150ms}
+.tbl tbody tr:last-child{border-bottom:0}
+.tbl tbody tr:hover{background:var(--bg-t)}
+.tbl td{padding:.55rem .75rem;white-space:nowrap}.tbl td.tr{text-align:right}
+.side-l{color:var(--suc);font-weight:500}.side-s{color:var(--dan);font-weight:500}
+
+/* Pagination */
+.pager{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1rem;border-top:1px solid var(--bd);font-family:var(--font-d);font-size:.72rem;color:var(--t2);gap:1rem;flex-wrap:wrap}
+.pager-info{display:flex;align-items:center;gap:.5rem}
+.pager-nav{display:flex;align-items:center;gap:2px}
+.pager-btn{width:30px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--bd);border-radius:var(--rs);background:0;color:var(--t2);cursor:pointer;transition:all 150ms var(--eo);font-family:var(--font-d);font-size:.7rem}
+.pager-btn:hover{border-color:var(--bdh);color:var(--t0);background:var(--bg-t)}
+.pager-btn.a{background:var(--acc-d);border-color:var(--acc);color:var(--acc)}
+.pager-btn:disabled{opacity:.3;cursor:default;pointer-events:none}
+.pager-btn.arrow{font-size:.8rem}
+.pager-dots{width:20px;text-align:center;color:var(--t3);font-size:.7rem}
+.pager-size{display:flex;align-items:center;gap:.4rem}
+.pager-size select{font-family:var(--font-d);font-size:.7rem;padding:.25rem .5rem;background:var(--bg-in);border:1px solid var(--bd);border-radius:4px;color:var(--t0);outline:0;cursor:pointer;transition:border-color 150ms}
+.pager-size select:hover{border-color:var(--bdh)}
+.pager-size select:focus{border-color:var(--acc)}
+
+/* Sub-tab for data tables */
+.sub-tabs{display:flex;gap:2px;background:var(--bg-in);border-radius:var(--rs);padding:2px;width:fit-content;margin-bottom:1.25rem}
+.stab{font-family:var(--font-d);font-size:.68rem;padding:.35rem .75rem;border-radius:4px;border:0;background:0;color:var(--t2);cursor:pointer;transition:all 150ms var(--eo)}
+.stab:hover{color:var(--t1)}
+.stab.a{background:var(--bg-t);color:var(--t0)}
+
+@media(max-width:900px){.g2,.g3,.g5{grid-template-columns:1fr 1fr}.d-stats{grid-template-columns:repeat(2,1fr)}.cfg{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.g2,.g3,.g5{grid-template-columns:1fr}.detail-actions{display:none}.row-meta{display:none}}
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- ==================== LIST VIEW ==================== -->
+<div id="listView">
+  <div class="top-bar">
+    <h1>QDS<span class="dot">.</span>Backtests<span class="cnt">6 tasks</span></h1>
+    <div class="theme-toggle"><span>☀</span><button onclick="document.documentElement.classList.toggle('light');rebuildCharts()"></button><span>☾</span></div>
+  </div>
+  <div class="summary">
+    <div class="summary-item"><div class="summary-dot" style="background:var(--info)"></div><span style="color:var(--info)">2 Running</span></div>
+    <div class="summary-item"><div class="summary-dot" style="background:var(--suc)"></div><span class="cg">2 Done</span></div>
+    <div class="summary-item"><div class="summary-dot" style="background:var(--dan)"></div><span class="cr">1 Failed</span></div>
+    <div class="summary-item"><div class="summary-dot" style="background:var(--t3)"></div><span>1 Queued</span></div>
+  </div>
+
+  <div class="list">
+
+    <!-- Running 1 -->
+    <div class="row" data-id="r1">
+      <div class="row-main" onclick="toggleExp('r1')">
+        <div class="row-accent run"></div>
+        <div class="row-info">
+          <div class="row-name">BT-2026-0401 <span style="font-weight:400;color:var(--t2);font-size:.72rem">MM-perp v3.2</span></div>
+          <div class="row-meta"><span class="id-badge" data-full="a3f8c1d2-7e4b-4a91-b6e0-9d2f5c8a1b3e" onclick="event.stopPropagation();copyId(this)">a3f8c1d2<span class="copy-icon">⧉</span></span>15min · Binance · 03/01 → 03/31</div>
+        </div>
+        <div class="row-status"><span class="status status-run"><span class="pulse-ring"></span>Running</span></div>
+        <div class="row-right" style="color:var(--acc)" id="rpct-r1">67%</div>
+        <div class="exp-arrow" id="arrow-r1">▾</div>
+      </div>
+      <div class="row-bar"><div class="row-bar-fill acc" id="rbar-r1" style="width:67%"></div></div>
+      <div class="row-expand" id="exp-r1">
+        <div class="row-expand-inner">
+          <div class="d-bar-wrap running"><div class="d-bar-fill acc" id="dbar-r1" style="width:67%"></div></div>
+          <div class="d-stats">
+            <div class="d-stat"><div class="d-stat-l">Progress</div><div class="d-stat-v acc" id="dpct-r1">67%</div></div>
+            <div class="d-stat"><div class="d-stat-l">Elapsed</div><div class="d-stat-v" id="elap-r1">14m 32s</div></div>
+            <div class="d-stat"><div class="d-stat-l">ETA</div><div class="d-stat-v acc" id="eta-r1">~6m 20s</div></div>
+            <div class="d-stat"><div class="d-stat-l">Speed</div><div class="d-stat-v" id="spd-r1">1,240 bars/s</div></div>
+            <div class="d-stat"><div class="d-stat-l">Processed</div><div class="d-stat-v" id="proc-r1">892K / 1.33M</div></div>
+            <div class="d-stat"><div class="d-stat-l">Trades</div><div class="d-stat-v" id="trd-r1">847</div></div>
+            <div class="d-stat"><div class="d-stat-l">Memory</div><div class="d-stat-v">2.4 GB</div></div>
+            <div class="d-stat"><div class="d-stat-l">CPU</div><div class="d-stat-v">78%</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Running 2 -->
+    <div class="row" data-id="r2">
+      <div class="row-main" onclick="toggleExp('r2')">
+        <div class="row-accent run"></div>
+        <div class="row-info">
+          <div class="row-name">BT-2026-0402 <span style="font-weight:400;color:var(--t2);font-size:.72rem">Stat-arb v1.8</span></div>
+          <div class="row-meta"><span class="id-badge" data-full="b7e2d9f4-3c16-48a5-a2d1-8e6b4f7c9a0d" onclick="event.stopPropagation();copyId(this)">b7e2d9f4<span class="copy-icon">⧉</span></span>1min · Hyperliquid · 02/15 → 03/15</div>
+        </div>
+        <div class="row-status"><span class="status status-run"><span class="pulse-ring"></span>Running</span></div>
+        <div class="row-right" style="color:var(--acc)" id="rpct-r2">23%</div>
+        <div class="exp-arrow" id="arrow-r2">▾</div>
+      </div>
+      <div class="row-bar"><div class="row-bar-fill acc" id="rbar-r2" style="width:23%"></div></div>
+      <div class="row-expand" id="exp-r2">
+        <div class="row-expand-inner">
+          <div class="d-bar-wrap running"><div class="d-bar-fill acc" id="dbar-r2" style="width:23%"></div></div>
+          <div class="d-stats">
+            <div class="d-stat"><div class="d-stat-l">Progress</div><div class="d-stat-v acc" id="dpct-r2">23%</div></div>
+            <div class="d-stat"><div class="d-stat-l">Elapsed</div><div class="d-stat-v" id="elap-r2">8m 15s</div></div>
+            <div class="d-stat"><div class="d-stat-l">ETA</div><div class="d-stat-v acc" id="eta-r2">~27m</div></div>
+            <div class="d-stat"><div class="d-stat-l">Speed</div><div class="d-stat-v" id="spd-r2">3,820 bars/s</div></div>
+            <div class="d-stat"><div class="d-stat-l">Processed</div><div class="d-stat-v" id="proc-r2">1.89M / 8.2M</div></div>
+            <div class="d-stat"><div class="d-stat-l">Trades</div><div class="d-stat-v" id="trd-r2">312</div></div>
+            <div class="d-stat"><div class="d-stat-l">Memory</div><div class="d-stat-v">4.1 GB</div></div>
+            <div class="d-stat"><div class="d-stat-l">CPU</div><div class="d-stat-v">92%</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Done 1 -->
+    <div class="row" data-id="d1">
+      <div class="row-main" onclick="toggleExp('d1')">
+        <div class="row-accent done"></div>
+        <div class="row-info">
+          <div class="row-name">BT-2026-0398 <span style="font-weight:400;color:var(--t2);font-size:.72rem">Funding arb v2.0</span></div>
+          <div class="row-meta"><span class="id-badge" data-full="c9a1b3e5-2d4f-4b87-9c0e-1f3a5d7b9e2c" onclick="event.stopPropagation();copyId(this)">c9a1b3e5<span class="copy-icon">⧉</span></span>5min · Binance · 01/01 → 03/31 · 22m 14s</div>
+        </div>
+        <div class="row-status"><span class="status status-done">✓ Done</span></div>
+        <div class="row-right" style="color:var(--suc)">+$284,520</div>
+        <div class="exp-arrow" id="arrow-d1">▾</div>
+      </div>
+      <div class="row-expand" id="exp-d1">
+        <div class="row-expand-inner">
+          <div class="d-stats" style="grid-template-columns:repeat(5,1fr);margin-bottom:1rem">
+            <div class="d-stat"><div class="d-stat-l">Total PnL<span class="help" data-tip="总盈亏。正值表示策略整体盈利，是最直接的收益指标。">?</span></div><div class="d-stat-v suc">+$284,520</div></div>
+            <div class="d-stat"><div class="d-stat-l">Sharpe</div><div class="d-stat-v">2.14</div></div>
+            <div class="d-stat"><div class="d-stat-l">Max DD<span class="help" data-tip="最大回撤。从峰值到谷底的最大跌幅，衡量最坏情况下的亏损。越小越好，>10% 需警惕。">?</span></div><div class="d-stat-v dan">-3.2%</div></div>
+            <div class="d-stat"><div class="d-stat-l">Win Rate<span class="help" data-tip="胜率。盈利交易占总交易的比例。高频做市通常 >60%，趋势策略可能 <40% 但靠盈亏比补偿。">?</span></div><div class="d-stat-v">67.8%</div></div>
+            <div class="d-stat"><div class="d-stat-l">Profit Factor<span class="help" data-tip="盈亏比。总利润÷总亏损。>1 表示盈利，>1.5 良好，>2 优秀。">?</span></div><div class="d-stat-v">1.82</div></div>
+            <div class="d-stat"><div class="d-stat-l">Sortino<span class="help" data-tip="索提诺比率。只惩罚下行波动，比 Sharpe 更合理。>2 优秀。">?</span></div><div class="d-stat-v">2.87</div></div>
+            <div class="d-stat"><div class="d-stat-l">Trades</div><div class="d-stat-v">1,247</div></div>
+            <div class="d-stat"><div class="d-stat-l">Avg Trade<span class="help" data-tip="平均每笔交易盈亏。正值说明策略每笔交易期望为正。">?</span></div><div class="d-stat-v suc">+$228</div></div>
+            <div class="d-stat"><div class="d-stat-l">Avg Hold<span class="help" data-tip="平均持仓时间。反映策略交易频率和风格，做市通常 <1h，趋势可能数天。">?</span></div><div class="d-stat-v">4.2h</div></div>
+            <div class="d-stat"><div class="d-stat-l">Fees</div><div class="d-stat-v dan">-$9,640</div></div>
+          </div>
+          <div style="display:flex;justify-content:flex-end"><button class="view-btn" onclick="event.stopPropagation();goDetail()">View Detail <span class="varrow">→</span></button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Done 2 -->
+    <div class="row" data-id="d2">
+      <div class="row-main" onclick="toggleExp('d2')">
+        <div class="row-accent done"></div>
+        <div class="row-info">
+          <div class="row-name">BT-2026-0396 <span style="font-weight:400;color:var(--t2);font-size:.72rem">Basis v0.9</span></div>
+          <div class="row-meta"><span class="id-badge" data-full="d4f6e8a2-1b3c-4d5e-a7f9-2c4b6d8e0a1f" onclick="event.stopPropagation();copyId(this)">d4f6e8a2<span class="copy-icon">⧉</span></span>15min · OKX · 02/01 → 03/15 · 18m 42s</div>
+        </div>
+        <div class="row-status"><span class="status status-done">✓ Done</span></div>
+        <div class="row-right" style="color:var(--suc)">+$162,340</div>
+        <div class="exp-arrow" id="arrow-d2">▾</div>
+      </div>
+      <div class="row-expand" id="exp-d2">
+        <div class="row-expand-inner">
+          <div class="d-stats" style="grid-template-columns:repeat(5,1fr);margin-bottom:1rem">
+            <div class="d-stat"><div class="d-stat-l">Total PnL</div><div class="d-stat-v suc">+$162,340</div></div>
+            <div class="d-stat"><div class="d-stat-l">Sharpe</div><div class="d-stat-v">1.76</div></div>
+            <div class="d-stat"><div class="d-stat-l">Max DD</div><div class="d-stat-v dan">-4.8%</div></div>
+            <div class="d-stat"><div class="d-stat-l">Win Rate</div><div class="d-stat-v">61.2%</div></div>
+            <div class="d-stat"><div class="d-stat-l">Profit Factor</div><div class="d-stat-v">1.54</div></div>
+            <div class="d-stat"><div class="d-stat-l">Sortino</div><div class="d-stat-v">2.31</div></div>
+            <div class="d-stat"><div class="d-stat-l">Trades</div><div class="d-stat-v">892</div></div>
+            <div class="d-stat"><div class="d-stat-l">Avg Trade</div><div class="d-stat-v suc">+$182</div></div>
+            <div class="d-stat"><div class="d-stat-l">Avg Hold</div><div class="d-stat-v">3.8h</div></div>
+            <div class="d-stat"><div class="d-stat-l">Fees</div><div class="d-stat-v dan">-$7,120</div></div>
+          </div>
+          <div style="display:flex;justify-content:flex-end"><button class="view-btn" onclick="event.stopPropagation();goDetail()">View Detail <span class="varrow">→</span></button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Failed -->
+    <div class="row" data-id="f1">
+      <div class="row-main" onclick="toggleExp('f1')">
+        <div class="row-accent fail"></div>
+        <div class="row-info">
+          <div class="row-name">BT-2026-0395 <span style="font-weight:400;color:var(--t2);font-size:.72rem">Momentum v4.1</span></div>
+          <div class="row-meta"><span class="id-badge" data-full="e2c4a6b8-9d1f-4e3a-b5c7-0e2f4a6c8d1b" onclick="event.stopPropagation();copyId(this)">e2c4a6b8<span class="copy-icon">⧉</span></span>1h · OKX · 02/01 → 02/28</div>
+        </div>
+        <div class="row-status"><span class="status status-fail">✕ Failed</span></div>
+        <div class="row-right" style="color:var(--dan);font-size:.7rem">OOM @ 82%</div>
+        <div class="exp-arrow" id="arrow-f1">▾</div>
+      </div>
+      <div class="row-expand" id="exp-f1">
+        <div class="row-expand-inner">
+          <div class="d-bar-wrap"><div class="d-bar-fill dan" style="width:82%"></div></div>
+          <div class="d-stats" style="grid-template-columns:repeat(3,1fr);margin-bottom:1rem">
+            <div class="d-stat"><div class="d-stat-l">Stopped At</div><div class="d-stat-v dan">82%</div></div>
+            <div class="d-stat"><div class="d-stat-l">Error</div><div class="d-stat-v dan">OutOfMemoryError</div></div>
+            <div class="d-stat"><div class="d-stat-l">Peak Memory</div><div class="d-stat-v">15.8 / 16 GB</div></div>
+            <div class="d-stat"><div class="d-stat-l">Elapsed</div><div class="d-stat-v">41m 07s</div></div>
+            <div class="d-stat"><div class="d-stat-l">Bars Processed</div><div class="d-stat-v">672K / 820K</div></div>
+            <div class="d-stat"><div class="d-stat-l">Suggestion</div><div class="d-stat-v" style="color:var(--warn)">Reduce lookback or streaming mode</div></div>
+          </div>
+          <div style="display:flex;justify-content:flex-end"><button class="view-btn" onclick="event.stopPropagation();goDetail()">View Detail <span class="varrow">→</span></button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Queued (Design E) -->
+    <div class="row" data-id="q1">
+      <div class="row-main" onclick="toggleExp('q1')">
+        <div class="row-accent queue"></div>
+        <div class="row-info">
+          <div class="row-name">BT-2026-0403 <span style="font-weight:400;color:var(--t2);font-size:.72rem">Basis v1.0</span></div>
+          <div class="row-meta"><span class="id-badge" data-full="f1d3e5a7-8b0c-4f2d-a4e6-9c1b3d5f7a8e" onclick="event.stopPropagation();copyId(this)">f1d3e5a7<span class="copy-icon">⧉</span></span>15min · Binance · 03/01 → 03/31</div>
+        </div>
+        <div class="row-status"><span class="status status-queue">◦ Queued</span></div>
+        <div class="row-right"><div class="q-dots"><span></span><span></span><span></span> #3</div></div>
+        <div class="exp-arrow" id="arrow-q1">▾</div>
+      </div>
+      <div class="row-expand" id="exp-q1">
+        <div class="row-expand-inner">
+          <div style="display:grid;grid-template-columns:1.5fr 1fr;gap:1rem">
+            <div><div style="font-size:.62rem;color:var(--t2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem">Equity Preview</div><div class="skel" style="height:80px;border-radius:8px"></div></div>
+            <div><div style="font-size:.62rem;color:var(--t2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem">Results</div>
+              <div style="display:flex;flex-direction:column;gap:.4rem">
+                <div style="display:flex;gap:.5rem"><div class="skel" style="width:60px;height:12px"></div><div class="skel" style="flex:1;height:12px"></div></div>
+                <div style="display:flex;gap:.5rem"><div class="skel" style="width:75px;height:12px"></div><div class="skel" style="flex:1;height:12px"></div></div>
+                <div style="display:flex;gap:.5rem"><div class="skel" style="width:50px;height:12px"></div><div class="skel" style="flex:1;height:12px"></div></div>
+                <div style="display:flex;gap:.5rem"><div class="skel" style="width:65px;height:12px"></div><div class="skel" style="flex:1;height:12px"></div></div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:.85rem;font-family:var(--font-d);font-size:.72rem;color:var(--t2)">Estimated start in <span style="color:var(--acc)">~12 min</span> · Waiting for BT-0401, BT-0402</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ==================== DETAIL VIEW ==================== -->
+<div id="detailView">
+
+  <!-- Header — always visible -->
+  <div class="detail-top sec">
+    <button class="back-btn" onclick="goBack()"><span class="ba">←</span> Back</button>
+    <div><div class="detail-title">BT-2026-0398 <span class="id-badge" data-full="c9a1b3e5-2d4f-4b87-9c0e-1f3a5d7b9e2c" onclick="copyId(this)" style="vertical-align:middle">c9a1b3e5<span class="copy-icon">⧉</span></span></div><div style="font-size:.75rem;color:var(--t2);margin-top:.1rem">Funding arb v2.0 · 5min bars · Binance Futures · 22m 14s</div></div>
+    <div class="detail-actions"><button class="act-btn">Export CSV</button><button class="act-btn">Clone & Re-run</button><button class="act-btn" style="color:var(--dan)">Delete</button></div>
+  </div>
+
+  <!-- Tab bar — full-width sticky backdrop -->
+  <div class="tab-bar-wrap" id="tabBarWrap">
+    <div class="tab-bar" id="tabBar">
+      <button class="dtab a" onclick="switchTab('overview',this)">Overview</button>
+      <button class="dtab" onclick="switchTab('perf',this)">Performance</button>
+      <button class="dtab" onclick="switchTab('trades',this)">Trades</button>
+      <button class="dtab" onclick="switchTab('robust',this)">Robustness</button>
+      <button class="dtab" onclick="switchTab('log',this)">Trade Log</button>
+      <button class="dtab" onclick="switchTab('tables',this)">Data Tables</button>
+      <button class="dtab" onclick="switchTab('report',this)">Report</button>
+    </div>
+  </div>
+
+  <!-- ====== TAB: Overview ====== -->
+  <div class="tab-panel active" id="tab-overview">
+    <div class="sec v"><div class="sec-label">Core Metrics</div>
+      <div class="g g5">
+        <div class="sc"><div class="sc-l">Total PnL</div><div class="sc-v cg" data-count="284520" data-prefix="+$" data-comma>+$0</div><div class="sc-sub cg">+12.4%</div></div>
+        <div class="sc"><div class="sc-l">Sharpe<span class="help" data-tip="夏普比率。每承受 1 单位风险获得的超额收益。>1 可接受，>2 优秀，>3 卓越。">?</span></div><div class="sc-v" data-count="2.14" data-decimal="2">0</div><div class="sc-sub dim">annualized</div></div>
+        <div class="sc"><div class="sc-l">Max DD</div><div class="sc-v cr" data-count="3.2" data-decimal="1" data-prefix="-" data-suffix="%">0</div><div class="sc-sub dim">02/18→02/24</div></div>
+        <div class="sc"><div class="sc-l">Win Rate</div><div class="sc-v" data-count="67.8" data-decimal="1" data-suffix="%">0</div><div class="sc-sub dim">1,247 trades</div></div>
+        <div class="sc"><div class="sc-l">Profit Factor</div><div class="sc-v" data-count="1.82" data-decimal="2">0</div><div class="sc-sub dim">avg W/L</div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Risk & Return</div>
+      <div class="g g5">
+        <div class="sc"><div class="sc-l">Sortino</div><div class="sc-v">2.87</div></div>
+        <div class="sc"><div class="sc-l">Calmar<span class="help" data-tip="卡玛比率。年化收益÷最大回撤。衡量收益与极端风险的关系。>3 优秀。">?</span></div><div class="sc-v">3.56</div></div>
+        <div class="sc"><div class="sc-l">Avg Trade</div><div class="sc-v cg">+$228</div></div>
+        <div class="sc"><div class="sc-l">Best Trade<span class="help" data-tip="单笔最大盈利。如果总 PnL 过度依赖少数大赢，策略可能不稳健。">?</span></div><div class="sc-v cg">+$12,450</div></div>
+        <div class="sc"><div class="sc-l">Worst Trade<span class="help" data-tip="单笔最大亏损。关注是否超出止损预期，异常大亏可能暴露风控问题。">?</span></div><div class="sc-v cr">-$4,820</div></div>
+        <div class="sc"><div class="sc-l">Avg Hold</div><div class="sc-v">4.2h</div></div>
+        <div class="sc"><div class="sc-l">Volume</div><div class="sc-v">$48.2M</div></div>
+        <div class="sc"><div class="sc-l">Fees</div><div class="sc-v cr">-$9,640</div></div>
+        <div class="sc"><div class="sc-l">Recovery<span class="help" data-tip="恢复因子。净利润÷最大回撤金额。>3 说明策略从最大回撤中恢复能力强。">?</span></div><div class="sc-v">3.88</div></div>
+        <div class="sc"><div class="sc-l">Expectancy<span class="help" data-tip="期望值（R 倍数）。每笔交易的风险调整后期望收益。>0.3R 良好。">?</span></div><div class="sc-v cg">0.34R</div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Equity & Drawdown</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>Equity Curve<span class="help" data-tip="权益曲线。策略累计净值变化，与基准对比可看出超额收益。曲线越平滑越好。">?</span></span><span class="badge badge-g">+12.4%</span></div><div class="cd-b" style="height:260px"><canvas id="cEQ"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>Drawdown<span class="help" data-tip="回撤曲线。每个时点相对历史最高点的跌幅。关注回撤深度和恢复速度。">?</span></span><span class="badge badge-r">Max -3.2%</span></div><div class="cd-b" style="height:260px"><canvas id="cDD"></canvas></div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Monthly Returns</div><div class="cd"><div class="cd-b" id="hmWrap"></div></div></div>
+    <div class="sec v"><div class="sec-label">Configuration</div><div class="cd"><div class="cd-b"><div class="cfg">
+      <div class="cfg-item"><span class="k">Strategy</span><span class="val">Funding arb v2.0</span></div>
+      <div class="cfg-item"><span class="k">Exchange</span><span class="val">Binance Futures</span></div>
+      <div class="cfg-item"><span class="k">Symbol</span><span class="val">BTC-PERP</span></div>
+      <div class="cfg-item"><span class="k">Timeframe</span><span class="val">5min</span></div>
+      <div class="cfg-item"><span class="k">Period</span><span class="val">01/01→03/31</span></div>
+      <div class="cfg-item"><span class="k">Capital</span><span class="val">$2,000,000</span></div>
+      <div class="cfg-item"><span class="k">Leverage</span><span class="val">5x</span></div>
+      <div class="cfg-item"><span class="k">Fee</span><span class="val">Maker 0.02%</span></div>
+      <div class="cfg-item"><span class="k">Slippage</span><span class="val">0.01%</span></div>
+      <div class="cfg-item"><span class="k">OMS</span><span class="val">NETTING</span></div>
+      <div class="cfg-item"><span class="k">Duration</span><span class="val">22m 14s</span></div>
+      <div class="cfg-item"><span class="k">Bars</span><span class="val">1,330,000</span></div>
+    </div></div></div></div>
+  </div>
+
+  <!-- ====== TAB: Performance ====== -->
+  <div class="tab-panel" id="tab-perf">
+    <div class="sec v"><div class="sec-label">Risk Metrics</div>
+      <div class="g g5">
+        <div class="sc"><div class="sc-l">VaR 95%<span class="help" data-tip="在险价值。95% 置信度下单日最大可能亏损。例如 -1.24% 表示 95% 的日子亏损不超过此值。">?</span></div><div class="sc-v cr">-1.24%</div><div class="sc-sub dim">daily</div></div>
+        <div class="sc"><div class="sc-l">CVaR 95%<span class="help" data-tip="条件在险价值（期望损失）。超过 VaR 阈值后的平均亏损，比 VaR 更保守。">?</span></div><div class="sc-v cr">-1.87%</div><div class="sc-sub dim">expected shortfall</div></div>
+        <div class="sc"><div class="sc-l">Omega Ratio<span class="help" data-tip="欧米伽比率。考虑所有收益分布矩的综合指标。>1 表示正期望，越高越好。">?</span></div><div class="sc-v">1.64</div><div class="sc-sub dim">threshold 0%</div></div>
+        <div class="sc"><div class="sc-l">Ulcer Index<span class="help" data-tip="溃疡指数。衡量回撤的深度和持续时间，越低表示持有体验越舒适。<2 优秀。">?</span></div><div class="sc-v">1.42</div><div class="sc-sub dim">pain index</div></div>
+        <div class="sc"><div class="sc-l">Beta<span class="help" data-tip="贝塔系数。策略与基准（BTC）的相关性。接近 0 表示市场中性，1 表示完全跟随市场。">?</span></div><div class="sc-v">0.38</div><div class="sc-sub dim">vs BTC</div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Rolling Metrics (30d window)</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>Rolling Sharpe<span class="help" data-tip="滚动夏普比率。用 30 日滑动窗口计算，观察策略表现是否稳定。波动大说明策略有阶段性失效。">?</span></span></div><div class="cd-b" style="height:240px"><canvas id="cRS"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>Rolling Volatility<span class="help" data-tip="滚动波动率。30 日窗口年化波动率，反映策略风险是否稳定。突然上升可能预示市场异常。">?</span></span></div><div class="cd-b" style="height:240px"><canvas id="cRV"></canvas></div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Return Distribution</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>Histogram</span></div><div class="cd-b" style="height:240px"><canvas id="cHI"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>QQ Plot<span class="help" data-tip="QQ 图。收益率分位数 vs 正态分布。偏离对角线说明收益非正态：尾部偏离=肥尾风险。">?</span></span></div><div class="cd-b" style="height:240px"><canvas id="cQQ"></canvas></div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Benchmark Comparison</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>Cumulative Return vs BTC</span></div><div class="cd-b" style="height:240px"><canvas id="cBM"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>Rolling Beta<span class="help" data-tip="滚动贝塔。策略与基准相关性随时间的变化。市场中性策略应保持在 0 附近。">?</span></span></div><div class="cd-b" style="height:240px"><canvas id="cRB"></canvas></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== TAB: Trades ====== -->
+  <div class="tab-panel" id="tab-trades">
+    <div class="sec v"><div class="sec-label">Trade PnL</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>PnL Distribution</span><span class="sub">per trade</span></div><div class="cd-b" style="height:240px"><canvas id="cTD"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>Cumulative PnL</span></div><div class="cd-b" style="height:240px"><canvas id="cCP"></canvas></div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">MAE / MFE Analysis</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>MAE vs PnL<span class="help" data-tip="最大不利偏移。每笔交易过程中经历的最大浮亏 vs 最终盈亏。可用于优化止损位。">?</span></span><span class="sub">max adverse excursion</span></div><div class="cd-b" style="height:240px"><canvas id="cMAE"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>MFE vs PnL<span class="help" data-tip="最大有利偏移。每笔交易过程中达到的最大浮盈 vs 最终盈亏。可用于优化止盈位。">?</span></span><span class="sub">max favorable excursion</span></div><div class="cd-b" style="height:240px"><canvas id="cMFE"></canvas></div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Patterns & Streaks</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>Win/Loss Streak</span></div><div class="cd-b" style="height:200px"><canvas id="cWL"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>Hold Time Dist.<span class="help" data-tip="持仓时间分布。分析交易持续多久，帮助判断策略是否有过长持仓风险。">?</span></span></div><div class="cd-b" style="height:200px"><canvas id="cHT"></canvas></div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">By Time</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>PnL by Hour</span><span class="sub">UTC</span></div><div class="cd-b" style="height:220px"><canvas id="cHR"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>PnL by Weekday</span></div><div class="cd-b" style="height:220px"><canvas id="cWD"></canvas></div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Long vs Short</div>
+      <div class="g g3">
+        <div class="sc"><div class="sc-l">Long Trades</div><div class="sc-v cg">682</div><div class="sc-sub cg">Win 71.4%</div></div>
+        <div class="sc"><div class="sc-l">Short Trades</div><div class="sc-v cr">565</div><div class="sc-sub cr">Win 63.2%</div></div>
+        <div class="sc"><div class="sc-l">Long/Short PnL</div><div class="sc-v">$194K / $90K</div><div class="sc-sub dim">ratio 2.16</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== TAB: Robustness ====== -->
+  <div class="tab-panel" id="tab-robust">
+    <div class="sec v"><div class="sec-label">Statistical Significance</div>
+      <div class="g g5">
+        <div class="sc"><div class="sc-l">PSR<span class="help" data-tip="概率夏普比率。Sharpe>0 的统计置信度。>95% 说明策略大概率真的有正收益，而非运气。">?</span></div><div class="sc-v cg">94.2%</div><div class="sc-sub dim">prob. Sharpe > 0</div></div>
+        <div class="sc"><div class="sc-l">Loss Probability<span class="help" data-tip="蒙特卡洛模拟下的亏损概率。通过随机重排交易序列，估算策略实际亏钱的可能性。">?</span></div><div class="sc-v">12.4%</div><div class="sc-sub dim">Monte Carlo</div></div>
+        <div class="sc"><div class="sc-l">5th %ile Return<span class="help" data-tip="第 5 百分位收益。蒙特卡洛模拟中最差 5% 情景的收益，代表极端不利情况。">?</span></div><div class="sc-v cr">-4.8%</div><div class="sc-sub dim">worst case</div></div>
+        <div class="sc"><div class="sc-l">Median Max DD<span class="help" data-tip="模拟中位最大回撤。蒙特卡洛多次模拟后，最大回撤的中位数，比单次回测更可靠。">?</span></div><div class="sc-v cr">-2.1%</div><div class="sc-sub dim">simulated</div></div>
+        <div class="sc"><div class="sc-l">Min Sharpe 95%<span class="help" data-tip="95% 置信下限 Sharpe。如果这个值仍 >0，说明策略在统计上显著盈利。">?</span></div><div class="sc-v">1.24</div><div class="sc-sub dim">confidence bound</div></div>
+      </div>
+    </div>
+    <div class="sec v"><div class="sec-label">Monte Carlo Simulation (1,000 paths)</div>
+      <div class="g g2">
+        <div class="cd"><div class="cd-h"><span>Equity Cone<span class="help" data-tip="蒙特卡洛权益锥。随机打乱交易顺序模拟 1000 条路径，展示收益的可能范围（5th~95th 百分位）。">?</span></span><span class="sub">5th / 25th / 50th / 75th / 95th percentile</span></div><div class="cd-b" style="height:280px"><canvas id="cMC"></canvas></div></div>
+        <div class="cd"><div class="cd-h"><span>Max DD Distribution<span class="help" data-tip="蒙特卡洛最大回撤分布。模拟出的最大回撤频率分布，评估回撤是否为偶然事件。">?</span></span></div><div class="cd-b" style="height:280px"><canvas id="cMDD"></canvas></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== TAB: Trade Log ====== -->
+  <div class="tab-panel" id="tab-log">
+    <div class="sec v"><div class="sec-label">Trade Log <span style="font-weight:400;color:var(--t2);letter-spacing:0">1,247 trades</span></div>
+      <div class="cd">
+        <div style="padding:0;overflow-x:auto">
+          <table class="tbl"><thead><tr><th>#</th><th>Open</th><th>Close</th><th>Symbol</th><th>Side</th><th class="tr">Qty</th><th class="tr">Entry</th><th class="tr">Exit</th><th class="tr">PnL</th><th class="tr">PnL%</th><th class="tr">Hold</th></tr></thead><tbody id="tradeLog"></tbody></table>
+        </div>
+        <div class="pager" id="pagerLog">
+          <div class="pager-info"><span id="logInfo">Showing 1-20 of 1,247</span></div>
+          <div class="pager-nav" id="logNav"></div>
+          <div class="pager-size"><span>Rows</span><select id="logSize" onchange="logState.size=+this.value;logState.page=1;renderLog()"><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== TAB: Data Tables ====== -->
+  <div class="tab-panel" id="tab-tables">
+    <div class="sec v">
+      <div class="sub-tabs">
+        <button class="stab a" onclick="switchSubTab('daily',this)">Daily Returns</button>
+        <button class="stab" onclick="switchSubTab('monthly',this)">Monthly Summary</button>
+        <button class="stab" onclick="switchSubTab('symbols',this)">By Symbol</button>
+      </div>
+      <div class="cd">
+        <div style="padding:0;overflow-x:auto">
+          <table class="tbl"><thead id="dtHead"></thead><tbody id="dtBody"></tbody></table>
+        </div>
+        <div class="pager" id="pagerDt">
+          <div class="pager-info"><span id="dtInfo"></span></div>
+          <div class="pager-nav" id="dtNav"></div>
+          <div class="pager-size"><span>Rows</span><select id="dtSize" onchange="dtState.size=+this.value;dtState.page=1;renderDt()"><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== TAB: Report ====== -->
+  <div class="tab-panel" id="tab-report">
+    <div class="sec v" style="text-align:center;padding:4rem 2rem">
+      <div style="font-size:2.5rem;margin-bottom:1rem;opacity:.3">📄</div>
+      <div style="font-size:.9rem;font-weight:600;margin-bottom:.5rem">Tearsheet Report</div>
+      <div class="dim" style="font-size:.8rem;margin-bottom:1.5rem">Full HTML tearsheet with all metrics, charts, and analysis</div>
+      <div style="display:flex;gap:.5rem;justify-content:center">
+        <button class="act-btn" style="padding:.5rem 1.25rem">Download HTML</button>
+        <button class="act-btn" style="padding:.5rem 1.25rem">Download PDF</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</div>
+
+<script>
+/* === EXPAND TOGGLE (A+D) === */
+function toggleExp(id){
+  const row=document.querySelector('[data-id="'+id+'"]');
+  const exp=document.getElementById('exp-'+id);
+  const arrow=document.getElementById('arrow-'+id);
+  const wasOpen=exp.classList.contains('open');
+  // close all
+  document.querySelectorAll('.row-expand.open').forEach(e=>e.classList.remove('open'));
+  document.querySelectorAll('.exp-arrow.open').forEach(a=>a.classList.remove('open'));
+  document.querySelectorAll('.row.expanded').forEach(r=>r.classList.remove('expanded'));
+  if(!wasOpen){exp.classList.add('open');arrow.classList.add('open');row.classList.add('expanded')}
+}
+
+/* === COPY ID === */
+function copyId(el){
+  const fullId=el.dataset.full;
+  const shortId=fullId.substring(0,8);
+  navigator.clipboard.writeText(fullId).then(()=>{
+    el.classList.add('copied');
+    el.innerHTML='✓ copied';
+    setTimeout(()=>{el.classList.remove('copied');el.innerHTML=shortId+'<span class="copy-icon">⧉</span>'},1200);
+  });
+}
+
+/* === VIEW TRANSITION === */
+function goDetail(){
+  document.getElementById('listView').classList.add('hide');
+  setTimeout(()=>{
+    document.getElementById('listView').style.display='none';
+    const dv=document.getElementById('detailView');dv.classList.add('show');
+    setTimeout(()=>{dv.querySelectorAll('.sec').forEach(s=>s.classList.add('v'));dv.querySelectorAll('[data-count]').forEach(el=>{if(el.dataset.done)return;el.dataset.done='1';animC(el)});rebuildCharts();buildHM();buildTL()},50);
+  },350);
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function goBack(){
+  const dv=document.getElementById('detailView');dv.classList.remove('show');dv.querySelectorAll('.sec').forEach(s=>s.classList.remove('v'));
+  setTimeout(()=>{const lv=document.getElementById('listView');lv.style.display='';lv.classList.remove('hide')},350);
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+/* === PROGRESS TICK === */
+const tasks={r1:{pct:67,speed:.4,total:1330000,elapsed:872},r2:{pct:23,speed:.25,total:8200000,elapsed:495}};
+function fmtT(s){const m=Math.floor(s/60),ss=Math.floor(s%60);return m+'m '+(ss<10?'0':'')+ss+'s'}
+function tickAll(){for(const[id,t]of Object.entries(tasks)){
+  t.pct+=t.speed+Math.random()*.3;t.elapsed+=2;if(t.pct>99)t.pct=15+Math.random()*10;
+  const p=Math.round(t.pct),proc=Math.round(t.total*t.pct/100),bps=Math.round(proc/t.elapsed),rem=(t.total-proc)/bps;
+  const el=s=>document.getElementById(s);
+  if(el('rbar-'+id))el('rbar-'+id).style.width=p+'%';
+  if(el('rpct-'+id))el('rpct-'+id).textContent=p+'%';
+  if(el('dbar-'+id))el('dbar-'+id).style.width=p+'%';
+  if(el('dpct-'+id))el('dpct-'+id).textContent=p+'%';
+  if(el('elap-'+id))el('elap-'+id).textContent=fmtT(t.elapsed);
+  if(el('eta-'+id))el('eta-'+id).textContent='~'+fmtT(rem);
+  if(el('spd-'+id))el('spd-'+id).textContent=bps.toLocaleString()+' bars/s';
+  if(el('proc-'+id))el('proc-'+id).textContent=(proc/1e6).toFixed(2)+'M / '+(t.total/1e6).toFixed(1)+'M';
+  if(el('trd-'+id)){const v=parseInt(el('trd-'+id).textContent.replace(/,/g,''));el('trd-'+id).textContent=(v+Math.floor(Math.random()*8)).toLocaleString()}
+}}
+setInterval(tickAll,2000);
+
+/* === COUNTER === */
+function animC(el){const target=parseFloat(el.dataset.count),decimal=parseInt(el.dataset.decimal||'0'),prefix=el.dataset.prefix||'',suffix=el.dataset.suffix||'',comma=el.hasAttribute('data-comma'),dur=1400,start=performance.now();function tick(now){const t=Math.min((now-start)/dur,1),eased=1-Math.pow(1-t,3);let val=(target*eased).toFixed(decimal);if(comma)val=Number(val).toLocaleString('en-US',{minimumFractionDigits:decimal,maximumFractionDigits:decimal});el.textContent=prefix+val+suffix;if(t<1)requestAnimationFrame(tick)}requestAnimationFrame(tick)}
+
+/* === CHARTS === */
+function lt(){return document.documentElement.classList.contains('light')}
+function cSuc(){return'#36884B'}function cDan(){return lt()?'#8A2425':'#FE8181'}
+function cAcc(){return'#D97857'}function cInfo(){return lt()?'#3266AD':'#85B7EB'}
+function cWarn(){return lt()?'#854F0B':'#FAC775'}function cPur(){return lt()?'#7C3AED':'#A78BFA'}
+function cGry(){return lt()?'rgba(0,0,0,.15)':'rgba(255,255,255,.2)'}
+function cGrid(){return lt()?'rgba(0,0,0,.05)':'rgba(255,255,255,.05)'}
+function cTick(){return lt()?'rgba(44,44,42,.4)':'rgba(232,230,224,.4)'}
+function cTxt(){return lt()?'#2C2C2A':'#E8E6E0'}
+const ttCfg=()=>({backgroundColor:lt()?'#f5f4ed':'#302f2d',titleColor:cTxt(),bodyColor:cTick(),borderColor:lt()?'#dedbd3':'#3b3a37',borderWidth:1,cornerRadius:8,padding:10,bodyFont:{family:"'IBM Plex Mono'"},titleFont:{family:"'IBM Plex Mono'",weight:'600'}});
+const bo=()=>({responsive:true,maintainAspectRatio:false,animation:{duration:800,easing:'easeOutQuart'},interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},tooltip:ttCfg()},scales:{x:{grid:{color:cGrid(),drawBorder:false},ticks:{color:cTick(),font:{family:"'IBM Plex Mono'",size:10},maxRotation:0}},y:{grid:{color:cGrid(),drawBorder:false},ticks:{color:cTick(),font:{family:"'IBM Plex Mono'",size:10}}}}});
+const legCfg=()=>({display:true,labels:{color:cTick(),font:{family:"'IBM Plex Mono'",size:10},boxWidth:10,usePointStyle:true}});
+function cumR(n,mu,sig){const r=[100];for(let i=1;i<n;i++)r.push(r[i-1]*(1+(mu+sig*(Math.random()-.5)*2)/100));return r}
+const CH={};function mc(id,cfg){if(CH[id])CH[id].destroy();CH[id]=new Chart(document.getElementById(id),cfg)}
+const d60=Array.from({length:60},(_,i)=>{const d=new Date(2026,1,3+i);return(d.getMonth()+1)+'/'+d.getDate()});
+
+function rebuildCharts(){buildTabCharts('overview')}
+
+/* === TAB SWITCHING === */
+let currentTab='overview';
+function switchTab(tab,btn){
+  if(tab===currentTab)return;
+  currentTab=tab;
+  document.querySelectorAll('.dtab').forEach(t=>t.classList.remove('a'));
+  btn.classList.add('a');
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  buildTabCharts(tab);
+  window.scrollTo({top:document.getElementById('tabBarWrap').offsetTop-10,behavior:'smooth'});
+}
+
+function buildTabCharts(tab){
+  switch(tab){
+    case'overview':bEQ();bDD();buildHM();break;
+    case'perf':bRS();bRV();bHI();bQQ();bBM();bRB();break;
+    case'trades':bTD();bCP();bMAE();bMFE();bWL();bHT();bHR();bWD();break;
+    case'robust':bMC();bMDD();break;
+    case'log':buildTL();break;
+    case'tables':buildDT();break;
+  }
+}
+
+function erfinv(x){const a=.147,ln=Math.log(1-x*x),s=Math.sign(x),t=2/(Math.PI*a)+ln/2;return s*Math.sqrt(Math.sqrt(t*t-ln/a)-t)}
+
+/* === OVERVIEW CHARTS === */
+function bEQ(){const nav=cumR(60,.2,.5),btc=cumR(60,.15,.8);const s=nav[0]/btc[0];const o=bo();o.plugins.legend=legCfg();o.scales.y.ticks.callback=v=>'$'+Math.round(v/10)+'k';mc('cEQ',{type:'line',data:{labels:d60,datasets:[{label:'Strategy',data:nav.map(v=>v*23),borderColor:cSuc(),backgroundColor:cSuc()+'15',fill:true,tension:.3,pointRadius:0,borderWidth:2},{label:'Buy&Hold',data:btc.map(v=>v*s*22.8),borderColor:cGry(),borderDash:[5,4],fill:false,tension:.3,pointRadius:0,borderWidth:1.5}]},options:o})}
+function bDD(){const eq=cumR(60,.2,.6);let pk=eq[0];const dd=eq.map(v=>{if(v>pk)pk=v;return((v-pk)/pk)*100});const o=bo();o.scales.y.ticks.callback=v=>v.toFixed(1)+'%';o.scales.y.max=.5;o.scales.x.ticks.maxTicksLimit=8;mc('cDD',{type:'line',data:{labels:d60,datasets:[{data:dd,borderColor:cDan(),backgroundColor:cDan()+'18',fill:'origin',tension:.3,pointRadius:0,borderWidth:1.5}]},options:o})}
+
+/* === PERFORMANCE CHARTS === */
+function bRS(){const d=cumR(60,.05,.8);const o=bo();o.scales.y.ticks.callback=v=>v.toFixed(1);o.scales.x.ticks.maxTicksLimit=8;mc('cRS',{type:'line',data:{labels:d60,datasets:[{data:d.map(v=>(v-100)/10+1.5+Math.random()*.5),borderColor:cAcc(),tension:.3,pointRadius:0,borderWidth:2},{data:Array(60).fill(0),borderColor:cGry(),borderDash:[4,4],borderWidth:1,pointRadius:0}]},options:o})}
+function bRV(){const o=bo();o.scales.x.ticks.maxTicksLimit=8;mc('cRV',{type:'line',data:{labels:d60,datasets:[{data:Array.from({length:60},()=>8+Math.random()*12),borderColor:cInfo(),backgroundColor:cInfo()+'12',fill:true,tension:.3,pointRadius:0,borderWidth:2}]},options:o})}
+function bHI(){const ret=Array.from({length:400},()=>(Math.random()+Math.random()+Math.random()-1.3)*600);const bins=30,mn=-2000,mx=2000,bw=(mx-mn)/bins;const counts=new Array(bins).fill(0);ret.forEach(r=>{const i=Math.floor((r-mn)/bw);if(i>=0&&i<bins)counts[i]++});const labels=counts.map((_,i)=>{const v=mn+i*bw+bw/2;return v>=0?'+'+Math.round(v):''+Math.round(v)});const o=bo();o.scales.x.ticks.maxTicksLimit=8;mc('cHI',{type:'bar',data:{labels,datasets:[{data:counts,backgroundColor:counts.map((_,i)=>{const v=mn+i*bw+bw/2;return v>=0?cSuc()+'88':cDan()+'88'}),borderRadius:2,barPercentage:1,categoryPercentage:1}]},options:o})}
+function bQQ(){const n=80;const ret=Array.from({length:n},()=>(Math.random()+Math.random()+Math.random()-1.5)*2);ret.sort((a,b)=>a-b);const nq=i=>{const p=(i+.5)/n;return Math.sqrt(2)*erfinv(2*p-1)};const pts=ret.map((r,i)=>({x:nq(i),y:r}));const o=bo();o.scales.x.title={display:true,text:'Theoretical',color:cTick(),font:{family:"'IBM Plex Mono'",size:10}};o.scales.y.title={display:true,text:'Sample',color:cTick(),font:{family:"'IBM Plex Mono'",size:10}};mc('cQQ',{type:'scatter',data:{datasets:[{data:pts,backgroundColor:cAcc()+'aa',pointRadius:4,order:1},{data:[{x:pts[0].x,y:pts[0].x},{x:pts[pts.length-1].x,y:pts[pts.length-1].x}],type:'line',borderColor:cGry(),borderDash:[6,4],borderWidth:1.5,pointRadius:0,order:0}]},options:o})}
+function bBM(){const s1=cumR(60,.2,.5),s2=cumR(60,.15,.8);const o=bo();o.plugins.legend=legCfg();o.scales.x.ticks.maxTicksLimit=8;mc('cBM',{type:'line',data:{labels:d60,datasets:[{label:'Strategy',data:s1.map(v=>v-100),borderColor:cSuc(),tension:.3,pointRadius:0,borderWidth:2},{label:'BTC',data:s2.map(v=>v-100),borderColor:cGry(),borderDash:[5,4],tension:.3,pointRadius:0,borderWidth:1.5}]},options:o})}
+function bRB(){const o=bo();o.scales.x.ticks.maxTicksLimit=8;mc('cRB',{type:'line',data:{labels:d60,datasets:[{data:Array.from({length:60},()=>.2+Math.random()*.4),borderColor:cInfo(),tension:.3,pointRadius:0,borderWidth:2},{data:Array(60).fill(1),borderColor:cGry(),borderDash:[4,4],borderWidth:1,pointRadius:0}]},options:o})}
+
+/* === TRADES CHARTS === */
+function bTD(){const ret=Array.from({length:400},()=>(Math.random()+Math.random()+Math.random()-1.3)*600);const bins=30,mn=-2000,mx=2000,bw=(mx-mn)/bins;const counts=new Array(bins).fill(0);ret.forEach(r=>{const i=Math.floor((r-mn)/bw);if(i>=0&&i<bins)counts[i]++});const labels=counts.map((_,i)=>(mn+i*bw+bw/2).toFixed(0));const o=bo();o.scales.x.ticks.maxTicksLimit=8;mc('cTD',{type:'bar',data:{labels,datasets:[{data:counts,backgroundColor:counts.map((_,i)=>{const v=mn+i*bw+bw/2;return v>=0?cSuc()+'88':cDan()+'88'}),borderRadius:2,barPercentage:1,categoryPercentage:1}]},options:o})}
+function bCP(){const cum=[];let c=0;for(let i=0;i<60;i++){c+=(Math.random()-.35)*600;cum.push(c)}const o=bo();o.scales.x.ticks.maxTicksLimit=8;mc('cCP',{type:'line',data:{labels:d60,datasets:[{data:cum,borderColor:cSuc(),backgroundColor:cSuc()+'12',fill:true,tension:.3,pointRadius:0,borderWidth:2}]},options:o})}
+function bMAE(){const pts=Array.from({length:100},()=>{const pnl=(Math.random()-.35)*2000;const mae=-Math.abs(pnl*(.2+Math.random()*.8));return{x:mae,y:pnl}});const o=bo();o.scales.x.title={display:true,text:'MAE ($)',color:cTick(),font:{family:"'IBM Plex Mono'",size:10}};o.scales.y.title={display:true,text:'PnL ($)',color:cTick(),font:{family:"'IBM Plex Mono'",size:10}};mc('cMAE',{type:'scatter',data:{datasets:[{data:pts,backgroundColor:pts.map(p=>p.y>=0?cSuc()+'88':cDan()+'88'),pointRadius:4}]},options:o})}
+function bMFE(){const pts=Array.from({length:100},()=>{const pnl=(Math.random()-.35)*2000;const mfe=Math.abs(pnl*(.3+Math.random()*.9));return{x:mfe,y:pnl}});const o=bo();o.scales.x.title={display:true,text:'MFE ($)',color:cTick(),font:{family:"'IBM Plex Mono'",size:10}};o.scales.y.title={display:true,text:'PnL ($)',color:cTick(),font:{family:"'IBM Plex Mono'",size:10}};mc('cMFE',{type:'scatter',data:{datasets:[{data:pts,backgroundColor:pts.map(p=>p.y>=0?cSuc()+'88':cDan()+'88'),pointRadius:4}]},options:o})}
+function bWL(){const s=Array.from({length:50},()=>Math.random()>.35?Math.ceil(Math.random()*6):-Math.ceil(Math.random()*4));const o=bo();o.scales.x.display=false;mc('cWL',{type:'bar',data:{labels:s.map((_,i)=>i),datasets:[{data:s,backgroundColor:s.map(v=>v>0?cSuc()+'aa':cDan()+'aa'),borderRadius:2}]},options:o})}
+function bHT(){const bins=['<5m','5-15m','15-30m','30m-1h','1-2h','2-4h','4-8h','8h+'];const counts=[45,120,210,280,195,160,140,97];const o=bo();mc('cHT',{type:'bar',data:{labels:bins,datasets:[{data:counts,backgroundColor:cInfo()+'88',borderRadius:3,barPercentage:.7}]},options:o})}
+function bHR(){const pnl=Array.from({length:24},()=>Math.round((Math.random()-.4)*8000));const labels=Array.from({length:24},(_,i)=>i+'h');const o=bo();o.scales.y.ticks.callback=v=>(v>=0?'+':'')+v/1000+'k';mc('cHR',{type:'bar',data:{labels,datasets:[{data:pnl,backgroundColor:pnl.map(v=>v>=0?cSuc()+'aa':cDan()+'aa'),borderRadius:3,barPercentage:.65}]},options:o})}
+function bWD(){const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];const pnl=days.map(()=>Math.round((Math.random()-.3)*15000));const o=bo();o.scales.y.ticks.callback=v=>(v>=0?'+':'')+v/1000+'k';mc('cWD',{type:'bar',data:{labels:days,datasets:[{data:pnl,backgroundColor:pnl.map(v=>v>=0?cSuc()+'aa':cDan()+'aa'),borderRadius:4,barPercentage:.6}]},options:o})}
+
+/* === ROBUSTNESS CHARTS === */
+function bMC(){const paths=[];for(let p=0;p<5;p++){paths.push(cumR(60,.15+p*.1,.4+p*.3))}const o=bo();o.plugins.legend=legCfg();o.scales.x.ticks.maxTicksLimit=8;o.scales.y.ticks.callback=v=>Math.round(v);
+  const colors=[cDan()+'44',cWarn()+'55',cSuc(),cWarn()+'55',cDan()+'44'];const labels=['5th','25th','50th','75th','95th'];
+  mc('cMC',{type:'line',data:{labels:d60,datasets:paths.map((d,i)=>({label:labels[i],data:d,borderColor:colors[i],backgroundColor:i===2?cSuc()+'10':'transparent',fill:i===2,tension:.3,pointRadius:0,borderWidth:i===2?2.5:1.5,borderDash:i===2?[]:[4,4]}))},options:o})}
+function bMDD(){const dds=Array.from({length:200},()=>-(Math.random()*Math.random()*8));const bins=20,mn=-8,mx=0,bw=(mx-mn)/bins;const counts=new Array(bins).fill(0);dds.forEach(r=>{const i=Math.floor((r-mn)/bw);if(i>=0&&i<bins)counts[i]++});const labels=counts.map((_,i)=>(mn+i*bw+bw/2).toFixed(1)+'%');const o=bo();o.scales.x.ticks.maxTicksLimit=8;mc('cMDD',{type:'bar',data:{labels,datasets:[{data:counts,backgroundColor:cDan()+'66',borderRadius:2,barPercentage:1,categoryPercentage:1}]},options:o})}
+
+/* === HEATMAP === */
+function buildHM(){const wrap=document.getElementById('hmWrap');if(!wrap)return;wrap.innerHTML='';const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];const years=['2025','2026'];const grid=document.createElement('div');grid.className='hm-grid';grid.innerHTML='<div class="hm-label"></div>'+months.map(m=>'<div class="hm-label" style="font-size:.6rem">'+m+'</div>').join('');
+  years.forEach(y=>{grid.innerHTML+='<div class="hm-label" style="font-size:.68rem;color:var(--t1)">'+y+'</div>';months.forEach(()=>{const v=(Math.random()-.35)*12;const abs=Math.abs(v);let bg;if(v>=0){const t=Math.min(abs/10,1);bg=lt()?`rgba(54,136,75,${.06+t*.4})`:`rgba(54,136,75,${.1+t*.55})`}else{const t=Math.min(abs/10,1);bg=lt()?`rgba(138,36,37,${.06+t*.4})`:`rgba(254,129,129,${.1+t*.55})`}const clr=abs>3?(lt()&&v<0?'#fff':cTxt()):cTick();grid.innerHTML+='<div class="hm-cell" style="background:'+bg+';color:'+clr+'">'+(v>=0?'+':'')+v.toFixed(1)+'%</div>'})});wrap.appendChild(grid)}
+
+/* === TRADE LOG — paginated === */
+const logData=[];
+(function genLogData(){for(let i=0;i<1247;i++){const side=Math.random()>.45?'Long':'Short';const sym=['BTC-PERP','ETH-PERP','SOL-PERP'][Math.floor(Math.random()*3)];const entry=sym==='BTC-PERP'?65000+Math.random()*5000:sym==='ETH-PERP'?3200+Math.random()*400:150+Math.random()*40;const delta=(Math.random()-.4)*(entry*.012);const exit=entry+delta;const size=sym==='BTC-PERP'?(0.1+Math.random()*2).toFixed(3):sym==='ETH-PERP'?(1+Math.random()*20).toFixed(2):(10+Math.random()*200).toFixed(1);const pnl=delta*parseFloat(size);const pnlP=delta/entry*100;const hold=Math.floor(Math.random()*720)+10;const hStr=hold>60?Math.floor(hold/60)+'h '+hold%60+'m':hold+'m';const od=new Date(2026,2,1+Math.floor(i/45),Math.floor(Math.random()*24),Math.floor(Math.random()*60));const cd=new Date(od.getTime()+hold*60000);logData.push({n:1247-i,od,cd,sym,side,size,entry,exit,pnl,pnlP,hStr})}})();
+const logState={page:1,size:20};
+function renderLog(){
+  const{page,size}=logState;const total=logData.length;const pages=Math.ceil(total/size);
+  const start=(page-1)*size;const rows=logData.slice(start,start+size);
+  const fmt=d=>(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
+  const tbody=document.getElementById('tradeLog');tbody.innerHTML='';
+  rows.forEach(r=>{tbody.innerHTML+=`<tr><td class="dim">${r.n}</td><td class="mono dim">${fmt(r.od)}</td><td class="mono dim">${fmt(r.cd)}</td><td class="mono">${r.sym}</td><td><span class="${r.side==='Long'?'side-l':'side-s'}">${r.side}</span></td><td class="tr mono">${r.size}</td><td class="tr mono">${r.entry.toFixed(2)}</td><td class="tr mono">${r.exit.toFixed(2)}</td><td class="tr mono ${r.pnl>=0?'cg':'cr'}">${r.pnl>=0?'+':'-'}$${Math.abs(r.pnl).toFixed(0)}</td><td class="tr mono ${r.pnlP>=0?'cg':'cr'}">${r.pnlP>=0?'+':''}${r.pnlP.toFixed(2)}%</td><td class="tr mono dim">${r.hStr}</td></tr>`});
+  document.getElementById('logInfo').textContent=`Showing ${start+1}-${Math.min(start+size,total)} of ${total.toLocaleString()}`;
+  renderPager('logNav',page,pages,p=>{logState.page=p;renderLog()});
+}
+function buildTL(){logState.page=1;renderLog()}
+
+/* === DATA TABLES — paginated + sub-tabs === */
+let dtCurrentSub='daily';
+const dtData={daily:[],monthly:[],symbols:[]};
+(function genDtData(){
+  let cum=0,eq=2000000;
+  for(let i=0;i<90;i++){const ret=(Math.random()-.35)*2;cum+=ret;eq*=(1+ret/100);const dd=Math.min(0,(Math.random()-.5)*3);const trades=Math.floor(Math.random()*40)+5;const vol=Math.floor(Math.random()*800000)+100000;const d=new Date(2026,0,1+i);dtData.daily.push({date:(d.getMonth()+1)+'/'+d.getDate(),ret,cum,eq:Math.round(eq),dd,trades,vol})}
+  const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  for(let i=0;i<12;i++){const ret=(Math.random()-.2)*8;const trades=Math.floor(Math.random()*300)+50;const vol=Math.floor(Math.random()*5000000)+1000000;dtData.monthly.push({month:months[i]+' 2026',ret,trades,vol,best:(Math.random()*4).toFixed(2)+'%',worst:(-Math.random()*3).toFixed(2)+'%'})}
+  const syms=['BTC-PERP','ETH-PERP','SOL-PERP','ARB-PERP','DOGE-PERP'];
+  syms.forEach(s=>{const trades=Math.floor(Math.random()*400)+50;const pnl=(Math.random()-.3)*100000;const wr=50+Math.random()*25;dtData.symbols.push({sym:s,trades,pnl,wr:wr.toFixed(1),avg:(pnl/trades).toFixed(0),vol:Math.floor(Math.random()*20000000)+1000000})});
+})();
+const dtState={page:1,size:20};
+const dtHeaders={
+  daily:'<tr><th>Date</th><th class="tr">Return</th><th class="tr">Cum. Return</th><th class="tr">Equity</th><th class="tr">Drawdown</th><th class="tr">Trades</th><th class="tr">Volume</th></tr>',
+  monthly:'<tr><th>Month</th><th class="tr">Return</th><th class="tr">Trades</th><th class="tr">Volume</th><th class="tr">Best Day</th><th class="tr">Worst Day</th></tr>',
+  symbols:'<tr><th>Symbol</th><th class="tr">Trades</th><th class="tr">PnL</th><th class="tr">Win Rate</th><th class="tr">Avg Trade</th><th class="tr">Volume</th></tr>'
+};
+function switchSubTab(sub,btn){
+  dtCurrentSub=sub;dtState.page=1;
+  btn.parentElement.querySelectorAll('.stab').forEach(t=>t.classList.remove('a'));btn.classList.add('a');
+  renderDt();
+}
+function renderDt(){
+  const data=dtData[dtCurrentSub];const{page,size}=dtState;const total=data.length;const pages=Math.max(1,Math.ceil(total/size));
+  const start=(page-1)*size;const rows=data.slice(start,start+size);
+  document.getElementById('dtHead').innerHTML=dtHeaders[dtCurrentSub];
+  const tbody=document.getElementById('dtBody');tbody.innerHTML='';
+  rows.forEach(r=>{
+    if(dtCurrentSub==='daily')tbody.innerHTML+=`<tr><td class="mono">${r.date}</td><td class="tr mono ${r.ret>=0?'cg':'cr'}">${r.ret>=0?'+':''}${r.ret.toFixed(2)}%</td><td class="tr mono ${r.cum>=0?'cg':'cr'}">${r.cum>=0?'+':''}${r.cum.toFixed(2)}%</td><td class="tr mono">$${r.eq.toLocaleString()}</td><td class="tr mono ${r.dd<0?'cr':'dim'}">${r.dd.toFixed(2)}%</td><td class="tr mono">${r.trades}</td><td class="tr mono">$${r.vol.toLocaleString()}</td></tr>`;
+    else if(dtCurrentSub==='monthly')tbody.innerHTML+=`<tr><td class="mono">${r.month}</td><td class="tr mono ${r.ret>=0?'cg':'cr'}">${r.ret>=0?'+':''}${r.ret.toFixed(2)}%</td><td class="tr mono">${r.trades}</td><td class="tr mono">$${r.vol.toLocaleString()}</td><td class="tr mono cg">${r.best}</td><td class="tr mono cr">${r.worst}</td></tr>`;
+    else tbody.innerHTML+=`<tr><td class="mono">${r.sym}</td><td class="tr mono">${r.trades}</td><td class="tr mono ${r.pnl>=0?'cg':'cr'}">${r.pnl>=0?'+':'-'}$${Math.abs(r.pnl).toFixed(0)}</td><td class="tr mono">${r.wr}%</td><td class="tr mono ${+r.avg>=0?'cg':'cr'}">$${r.avg}</td><td class="tr mono">$${r.vol.toLocaleString()}</td></tr>`;
+  });
+  document.getElementById('dtInfo').textContent=`Showing ${start+1}-${Math.min(start+size,total)} of ${total}`;
+  renderPager('dtNav',page,pages,p=>{dtState.page=p;renderDt()});
+  // hide pager for small datasets
+  document.getElementById('pagerDt').style.display=total<=size?'none':'flex';
+}
+function buildDT(){dtState.page=1;renderDt()}
+
+/* === PAGINATION RENDERER === */
+function renderPager(containerId,current,total,onPage){
+  const nav=document.getElementById(containerId);nav.innerHTML='';
+  const mk=(label,pg,disabled,active)=>{
+    const b=document.createElement('button');b.className='pager-btn'+(active?' a':'')+(label==='‹'||label==='›'?' arrow':'');
+    b.textContent=label;b.disabled=disabled;
+    if(!disabled&&!active)b.onclick=()=>onPage(pg);
+    return b;
+  };
+  nav.appendChild(mk('‹',current-1,current<=1));
+  // smart page range
+  const range=[];
+  if(total<=7){for(let i=1;i<=total;i++)range.push(i)}
+  else{
+    range.push(1);
+    if(current>3)range.push('...');
+    for(let i=Math.max(2,current-1);i<=Math.min(total-1,current+1);i++)range.push(i);
+    if(current<total-2)range.push('...');
+    range.push(total);
+  }
+  range.forEach(p=>{
+    if(p==='...'){const d=document.createElement('span');d.className='pager-dots';d.textContent='…';nav.appendChild(d)}
+    else nav.appendChild(mk(String(p),p,false,p===current));
+  });
+  nav.appendChild(mk('›',current+1,current>=total));
+}
+
+/* === STICKY TAB BAR — scroll detection === */
+const tabWrap=document.getElementById('tabBarWrap');
+if(tabWrap){
+  const sentinel=document.createElement('div');
+  sentinel.style.height='1px';
+  tabWrap.parentElement.insertBefore(sentinel,tabWrap);
+  const stickyObs=new IntersectionObserver(([e])=>{
+    tabWrap.classList.toggle('stuck',!e.isIntersecting);
+  },{threshold:0});
+  stickyObs.observe(sentinel);
+}
+</script>
+</body>
+</html>

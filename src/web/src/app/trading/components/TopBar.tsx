@@ -71,7 +71,7 @@ export function TopBar({ nodeType, onNodeTypeChange, activeTab, onTabChange }: P
 
   return (
     <>
-      <div className="h-11 shrink-0 flex items-center px-3 gap-0 border-b border-white/[0.06] bg-sidebar">
+      <div className="h-11 shrink-0 flex items-center px-3 gap-0 border-b border bg-sidebar">
         {/* Mode selector */}
         {(["sandbox", "live"] as const).map((mode) => (
           <Button

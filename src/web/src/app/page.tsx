@@ -16,6 +16,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { TrendingUp, Activity, BarChart3, Wallet, Server } from "lucide-react";
+import { CHART_AXIS_STYLE, CHART_TOOLTIP_STYLE, CHART_GRID_STYLE, CHART_COLORS } from "@/lib/chartTheme";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -82,26 +83,26 @@ function KpiCard({ label, value, prefix = "", suffix = "", decimals = 0, change,
     : Math.round(animated).toLocaleString();
 
   return (
-    <div className="rounded-xl bg-card border border-border p-5 flex flex-col gap-3">
+    <div className="rounded-xl bg-card border p-5 flex flex-col gap-3 hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
+        <span className="qds-section-label">
           {label}
         </span>
-        <div className="w-7 h-7 rounded-lg bg-popover flex items-center justify-center text-muted-foreground">
+        <div className="w-7 h-7 rounded-lg bg-input flex items-center justify-center text-muted-foreground">
           {icon}
         </div>
       </div>
       <div className="flex flex-col gap-1">
-        <span className="font-heading text-2xl font-bold tracking-tight text-foreground">
+        <span className="font-mono text-[1.35rem] font-semibold tracking-tight text-foreground">
           {prefix}{formatted}{suffix}
         </span>
         {change !== undefined && (
           <span
-            className={`text-[11px] font-mono font-semibold ${
+            className={`text-[.68rem] font-mono font-medium ${
               changePositive === true
-                ? "text-[var(--accent-green)]"
+                ? "text-qds-success"
                 : changePositive === false
-                ? "text-[var(--accent-red)]"
+                ? "text-destructive"
                 : "text-muted-foreground"
             }`}
           >
@@ -115,7 +116,7 @@ function KpiCard({ label, value, prefix = "", suffix = "", decimals = 0, change,
 
 function KpiCardSkeleton() {
   return (
-    <div className="rounded-xl bg-card border border-border p-5 flex flex-col gap-3">
+    <div className="rounded-xl bg-card border p-5 flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <Skeleton className="h-3 w-20" />
         <Skeleton className="h-7 w-7 rounded-lg" />
@@ -135,11 +136,9 @@ interface NodeCardProps {
 }
 
 function NodeCard({ label, nodeType, info }: NodeCardProps) {
-  // Also subscribe to live websocket heartbeats
   const hbEvent = useWsEvent("node.heartbeat");
   const lastHb = useWsLastKnown("node.heartbeat");
 
-  // Determine alive: either from passed info, or from WS heartbeat
   const hbData = (hbEvent ?? lastHb) as { node_type?: string; lifecycle_state?: string } | null;
   const wsAlive = hbData?.node_type === nodeType;
   const alive = info?.alive ?? wsAlive;
@@ -147,53 +146,53 @@ function NodeCard({ label, nodeType, info }: NodeCardProps) {
   const lcState = info?.lifecycle_state ?? (wsAlive ? hbData?.lifecycle_state : undefined);
 
   return (
-    <div className="rounded-xl bg-card border border-border p-5 flex flex-col gap-4 flex-1">
+    <div className="rounded-xl bg-card border p-5 flex flex-col gap-4 flex-1 hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <Server className="w-4 h-4 text-muted-foreground" />
-          <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
+          <span className="qds-section-label">
             {label}
           </span>
         </div>
         <div className="flex items-center gap-1.5">
           <span
-            className={`w-2 h-2 rounded-full ${alive ? "bg-[var(--accent-green)] shadow-[0_0_6px_var(--accent-green)]" : "bg-muted-foreground"}`}
+            className={`w-2 h-2 rounded-full ${alive ? "bg-qds-success shadow-[0_0_6px_var(--suc)]" : "text-qds-t3"}`}
             style={alive ? { animation: "pulse 2s cubic-bezier(0.4,0,0.6,1) infinite" } : undefined}
           />
-          <span className={`text-[10px] font-mono font-semibold ${alive ? "text-[var(--accent-green)]" : "text-muted-foreground"}`}>
+          <span className={`text-[.68rem] font-mono font-semibold ${alive ? "text-qds-success" : "text-qds-t3"}`}>
             {alive ? "ONLINE" : "OFFLINE"}
           </span>
         </div>
       </div>
       <div className="grid grid-cols-3 gap-3">
         <div className="flex flex-col gap-1">
-          <span className="text-[9px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">策略数</span>
-          <span className="text-[14px] font-bold font-mono text-foreground">
-            {info?.strategy_count ?? "—"}
+          <span className="qds-stat-label">策略数</span>
+          <span className="text-[14px] font-semibold font-mono text-foreground">
+            {info?.strategy_count ?? "\u2014"}
           </span>
         </div>
         <div className="flex flex-col gap-1">
-          <span className="text-[9px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">持仓数</span>
-          <span className="text-[14px] font-bold font-mono text-foreground">
-            {info?.position_count ?? "—"}
+          <span className="qds-stat-label">持仓数</span>
+          <span className="text-[14px] font-semibold font-mono text-foreground">
+            {info?.position_count ?? "\u2014"}
           </span>
         </div>
         <div className="flex flex-col gap-1">
-          <span className="text-[9px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">状态</span>
-          <span className={`text-[11px] font-bold font-mono uppercase ${
-            lcState === "running" ? "text-[var(--accent-green)]" :
-            lcState === "paused" ? "text-[var(--accent-amber)]" :
-            lcState === "flattening" ? "text-[var(--accent-red)]" :
-            "text-muted-foreground"
+          <span className="qds-stat-label">状态</span>
+          <span className={`text-[11px] font-semibold font-mono uppercase ${
+            lcState === "running" ? "text-qds-success" :
+            lcState === "paused" ? "text-qds-warning" :
+            lcState === "flattening" ? "text-destructive" :
+            "text-qds-t3"
           }`}>
-            {lcState ?? "—"}
+            {lcState ?? "\u2014"}
           </span>
         </div>
       </div>
       {info?.trading_state && (
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-popover">
-          <span className="text-[9px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">交易状态</span>
-          <span className="text-[10px] font-mono font-semibold text-primary ml-auto">
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-sm bg-input">
+          <span className="qds-stat-label">交易状态</span>
+          <span className="text-[.68rem] font-mono font-semibold text-primary ml-auto">
             {info.trading_state}
           </span>
         </div>
@@ -288,33 +287,26 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="flex flex-col gap-6 p-8">
-        {/* Title skeleton */}
         <div className="flex flex-col gap-2">
           <Skeleton className="h-7 w-48" />
           <Skeleton className="h-4 w-72" />
         </div>
-
-        {/* KPI skeletons */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-[1.25rem]">
           {[0, 1, 2, 3].map((i) => <KpiCardSkeleton key={i} />)}
         </div>
-
-        {/* Mid row skeletons */}
-        <div className="flex gap-4">
-          <div className="rounded-xl bg-card border border-border p-5 flex-1">
+        <div className="flex gap-[1.25rem]">
+          <div className="rounded-xl bg-card border p-5 flex-1">
             <Skeleton className="h-4 w-24 mb-4" />
             <Skeleton className="h-[280px] w-full" />
           </div>
-          <div className="rounded-xl bg-card border border-border p-5 w-[340px]">
+          <div className="rounded-xl bg-card border p-5 w-[340px]">
             <Skeleton className="h-4 w-24 mb-4" />
             {[0, 1, 2, 3, 4].map((i) => (
               <Skeleton key={i} className="h-10 w-full mb-2" />
             ))}
           </div>
         </div>
-
-        {/* Node row skeletons */}
-        <div className="flex gap-4">
+        <div className="flex gap-[1.25rem]">
           <Skeleton className="h-32 flex-1 rounded-xl" />
           <Skeleton className="h-32 flex-1 rounded-xl" />
         </div>
@@ -332,7 +324,7 @@ export default function DashboardPage() {
           <span className="font-mono text-[12px] text-destructive">{error}</span>
           <button
             onClick={() => setReloadKey((k) => k + 1)}
-            className="px-4 py-2 rounded-lg bg-popover border border-border text-[11px] font-semibold text-muted-foreground hover:text-foreground transition-colors"
+            className="px-4 py-2 rounded-sm bg-card border text-[11px] font-semibold text-qds-t1 hover:text-foreground hover:border-qds-border-hover transition-colors"
           >
             重试
           </button>
@@ -349,17 +341,17 @@ export default function DashboardPage() {
       {/* Page header */}
       <FadeIn direction="down" duration={0.25}>
         <div className="flex flex-col gap-1">
-          <h1 className="font-heading text-[28px] font-bold tracking-[-1px] text-foreground">
+          <h1 className="font-mono text-[1.1rem] font-semibold tracking-tight text-foreground">
             {t("dashboard.title")}
           </h1>
-          <p className="font-mono text-[12px] text-muted-foreground">
+          <p className="font-mono text-[.72rem] text-muted-foreground">
             {t("dashboard.subtitle")}
           </p>
         </div>
       </FadeIn>
 
       {/* KPI Cards Row */}
-      <StaggerContainer className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" staggerDelay={0.1}>
+      <StaggerContainer className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-[1.25rem]" staggerDelay={0.05}>
         <StaggerItem>
           <KpiCard
             label={t("dashboard.totalEquity")}
@@ -402,22 +394,22 @@ export default function DashboardPage() {
         </StaggerItem>
       </StaggerContainer>
 
-      {/* Main Content Row — chart + recent backtests */}
+      {/* Main Content Row -- chart + recent backtests */}
       <FadeIn direction="up" delay={0.15} duration={0.35}>
-        <div className="flex gap-4">
+        <div className="flex gap-[1.25rem]">
           {/* Equity Curve Chart */}
-          <div className="rounded-xl bg-card border border-border flex-1 flex flex-col">
+          <div className="rounded-xl bg-card border flex-1 flex flex-col hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
             <div className="flex items-center justify-between px-5 pt-5 pb-3">
-              <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
+              <span className="qds-section-label">
                 {t("dashboard.equityCurve")}
               </span>
-              <span className="text-[10px] font-mono text-muted-foreground">ALL</span>
+              <span className="text-[.68rem] font-mono text-muted-foreground">ALL</span>
             </div>
             <div className="h-px bg-border" />
             <div className="flex-1 px-3 py-4" style={{ minHeight: 280 }}>
               {equityData.length === 0 ? (
                 <div className="flex items-center justify-center h-full" style={{ minHeight: 280 }}>
-                  <span className="font-mono text-[11px] text-muted-foreground">
+                  <span className="font-mono text-[.72rem] text-muted-foreground">
                     {t("dashboard.noEquityData")}
                   </span>
                 </div>
@@ -426,20 +418,20 @@ export default function DashboardPage() {
                   <AreaChart data={equityData} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
                     <defs>
                       <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#4C9EEB" stopOpacity={0.25} />
-                        <stop offset="100%" stopColor="#4C9EEB" stopOpacity={0} />
+                        <stop offset="0%" stopColor="var(--acc)" stopOpacity={0.25} />
+                        <stop offset="100%" stopColor="var(--acc)" stopOpacity={0} />
                       </linearGradient>
                     </defs>
                     <XAxis
                       dataKey="date"
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 10, fill: "var(--muted-foreground)", fontFamily: "JetBrains Mono" }}
+                      tick={CHART_AXIS_STYLE}
                     />
                     <YAxis
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 10, fill: "var(--muted-foreground)", fontFamily: "JetBrains Mono" }}
+                      tick={CHART_AXIS_STYLE}
                       tickFormatter={(v: number) =>
                         v >= 1_000_000
                           ? `$${(v / 1_000_000).toFixed(1)}M`
@@ -451,24 +443,17 @@ export default function DashboardPage() {
                       width={64}
                     />
                     <RechartsTooltip
-                      contentStyle={{
-                        backgroundColor: "var(--popover)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        fontSize: 11,
-                        fontFamily: "JetBrains Mono",
-                        color: "var(--foreground)",
-                      }}
+                      contentStyle={CHART_TOOLTIP_STYLE}
                       formatter={(value: number | undefined) => [`$${Number(value ?? 0).toLocaleString()}`, "权益"]}
                     />
                     <Area
                       type="monotone"
                       dataKey="value"
-                      stroke="#4C9EEB"
+                      stroke="var(--acc)"
                       strokeWidth={2}
                       fill="url(#equityGradient)"
                       dot={false}
-                      activeDot={{ r: 4, fill: "#4C9EEB", stroke: "var(--card)", strokeWidth: 2 }}
+                      activeDot={{ r: 4, fill: "var(--acc)", stroke: "var(--bg-p)", strokeWidth: 2 }}
                     />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -477,14 +462,14 @@ export default function DashboardPage() {
           </div>
 
           {/* Recent Backtests */}
-          <div className="rounded-xl bg-card border border-border w-[340px] flex flex-col">
+          <div className="rounded-xl bg-card border w-[340px] flex flex-col hover:border-qds-border-hover transition-colors duration-[var(--dur)]">
             <div className="flex items-center justify-between px-5 pt-5 pb-3">
-              <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
+              <span className="qds-section-label">
                 最近回测
               </span>
               <a
                 href="/backtest"
-                className="text-[10px] font-semibold tracking-[0.5px] text-primary hover:underline"
+                className="text-[.68rem] font-semibold tracking-[0.05em] text-primary hover:underline"
               >
                 {t("dashboard.viewAll")}
               </a>
@@ -493,7 +478,7 @@ export default function DashboardPage() {
 
             {/* Running backtest progress ring */}
             {runningBt && (
-              <div className="flex flex-col items-center gap-3 py-5 border-b border-border">
+              <div className="flex flex-col items-center gap-3 py-5 border-b border">
                 {(() => {
                   const radius = 48;
                   const stroke = 4;
@@ -504,10 +489,10 @@ export default function DashboardPage() {
                     <div className="relative">
                       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
                         <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
-                          stroke="hsl(var(--muted))" strokeWidth={stroke} />
+                          stroke="var(--bg-t)" strokeWidth={stroke} />
                         {!isQueued && (
                           <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
-                            stroke="url(#dashRingGrad)" strokeWidth={stroke}
+                            stroke="var(--acc)" strokeWidth={stroke}
                             strokeLinecap="round"
                             strokeDasharray={circumference}
                             strokeDashoffset={offset}
@@ -516,39 +501,20 @@ export default function DashboardPage() {
                         )}
                         {isQueued && (
                           <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
-                            stroke="hsl(var(--primary))" strokeWidth={stroke}
+                            stroke="var(--info)" strokeWidth={stroke}
                             strokeLinecap="round" opacity="0.6"
                             strokeDasharray={`${circumference * 0.25} ${circumference * 0.75}`}
                             style={{ transform: "rotate(-90deg)", transformOrigin: "center", animation: "spin 1.5s linear infinite" }}
                           />
                         )}
-                        {!isQueued && runningPct > 0 && (
-                          <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
-                            stroke="url(#dashRingGrad)" strokeWidth={stroke + 3}
-                            strokeLinecap="round" opacity="0.3"
-                            strokeDasharray={circumference}
-                            strokeDashoffset={offset}
-                            filter="url(#dashGlow)"
-                            style={{ transform: "rotate(-90deg)", transformOrigin: "center", transition: "stroke-dashoffset 600ms cubic-bezier(0.4, 0, 0.2, 1)" }}
-                          />
-                        )}
-                        <defs>
-                          <linearGradient id="dashRingGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                            <stop offset="0%" stopColor="#4C9EEB" />
-                            <stop offset="100%" stopColor="#A78BFA" />
-                          </linearGradient>
-                          <filter id="dashGlow" x="-30%" y="-30%" width="160%" height="160%">
-                            <feGaussianBlur in="SourceGraphic" stdDeviation="5" />
-                          </filter>
-                        </defs>
                       </svg>
                       <div className="absolute inset-0 flex flex-col items-center justify-center">
                         {isQueued ? (
-                          <span className="text-[10px] font-medium text-muted-foreground">排队中</span>
+                          <span className="text-[.68rem] font-medium text-muted-foreground">排队中</span>
                         ) : (
                           <>
-                            <span className="text-2xl font-bold font-heading text-foreground">{runningPct}</span>
-                            <span className="text-[10px] font-medium text-muted-foreground -mt-0.5">%</span>
+                            <span className="text-2xl font-semibold font-mono text-foreground">{runningPct}</span>
+                            <span className="text-[.68rem] font-medium text-muted-foreground -mt-0.5">%</span>
                           </>
                         )}
                       </div>
@@ -556,10 +522,10 @@ export default function DashboardPage() {
                   );
                 })()}
                 <div className="flex flex-col items-center gap-0.5">
-                  <span className="text-[11px] font-semibold text-foreground truncate max-w-[200px]">
+                  <span className="text-[.75rem] font-semibold font-mono text-foreground truncate max-w-[200px]">
                     {runningBt.strategy_name}
                   </span>
-                  <span className="text-[10px] text-muted-foreground">
+                  <span className="text-[.68rem] text-muted-foreground">
                     {isQueued ? "等待运行..." : "回测运行中"}
                   </span>
                 </div>
@@ -569,22 +535,22 @@ export default function DashboardPage() {
             <div className="flex flex-col overflow-y-auto" style={{ maxHeight: runningBt ? 200 : 320 }}>
               {backtestRuns.length === 0 ? (
                 <div className="flex items-center justify-center px-5 py-8">
-                  <span className="font-mono text-[11px] text-muted-foreground">暂无回测记录</span>
+                  <span className="font-mono text-[.72rem] text-muted-foreground">暂无回测记录</span>
                 </div>
               ) : (
                 backtestRuns.map((run, i) => (
                   <div
                     key={run.run_id ?? `run-${i}`}
                     className={`flex items-center justify-between px-5 py-3 ${
-                      i < backtestRuns.length - 1 ? "border-b border-border" : ""
+                      i < backtestRuns.length - 1 ? "border-b" : ""
                     }`}
                   >
                     <div className="flex flex-col gap-1 min-w-0">
-                      <span className="text-[11px] font-semibold text-foreground truncate max-w-[180px]">
+                      <span className="text-[.75rem] font-semibold font-mono text-foreground truncate max-w-[180px]">
                         {run.strategy_name}
                       </span>
                       {run.symbol && (
-                        <span className="text-[10px] font-mono text-muted-foreground">
+                        <span className="text-[.68rem] font-mono text-muted-foreground">
                           {run.symbol}
                         </span>
                       )}
@@ -600,7 +566,7 @@ export default function DashboardPage() {
 
       {/* Node Status Row */}
       <FadeIn direction="up" delay={0.25} duration={0.35}>
-        <div className="flex gap-4">
+        <div className="flex gap-[1.25rem]">
           <NodeCard
             label="沙盒节点"
             nodeType="sandbox"

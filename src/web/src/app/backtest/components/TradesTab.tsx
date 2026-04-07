@@ -18,7 +18,6 @@ import {
   Legend,
   ErrorBar,
 } from "recharts";
-import { motion } from "framer-motion";
 import { HelpCircle } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -29,6 +28,7 @@ import {
 } from "@/components/ui/tooltip";
 import { API_BASE } from "@/lib/api";
 import { useCountUp } from "@/hooks/useCountUp";
+import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
 import type {
   BacktestResult,
   TradePnlDistributionBin,
@@ -45,26 +45,11 @@ import type {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const ACCENT_GREEN = "#26D97F";
-const ACCENT_RED = "#EF5350";
-const ACCENT_BLUE = "#4C9EEB";
-const ACCENT_PURPLE = "#A78BFA";
+const ACCENT_GREEN = "var(--suc)";
+const ACCENT_RED = "var(--dan)";
+const ACCENT_BLUE = "var(--info)";
+const ACCENT_PURPLE = "var(--info)";
 
-const tooltipStyle: React.CSSProperties = {
-  background: "rgba(15, 20, 25, 0.95)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 10,
-  fontSize: 11,
-  color: "#E8EAED",
-  backdropFilter: "blur(8px)",
-};
-const tooltipLabelStyle: React.CSSProperties = {
-  color: "rgba(255,255,255,0.5)",
-};
-const tooltipItemStyle: React.CSSProperties = {
-  color: "#E8EAED",
-  boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-};
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -75,7 +60,7 @@ function HelpTip({ text }: { text: string }) {
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger className="inline-flex items-center justify-center ml-1 cursor-help">
-          <HelpCircle className="w-3 h-3 text-muted-foreground/30 hover:text-muted-foreground/60 transition-colors" />
+          <HelpCircle className="w-3 h-3 text-qds-t3 hover:text-muted-foreground transition-colors" />
         </TooltipTrigger>
         <TooltipContent side="top" className="max-w-[220px] text-[11px] leading-relaxed">
           {text}
@@ -94,7 +79,7 @@ function GlassCard({
 }) {
   return (
     <div
-      className={`rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm overflow-hidden ${className}`}
+      className={`rounded-xl border bg-card overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)] ${className}`}
     >
       {children}
     </div>
@@ -104,7 +89,7 @@ function GlassCard({
 function EmptyPlaceholder({ label }: { label?: string }) {
   return (
     <div className="flex items-center justify-center h-full min-h-[120px]">
-      <span className="text-xs text-muted-foreground/40">{label ?? "暂无数据"}</span>
+      <span className="text-xs text-qds-t3">{label ?? "暂无数据"}</span>
     </div>
   );
 }
@@ -154,10 +139,10 @@ function MetricCard({
 
   const colorClass =
     positive == null
-      ? "text-foreground/90"
+      ? "text-foreground"
       : positive
-        ? "text-[var(--accent-green)]"
-        : "text-[var(--accent-red)]";
+        ? "text-qds-success"
+        : "text-destructive";
 
   const accentColor =
     positive == null
@@ -176,24 +161,21 @@ function MetricCard({
           : `${prefix}${animated.toFixed(decimals)}${suffix}`;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.45, delay: 0.08 + index * 0.06, ease: [0.22, 1, 0.36, 1] }}
-      className="group relative flex flex-col gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm p-4 hover:bg-white/[0.05] transition-all duration-300 overflow-hidden"
+    <div
+      className="group relative flex flex-col gap-2.5 rounded-xl border bg-card p-4 hover:bg-secondary transition-all duration-300 overflow-hidden"
     >
       <div
         className="absolute bottom-0 left-0 right-0 h-[2px] opacity-30 group-hover:opacity-70 transition-opacity duration-500"
         style={{ background: `linear-gradient(90deg, transparent, ${accentColor}, transparent)` }}
       />
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 inline-flex items-center">
+      <span className="qds-section-label inline-flex items-center">
         {label}
         {tooltip && <HelpTip text={tooltip} />}
       </span>
-      <span className={`text-2xl font-bold font-heading tracking-tight leading-none ${colorClass}`}>
+      <span className={`text-2xl font-bold font-mono tracking-tight leading-none ${colorClass}`}>
         {formatted}
       </span>
-    </motion.div>
+    </div>
   );
 }
 
@@ -203,7 +185,7 @@ function MetricCard({
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 mb-1 block">
+    <span className="qds-section-label block">
       {children}
     </span>
   );
@@ -230,22 +212,22 @@ function PnlDistributionChart({ data }: { data?: TradePnlDistributionBin[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
         <XAxis
           dataKey="label"
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           width={32}
         />
         <RechartsTooltip
-          contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+          {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${value} 笔`, "交易数"]}
         />
         <Bar dataKey="count" radius={[2, 2, 0, 0]} isAnimationActive animationDuration={1200}>
@@ -277,23 +259,23 @@ function CumulativePnlChart({ data }: { data?: CumulativeTradePnl[] }) {
             <stop offset="100%" stopColor={isPositive ? ACCENT_BLUE : ACCENT_RED} stopOpacity={0.02} />
           </linearGradient>
         </defs>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
         <XAxis
           dataKey="trade_num"
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
-          label={{ value: "交易序号", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "rgba(255,255,255,0.2)" }}
+          label={{ value: "交易序号", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "var(--t3)" }}
         />
         <YAxis
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           width={52}
           tickFormatter={(v) => `${Number(v).toFixed(0)}`}
         />
         <RechartsTooltip
-          contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+          {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${Number(value).toFixed(2)} USDT`, "累积盈亏"]}
         />
         <ReferenceLine y={0} stroke="rgba(240,180,41,0.4)" strokeDasharray="6 4" strokeWidth={1} />
@@ -334,27 +316,27 @@ function PnlScatterChart({ data }: { data?: TradePnlScatterPoint[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <ScatterChart margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
         <XAxis
           dataKey="x"
           type="number"
           domain={["auto", "auto"]}
           tickFormatter={(v) => new Date(v).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
         />
         <YAxis
           dataKey="y"
           type="number"
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           width={52}
           tickFormatter={(v) => `${Number(v).toFixed(0)}`}
         />
         <RechartsTooltip
-          contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+          {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown, name: unknown) => [`${Number(value).toFixed(2)} USDT`, name === "y" ? "盈亏" : String(name)]}
         />
         <ReferenceLine y={0} stroke="rgba(240,180,41,0.4)" strokeDasharray="6 4" strokeWidth={1} />
@@ -386,28 +368,28 @@ function MaeMfeChart({ data }: { data?: MaeMfePoint[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <ScatterChart margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
         <XAxis
           dataKey="x"
           type="number"
           domain={["auto", "auto"]}
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
-          label={{ value: "MAE", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "rgba(255,255,255,0.2)" }}
+          label={{ value: "MAE", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "var(--t3)" }}
           tickFormatter={(v) => `${Number(v).toFixed(0)}`}
         />
         <YAxis
           dataKey="y"
           type="number"
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           width={52}
           tickFormatter={(v) => `${Number(v).toFixed(0)}`}
         />
         <RechartsTooltip
-          contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+          {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown, name: unknown) => [`${Number(value).toFixed(2)}`, name === "y" ? "最终盈亏" : "MAE"]}
         />
         <ReferenceLine y={0} stroke="rgba(240,180,41,0.4)" strokeDasharray="6 4" strokeWidth={1} />
@@ -444,22 +426,22 @@ function HoldingTimeChart({ data }: { data?: HoldingTimeBin[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
         <XAxis
           dataKey="label"
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           width={32}
         />
         <RechartsTooltip
-          contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+          {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${value} 笔`, "交易数"]}
         />
         <Bar dataKey="count" fill={ACCENT_BLUE} fillOpacity={0.8} radius={[2, 2, 0, 0]} isAnimationActive animationDuration={1200} />
@@ -487,22 +469,22 @@ function StreakChart({ data }: { data?: StreakEntry[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
         <XAxis
           dataKey="streak_num"
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
-          label={{ value: "连续序号", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "rgba(255,255,255,0.2)" }}
+          label={{ value: "连续序号", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "var(--t3)" }}
         />
         <YAxis
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           width={32}
         />
         <RechartsTooltip
-          contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+          {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${Math.abs(Number(value))} 笔`, "连续长度"]}
         />
         <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
@@ -536,19 +518,19 @@ function LongShortChart({ data }: { data?: LongVsShort }) {
         const total = Math.abs(m.long) + Math.abs(m.short);
         const longPct = total > 0 ? (Math.abs(m.long) / total) * 100 : 50;
         return (
-          <div key={m.label} className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
-            <div className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 mb-2">{m.label}</div>
+          <div key={m.label} className="rounded-lg border bg-card p-3">
+            <div className="qds-section-label">{m.label}</div>
             <div className="flex items-center justify-between text-xs mb-1">
               <span style={{ color: ACCENT_BLUE }}>{m.fmt(m.long)}</span>
               <span style={{ color: ACCENT_PURPLE }}>{m.fmt(m.short)}</span>
             </div>
-            <div className="flex h-2 rounded-full overflow-hidden bg-white/[0.04]">
+            <div className="flex h-2 rounded-full overflow-hidden bg-secondary">
               <div style={{ width: `${longPct}%`, background: ACCENT_BLUE, opacity: 0.8 }} />
               <div style={{ width: `${100 - longPct}%`, background: ACCENT_PURPLE, opacity: 0.8 }} />
             </div>
             <div className="flex justify-between mt-1">
-              <span className="text-[9px] text-muted-foreground/40">多头</span>
-              <span className="text-[9px] text-muted-foreground/40">空头</span>
+              <span className="text-[9px] text-qds-t3">多头</span>
+              <span className="text-[9px] text-qds-t3">空头</span>
             </div>
           </div>
         );
@@ -595,22 +577,22 @@ function ReturnByGroupChart({ data, labelKey, title }: {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
         <XAxis
           dataKey="label"
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
         />
         <YAxis
-          tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
+          tick={{ fill: "var(--t2)", fontSize: 9 }}
           tickLine={false}
           axisLine={false}
           width={48}
           tickFormatter={(v) => `${Number(v).toFixed(1)}`}
         />
         <RechartsTooltip
-          contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+          {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${Number(value).toFixed(2)}`, "中位收益"]}
         />
         <ReferenceLine y={0} stroke="rgba(240,180,41,0.4)" strokeDasharray="6 4" strokeWidth={1} />
@@ -689,7 +671,7 @@ export function TradesTab({ runId }: TradesTabProps) {
   if (error || !result) {
     return (
       <div className="flex items-center justify-center h-48">
-        <span className="text-xs text-[var(--accent-red)]">{error ?? "加载失败"}</span>
+        <span className="text-xs text-destructive">{error ?? "加载失败"}</span>
       </div>
     );
   }
@@ -806,92 +788,68 @@ export function TradesTab({ runId }: TradesTabProps) {
       <div className="grid grid-cols-2 gap-4">
 
         {/* Row 1: PnL Distribution | Cumulative PnL */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
+        <div
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>盈亏分布</SectionTitle>
             <PnlDistributionChart data={result.trade_pnl_distribution} />
           </GlassCard>
-        </motion.div>
+        </div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
+        <div
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>累积盈亏</SectionTitle>
             <CumulativePnlChart data={result.cumulative_trade_pnl} />
           </GlassCard>
-        </motion.div>
+        </div>
 
         {/* Row 2: Trade Scatter | MAE/MFE */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.25, ease: [0.22, 1, 0.36, 1] }}
+        <div
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>逐笔盈亏散点</SectionTitle>
             <PnlScatterChart data={result.trade_pnl_scatter} />
           </GlassCard>
-        </motion.div>
+        </div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
+        <div
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>MAE/MFE 分析</SectionTitle>
             <MaeMfeChart data={result.mae_mfe} />
           </GlassCard>
-        </motion.div>
+        </div>
 
         {/* Row 3: Holding Time | Streaks */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.35, ease: [0.22, 1, 0.36, 1] }}
+        <div
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>持仓时长分布</SectionTitle>
             <HoldingTimeChart data={result.holding_time_distribution} />
           </GlassCard>
-        </motion.div>
+        </div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.4, ease: [0.22, 1, 0.36, 1] }}
+        <div
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>连盈/连亏序列</SectionTitle>
             <StreakChart data={result.streak_sequence} />
           </GlassCard>
-        </motion.div>
+        </div>
 
         {/* Row 4: Long vs Short (full width) */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.45, ease: [0.22, 1, 0.36, 1] }}
+        <div
           className="col-span-2"
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>多空对比</SectionTitle>
             <LongShortChart data={result.long_vs_short} />
           </GlassCard>
-        </motion.div>
+        </div>
 
         {/* Row 5: Return by DOW | Return by Hour */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.5, ease: [0.22, 1, 0.36, 1] }}
+        <div
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>按星期收益分布</SectionTitle>
@@ -901,12 +859,9 @@ export function TradesTab({ runId }: TradesTabProps) {
               title="按星期"
             />
           </GlassCard>
-        </motion.div>
+        </div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.55, ease: [0.22, 1, 0.36, 1] }}
+        <div
         >
           <GlassCard className="p-4 flex flex-col gap-2">
             <SectionTitle>按小时收益分布</SectionTitle>
@@ -916,7 +871,7 @@ export function TradesTab({ runId }: TradesTabProps) {
               title="按小时"
             />
           </GlassCard>
-        </motion.div>
+        </div>
 
       </div>
     </div>

@@ -10,10 +10,10 @@ interface Props {
 
 const item: Variants = {
   hidden: { opacity: 0, y: 12 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.3, ease: "easeOut" as const } },
+  show: { opacity: 1, y: 0, transition: { duration: 0.28, ease: [0.16, 1, 0.3, 1] } },
 };
 
-export function StaggerContainer({ children, className, staggerDelay = 0.1 }: Props) {
+export function StaggerContainer({ children, className, staggerDelay = 0.05 }: Props) {
   return (
     <motion.div
       variants={{

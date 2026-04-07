@@ -76,8 +76,8 @@ const columns = [
         <span
           className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ${
             isBuy
-              ? "bg-[var(--accent-green-20)] text-[var(--accent-green)]"
-              : "bg-[var(--accent-red-20)] text-[var(--accent-red)]"
+              ? "bg-qds-success-dim text-qds-success"
+              : "bg-qds-danger-dim text-destructive"
           }`}
         >
           {isBuy ? "买入" : "卖出"}
@@ -124,7 +124,7 @@ const columns = [
       if (isNaN(v)) return "—";
       const positive = v >= 0;
       return (
-        <span className={positive ? "text-[var(--accent-green)] font-medium" : "text-[var(--accent-red)] font-medium"}>
+        <span className={positive ? "text-qds-success font-medium" : "text-destructive font-medium"}>
           {positive ? "+" : ""}
           {v.toFixed(2)}
         </span>
@@ -193,7 +193,7 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
         <Table className="w-full text-xs border-collapse">
           <TableHeader className="sticky top-0 z-10 bg-card">
             {table.getHeaderGroups().map((hg) => (
-              <TableRow key={hg.id} className="border-b border-border">
+              <TableRow key={hg.id} className="border-b">
                 {hg.headers.map((header) => {
                   const canSort = header.column.getCanSort();
                   const sorted = header.column.getIsSorted();
@@ -230,8 +230,8 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
             {table.getRowModel().rows.map((row, i) => (
               <TableRow
                 key={row.id}
-                className={`border-b border-border/30 hover:bg-muted/50 transition-colors ${
-                  i % 2 === 0 ? "" : "bg-background/30"
+                className={`border-b hover:bg-secondary transition-colors ${
+                  i % 2 === 0 ? "" : "bg-background"
                 }`}
               >
                 {row.getVisibleCells().map((cell) => (
@@ -246,7 +246,7 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
       </div>
 
       {/* Pagination bar */}
-      <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-card shrink-0">
+      <div className="flex items-center justify-between px-4 py-2 border-t bg-card shrink-0">
         <span className="text-[11px] text-muted-foreground">
           {from}–{to} / {totalRows} 条记录
         </span>
@@ -268,7 +268,7 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
             <button
               onClick={() => table.previousPage()}
               disabled={!table.getCanPreviousPage()}
-              className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-secondary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               上一页
             </button>
@@ -278,7 +278,7 @@ export function TradeLogTab({ tradeLog }: TradeLogTabProps) {
             <button
               onClick={() => table.nextPage()}
               disabled={!table.getCanNextPage()}
-              className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="px-2 py-1 rounded text-[11px] text-muted-foreground hover:bg-secondary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               下一页
             </button>

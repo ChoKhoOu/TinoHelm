@@ -1,13 +1,12 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { Search, RefreshCw, CheckCircle, ChevronRight, FileText, Layers, Plus, FolderOpen, Copy, Check } from "lucide-react";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { Search, RefreshCw, Plus } from "lucide-react";
 import { apiGet, apiPost, ApiError } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FadeIn } from "@/components/motion/FadeIn";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogClose,
@@ -18,7 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-/* ── Types ───────────────────────────────────────────────────────── */
+/* -- Types ---------------------------------------------------------- */
 
 interface RawStrategyItem {
   name: string;
@@ -43,7 +42,6 @@ interface StrategyParam {
   default?: unknown;
   min?: number;
   max?: number;
-  description?: string;
 }
 
 interface ParamsResponse {
@@ -67,23 +65,25 @@ interface StrategyDetail {
   versions?: StrategyVersion[];
 }
 
-/* ── Helpers ─────────────────────────────────────────────────────── */
-
-function formatPath(path: string | undefined): string {
-  if (!path) return "—";
-  const parts = path.split(/[/\\]/);
-  return parts.slice(-2).join("/");
-}
-
-/* ── Skeleton loaders ────────────────────────────────────────────── */
+/* -- Skeleton loaders ----------------------------------------------- */
 
 function ListSkeleton() {
   return (
-    <div className="flex flex-col gap-2 p-3">
+    <div className="flex flex-col">
       {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="rounded-lg p-3 flex flex-col gap-2">
-          <Skeleton className="h-3.5 w-2/3 bg-popover" />
-          <Skeleton className="h-2.5 w-1/2 bg-popover" />
+        <div
+          key={i}
+          className="grid border-b last:border-0 py-3 px-4 gap-3 items-center"
+          style={{ gridTemplateColumns: "3px 1fr auto auto auto" }}
+        >
+          <div />
+          <div className="flex flex-col gap-1.5">
+            <Skeleton className="h-3 w-2/5 bg-secondary" />
+            <Skeleton className="h-2.5 w-3/5 bg-secondary" />
+          </div>
+          <Skeleton className="h-2.5 w-8 bg-secondary" />
+          <Skeleton className="h-2.5 w-10 bg-secondary" />
+          <div />
         </div>
       ))}
     </div>
@@ -92,306 +92,409 @@ function ListSkeleton() {
 
 function DetailSkeleton() {
   return (
-    <div className="flex flex-col gap-5 p-6">
-      <div className="flex flex-col gap-2">
-        <Skeleton className="h-6 w-48 bg-popover" />
-        <Skeleton className="h-3 w-32 bg-popover" />
+    <div className="flex flex-col gap-6">
+      <div className="flex items-center gap-4 pb-5 border-b">
+        <Skeleton className="h-8 w-16 bg-secondary rounded-sm" />
+        <Skeleton className="size-10 rounded-[10px] bg-secondary" />
+        <div className="flex flex-col gap-1.5">
+          <Skeleton className="h-4 w-40 bg-secondary" />
+          <Skeleton className="h-3 w-60 bg-secondary" />
+        </div>
       </div>
       <div className="flex flex-col gap-3">
-        <Skeleton className="h-3 w-20 bg-popover" />
+        <Skeleton className="h-3 w-16 bg-secondary" />
+        <div className="grid grid-cols-3 gap-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-14 w-full bg-secondary rounded-sm" />
+          ))}
+        </div>
+      </div>
+      <div className="flex flex-col gap-3">
+        <Skeleton className="h-3 w-20 bg-secondary" />
         {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-9 w-full bg-popover" />
+          <Skeleton key={i} className="h-9 w-full bg-secondary" />
         ))}
       </div>
     </div>
   );
 }
 
-/* ── Strategy list item ──────────────────────────────────────────── */
+/* -- Sub-components ------------------------------------------------- */
 
-function StrategyRow({
-  strategy,
-  selected,
-  onClick,
-}: {
-  strategy: StrategyListItem;
-  selected: boolean;
-  onClick: () => void;
-}) {
+function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <Button
-      variant="ghost"
-      onClick={onClick}
-      className={`w-full justify-start h-auto text-left rounded-lg px-3 py-2.5 flex items-center gap-3 transition-all duration-100 group ${
-        selected
-          ? "bg-[var(--accent-green-20)] border border-[var(--accent-green)]/30"
-          : "hover:bg-popover border border-transparent"
-      }`}
-    >
-      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-        <div className="flex items-center gap-2">
-          <span
-            className={`text-[12px] font-semibold truncate ${
-              selected ? "text-[var(--accent-green)]" : "text-foreground"
-            }`}
-          >
-            {strategy.name}
-          </span>
-          <Badge
-            variant="neutral"
-            className="shrink-0 text-[9px] font-bold"
-          >
-            策略
-          </Badge>
-        </div>
-        {strategy.class_name && (
-          <span className="text-[10px] text-muted-foreground truncate font-mono">
-            {strategy.class_name}
-          </span>
-        )}
-      </div>
-      {strategy.version && (
-        <span className="shrink-0 text-[9px] font-mono text-muted-foreground">
-          v{strategy.version}
-        </span>
-      )}
-      <ChevronRight
-        className={`shrink-0 w-3 h-3 transition-colors ${
-          selected ? "text-[var(--accent-green)]" : "text-muted-foreground opacity-0 group-hover:opacity-100"
-        }`}
-      />
-    </Button>
+    <div className="qds-section-label mb-3">
+      {children}
+    </div>
   );
 }
 
-/* ── Detail panel ────────────────────────────────────────────────── */
+function TypeBadge({ type }: { type: string }) {
+  const t = type.toLowerCase();
+  let cls = "bg-qds-info-dim text-qds-info";
+  if (t === "bool" || t === "boolean") cls = "bg-qds-warning-dim text-qds-warning";
+  else if (t === "int" || t === "integer") cls = "bg-qds-success-dim text-qds-success";
+  return (
+    <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[0.58rem] font-bold ${cls}`}>
+      [{type}]
+    </span>
+  );
+}
 
-function DetailPanel({
+/* -- Strategy row (list view) --------------------------------------- */
+
+function StrategyRow({ strategy, onClick }: { strategy: StrategyListItem; onClick: () => void }) {
+  return (
+    <div
+      onClick={onClick}
+      className="grid items-center border-b last:border-0 cursor-pointer hover:bg-secondary transition-colors group"
+      style={{ gridTemplateColumns: "3px 1fr auto auto auto" }}
+    >
+      <div className="self-stretch rounded-l-sm bg-primary" />
+      <div className="py-3 px-4">
+        <div className="flex items-center gap-2">
+          <span className="text-[0.82rem] font-semibold font-mono text-foreground">{strategy.name}</span>
+          <span className="px-1.5 py-0.5 rounded-full text-[0.58rem] font-bold bg-secondary text-qds-t1">策略</span>
+        </div>
+        <div className="text-[0.68rem] font-mono text-muted-foreground mt-0.5">
+          {strategy.class_name && strategy.file_path
+            ? `${strategy.class_name} · ${strategy.file_path}`
+            : strategy.class_name ?? strategy.file_path ?? ""}
+        </div>
+      </div>
+      <div className="py-3 px-3 text-[0.72rem] font-mono text-muted-foreground">
+        {strategy.version ? `v${strategy.version}` : ""}
+      </div>
+      <div className="py-3 px-3 text-[0.72rem] font-mono text-muted-foreground" />
+      <div className="py-3 px-3 text-[0.72rem] text-qds-t3 group-hover:text-primary group-hover:translate-x-[3px] transition-all">
+        →
+      </div>
+    </div>
+  );
+}
+
+/* -- Detail view ---------------------------------------------------- */
+
+function DetailView({
   strategy,
   detail,
   params,
   detailLoading,
   paramsLoading,
-  onValidate,
   validating,
   validateResult,
+  onBack,
+  onValidate,
   onOpen,
-  opening,
 }: {
   strategy: StrategyListItem;
   detail: StrategyDetail | null;
   params: StrategyParam[];
   detailLoading: boolean;
   paramsLoading: boolean;
-  onValidate: () => void;
   validating: boolean;
   validateResult: string | null;
+  onBack: () => void;
+  onValidate: () => void;
   onOpen: () => void;
-  opening: boolean;
 }) {
-  const [copied, setCopied] = useState(false);
+  const info = detail ?? strategy;
+  const name = info.name;
+  const iconLetters = name.substring(0, 2).toUpperCase();
 
   if (detailLoading) return <DetailSkeleton />;
 
-  const info = detail ?? strategy;
-
   return (
-    <FadeIn key={strategy.name} className="flex flex-col gap-5 p-6 overflow-y-auto h-full">
+    <div className="flex flex-col gap-6">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-2">
-            <h2 className="font-heading text-xl font-bold text-foreground">
-              {info.name}
-            </h2>
-            <Badge
-              variant="neutral"
-              className="text-[9px] font-bold"
-            >
-              策略
-            </Badge>
-          </div>
-          {info.description && (
-            <span className="text-[11px] text-muted-foreground">{info.description}</span>
-          )}
+      <div className="flex items-center gap-4 pb-5 border-b flex-wrap">
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm border text-[0.75rem] font-mono text-qds-t1 hover:border-qds-border-hover hover:text-foreground hover:bg-secondary transition-all group shrink-0"
+        >
+          <span className="group-hover:-translate-x-[3px] transition-transform inline-block">←</span>
+          &nbsp;返回
+        </button>
+        <div
+          className="size-10 rounded-[10px] flex items-center justify-center text-[0.82rem] font-mono font-semibold shrink-0 bg-qds-accent-dim text-primary"
+        >
+          {iconLetters}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={async () => {
-              onOpen();
-              // Also copy path to clipboard as fallback
-              try {
-                const resp = await apiPost<{ path: string }>(`/api/strategies/${encodeURIComponent(strategy.name)}/open`);
-                if (resp?.path) {
-                  await navigator.clipboard.writeText(resp.path);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 2000);
-                }
-              } catch {
-                // ignore — onOpen already handles the API call
-              }
-            }}
-            disabled={opening}
-            className="border-border bg-popover text-[11px] font-semibold text-muted-foreground hover:border-[var(--accent-blue)]/50 hover:text-[var(--accent-blue)] transition-all duration-150"
+        <div className="flex flex-col gap-0.5 min-w-0">
+          <div className="text-[1.05rem] font-mono font-semibold text-foreground">{name}</div>
+          <div className="text-[0.68rem] font-mono text-muted-foreground truncate">{info.file_path ?? ""}</div>
+        </div>
+        <div className="ml-auto flex items-center gap-2 flex-wrap">
+          <span className="px-1.5 py-0.5 rounded-full text-[0.58rem] font-bold bg-secondary text-qds-t1">
+            策略
+          </span>
+          <button
+            onClick={onOpen}
+            className="px-2.5 py-1.5 rounded-sm border text-[0.72rem] font-mono text-qds-t1 hover:border-qds-border-hover hover:text-foreground hover:bg-secondary transition-all"
           >
-            {copied ? (
-              <Check className="w-3 h-3 text-[var(--accent-green)]" />
-            ) : (
-              <FolderOpen className="w-3 h-3" />
-            )}
-            {copied ? "已复制路径" : "打开文件夹"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
+            打开文件夹
+          </button>
+          <button
             onClick={onValidate}
             disabled={validating}
-            className="border-border bg-popover text-[11px] font-semibold text-muted-foreground hover:border-[var(--accent-green)]/50 hover:text-[var(--accent-green)] transition-all duration-150"
+            className="px-2.5 py-1.5 rounded-sm border text-[0.72rem] font-mono text-qds-t1 hover:border-qds-border-hover hover:text-foreground hover:bg-secondary transition-all disabled:opacity-50 flex items-center gap-1.5"
           >
-            {validating ? (
-              <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-            ) : (
-              <CheckCircle className="w-3 h-3" />
+            {validating && (
+              <span className="size-2.5 border border-current border-t-transparent rounded-full animate-spin" />
             )}
             验证
-          </Button>
+          </button>
+          <button
+            onClick={() => console.log("delete", name)}
+            className="px-2.5 py-1.5 rounded-sm border text-[0.72rem] font-mono transition-all hover:bg-qds-danger-dim text-destructive border-destructive"
+          >
+            删除
+          </button>
         </div>
       </div>
 
+      {/* Validate result banner */}
       {validateResult && (
-        <div
-          className={`rounded-lg px-4 py-2.5 text-[11px] font-medium border ${
-            validateResult === "ok"
-              ? "bg-[var(--accent-green-20)] border-[var(--accent-green)]/30 text-[var(--accent-green)]"
-              : "bg-[var(--accent-red-20)] border-[var(--accent-red)]/30 text-[var(--accent-red)]"
-          }`}
-        >
-          {validateResult === "ok" ? "验证通过" : `验证失败: ${validateResult}`}
-        </div>
+        <FadeIn>
+          <div
+            className="rounded-sm px-4 py-2.5 text-[0.68rem] font-medium border"
+            style={{
+              background: validateResult === "ok" ? "var(--suc-d)" : "var(--dan-d)",
+              borderColor: `color-mix(in srgb, ${validateResult === "ok" ? "var(--suc)" : "var(--dan)"} 30%, transparent)`,
+              color: validateResult === "ok" ? "var(--suc)" : "var(--dan)",
+            }}
+          >
+            {validateResult === "ok" ? "验证通过" : `验证失败: ${validateResult}`}
+          </div>
+        </FadeIn>
       )}
 
-      {/* 概览 */}
-      <div className="rounded-xl bg-card border border-border p-5 flex flex-col gap-4">
-        <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-          概览
-        </span>
-        <div className="grid grid-cols-2 gap-x-8 gap-y-3">
-          <KvRow label="策略名称" value={info.name} />
-          <KvRow label="策略类" value={info.class_name ?? "—"} mono />
-          <KvRow label="类型" value="策略" />
-          <KvRow label="版本" value={info.version ? `v${info.version}` : "—"} />
-          <div className="col-span-2">
-            <KvRow label="文件路径" value={info.file_path ?? "—"} mono />
+      {/* Overview section */}
+      <FadeIn>
+        <SectionLabel>概览</SectionLabel>
+        <div className="grid grid-cols-3 gap-3">
+          {[
+            { label: "策略名称", value: info.name },
+            { label: "策略类", value: info.class_name ?? "—" },
+            { label: "类型", value: "策略" },
+            { label: "版本", value: info.version ? `v${info.version}` : "—" },
+            { label: "框架", value: "NautilusTrader" },
+            { label: "交易所", value: "Binance" },
+          ].map((item) => (
+            <div
+              key={item.label}
+              className="border rounded-sm px-3 py-2.5 hover:border-qds-border-hover transition-colors bg-card"
+            >
+              <div className="text-[0.6rem] text-muted-foreground uppercase tracking-[0.05em] mb-1">{item.label}</div>
+              <div className="text-[0.8rem] font-mono font-medium text-foreground truncate">{item.value}</div>
+            </div>
+          ))}
+        </div>
+        {info.file_path && (
+          <div
+            className="mt-3 border rounded-sm px-3 py-2.5 hover:border-qds-border-hover transition-colors bg-card"
+          >
+            <div className="text-[0.6rem] text-muted-foreground uppercase tracking-[0.05em] mb-1">文件路径</div>
+            <div className="text-[0.8rem] font-mono font-medium text-foreground break-all">{info.file_path}</div>
           </div>
-        </div>
-      </div>
+        )}
+      </FadeIn>
 
-      {/* 参数 */}
-      <div className="rounded-xl bg-card border border-border overflow-hidden">
-        <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-          <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-            参数
-          </span>
-          {paramsLoading && (
-            <div className="w-3 h-3 border border-muted-foreground border-t-transparent rounded-full animate-spin" />
+      {/* Params section */}
+      <FadeIn>
+        <SectionLabel>
+          参数
+          {params.length > 0 && (
+            <span className="text-muted-foreground font-normal tracking-normal normal-case text-[0.62rem]">
+              · {params.length} 个
+            </span>
           )}
-        </div>
+        </SectionLabel>
         {paramsLoading ? (
-          <div className="p-5 flex flex-col gap-2">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton key={i} className="h-8 w-full bg-popover" />
+          <div className="flex flex-col gap-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-9 w-full bg-secondary" />
             ))}
           </div>
         ) : params.length === 0 ? (
-          <div className="px-5 py-6 text-center text-[11px] text-muted-foreground">
+          <div
+            className="rounded-sm px-4 py-6 text-center text-[0.68rem] text-muted-foreground border bg-card"
+          >
             暂无参数配置
           </div>
         ) : (
-          <div>
-            {/* Table header */}
-            <div className="flex items-center px-5 py-2 border-b border-border">
-              <span className="w-[160px] text-[10px] font-semibold tracking-[0.5px] text-muted-foreground">参数名</span>
-              <span className="w-[80px] text-[10px] font-semibold tracking-[0.5px] text-muted-foreground">类型</span>
-              <span className="w-[120px] text-[10px] font-semibold tracking-[0.5px] text-muted-foreground">默认值</span>
-              <span className="flex-1 text-[10px] font-semibold tracking-[0.5px] text-muted-foreground">优化范围</span>
-            </div>
-            {params.map((p, i) => (
-              <div
-                key={p.name}
-                className={`flex items-center px-5 py-2.5 text-[11px] ${
-                  i < params.length - 1 ? "border-b border-border" : ""
-                }`}
-              >
-                <span className="w-[160px] font-mono text-foreground truncate">{p.name}</span>
-                <span className="w-[80px]">
-                  <span className="inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold bg-[var(--accent-blue-20)] text-primary">
-                    {p.type}
-                  </span>
-                </span>
-                <span className="w-[120px] font-mono text-muted-foreground">
-                  {p.default !== undefined && p.default !== null ? String(p.default) : "—"}
-                </span>
-                <span className="flex-1 font-mono text-muted-foreground text-[10px]">
-                  {p.min !== undefined && p.max !== undefined
-                    ? `[${p.min}, ${p.max}]`
-                    : "—"}
-                </span>
-              </div>
-            ))}
+          <div
+            className="rounded-sm border overflow-hidden bg-card"
+          >
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>参数名</TableHead>
+                  <TableHead>类型</TableHead>
+                  <TableHead className="text-right">默认值</TableHead>
+                  <TableHead className="text-right">优化范围</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {params.map((p) => (
+                  <TableRow key={p.name}>
+                    <TableCell className="font-medium">{p.name}</TableCell>
+                    <TableCell>
+                      <TypeBadge type={p.type} />
+                    </TableCell>
+                    <TableCell className="text-right font-medium">
+                      {p.default !== undefined && p.default !== null ? String(p.default) : "—"}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {p.min != null && p.max != null ? (
+                        <span className="text-qds-t1">
+                          [{p.min} → {p.max}]
+                        </span>
+                      ) : (
+                        <span className="text-qds-t3">—</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </div>
         )}
-      </div>
+      </FadeIn>
 
-      {/* 版本历史 */}
+      {/* Version history */}
       {detail?.versions && detail.versions.length > 0 && (
-        <div className="rounded-xl bg-card border border-border overflow-hidden">
-          <div className="px-5 py-3 border-b border-border">
-            <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-              版本历史
-            </span>
-          </div>
-          <div className="flex flex-col">
+        <FadeIn>
+          <SectionLabel>版本历史</SectionLabel>
+          <div className="relative pl-6">
+            <div
+              className="absolute left-[5px] top-[6px] bottom-[6px] w-px bg-border"
+            />
             {detail.versions.map((v, i) => (
-              <div
-                key={v.version}
-                className={`flex items-center gap-4 px-5 py-2.5 text-[11px] ${
-                  i < detail.versions!.length - 1 ? "border-b border-border" : ""
-                }`}
-              >
-                <span className="font-mono text-[var(--accent-green)] w-16">v{v.version}</span>
-                {v.date && (
-                  <span className="text-muted-foreground w-28">{v.date}</span>
-                )}
+              <div key={v.version} className="relative pb-5 last:pb-0">
+                <div
+                  className={`absolute left-[-1.5rem] top-[5px] size-[11px] rounded-full border-2 ${
+                    i === 0 ? "border-primary bg-primary" : "border bg-background"
+                  }`}
+                />
+                <div className="flex items-center gap-2 mb-0.5 flex-wrap">
+                  <span className="text-[0.75rem] font-mono font-semibold text-foreground">
+                    v{v.version}
+                  </span>
+                  {i === 0 && (
+                    <span className="text-[0.56rem] px-1.5 py-0.5 rounded font-bold bg-qds-accent-dim text-primary">
+                      latest
+                    </span>
+                  )}
+                  {v.date && (
+                    <span className="text-[0.62rem] font-mono text-qds-t3">{v.date}</span>
+                  )}
+                </div>
                 {v.notes && (
-                  <span className="text-muted-foreground flex-1">{v.notes}</span>
+                  <div className="text-[0.72rem] text-muted-foreground">{v.notes}</div>
                 )}
               </div>
             ))}
           </div>
-        </div>
+        </FadeIn>
       )}
-    </FadeIn>
-  );
-}
-
-function KvRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-        {label}
-      </span>
-      <span className={`text-[11px] text-foreground ${mono ? "font-mono" : "font-medium"}`}>
-        {value}
-      </span>
     </div>
   );
 }
 
-/* ── Page ────────────────────────────────────────────────────────── */
+/* -- List view ------------------------------------------------------ */
+
+function ListView({
+  strategies,
+  loading,
+  error,
+  search,
+  onSearchChange,
+  onRowClick,
+  onRescan,
+  rescanning,
+  onCreateOpen,
+  count,
+}: {
+  strategies: StrategyListItem[];
+  loading: boolean;
+  error: string | null;
+  search: string;
+  onSearchChange: (v: string) => void;
+  onRowClick: (s: StrategyListItem) => void;
+  onRescan: () => void;
+  rescanning: boolean;
+  onCreateOpen: () => void;
+  count: number;
+}) {
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Top bar */}
+      <div className="flex items-center justify-between pt-8 pb-2">
+        <div>
+          <h1 className="text-[1.1rem] font-bold font-mono tracking-tight text-foreground">策略管理</h1>
+          <div className="text-[0.62rem] font-mono text-muted-foreground mt-0.5">
+            {loading ? "加载中..." : `${count} 个策略`}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onCreateOpen}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm border text-[0.72rem] font-mono text-qds-t1 hover:border-qds-border-hover hover:text-foreground hover:bg-secondary transition-all"
+          >
+            <Plus className="size-3" />
+            新建策略
+          </button>
+          <button
+            onClick={onRescan}
+            disabled={rescanning}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-sm bg-primary text-[0.72rem] font-mono font-semibold text-white transition-all disabled:opacity-50"
+          >
+            <RefreshCw className={`size-3 ${rescanning ? "animate-spin" : ""}`} />
+            重新扫描
+          </button>
+        </div>
+      </div>
+
+      {/* Search */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+        <input
+          type="text"
+          placeholder="搜索策略名称或类名..."
+          value={search}
+          onChange={(e) => onSearchChange(e.target.value)}
+          className="w-full h-9 rounded-sm border pl-9 pr-4 text-[0.75rem] font-mono text-foreground placeholder:text-qds-t3 outline-none focus:border-primary transition-colors bg-input"
+        />
+      </div>
+
+      {/* List card */}
+      <div
+        className="rounded-lg border overflow-hidden bg-card"
+      >
+        {loading ? (
+          <ListSkeleton />
+        ) : error ? (
+          <div className="px-6 py-10 text-center text-[0.72rem] text-destructive">{error}</div>
+        ) : strategies.length === 0 ? (
+          <div className="px-6 py-10 text-center text-[0.72rem] text-muted-foreground">
+            {search ? "无匹配结果" : "暂无策略，请点击重新扫描"}
+          </div>
+        ) : (
+          strategies.map((s) => (
+            <StrategyRow key={s.name} strategy={s} onClick={() => onRowClick(s)} />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* -- Page ----------------------------------------------------------- */
 
 export default function StrategiesPage() {
+  const [view, setView] = useState<"list" | "detail">("list");
+
   const [strategies, setStrategies] = useState<StrategyListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -400,7 +503,6 @@ export default function StrategiesPage() {
 
   const [detail, setDetail] = useState<StrategyDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-
   const [params, setParams] = useState<StrategyParam[]>([]);
   const [paramsLoading, setParamsLoading] = useState(false);
 
@@ -409,7 +511,6 @@ export default function StrategiesPage() {
   const [validateResult, setValidateResult] = useState<string | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const createType = "strategy";
   const [createName, setCreateName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -450,16 +551,10 @@ export default function StrategiesPage() {
       await apiPost("/api/strategies/rescan");
       await loadStrategies();
     } catch {
-      // ignore
+      /* ignore */
     } finally {
       setRescanning(false);
     }
-  }
-
-  function openCreateDialog() {
-    setCreateName("");
-    setCreateError(null);
-    setCreateOpen(true);
   }
 
   async function handleCreate() {
@@ -468,9 +563,8 @@ export default function StrategiesPage() {
     setCreating(true);
     setCreateError(null);
     try {
-      await apiPost("/api/strategies/create", { name, type: createType });
+      await apiPost("/api/strategies/create", { name, type: "strategy" });
       setCreateOpen(false);
-      // Auto rescan + select new strategy
       setRescanning(true);
       try {
         await apiPost("/api/strategies/rescan");
@@ -479,13 +573,9 @@ export default function StrategiesPage() {
         setRescanning(false);
       }
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setCreateError("策略已存在");
-      } else if (err instanceof Error) {
-        setCreateError(err.message || "创建失败");
-      } else {
-        setCreateError("创建失败");
-      }
+      if (err instanceof ApiError && err.status === 409) setCreateError("策略已存在");
+      else if (err instanceof Error) setCreateError(err.message || "创建失败");
+      else setCreateError("创建失败");
     } finally {
       setCreating(false);
     }
@@ -496,23 +586,19 @@ export default function StrategiesPage() {
     setDetail(null);
     setParams([]);
     setValidateResult(null);
-
     setDetailLoading(true);
     setParamsLoading(true);
-
+    setView("detail");
     try {
       const d = await apiGet<StrategyDetail>(`/api/strategies/${encodeURIComponent(s.name)}`);
       if (d) setDetail(d);
     } catch {
-      // ignore
+      /* ignore */
     } finally {
       setDetailLoading(false);
     }
-
     try {
-      const resp = await apiGet<ParamsResponse>(
-        `/api/strategies/${encodeURIComponent(s.name)}/params`
-      );
+      const resp = await apiGet<ParamsResponse>(`/api/strategies/${encodeURIComponent(s.name)}/params`);
       if (resp?.config_params) {
         setParams(
           resp.config_params.map((cp) => {
@@ -528,23 +614,23 @@ export default function StrategiesPage() {
         );
       }
     } catch {
-      // ignore
+      /* ignore */
     } finally {
       setParamsLoading(false);
     }
   }
 
-  const [opening, setOpening] = useState(false);
+  function handleBack() {
+    setView("list");
+    setValidateResult(null);
+  }
 
   async function handleOpen() {
     if (!selected) return;
-    setOpening(true);
     try {
       await apiPost(`/api/strategies/${encodeURIComponent(selected.name)}/open`);
     } catch {
-      // ignore — clipboard copy is handled in the button's onClick
-    } finally {
-      setOpening(false);
+      /* ignore */
     }
   }
 
@@ -558,7 +644,7 @@ export default function StrategiesPage() {
     } catch (err) {
       if (err instanceof ApiError && err.data && typeof err.data === "object") {
         const d = err.data as { issues?: string[] };
-        setValidateResult(d.issues?.join("; ") ?? err.message);
+        setValidateResult(d.issues?.join("; ") ?? (err as Error).message);
       } else {
         setValidateResult(err instanceof Error ? err.message : "error");
       }
@@ -578,168 +664,85 @@ export default function StrategiesPage() {
   }, [strategies, search]);
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Top bar */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
-        <div className="flex flex-col gap-0.5">
-          <h1 className="font-heading text-[22px] font-bold tracking-tight text-foreground">
-            策略管理
-          </h1>
-          <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-            // {loading ? "加载中..." : `${strategies.length} 个策略已发现`}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={openCreateDialog}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-popover text-foreground px-4 py-2 text-[11px] font-bold tracking-wide hover:border-[var(--accent-blue)]/50 hover:text-[var(--accent-blue)] transition-all duration-150"
-          >
-            <Plus className="w-3 h-3" />
-            新建策略
-          </Button>
-          <Button
-            onClick={handleRescan}
-            disabled={rescanning}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-green)] text-primary-foreground px-4 py-2 text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150 disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3 h-3 ${rescanning ? "animate-spin" : ""}`} />
-            重新扫描
-          </Button>
-        </div>
-      </div>
-
-      {/* Body: master-detail */}
-      <div className="flex flex-1 min-h-0">
-        {/* Left panel — 380px */}
-        <div className="w-[380px] shrink-0 flex flex-col border-r border-border">
-          {/* Search */}
-          <div className="px-3 py-3 border-b border-border">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-              <Input
-                type="text"
-                placeholder="搜索策略..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full h-8 rounded-lg bg-popover border border-border pl-8 pr-3 text-[11px] text-foreground placeholder:text-muted-foreground outline-none focus:border-[var(--accent-green)]/50 transition-colors"
+    <div className="flex flex-col h-full overflow-auto">
+      <div className="max-w-[960px] w-full mx-auto px-8 pb-16">
+        {view === "list" ? (
+          <FadeIn key="list">
+            <ListView
+              strategies={filtered}
+              loading={loading}
+              error={error}
+              search={search}
+              onSearchChange={setSearch}
+              onRowClick={handleSelect}
+              onRescan={handleRescan}
+              rescanning={rescanning}
+              onCreateOpen={() => {
+                setCreateName("");
+                setCreateError(null);
+                setCreateOpen(true);
+              }}
+              count={strategies.length}
+            />
+          </FadeIn>
+        ) : selected ? (
+          <FadeIn key="detail">
+            <div className="pt-8">
+              <DetailView
+                strategy={selected}
+                detail={detail}
+                params={params}
+                detailLoading={detailLoading}
+                paramsLoading={paramsLoading}
+                validating={validating}
+                validateResult={validateResult}
+                onBack={handleBack}
+                onValidate={handleValidate}
+                onOpen={handleOpen}
               />
             </div>
-          </div>
-
-          {/* List */}
-          <div className="flex-1 overflow-y-auto">
-            {loading ? (
-              <ListSkeleton />
-            ) : error ? (
-              <div className="flex flex-col items-center justify-center h-full gap-2 p-6">
-                <span className="text-[11px] text-destructive">{error}</span>
-                <Button
-                  variant="ghost"
-                  onClick={() => loadStrategies()}
-                  className="text-[10px] text-muted-foreground underline h-auto p-0"
-                >
-                  重试
-                </Button>
-              </div>
-            ) : filtered.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full gap-2 p-6">
-                <span className="text-[11px] text-muted-foreground">
-                  {search ? "无匹配结果" : "暂无策略"}
-                </span>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-1 p-3">
-                {filtered.map((s) => (
-                  <StrategyRow
-                    key={s.name}
-                    strategy={s}
-                    selected={selected?.name === s.name}
-                    onClick={() => handleSelect(s)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right panel — flex-1 */}
-        <div className="flex-1 min-w-0 overflow-hidden">
-          {selected ? (
-            <DetailPanel
-              strategy={selected}
-              detail={detail}
-              params={params}
-              detailLoading={detailLoading}
-              paramsLoading={paramsLoading}
-              onValidate={handleValidate}
-              validating={validating}
-              validateResult={validateResult}
-              onOpen={handleOpen}
-              opening={opening}
-            />
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full gap-3">
-              <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-popover border border-border">
-                {strategies.length > 0 ? (
-                  <Layers className="w-5 h-5 text-muted-foreground" />
-                ) : (
-                  <FileText className="w-5 h-5 text-muted-foreground" />
-                )}
-              </div>
-              <span className="text-[11px] text-muted-foreground">请选择一个策略</span>
-            </div>
-          )}
-        </div>
+          </FadeIn>
+        ) : null}
       </div>
 
-      {/* Create Strategy Dialog */}
+      {/* Create Dialog */}
       <Dialog open={createOpen} onOpenChange={(open) => { if (!creating) setCreateOpen(open); }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>新建策略</DialogTitle>
             <DialogDescription>选择策略类型并输入名称</DialogDescription>
           </DialogHeader>
-
           <div className="flex flex-col gap-4 py-2">
-            {/* Name input */}
             <div className="flex flex-col gap-2">
-              <span className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground uppercase">
-                名称
-              </span>
-              <Input
+              <span className="qds-stat-label">名称</span>
+              <input
                 placeholder="输入策略名称"
                 value={createName}
-                onChange={(e) => {
-                  setCreateName(e.target.value);
-                  setCreateError(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && createName.trim() && !creating) handleCreate();
-                }}
-                className="h-9 rounded-lg bg-popover border-border text-[12px] placeholder:text-muted-foreground focus:border-[var(--accent-blue)]/50"
+                onChange={(e) => { setCreateName(e.target.value); setCreateError(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter" && createName.trim() && !creating) handleCreate(); }}
+                className="h-9 rounded-sm border px-3 text-[0.72rem] text-foreground placeholder:text-qds-t3 outline-none focus:border-primary focus:shadow-[0_0_0_3px_var(--acc-d)] transition-all bg-input"
+                style={{ transitionDuration: "var(--dur)" }}
               />
             </div>
-
-            {/* Inline error */}
             {createError && (
-              <div className="rounded-lg px-4 py-2.5 text-[11px] font-medium border bg-[var(--accent-red)]/5 border-[var(--accent-red)]/30 text-[var(--accent-red)]">
+              <div
+                className="rounded-sm px-4 py-2.5 text-[0.68rem] font-medium border bg-qds-danger-dim text-destructive"
+                style={{ borderColor: "color-mix(in srgb, var(--dan) 30%, transparent)" }}
+              >
                 {createError}
               </div>
             )}
           </div>
-
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" size="sm" />}>
-              取消
-            </DialogClose>
+            <DialogClose render={<Button variant="outline" size="sm" />}>取消</DialogClose>
             <Button
               size="sm"
               onClick={handleCreate}
               disabled={!createName.trim() || creating}
-              className="bg-[var(--accent-blue)] text-white hover:opacity-90 disabled:opacity-50"
+              className="bg-primary text-white hover:opacity-90 disabled:opacity-50"
             >
               {creating && (
-                <div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                <span className="size-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
               )}
               创建
             </Button>

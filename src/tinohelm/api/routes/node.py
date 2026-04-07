@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Literal
 
 import redis.asyncio as aioredis
@@ -12,8 +13,10 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tinohelm.api.deps import get_db, get_process_manager, get_redis
-from tinohelm.core.config import get_settings
+import yaml
+
+from tinohelm.api.deps import get_db, get_process_manager, get_redis, get_settings_dep
+from tinohelm.core.config import get_settings, Settings
 from tinohelm.core.process_manager import ProcessManager
 from tinohelm.db.models import Position
 
@@ -93,25 +96,48 @@ async def lifecycle_state(
     return {"trading_state": "unknown", "strategy_states": {}, "paused": []}
 
 
+def _enrich_strategy_meta(strategies: dict, settings: Settings) -> dict:
+    """Enrich each strategy entry with symbols/interval from portfolio.yaml."""
+    strategies_dir = Path.home() / settings.paths.strategies
+    for name, info in strategies.items():
+        yaml_path = strategies_dir / name / "portfolio.yaml"
+        if yaml_path.exists():
+            try:
+                with open(yaml_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+                info["symbols"] = cfg.get("symbols", [])
+                info["interval"] = cfg.get("interval", "")
+            except Exception:
+                info.setdefault("symbols", [])
+                info.setdefault("interval", "")
+        else:
+            info.setdefault("symbols", [])
+            info.setdefault("interval", "")
+    return strategies
+
+
 @router.get("/strategies")
 async def list_strategies(
     mode: Literal["sandbox", "live"] = "live",
     rds: aioredis.Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings_dep),
 ) -> dict:
-    """Return all strategies with their state (new name for /portfolios)."""
+    """Return all strategies with their state and portfolio metadata."""
     raw = await rds.get(f"tino:{mode}:strategy_registry")
     if raw:
         if isinstance(raw, bytes):
             raw = raw.decode()
         data = json.loads(raw)
-        return {"strategies": data.get("strategies", {})}
+        strategies = data.get("strategies", {})
+        return {"strategies": _enrich_strategy_meta(strategies, settings)}
     # Fallback: try heartbeat
     hb_raw = await rds.get(f"tino:heartbeat:{mode}")
     if hb_raw:
         if isinstance(hb_raw, bytes):
             hb_raw = hb_raw.decode()
         hb = json.loads(hb_raw)
-        return {"strategies": hb.get("strategies", {})}
+        strategies = hb.get("strategies", {})
+        return {"strategies": _enrich_strategy_meta(strategies, settings)}
     return {"strategies": {}}
 
 

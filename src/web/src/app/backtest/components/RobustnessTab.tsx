@@ -15,10 +15,10 @@ import {
   Line,
   ReferenceLine,
 } from "recharts";
-import { motion } from "framer-motion";
 import { HelpCircle, Check, X as XIcon, AlertTriangle } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { API_BASE } from "@/lib/api";
+import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
 import type { BacktestResult, RobustnessMetrics } from "../types";
 
 /* ------------------------------------------------------------------ */
@@ -27,7 +27,7 @@ import type { BacktestResult, RobustnessMetrics } from "../types";
 
 function GlassCard({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={`rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm overflow-hidden ${className}`}>
+    <div className={`rounded-xl border bg-card overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)] ${className}`}>
       {children}
     </div>
   );
@@ -35,7 +35,7 @@ function GlassCard({ children, className = "" }: { children: React.ReactNode; cl
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 mb-4">
+    <div className="qds-section-label">
       {children}
     </div>
   );
@@ -46,7 +46,7 @@ function HelpTip({ text }: { text: string }) {
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger className="inline-flex items-center justify-center ml-1 cursor-help">
-          <HelpCircle className="w-3 h-3 text-muted-foreground/30 hover:text-muted-foreground/60 transition-colors" />
+          <HelpCircle className="w-3 h-3 text-qds-t3 hover:text-muted-foreground transition-colors" />
         </TooltipTrigger>
         <TooltipContent side="top" className="max-w-[260px] text-[11px] leading-relaxed">
           {text}
@@ -63,7 +63,7 @@ function MetricRow({ label, value, help, color, suffix = "" }: {
   return (
     <div className="flex items-center justify-between py-1.5">
       <div className="flex items-center gap-1">
-        <span className="text-[11px] text-muted-foreground/70">{label}</span>
+        <span className="text-[11px] text-qds-t1">{label}</span>
         {help && <HelpTip text={help} />}
       </div>
       <span className="text-[13px] font-bold font-mono" style={{ color: color || "var(--foreground)" }}>
@@ -79,18 +79,6 @@ const cardAnim = (delay: number) => ({
   transition: { duration: 0.4, delay, ease: [0.22, 1, 0.36, 1] as const },
 });
 
-const CHART_TOOLTIP_STYLE = {
-  contentStyle: {
-    background: "rgba(15,20,25,0.95)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 10,
-    backdropFilter: "blur(8px)",
-    fontSize: 11,
-    color: "rgba(255,255,255,0.8)",
-  },
-  itemStyle: { color: "rgba(255,255,255,0.7)", fontSize: 11 },
-  labelStyle: { color: "rgba(255,255,255,0.5)", fontSize: 10 },
-};
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -111,14 +99,14 @@ function StatisticalTestsSection({ r }: { r: RobustnessMetrics }) {
   const sufficient = r.backtest_length_sufficient;
 
   const psrColor = psr != null
-    ? psr >= 0.95 ? "var(--accent-green)"
-      : psr >= 0.85 ? "var(--accent-blue)"
-        : psr >= 0.5 ? "var(--accent-amber)"
-          : "var(--accent-red)"
+    ? psr >= 0.95 ? "var(--suc)"
+      : psr >= 0.85 ? "var(--info)"
+        : psr >= 0.5 ? "var(--warn)"
+          : "var(--dan)"
     : undefined;
 
   return (
-    <motion.div {...cardAnim(0)}>
+    <div {...cardAnim(0)}>
       <GlassCard className="p-5">
         <SectionLabel>Statistical Tests</SectionLabel>
         <div className="space-y-0">
@@ -141,17 +129,17 @@ function StatisticalTestsSection({ r }: { r: RobustnessMetrics }) {
           />
           {sufficient != null && (
             <div className="flex items-center justify-between py-1.5">
-              <span className="text-[11px] text-muted-foreground/70">样本量充足</span>
+              <span className="text-[11px] text-qds-t1">样本量充足</span>
               <div className="flex items-center gap-1">
                 {sufficient ? (
                   <>
-                    <Check className="w-3.5 h-3.5" style={{ color: "var(--accent-green)" }} />
-                    <span className="text-[12px] font-bold" style={{ color: "var(--accent-green)" }}>是</span>
+                    <Check className="w-3.5 h-3.5 text-qds-success" />
+                    <span className="text-[12px] font-bold text-qds-success">是</span>
                   </>
                 ) : (
                   <>
-                    <XIcon className="w-3.5 h-3.5" style={{ color: "var(--accent-red)" }} />
-                    <span className="text-[12px] font-bold" style={{ color: "var(--accent-red)" }}>否</span>
+                    <XIcon className="w-3.5 h-3.5 text-destructive" />
+                    <span className="text-[12px] font-bold text-destructive">否</span>
                   </>
                 )}
               </div>
@@ -159,7 +147,7 @@ function StatisticalTestsSection({ r }: { r: RobustnessMetrics }) {
           )}
         </div>
       </GlassCard>
-    </motion.div>
+    </div>
   );
 }
 
@@ -189,7 +177,7 @@ function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
   }, [cone]);
 
   return (
-    <motion.div {...cardAnim(0.07)}>
+    <div {...cardAnim(0.07)}>
       <GlassCard className="p-5">
         <SectionLabel>
           Monte Carlo Equity Cone
@@ -200,29 +188,29 @@ function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
             <AreaChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
               <defs>
                 <linearGradient id="mcOuterGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#4C9EEB" stopOpacity={0.08} />
-                  <stop offset="100%" stopColor="#4C9EEB" stopOpacity={0.02} />
+                  <stop offset="0%" stopColor="var(--info)" stopOpacity={0.08} />
+                  <stop offset="100%" stopColor="var(--info)" stopOpacity={0.02} />
                 </linearGradient>
                 <linearGradient id="mcInnerGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#4C9EEB" stopOpacity={0.15} />
-                  <stop offset="100%" stopColor="#4C9EEB" stopOpacity={0.05} />
+                  <stop offset="0%" stopColor="var(--info)" stopOpacity={0.15} />
+                  <stop offset="100%" stopColor="var(--info)" stopOpacity={0.05} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
               <XAxis
                 dataKey="x"
-                tick={{ fontSize: 9, fill: "rgba(255,255,255,0.3)" }}
+                tick={{ fontSize: 9, fill: "var(--t2)" }}
                 tickLine={false}
                 axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
                 label={{ value: "交易序号", position: "insideBottom", offset: -2, fontSize: 9, fill: "rgba(255,255,255,0.25)" }}
               />
               <YAxis
-                tick={{ fontSize: 9, fill: "rgba(255,255,255,0.3)" }}
+                tick={{ fontSize: 9, fill: "var(--t2)" }}
                 tickLine={false}
                 axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
                 tickFormatter={(v: number) => `${(v / 1000).toFixed(0)}k`}
               />
-              <RechartsTooltip {...CHART_TOOLTIP_STYLE} />
+              <RechartsTooltip {...CHART_TOOLTIP_PROPS} />
               {/* 5%-95% outer band */}
               <Area type="monotone" dataKey="p5" stackId="outer" stroke="none" fill="transparent" />
               <Area type="monotone" dataKey="band_outer" stackId="outer" stroke="none" fill="url(#mcOuterGrad)" name="5%-95%" />
@@ -230,14 +218,14 @@ function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
               <Area type="monotone" dataKey="p25" stackId="inner" stroke="none" fill="transparent" />
               <Area type="monotone" dataKey="band_inner" stackId="inner" stroke="none" fill="url(#mcInnerGrad)" name="25%-75%" />
               {/* Median line */}
-              <Area type="monotone" dataKey="p50" stroke="#4C9EEB" strokeWidth={1} strokeDasharray="4 3" fill="none" name="中位数" dot={false} />
+              <Area type="monotone" dataKey="p50" stroke="var(--info)" strokeWidth={1} strokeDasharray="4 3" fill="none" name="中位数" dot={false} />
               {/* Original equity */}
               <Area type="monotone" dataKey="original" stroke="rgba(255,255,255,0.9)" strokeWidth={1.5} fill="none" name="实际" dot={false} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
       </GlassCard>
-    </motion.div>
+    </div>
   );
 }
 
@@ -249,47 +237,47 @@ function McSummarySection({ r }: { r: RobustnessMetrics }) {
   if (r.mc_probability_of_loss == null) return null;
 
   const pLoss = r.mc_probability_of_loss;
-  const pLossColor = pLoss <= 5 ? "var(--accent-green)" : pLoss <= 20 ? "var(--accent-amber)" : "var(--accent-red)";
+  const pLossColor = pLoss <= 5 ? "var(--suc)" : pLoss <= 20 ? "var(--warn)" : "var(--dan)";
 
   return (
-    <motion.div {...cardAnim(0.14)}>
+    <div {...cardAnim(0.14)}>
       <GlassCard className="p-5">
         <SectionLabel>Monte Carlo Summary</SectionLabel>
         <div className="flex items-center gap-6 flex-wrap">
           <div className="flex items-center gap-2">
-            <span className="text-[9px] font-semibold tracking-[1px] uppercase text-muted-foreground/40">亏损概率</span>
+            <span className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3">亏损概率</span>
             <span className="text-[13px] font-bold font-mono" style={{ color: pLossColor }}>
               {pLoss.toFixed(1)}%
             </span>
           </div>
-          <div className="w-px h-4 bg-white/[0.08]" />
+          <div className="w-px h-4 bg-secondary" />
           <div className="flex items-center gap-2">
-            <span className="text-[9px] font-semibold tracking-[1px] uppercase text-muted-foreground/40">5% 分位收益</span>
+            <span className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3">5% 分位收益</span>
             <span className="text-[13px] font-bold font-mono" style={{
-              color: (r.mc_5th_percentile_return ?? 0) >= 0 ? "var(--accent-green)" : "var(--accent-red)",
+              color: (r.mc_5th_percentile_return ?? 0) >= 0 ? "var(--suc)" : "var(--dan)",
             }}>
               {(r.mc_5th_percentile_return ?? 0) >= 0 ? "+" : ""}{r.mc_5th_percentile_return?.toFixed(1)}%
             </span>
           </div>
-          <div className="w-px h-4 bg-white/[0.08]" />
+          <div className="w-px h-4 bg-secondary" />
           <div className="flex items-center gap-2">
-            <span className="text-[9px] font-semibold tracking-[1px] uppercase text-muted-foreground/40">中位最大回撤</span>
-            <span className="text-[13px] font-bold font-mono" style={{ color: "var(--accent-red)" }}>
+            <span className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3">中位最大回撤</span>
+            <span className="text-[13px] font-bold font-mono text-destructive">
               {r.mc_median_max_drawdown?.toFixed(1)}%
             </span>
           </div>
-          <div className="w-px h-4 bg-white/[0.08]" />
+          <div className="w-px h-4 bg-secondary" />
           <div className="flex items-center gap-2">
-            <span className="text-[9px] font-semibold tracking-[1px] uppercase text-muted-foreground/40">中位最终收益</span>
+            <span className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3">中位最终收益</span>
             <span className="text-[13px] font-bold font-mono" style={{
-              color: (r.mc_median_final_return ?? 0) >= 0 ? "var(--accent-green)" : "var(--accent-red)",
+              color: (r.mc_median_final_return ?? 0) >= 0 ? "var(--suc)" : "var(--dan)",
             }}>
               {(r.mc_median_final_return ?? 0) >= 0 ? "+" : ""}{r.mc_median_final_return?.toFixed(1)}%
             </span>
           </div>
         </div>
       </GlassCard>
-    </motion.div>
+    </div>
   );
 }
 
@@ -347,13 +335,13 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
   }, [isEq, oosEq]);
 
   return (
-    <motion.div {...cardAnim(0.21)}>
+    <div {...cardAnim(0.21)}>
       <GlassCard className="p-5">
         <SectionLabel>
           IS vs OOS 对比
           <HelpTip text="样本内（训练期）与样本外（测试期）的权益曲线和核心指标对比。衰减越小，策略过拟合风险越低。" />
           {opt.dsr != null && (
-            <span className="ml-3 text-[10px] font-mono text-muted-foreground/60">
+            <span className="ml-3 text-[10px] font-mono text-muted-foreground">
               DSR: {(opt.dsr * 100).toFixed(1)}%
             </span>
           )}
@@ -363,21 +351,21 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
           {/* Equity overlay */}
           {equityData.length > 0 && (
             <div>
-              <div className="text-[9px] font-semibold tracking-[1px] uppercase text-muted-foreground/40 mb-2">
+              <div className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3 mb-2">
                 权益曲线叠加
               </div>
               <div className="h-[200px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={equityData} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-                    <XAxis dataKey="idx" tick={{ fontSize: 9, fill: "rgba(255,255,255,0.3)" }} tickLine={false} />
-                    <YAxis tick={{ fontSize: 9, fill: "rgba(255,255,255,0.3)" }} tickLine={false} tickFormatter={(v: number) => `${(v / 1000).toFixed(0)}k`} />
-                    <RechartsTooltip {...CHART_TOOLTIP_STYLE} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+                    <XAxis dataKey="idx" tick={{ fontSize: 9, fill: "var(--t2)" }} tickLine={false} />
+                    <YAxis tick={{ fontSize: 9, fill: "var(--t2)" }} tickLine={false} tickFormatter={(v: number) => `${(v / 1000).toFixed(0)}k`} />
+                    <RechartsTooltip {...CHART_TOOLTIP_PROPS} />
                     {isEq.length > 0 && (
-                      <ReferenceLine x={isEq.length - 1} stroke="var(--accent-amber)" strokeDasharray="4 3" strokeOpacity={0.5} label={{ value: "Split", fontSize: 9, fill: "var(--accent-amber)" }} />
+                      <ReferenceLine x={isEq.length - 1} stroke="var(--warn)" strokeDasharray="4 3" strokeOpacity={0.5} label={{ value: "Split", fontSize: 9, fill: "var(--warn)" }} />
                     )}
-                    <Area type="monotone" dataKey="is" stroke="var(--accent-blue)" strokeWidth={1.5} fill="none" name="IS" dot={false} connectNulls={false} />
-                    <Area type="monotone" dataKey="oos" stroke="var(--accent-purple)" strokeWidth={1.5} fill="none" name="OOS" dot={false} connectNulls={false} />
+                    <Area type="monotone" dataKey="is" stroke="var(--info)" strokeWidth={1.5} fill="none" name="IS" dot={false} connectNulls={false} />
+                    <Area type="monotone" dataKey="oos" stroke="var(--info)" strokeWidth={1.5} fill="none" name="OOS" dot={false} connectNulls={false} />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
@@ -386,27 +374,27 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
 
           {/* Metrics comparison */}
           <div>
-            <div className="text-[9px] font-semibold tracking-[1px] uppercase text-muted-foreground/40 mb-2">
+            <div className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3 mb-2">
               指标对比
             </div>
             <div className="h-[200px]">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={compData} layout="vertical" margin={{ top: 5, right: 40, left: 50, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" horizontal={false} />
-                  <XAxis type="number" tick={{ fontSize: 9, fill: "rgba(255,255,255,0.3)" }} tickLine={false} />
-                  <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "rgba(255,255,255,0.5)" }} tickLine={false} axisLine={false} width={45} />
-                  <RechartsTooltip {...CHART_TOOLTIP_STYLE} />
-                  <Bar dataKey="IS" fill="var(--accent-blue)" barSize={8} radius={[0, 2, 2, 0]} name="IS" />
-                  <Bar dataKey="OOS" fill="var(--accent-purple)" barSize={8} radius={[0, 2, 2, 0]} name="OOS" />
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 9, fill: "var(--t2)" }} tickLine={false} />
+                  <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "var(--t2)" }} tickLine={false} axisLine={false} width={45} />
+                  <RechartsTooltip {...CHART_TOOLTIP_PROPS} />
+                  <Bar dataKey="IS" fill="var(--info)" barSize={8} radius={[0, 2, 2, 0]} name="IS" />
+                  <Bar dataKey="OOS" fill="var(--info)" barSize={8} radius={[0, 2, 2, 0]} name="OOS" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
             {/* Degradation labels */}
             <div className="flex flex-wrap gap-3 mt-2">
               {compData.map((d) => (
-                <span key={d.name} className="text-[9px] font-mono text-muted-foreground/50">
+                <span key={d.name} className="text-[9px] font-mono text-muted-foreground">
                   {d.name}:{" "}
-                  <span style={{ color: d.degradation >= 0 ? "var(--accent-green)" : "var(--accent-red)" }}>
+                  <span style={{ color: d.degradation >= 0 ? "var(--suc)" : "var(--dan)" }}>
                     {d.degradation >= 0 ? "+" : ""}{d.degradation}%
                   </span>
                 </span>
@@ -415,7 +403,7 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
           </div>
         </div>
       </GlassCard>
-    </motion.div>
+    </div>
   );
 }
 
@@ -438,12 +426,12 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
   if (!hasSensitivity && !hasWf && stability == null) return null;
 
   return (
-    <motion.div {...cardAnim(0.28)}>
+    <div {...cardAnim(0.28)}>
       <GlassCard className="p-5">
         <SectionLabel>
           Parameter Analysis
           {stability != null && (
-            <span className="ml-3 text-[10px] font-mono text-muted-foreground/60">
+            <span className="ml-3 text-[10px] font-mono text-muted-foreground">
               稳定性: {stability.toFixed(4)}
               <HelpTip text="最优参数附近 (±20%) 的 fitness 标准差。越低越稳定。" />
             </span>
@@ -454,20 +442,20 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
           {/* Sensitivity: single param line charts */}
           {hasSensitivity && (
             <div>
-              <div className="text-[9px] font-semibold tracking-[1px] uppercase text-muted-foreground/40 mb-2">
+              <div className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3 mb-2">
                 参数敏感性
               </div>
               <div className="space-y-3">
                 {Object.entries(sensitivity!.single_param!).slice(0, 4).map(([pname, data]) => (
                   <div key={pname}>
-                    <div className="text-[10px] font-mono text-muted-foreground/60 mb-1">{pname}</div>
+                    <div className="text-[10px] font-mono text-muted-foreground mb-1">{pname}</div>
                     <div className="h-[100px]">
                       <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={data.bins.map((b, i) => ({ x: b, fitness: data.values[i] }))} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-                          <XAxis dataKey="x" tick={{ fontSize: 8, fill: "rgba(255,255,255,0.3)" }} tickLine={false} />
-                          <YAxis tick={{ fontSize: 8, fill: "rgba(255,255,255,0.3)" }} tickLine={false} />
-                          <Line type="monotone" dataKey="fitness" stroke="var(--accent-blue)" strokeWidth={1.5} dot={{ fill: "var(--accent-blue)", r: 2 }} />
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+                          <XAxis dataKey="x" tick={{ fontSize: 8, fill: "var(--t2)" }} tickLine={false} />
+                          <YAxis tick={{ fontSize: 8, fill: "var(--t2)" }} tickLine={false} />
+                          <Line type="monotone" dataKey="fitness" stroke="var(--info)" strokeWidth={1.5} dot={{ fill: "var(--info)", r: 2 }} />
                         </LineChart>
                       </ResponsiveContainer>
                     </div>
@@ -480,17 +468,17 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
           {/* Walk-forward fold results */}
           {hasWf && (
             <div>
-              <div className="text-[9px] font-semibold tracking-[1px] uppercase text-muted-foreground/40 mb-2">
+              <div className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3 mb-2">
                 Walk-Forward Folds
               </div>
               <div className="h-[200px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={wfResults} layout="vertical" margin={{ top: 5, right: 10, left: 40, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" horizontal={false} />
-                    <XAxis type="number" tick={{ fontSize: 9, fill: "rgba(255,255,255,0.3)" }} tickLine={false} />
-                    <YAxis type="category" dataKey="fold" tick={{ fontSize: 10, fill: "rgba(255,255,255,0.5)" }} tickLine={false} axisLine={false} tickFormatter={(v: number) => `Fold ${v}`} width={45} />
-                    <RechartsTooltip {...CHART_TOOLTIP_STYLE} />
-                    <Bar dataKey="test_value" fill="var(--accent-blue)" barSize={12} radius={[0, 4, 4, 0]} name="OOS Fitness" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 9, fill: "var(--t2)" }} tickLine={false} />
+                    <YAxis type="category" dataKey="fold" tick={{ fontSize: 10, fill: "var(--t2)" }} tickLine={false} axisLine={false} tickFormatter={(v: number) => `Fold ${v}`} width={45} />
+                    <RechartsTooltip {...CHART_TOOLTIP_PROPS} />
+                    <Bar dataKey="test_value" fill="var(--info)" barSize={12} radius={[0, 4, 4, 0]} name="OOS Fitness" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -498,7 +486,7 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
           )}
         </div>
       </GlassCard>
-    </motion.div>
+    </div>
   );
 }
 
@@ -540,7 +528,7 @@ export function RobustnessTab({ runId }: Props) {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-48">
-        <span className="text-xs text-muted-foreground/50">加载中...</span>
+        <span className="text-xs text-muted-foreground">加载中...</span>
       </div>
     );
   }
@@ -551,8 +539,8 @@ export function RobustnessTab({ runId }: Props) {
     return (
       <div className="flex items-center justify-center h-48">
         <div className="text-center">
-          <AlertTriangle className="w-5 h-5 text-muted-foreground/30 mx-auto mb-2" />
-          <span className="text-xs text-muted-foreground/50">
+          <AlertTriangle className="w-5 h-5 text-qds-t3 mx-auto mb-2" />
+          <span className="text-xs text-muted-foreground">
             无健壮性数据（旧版回测结果不包含此信息）
           </span>
         </div>

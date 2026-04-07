@@ -1,66 +1,59 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { useState, useEffect } from "react";
-import { Search, Bell } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { useWsConnection } from "@/providers/WebSocketProvider";
+import { Search } from "lucide-react";
+import { ThemeToggle } from "@/components/ThemeToggle";
 
 const pathTitles: Record<string, string> = {
-  "/": "仪表盘",
-  "/trading": "交易终端",
-  "/backtest": "回测分析",
-  "/strategies": "策略管理",
-  "/data-catalog": "数据目录",
-  "/analytics": "绩效分析",
-  "/orders": "订单历史",
-  "/watchlist": "观察列表",
-  "/optimization": "参数优化",
-  "/settings": "系统设置",
+  "/": "Dashboard",
+  "/trading": "Trading Terminal",
+  "/backtest": "Backtests",
+  "/strategies": "Strategies",
+  "/data-catalog": "Data Catalog",
+  "/analytics": "Analytics",
+  "/orders": "Orders",
+  "/watchlist": "Watchlist",
+  "/optimization": "Optimization",
+  "/settings": "Settings",
 };
 
 export function TopBar() {
   const pathname = usePathname();
-  const { connected, reconnecting } = useWsConnection();
-  const [clock, setClock] = useState("");
 
-  useEffect(() => {
-    const tick = () => {
-      const now = new Date();
-      setClock(now.toLocaleTimeString("zh-CN", { hour12: false }));
-    };
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const title = pathTitles[pathname]
-    ?? Object.entries(pathTitles).find(([k]) => k !== "/" && pathname.startsWith(k))?.[1]
-    ?? "TinoHelm";
-
-  const wsColor = connected
-    ? "bg-[var(--accent-green)]"
-    : reconnecting
-      ? "bg-[var(--accent-amber)] animate-pulse"
-      : "bg-[var(--accent-red)]";
-
-  const wsLabel = connected ? "已连接" : reconnecting ? "重连中..." : "已断开";
+  const title =
+    pathTitles[pathname] ??
+    Object.entries(pathTitles).find(
+      ([k]) => k !== "/" && pathname.startsWith(k),
+    )?.[1] ??
+    "TinoHelm";
 
   return (
-    <header className="flex items-center justify-between h-[52px] px-6 border-b border-border shrink-0">
-      <h1 className="font-heading text-base font-semibold text-foreground">{title}</h1>
+    <header
+      className="flex items-center justify-between shrink-0 px-6 border-b bg-background"
+      style={{ height: 48, minHeight: 48 }}
+    >
+      {/* Breadcrumb */}
+      <div className="font-mono text-[0.75rem] text-muted-foreground flex items-center gap-1.5">
+        <span>TinoHelm</span>
+        <span className="opacity-40">/</span>
+        <span className="text-foreground font-medium">{title}</span>
+      </div>
+
+      {/* Right actions */}
       <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-muted-foreground">
-          <Search className="w-4 h-4" />
-        </Button>
-        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-muted-foreground relative">
-          <Bell className="w-4 h-4" />
-        </Button>
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${wsColor}`} title={wsLabel} />
-          <span className="text-[10px] font-mono text-muted-foreground">{wsLabel}</span>
-        </div>
-        <span className="text-[11px] font-mono text-muted-foreground tabular-nums">{clock}</span>
+        {/* Search */}
+        <button
+          className="font-mono text-[0.72rem] px-3 py-1 border rounded-sm bg-transparent text-muted-foreground cursor-pointer flex items-center gap-1.5 hover:border-qds-border-hover hover:text-foreground transition-all duration-150"
+        >
+          <Search className="w-3.5 h-3.5" />
+          Search
+          <kbd className="text-[0.6rem] bg-secondary px-1.5 py-0.5 rounded-[3px]">
+            ⌘K
+          </kbd>
+        </button>
+
+        {/* Theme toggle */}
+        <ThemeToggle />
       </div>
     </header>
   );

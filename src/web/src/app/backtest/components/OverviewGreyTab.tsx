@@ -15,12 +15,12 @@ import {
   PolarGrid,
   PolarAngleAxis,
 } from "recharts";
-import { motion } from "framer-motion";
 import { HelpCircle } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { API_BASE } from "@/lib/api";
 import { useCountUp } from "@/hooks/useCountUp";
+import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
 import type { BacktestResult } from "../types";
 
 /* ------------------------------------------------------------------ */
@@ -38,7 +38,7 @@ function HelpTip({ text }: { text: string }) {
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger className="inline-flex items-center justify-center ml-1 cursor-help">
-          <HelpCircle className="w-3 h-3 text-muted-foreground/30 hover:text-muted-foreground/60 transition-colors" />
+          <HelpCircle className="w-3 h-3 text-qds-t3 hover:text-muted-foreground transition-colors" />
         </TooltipTrigger>
         <TooltipContent side="top" className="max-w-[220px] text-[11px] leading-relaxed">
           {text}
@@ -61,7 +61,7 @@ function GlassCard({
 }) {
   return (
     <div
-      className={`rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm overflow-hidden ${className}`}
+      className={`rounded-xl border bg-card overflow-hidden ${className}`}
     >
       {children}
     </div>
@@ -91,11 +91,8 @@ function HeroBanner({
   const pnlAnimated = useCountUp(totalPnl, 1000, true);
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-      className="overview-grey-hero relative rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm p-6 overflow-hidden"
+    <div
+      className="overview-grey-hero relative rounded-xl border bg-card p-6 overflow-hidden"
     >
       {/* Gradient overlay */}
       <div className="absolute inset-0 bg-gradient-to-br from-white/[0.03] via-transparent to-transparent pointer-events-none" />
@@ -103,16 +100,16 @@ function HeroBanner({
       <div className="relative flex items-end justify-between">
         {/* Left: Total Return */}
         <div className="flex flex-col gap-1.5">
-          <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/60 inline-flex items-center">
+          <span className="qds-section-label inline-flex items-center">
             总收益率
             <HelpTip text="回测期间的总投资回报百分比，即 (最终权益 - 初始资金) / 初始资金" />
           </span>
           <div className="flex items-baseline gap-3">
             <span
-              className={`text-5xl font-black font-heading tracking-tight leading-none ${
+              className={`text-5xl font-black font-mono tracking-tight leading-none ${
                 isPositive
-                  ? "text-[var(--accent-green)]"
-                  : "text-[var(--accent-red)]"
+                  ? "text-qds-success"
+                  : "text-destructive"
               }`}
               style={{
                 textShadow: isPositive
@@ -128,8 +125,8 @@ function HeroBanner({
           <span
             className={`text-sm font-medium ${
               isPositive
-                ? "text-[var(--accent-green)]/70"
-                : "text-[var(--accent-red)]/70"
+                ? "text-qds-success/70"
+                : "text-destructive/70"
             }`}
           >
             {pnlAnimated >= 0 ? "+" : ""}
@@ -141,11 +138,11 @@ function HeroBanner({
           </span>
           <div className="flex items-center gap-4 mt-1">
             <span className="text-xs text-muted-foreground">
-              初始资金 <span className="font-semibold text-foreground/80">${startingBalance.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span>
+              初始资金 <span className="font-semibold text-foreground">${startingBalance.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span>
             </span>
-            <span className="text-muted-foreground/40">·</span>
+            <span className="text-qds-t3">·</span>
             <span className="text-xs text-muted-foreground">
-              手续费 <span className="font-semibold text-foreground/80">${totalFees.toLocaleString("en-US", { maximumFractionDigits: 2 })}</span>
+              手续费 <span className="font-semibold text-foreground">${totalFees.toLocaleString("en-US", { maximumFractionDigits: 2 })}</span>
             </span>
           </div>
         </div>
@@ -153,11 +150,11 @@ function HeroBanner({
         {/* Right: Final Equity */}
         {finalEquity !== null && (
           <div className="flex flex-col items-end gap-1.5">
-            <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/60 inline-flex items-center">
+            <span className="qds-section-label inline-flex items-center">
               最终权益
               <HelpTip text="回测结束时的账户总价值，包含初始资金和所有已实现盈亏" />
             </span>
-            <span className="text-3xl font-bold font-heading text-foreground/90 tracking-tight">
+            <span className="text-3xl font-bold font-mono text-foreground tracking-tight">
               $
               {equityAnimated.toLocaleString("en-US", {
                 minimumFractionDigits: 2,
@@ -168,7 +165,7 @@ function HeroBanner({
         )}
       </div>
 
-    </motion.div>
+    </div>
   );
 }
 
@@ -206,10 +203,10 @@ function MetricCard({
 
   const colorClass =
     positive === null || positive === undefined
-      ? "text-foreground/90"
+      ? "text-foreground"
       : positive
-        ? "text-[var(--accent-green)]"
-        : "text-[var(--accent-red)]";
+        ? "text-qds-success"
+        : "text-destructive";
 
   const accentColor =
     positive === null || positive === undefined
@@ -228,15 +225,8 @@ function MetricCard({
           : `${prefix}${animated.toFixed(decimals)}${suffix}`;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{
-        duration: 0.45,
-        delay: 0.12 + index * 0.07,
-        ease: [0.22, 1, 0.36, 1],
-      }}
-      className="group relative flex flex-col gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm p-4 hover:bg-white/[0.05] transition-all duration-300 overflow-hidden"
+    <div
+      className="group relative flex flex-col gap-2.5 rounded-xl border bg-card p-4 hover:bg-secondary transition-all duration-300 overflow-hidden"
     >
       {/* Bottom accent glow line */}
       <div
@@ -246,21 +236,21 @@ function MetricCard({
         }}
       />
 
-      <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 inline-flex items-center">
+      <span className="qds-section-label inline-flex items-center">
         {label}
         {tooltip && <HelpTip text={tooltip} />}
       </span>
       <span
-        className={`text-2xl font-bold font-heading tracking-tight leading-none ${colorClass}`}
+        className={`text-2xl font-bold font-mono tracking-tight leading-none ${colorClass}`}
       >
         {formatted}
       </span>
       {sublabel && (
-        <span className="text-[9px] text-muted-foreground/40 leading-tight">
+        <span className="text-[9px] text-qds-t3 leading-tight">
           {sublabel}
         </span>
       )}
-    </motion.div>
+    </div>
   );
 }
 
@@ -294,13 +284,10 @@ function PerformanceRadar({ s }: { s: BacktestResult["statistics"] }) {
   }, [s]);
 
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.92 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.6, delay: 0.35, ease: [0.22, 1, 0.36, 1] }}
+    <div
     >
       <GlassCard className="p-4 h-full flex flex-col">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 mb-1 inline-flex items-center">
+        <span className="qds-section-label inline-flex items-center">
           绩效画像
           <HelpTip text="将多个关键指标归一化到 0-100 分制，直观展示策略的综合表现维度" />
         </span>
@@ -346,7 +333,7 @@ function PerformanceRadar({ s }: { s: BacktestResult["statistics"] }) {
           </ResponsiveContainer>
         </div>
       </GlassCard>
-    </motion.div>
+    </div>
   );
 }
 
@@ -390,26 +377,12 @@ function EquityDrawdownChart({
   // Clamp to [0.01, 0.99] so both colors always have some presence
   const balanceStop = clamp((maxEq - startingBalance) / range, 0.01, 0.99);
 
-  const tooltipStyle = {
-    background: "rgba(15, 20, 25, 0.95)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 10,
-    fontSize: 11,
-    color: "#E8EAED",
-    backdropFilter: "blur(8px)",
-    boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-  };
-  const tooltipLabelStyle = { color: "rgba(255,255,255,0.5)" };
-  const tooltipItemStyle = { color: "#E8EAED" };
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: 0.25, ease: [0.22, 1, 0.36, 1] }}
+    <div
     >
       <GlassCard className="p-4 flex flex-col gap-3">
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
+        <span className="qds-section-label">
           权益曲线
         </span>
         <ResponsiveContainer width="100%" height={210}>
@@ -450,7 +423,7 @@ function EquityDrawdownChart({
               width={48}
             />
             <RechartsTooltip
-              contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+              {...CHART_TOOLTIP_PROPS}
               formatter={(value: unknown, _name: unknown, props: { payload?: { equity?: number } }) => {
                 const eq = props?.payload?.equity ?? Number(value);
                 const color = eq >= startingBalance ? "#4C9EEB" : "#EF5350";
@@ -503,7 +476,7 @@ function EquityDrawdownChart({
         </ResponsiveContainer>
 
         {/* Drawdown underwater chart */}
-        <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50 mt-1">
+        <span className="qds-section-label mt-1">
           回撤曲线
         </span>
         <ResponsiveContainer width="100%" height={80}>
@@ -530,7 +503,7 @@ function EquityDrawdownChart({
               width={48}
             />
             <RechartsTooltip
-              contentStyle={tooltipStyle} labelStyle={tooltipLabelStyle} itemStyle={tooltipItemStyle}
+              {...CHART_TOOLTIP_PROPS}
               formatter={(value: unknown) => [
                 `${Number(value).toFixed(2)}%`,
                 "回撤",
@@ -550,7 +523,7 @@ function EquityDrawdownChart({
           </AreaChart>
         </ResponsiveContainer>
       </GlassCard>
-    </motion.div>
+    </div>
   );
 }
 
@@ -622,7 +595,7 @@ export function OverviewGreyTab({ runId }: OverviewGreyTabProps) {
   if (error || !result) {
     return (
       <div className="flex items-center justify-center h-48">
-        <span className="text-xs text-[var(--accent-red)]">
+        <span className="text-xs text-destructive">
           {error ?? "加载失败"}
         </span>
       </div>

@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { motion } from "framer-motion";
 import { ArrowDown, Activity, TrendingUp, FileText } from "lucide-react";
 import { useWsEvent } from "@/providers/WebSocketProvider";
+import { FadeIn } from "@/components/motion/FadeIn";
 
 interface Props {
   nodeType: "sandbox" | "live";
@@ -27,15 +27,15 @@ interface TimelineEvent {
 }
 
 const LEVEL_COLORS: Record<string, string> = {
-  ERROR: "var(--accent-red)",
-  WARNING: "var(--accent-amber)",
-  INFO: "var(--foreground)",
-  DEBUG: "rgba(255,255,255,0.35)",
+  ERROR: "var(--dan)",
+  WARNING: "var(--warn)",
+  INFO: "var(--t1)",
+  DEBUG: "var(--t3)",
 };
 
 const LEVEL_BG: Record<string, string> = {
-  ERROR: "rgba(239,83,80,0.12)",
-  WARNING: "rgba(240,180,41,0.08)",
+  ERROR: "var(--dan-d)",
+  WARNING: "var(--warn-d)",
   INFO: "transparent",
   DEBUG: "transparent",
 };
@@ -45,22 +45,6 @@ const MAX_TIMELINE = 100;
 
 let _logIdCounter = 0;
 let _timelineIdCounter = 0;
-
-function GlassCard({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={`rounded-xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm overflow-hidden ${className}`}
-    >
-      {children}
-    </div>
-  );
-}
 
 function fmtTs(ts: string): string {
   try {
@@ -75,25 +59,17 @@ function fmtTs(ts: string): string {
   }
 }
 
-function LevelChip({
-  level,
-  active,
-  onClick,
-}: {
-  level: LogLevel;
-  active: boolean;
-  onClick: () => void;
-}) {
+function LevelChip({ level, active, onClick }: { level: LogLevel; active: boolean; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className={`px-2 py-0.5 rounded text-[9px] font-bold tracking-[1px] uppercase border transition-all duration-150 ${
-        active ? "opacity-100" : "opacity-30"
-      }`}
+      className="px-2 py-0.5 rounded-[var(--rs)] text-[0.56rem] font-bold tracking-[1px] uppercase border transition-all"
       style={{
         color: LEVEL_COLORS[level],
-        borderColor: `${LEVEL_COLORS[level]}40`,
-        background: active ? `${LEVEL_COLORS[level]}12` : "transparent",
+        borderColor: active ? `color-mix(in srgb, ${LEVEL_COLORS[level]} 40%, transparent)` : "transparent",
+        background: active ? `color-mix(in srgb, ${LEVEL_COLORS[level]} 8%, transparent)` : "transparent",
+        opacity: active ? 1 : 0.3,
+        transitionDuration: "150ms",
       }}
     >
       {level}
@@ -102,29 +78,25 @@ function LevelChip({
 }
 
 function TimelineIcon({ type }: { type: TimelineEvent["type"] }) {
-  if (type === "fill") return <TrendingUp className="w-3 h-3 text-[var(--accent-green)]" />;
-  if (type === "position") return <Activity className="w-3 h-3 text-[var(--accent-blue)]" />;
-  return <FileText className="w-3 h-3 text-[var(--accent-amber)]" />;
+  if (type === "fill") return <TrendingUp className="size-3 text-[var(--suc)]" />;
+  if (type === "position") return <Activity className="size-3 text-[var(--info)]" />;
+  return <FileText className="size-3 text-[var(--warn)]" />;
 }
 
 export function LogsTab({ nodeType }: Props) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
-  const [activeFilters, setActiveFilters] = useState<Set<LogLevel>>(
-    new Set(["INFO", "WARNING", "ERROR"])
-  );
+  const [activeFilters, setActiveFilters] = useState<Set<LogLevel>>(new Set(["INFO", "WARNING", "ERROR"]));
   const [autoScroll, setAutoScroll] = useState(true);
   const logListRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom
   useEffect(() => {
     if (autoScroll && bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [logs, autoScroll]);
 
-  // Detect manual scroll up
   const handleScroll = useCallback(() => {
     const el = logListRef.current;
     if (!el) return;
@@ -141,15 +113,8 @@ export function LogsTab({ nodeType }: Props) {
   const logMsg = useWsEvent("log.entry");
   useEffect(() => {
     if (!logMsg) return;
-    const d = (logMsg.data ?? logMsg) as {
-      node_type?: string;
-      ts?: string;
-      level?: string;
-      logger?: string;
-      message?: string;
-    };
+    const d = (logMsg.data ?? logMsg) as { node_type?: string; ts?: string; level?: string; logger?: string; message?: string };
     if (d.node_type && d.node_type !== nodeType) return;
-
     const entry: LogEntry = {
       id: ++_logIdCounter,
       ts: d.ts ?? new Date().toISOString(),
@@ -157,7 +122,6 @@ export function LogsTab({ nodeType }: Props) {
       logger: d.logger ?? "",
       message: d.message ?? "",
     };
-
     setLogs((prev) => {
       const next = [...prev, entry];
       return next.length > MAX_LOGS ? next.slice(next.length - MAX_LOGS) : next;
@@ -168,26 +132,13 @@ export function LogsTab({ nodeType }: Props) {
   const fillMsg = useWsEvent("fill.new");
   useEffect(() => {
     if (!fillMsg) return;
-    const d = (fillMsg.data ?? fillMsg) as {
-      node_type?: string;
-      symbol?: string;
-      side?: string;
-      quantity?: number;
-      price?: number;
-      ts?: string;
-    };
+    const d = (fillMsg.data ?? fillMsg) as { node_type?: string; symbol?: string; side?: string; quantity?: number; price?: number; ts?: string };
     if (d.node_type && d.node_type !== nodeType) return;
-
-    const sym = d.symbol ?? "?";
-    const side = d.side ?? "";
-    const qty = d.quantity != null ? d.quantity.toFixed(4) : "?";
-    const px = d.price != null ? d.price.toFixed(2) : "?";
-
     setTimeline((prev) => {
       const entry: TimelineEvent = {
         id: ++_timelineIdCounter,
         type: "fill",
-        description: `订单成交: ${sym} ${side} ${qty} @ ${px}`,
+        description: `订单成交: ${d.symbol ?? "?"} ${d.side ?? ""} ${d.quantity?.toFixed(4) ?? "?"} @ ${d.price?.toFixed(2) ?? "?"}`,
         ts: d.ts ?? new Date().toISOString(),
       };
       const next = [entry, ...prev];
@@ -199,23 +150,15 @@ export function LogsTab({ nodeType }: Props) {
   const posMsg = useWsEvent("position.update");
   useEffect(() => {
     if (!posMsg) return;
-    const d = (posMsg.data ?? posMsg) as {
-      node_type?: string;
-      position?: { instrument_id?: string; side?: string; quantity?: number };
-    };
+    const d = (posMsg.data ?? posMsg) as { node_type?: string; position?: { instrument_id?: string; side?: string; quantity?: number } };
     if (d.node_type && d.node_type !== nodeType) return;
     const pos = d.position;
     if (!pos) return;
-
-    const sym = pos.instrument_id ?? "?";
-    const side = pos.side ?? "";
-    const qty = pos.quantity != null ? pos.quantity.toFixed(4) : "?";
-
     setTimeline((prev) => {
       const entry: TimelineEvent = {
         id: ++_timelineIdCounter,
         type: "position",
-        description: `持仓变化: ${sym.replace(".BINANCE", "")} ${side} ${qty}`,
+        description: `持仓变化: ${(pos.instrument_id ?? "?").replace(".BINANCE", "")} ${pos.side ?? ""} ${pos.quantity?.toFixed(4) ?? "?"}`,
         ts: new Date().toISOString(),
       };
       const next = [entry, ...prev];
@@ -227,23 +170,15 @@ export function LogsTab({ nodeType }: Props) {
   const orderMsg = useWsEvent("order.update");
   useEffect(() => {
     if (!orderMsg) return;
-    const d = (orderMsg.data ?? orderMsg) as {
-      node_type?: string;
-      order?: { instrument_id?: string; status?: string; side?: string };
-    };
+    const d = (orderMsg.data ?? orderMsg) as { node_type?: string; order?: { instrument_id?: string; status?: string; side?: string } };
     if (d.node_type && d.node_type !== nodeType) return;
     const ord = d.order;
     if (!ord) return;
-
-    const sym = ord.instrument_id ?? "?";
-    const status = ord.status ?? "";
-    const side = ord.side ?? "";
-
     setTimeline((prev) => {
       const entry: TimelineEvent = {
         id: ++_timelineIdCounter,
         type: "order",
-        description: `订单状态: ${sym.replace(".BINANCE", "")} ${side} → ${status}`,
+        description: `订单状态: ${(ord.instrument_id ?? "?").replace(".BINANCE", "")} ${ord.side ?? ""} -> ${ord.status ?? ""}`,
         ts: new Date().toISOString(),
       };
       const next = [entry, ...prev];
@@ -254,11 +189,8 @@ export function LogsTab({ nodeType }: Props) {
   const toggleFilter = useCallback((level: LogLevel) => {
     setActiveFilters((prev) => {
       const next = new Set(prev);
-      if (next.has(level)) {
-        next.delete(level);
-      } else {
-        next.add(level);
-      }
+      if (next.has(level)) next.delete(level);
+      else next.add(level);
       return next;
     });
   }, []);
@@ -266,34 +198,19 @@ export function LogsTab({ nodeType }: Props) {
   const filteredLogs = logs.filter((l) => activeFilters.has(l.level));
 
   return (
-    <div className="flex flex-col gap-3 p-4 h-full min-h-0">
-      {/* Log stream — 70% height */}
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-        className="flex flex-col min-h-0"
-        style={{ flex: "7 1 0" }}
-      >
-        <GlassCard className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col gap-3 p-5 h-full min-h-0">
+      {/* Log stream -- 70% height */}
+      <FadeIn className="flex flex-col min-h-0 [flex:7_1_0]">
+        <div className="rounded-[var(--r)] border border-[var(--bd)] bg-[var(--bg-in)] flex flex-col h-full min-h-0 overflow-hidden">
           {/* Header with filters */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06] shrink-0">
+          <div className="qds-card-header shrink-0">
             <div className="flex items-center gap-2">
-              <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
-                日志流
-              </span>
-              <span className="text-[9px] font-mono text-muted-foreground/30 ml-1">
-                {filteredLogs.length}/{MAX_LOGS}
-              </span>
+              <span className="qds-section-label">日志流</span>
+              <span className="text-[0.56rem] font-mono text-[var(--t3)] ml-1">{filteredLogs.length}/{MAX_LOGS}</span>
             </div>
             <div className="flex items-center gap-1.5">
               {(["ERROR", "WARNING", "INFO", "DEBUG"] as LogLevel[]).map((level) => (
-                <LevelChip
-                  key={level}
-                  level={level}
-                  active={activeFilters.has(level)}
-                  onClick={() => toggleFilter(level)}
-                />
+                <LevelChip key={level} level={level} active={activeFilters.has(level)} onClick={() => toggleFilter(level)} />
               ))}
             </div>
           </div>
@@ -302,102 +219,72 @@ export function LogsTab({ nodeType }: Props) {
           <div
             ref={logListRef}
             onScroll={handleScroll}
-            className="flex-1 overflow-y-auto min-h-0 font-mono text-[11px] leading-relaxed"
+            className="flex-1 overflow-y-auto min-h-0 font-mono text-[0.68rem] leading-[1.8]"
           >
             {filteredLogs.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-muted-foreground/30 text-xs">
-                等待日志...
-              </div>
+              <div className="flex items-center justify-center h-full text-[var(--t3)] text-[0.72rem]">等待日志...</div>
             ) : (
-              filteredLogs.map((entry) => (
+              filteredLogs.map((entry, i) => (
                 <div
                   key={entry.id}
-                  className="flex items-start gap-2 px-4 py-1 hover:bg-white/[0.02] transition-colors"
-                  style={{ background: LEVEL_BG[entry.level] }}
+                  className="flex items-start gap-2 px-4 py-0.5 hover:bg-[var(--bg-t)] transition-colors"
+                  style={{ background: i % 2 === 1 ? "var(--bg-t)" : LEVEL_BG[entry.level] }}
                 >
-                  <span className="text-muted-foreground/30 shrink-0 tabular-nums">
-                    {fmtTs(entry.ts)}
-                  </span>
+                  <span className="text-[var(--t3)] shrink-0 tabular-nums">{fmtTs(entry.ts)}</span>
                   <span
-                    className="shrink-0 font-bold text-[9px] tracking-[1px] uppercase w-14 text-right"
+                    className="shrink-0 font-bold text-[0.56rem] tracking-[1px] uppercase w-14 text-right"
                     style={{ color: LEVEL_COLORS[entry.level] }}
                   >
                     {entry.level}
                   </span>
                   {entry.logger && (
-                    <span className="shrink-0 text-muted-foreground/40 text-[10px] max-w-[120px] truncate">
-                      {entry.logger}:
-                    </span>
+                    <span className="shrink-0 text-[var(--t3)] text-[0.62rem] max-w-[120px] truncate">{entry.logger}:</span>
                   )}
-                  <span
-                    className="flex-1 break-all"
-                    style={{ color: LEVEL_COLORS[entry.level] }}
-                  >
-                    {entry.message}
-                  </span>
+                  <span className="flex-1 break-all" style={{ color: LEVEL_COLORS[entry.level] }}>{entry.message}</span>
                 </div>
               ))
             )}
             <div ref={bottomRef} />
           </div>
 
-          {/* Scroll-to-bottom button */}
+          {/* Scroll-to-bottom */}
           {!autoScroll && (
-            <div className="shrink-0 flex justify-center py-2 border-t border-white/[0.06]">
+            <div className="shrink-0 flex justify-center py-2 border-t border-[var(--bd)]">
               <button
                 onClick={scrollToBottom}
-                className="flex items-center gap-1.5 px-3 py-1 rounded-md text-[10px] font-semibold text-[var(--accent-blue)] bg-[var(--accent-blue)]/10 hover:bg-[var(--accent-blue)]/20 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 rounded-[var(--rs)] text-[0.62rem] font-semibold text-[var(--info)] bg-[var(--info-d)] hover:brightness-110 transition-colors"
               >
-                <ArrowDown className="w-3 h-3" />
+                <ArrowDown className="size-3" />
                 滚动到底部
               </button>
             </div>
           )}
-        </GlassCard>
-      </motion.div>
+        </div>
+      </FadeIn>
 
-      {/* Event timeline — 30% height */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
-        className="flex flex-col min-h-0"
-        style={{ flex: "3 1 0" }}
-      >
-        <GlassCard className="flex flex-col h-full min-h-0">
-          <div className="px-4 py-3 border-b border-white/[0.06] shrink-0">
-            <span className="text-[10px] font-semibold tracking-[1.5px] uppercase text-muted-foreground/50">
-              事件时间线
-            </span>
+      {/* Event timeline -- 30% height */}
+      <FadeIn delay={0.1} className="flex flex-col min-h-0 [flex:3_1_0]">
+        <div className="rounded-[var(--r)] border border-[var(--bd)] bg-[var(--bg-p)] flex flex-col h-full min-h-0 overflow-hidden">
+          <div className="qds-card-header shrink-0">
+            <span className="qds-section-label">事件时间线</span>
           </div>
           <div className="flex-1 overflow-y-auto min-h-0">
             {timeline.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-muted-foreground/30 text-xs">
-                等待事件...
-              </div>
+              <div className="flex items-center justify-center h-full text-[var(--t3)] text-[0.72rem]">等待事件...</div>
             ) : (
-              <div className="divide-y divide-white/[0.03]">
+              <div className="divide-y divide-[var(--bd)]">
                 {timeline.map((evt) => (
-                  <div
-                    key={evt.id}
-                    className="flex items-center gap-3 px-4 py-2 hover:bg-white/[0.02] transition-colors"
-                  >
-                    <div className="shrink-0">
-                      <TimelineIcon type={evt.type} />
-                    </div>
-                    <span className="flex-1 text-[11px] text-foreground/70">
-                      {evt.description}
-                    </span>
-                    <span className="shrink-0 text-[9px] font-mono text-muted-foreground/30">
-                      {fmtTs(evt.ts)}
-                    </span>
+                  <div key={evt.id} className="flex items-center gap-3 px-4 py-2 hover:bg-[var(--bg-t)] transition-colors">
+                    <div className="shrink-0"><TimelineIcon type={evt.type} /></div>
+                    <span className="flex-1 text-[0.68rem] text-[var(--t1)]">{evt.description}</span>
+                    <span className="shrink-0 text-[0.56rem] font-mono text-[var(--t3)]">{fmtTs(evt.ts)}</span>
                   </div>
                 ))}
               </div>
             )}
           </div>
-        </GlassCard>
-      </motion.div>
+        </div>
+      </FadeIn>
     </div>
   );
 }

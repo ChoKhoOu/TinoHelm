@@ -229,9 +229,17 @@ class BinanceVisionPipeline:
 
         # 5. Update DB catalog
         await _progress(96, "Updating catalog database...")
+        # Compute size_bytes from written files
+        written_size = sum(
+            Path(p).stat().st_size for p in all_file_paths
+            if Path(p).exists()
+        ) if all_file_paths else None
         try:
             await self._update_db_catalog(
                 symbol, data_type, interval, start, end,
+                record_count=total_objects if total_objects > 0 else None,
+                size_bytes=written_size,
+                source_type=data_type,
             )
         except Exception:
             logger.warning("Failed to update DB catalog", exc_info=True)
@@ -589,6 +597,9 @@ class BinanceVisionPipeline:
         interval: str | None,
         start: date,
         end: date,
+        record_count: int | None = None,
+        size_bytes: int | None = None,
+        source_type: str | None = None,
     ) -> None:
         """Upsert a DataCatalog row for the ingested data."""
         from sqlalchemy import select
@@ -610,6 +621,12 @@ class BinanceVisionPipeline:
             if existing:
                 existing.start_date = min(existing.start_date, start)
                 existing.end_date = max(existing.end_date, end)
+                if record_count is not None:
+                    existing.record_count = record_count
+                if size_bytes is not None:
+                    existing.size_bytes = size_bytes
+                if source_type is not None:
+                    existing.source_type = source_type
             else:
                 session.add(DataCatalog(
                     symbol=symbol,
@@ -618,7 +635,9 @@ class BinanceVisionPipeline:
                     start_date=start,
                     end_date=end,
                     file_path=self.catalog_path,
-                    size_bytes=0,
+                    size_bytes=size_bytes or 0,
+                    record_count=record_count,
+                    source_type=source_type,
                 ))
 
             await session.commit()

@@ -29,15 +29,12 @@ export function TabNav({ activeTab, onTabChange, nodeType }: Props) {
   const visibleTabs = TABS.filter((t) => t.shared || nodeType === "sandbox");
 
   return (
-    <div className="shrink-0 flex items-center gap-0 px-4 border-b border-white/[0.06] bg-background overflow-x-auto">
+    <div className="shrink-0 flex items-center gap-0 px-4 border-b border bg-background overflow-x-auto">
       {visibleTabs.map((tab) => (
         <button
           key={tab.id}
           onClick={() => onTabChange(tab.id)}
-          className="relative px-4 py-2.5 text-[11px] font-semibold tracking-wide transition-colors whitespace-nowrap"
-          style={{
-            color: activeTab === tab.id ? "var(--foreground)" : "var(--muted-foreground)",
-          }}
+          className={`relative px-4 py-2.5 text-[11px] font-semibold tracking-wide transition-colors whitespace-nowrap ${activeTab === tab.id ? "text-foreground" : "text-muted-foreground"}`}
         >
           {tab.label}
           {activeTab === tab.id && (
