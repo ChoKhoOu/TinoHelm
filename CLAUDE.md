@@ -10,9 +10,11 @@ TinoHelm is a single-instance quantitative trading platform built on NautilusTra
 
 ```bash
 # Docker (primary way to run)
-docker compose up -d              # Start all services
-docker compose up -d --build api  # Rebuild API after src/ code changes
-docker compose logs api --tail 50 # Check API logs
+docker compose up -d                                    # Start core services (api, web, postgres, redis)
+docker compose --profile sandbox up -d                  # Include sandbox node
+docker compose --profile sandbox --profile live up -d   # Include sandbox + live nodes
+docker compose up -d --build api                        # Rebuild API after src/ code changes
+docker compose logs api --tail 50                       # Check API logs
 
 # Local dev (Python)
 python -m venv .venv && source .venv/bin/activate
@@ -129,7 +131,9 @@ available → starting → running → paused → available
 
 **API**: `GET /api/node/strategies`, `POST /api/node/strategy/{start,pause,resume,flatten-stop}`. **CLI**: `tino node strategy list|start|pause|resume|flatten-stop --mode sandbox|live`.
 
-**DB design**: The `strategies` table is ephemeral (rebuilt on `tino strategy rescan`). `backtest_runs` uses `strategy_name` (string column) instead of FK. `positions` stores live/sandbox snapshots (upserted by `position_id`). `fills` stores immutable fill records (deduped by `trade_id`). `data_catalog` tracks Parquet/JSON storage metadata with `record_count` and `source_type` columns.
+**DB design**: The `strategies` table is ephemeral (rebuilt on `tino strategy rescan`). `backtest_runs` uses `strategy_name` (string column) instead of FK. `positions` stores live/sandbox snapshots (upserted by `position_id`). `fills` stores immutable fill records (deduped by `trade_id`). `data_catalog` tracks Parquet/JSON storage metadata with `record_count` and `source_type` columns. `data_fetch_jobs` tracks persistent data ingestion jobs with status/progress/error (survives API restarts).
+
+**Data fetch jobs**: `POST /api/data/fetch-batch` → creates `DataFetchJob` DB records → pushes to Redis queue `tino:data:queue` → async worker in API process dequeues (BRPOP) → runs `BinanceVisionPipeline.ingest()` → updates DB progress. On API restart, interrupted jobs (status=running) are reset to queued and re-enqueued. Downloads run with `asyncio.Semaphore(5)` concurrency + `run_in_executor` for ZIP extraction.
 
 ## Key Conventions
 
@@ -165,6 +169,8 @@ Priority: ENV vars (`TINO_` prefix, `__` nested delimiter) > `config/user.yaml` 
 - `tino:backtest:queue` — Job queue (LPUSH/BRPOP)
 - `tino:backtest:cancel:{run_id}` — Cancel flag
 - `tino:backtest:progress:{run_id}` — Progress percentage
+- `tino:data:queue` — Data fetch job queue (LPUSH/BRPOP)
+- `tino:data:progress:{job_id}` — Data fetch progress (PubSub)
 - `tino:heartbeat:{node_type}` — Node heartbeat (15s TTL)
 - `tino:{node_type}:positions` — Position update events (PubSub)
 - `tino:{node_type}:fills` — Fill/trade events (PubSub)
@@ -262,7 +268,26 @@ All API calls use a `DataCmd` channel pattern: `fire_load_*()` spawns `tokio::sp
 - **Font**: IBM Plex Sans (`font-sans`) for UI, IBM Plex Mono (`font-mono`) for data
 
 ### QDS Warm Design System
-All pages MUST follow QDS Warm. Reference: `docs/ui/qds-*.html` + `docs/ui/qds-warm-theme.css`.
+**MUST**: All frontend development MUST strictly follow the design references in `docs/ui/`. These are the single source of truth for UI/UX, layout, spacing, color, typography, and animation. Pixel-perfect replication is expected — do not simplify, approximate, or deviate from the design mockups.
+
+**Design reference files** (`docs/ui/`):
+| File | Scope |
+|------|-------|
+| `qds-warm-v2.html` | Master design system: tokens, components, patterns |
+| `qds-warm-theme.css` | CSS variable definitions (tokens) |
+| `qds-design-spec.md` | Design principles and token architecture |
+| `qds-patterns-spec.md` + `qds-patterns.html` | Reusable UI patterns |
+| `qds-backtest-integrated.html` | Backtest page reference |
+| `qds-data-catalog.html` | Data catalog page reference |
+| `qds-trading-terminal-spec.md` + `qds-trading-terminal.html` | Trading terminal reference |
+| `qds-strategies.html` | Strategies page reference |
+| `qds-app-shell.html` | App shell (sidebar, topbar, statusbar) |
+| `qds-empty-states-spec.md` + `qds-empty-states.html` | Empty state patterns |
+| `qds-notification-spec.md` | 4-layer notification architecture |
+| `qds-missing-pages-spec.md` + `qds-missing-pages.html` | Analytics, orders, watchlist, optimization |
+| `qds-shadcn-architecture.md` | shadcn integration strategy |
+
+**Workflow**: Before implementing any frontend page/component, ALWAYS read the corresponding `qds-*.html` reference first. Replicate its structure, spacing, colors, and animations exactly.
 
 **Token architecture** (two layers in `globals.css`):
 1. QDS short tokens in `:root` (`--bg-p`, `--acc`, `--suc`, etc.) — source of truth
@@ -281,11 +306,20 @@ All pages MUST follow QDS Warm. Reference: `docs/ui/qds-*.html` + `docs/ui/qds-w
 
 **Color semantic rules**: Green/Red are NEVER decorative — always semantic (profit/loss, success/fail).
 
-**QDS business components** (`components/qds/`): `StatCard`, `ShimmerBar`, `StatusBadge`, `HelpTip`, `PageHeader`, `SectionLabel`.
+**QDS business components** (`components/qds/`): `StatCard`, `ShimmerBar`, `StatusBadge`, `HelpTip`, `PageHeader`, `SectionLabel`, `InlineError`.
 
 **Chart theme** (`lib/chartTheme.ts`): Use `CHART_TOOLTIP_PROPS` spread on Recharts tooltips, `CHART_GRID_STYLE` for grids. Recharts props use `var()` directly (correct — don't convert to Tailwind).
 
-**QDS CSS classes** (`qds-input`, `qds-card`, `qds-table`, `bt-*`) exist in globals.css with `!important` for pixel-perfect replication of design mockups. New code should prefer Tailwind classes and QDS components.
+**QDS CSS classes** (`qds-input`, `qds-card`, `qds-table`, `bt-*`, `dc-*`) exist in globals.css with `!important` for pixel-perfect replication of design mockups. Shared primitives: `.btn`/`.btn-p`/`.btn-o`/`.btn-d`, `.sc`/`.sc-l`/`.sc-v`, `.fl`/`.fi`/`.fsel`, `.list`, `.empty`. Data catalog: `dc-filter-*`, `dc-qrow-*`, `dc-dtbl`, `dc-type-*`, `dc-cov-*`, `dc-pager-*`, `dc-chip-*`. New code should prefer Tailwind classes and QDS components.
+
+### 4-Layer Notification System
+Spec: `docs/ui/qds-notification-spec.md`. Implementation:
+- **Layer 1 (Silent/Ticker)**: High-frequency WS events (fill, order, position, progress) → data flows into UI components. `FillTicker` in StatusBar shows latest fill with fade transition.
+- **Layer 2 (Inline)**: User-triggered API calls → `useAction` hook (`hooks/use-action.ts`) manages button state (idle→loading→success/error). `InlineError` component for error display. **API errors NEVER use toast.**
+- **Layer 3 (Toast)**: Async background events (backtest complete, data fetch complete, connection degraded) → `NotificationListener` component routes WS events through `lib/notification-router.ts` to Sonner toast. Dedupe by event ID, max 3 on screen, 5s auto-dismiss.
+- **Layer 4 (Modal)**: Critical risk events (daily limit, max drawdown, liquidation) → blocking modal (future).
+
+Event routing table: `lib/notification-router.ts` maps event types to channels with dedupe config.
 
 ## Pitfalls & Lessons Learned
 
@@ -296,7 +330,7 @@ All pages MUST follow QDS Warm. Reference: `docs/ui/qds-*.html` + `docs/ui/qds-w
 
 ### Alembic Migrations
 - The `revision` value is an **arbitrary string ID**, NOT the filename. Use the actual `revision` string from the parent migration for `down_revision`.
-- Migration chain: `None → "001" → "002" → "003" → "004" → "005" → "006"` (006 adds `record_count` + `source_type` to `data_catalog`).
+- Migration chain: `None → "001" → "002" → "003" → "004" → "005" → "006" → "007"` (006 adds `record_count` + `source_type` to `data_catalog`; 007 adds `data_fetch_jobs` table).
 - DB `DateTime` columns are `TIMESTAMP WITHOUT TIME ZONE` (naive). **Never** assign `datetime.now(timezone.utc)` (aware) — causes `asyncpg.DataError`. Use `datetime.utcnow()` or `server_default`/`func.now()`.
 
 ### NautilusTrader API Gotchas
@@ -318,7 +352,9 @@ Key gotchas that have caused bugs in this project:
 - FundingRate data is stored as JSON (`~/.tino/data/funding_rates/{symbol.lower()}.json`), not Parquet.
 
 ### Docker & Dependencies
-- Container only has `asyncpg` by default — backtest workers need sync DB via `psycopg2-binary` (in Dockerfile).
+- **Multi-stage Dockerfile**: `deps` stage collects pre-built wheels (nautilus_trader has manylinux wheels for aarch64+x86_64, no Rust toolchain needed), `runtime` stage installs from wheels via `--mount=type=bind`. Build-essential never enters the final image (~1.37GB vs old 3.47GB).
+- **Shared image**: `api`, `node-sandbox`, `node-live` all use `tinohelm-api:latest`. Only `api` service builds; the others reference the pre-built image.
+- **Layer caching**: Dependencies are installed before source code is copied. Editing `src/` only invalidates the lightweight `pip install --no-deps .` layer (~30s rebuild vs full ~8min).
 - Strategy files are volume-mounted (`~/.tino/strategies/`), but source code is baked into the image. Code changes in `src/` require `docker compose up -d --build api`, but strategy changes are hot-reloadable via `tino strategy rescan`.
 
 ### Dynamic Module Loading

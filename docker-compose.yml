@@ -34,6 +34,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: tinohelm-api:latest
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -70,9 +71,7 @@ services:
       - api
 
   node-sandbox:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: tinohelm-api:latest
     restart: on-failure
     command: ["python", "-m", "tinohelm.node.sandbox_main"]
     profiles: ["sandbox"]
@@ -105,9 +104,7 @@ services:
       start_period: 60s
 
   node-live:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: tinohelm-api:latest
     restart: on-failure
     command: ["python", "-m", "tinohelm.node.live_main"]
     profiles: ["live"]
