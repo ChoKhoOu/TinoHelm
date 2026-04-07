@@ -70,6 +70,8 @@ class _ProgressReporter(Actor):
             # Map bar progress to 10-90% range (leaving 0-10 for setup, 90-100 for post)
             pct = min(int(self._bar_count / total_bars * 80) + 10, 90)
             elapsed = round(time.monotonic() - self._start_time, 1)
+            eta = round(elapsed * (100 - pct) / pct, 1) if pct > 0 else None
+            bars_per_sec = round(self._bar_count / elapsed, 1) if elapsed > 0 else None
             try:
                 redis_client.setex(
                     f"tino:backtest:progress:{run_id}", 86400, str(pct),
@@ -79,6 +81,11 @@ class _ProgressReporter(Actor):
                     "run_id": run_id,
                     "pct": pct,
                     "elapsed_secs": elapsed,
+                    "eta_secs": eta,
+                    "total_bars": total_bars,
+                    "processed_bars": self._bar_count,
+                    "bars_per_sec": bars_per_sec,
+                    "trades": None,
                 })
                 redis_client.publish(
                     f"tino:backtest:progress:{run_id}", payload,
@@ -110,11 +117,17 @@ class BacktestRunner:
         intervals: list[str] | None = None,
         fill_model: dict | None = None,
         strategy_bundle: Any | None = None,
+        maker_fee: str | None = None,
+        taker_fee: str | None = None,
+        warmup_bars: int | None = None,
+        tags: str | None = None,
     ) -> None:
         self.strategy_path = strategy_path
         self.config_path = config_path
         self.strategy_params = strategy_params or {}
         self.catalog_path = Path(catalog_path) if catalog_path else Path()
+        self.maker_fee = maker_fee
+        self.taker_fee = taker_fee
 
         # Multi-instrument support: accept symbol (str/list) or symbols (list)
         if symbols is not None:
@@ -143,6 +156,8 @@ class BacktestRunner:
         self.start = start
         self.end = end
         self.fill_model_config = fill_model
+        self.warmup_bars = warmup_bars
+        self.tags = tags
         self.artifacts_dir: Path | None = None
         self._engine: BacktestEngine | None = None
         self._redis_client = None  # sync Redis for progress reporting
@@ -269,6 +284,31 @@ class BacktestRunner:
         "one_tick_slippage": "OneTickSlippageFillModel",
         "three_tier": "ThreeTierFillModel",
     }
+
+    @staticmethod
+    def _parse_fee(val: str) -> "Decimal":
+        """Parse a fee string to Decimal.
+
+        Accepts percentage strings like ``"0.02%"`` (divides by 100) or
+        plain decimal strings like ``"0.0002"``.
+        """
+        val = val.strip()
+        if val.endswith("%"):
+            return Decimal(str(float(val[:-1]) / 100))
+        return Decimal(val)
+
+    def _build_fee_model(self) -> "Any | None":
+        """Build a MakerTakerFeeModel if maker_fee or taker_fee is set."""
+        if self.maker_fee is None and self.taker_fee is None:
+            return None
+        try:
+            from nautilus_trader.backtest.models import MakerTakerFeeModel
+            maker = self._parse_fee(self.maker_fee) if self.maker_fee else Decimal("0.0002")
+            taker = self._parse_fee(self.taker_fee) if self.taker_fee else Decimal("0.0004")
+            return MakerTakerFeeModel({"maker_fee": str(maker), "taker_fee": str(taker)})
+        except Exception:
+            logger.warning("Failed to build MakerTakerFeeModel, using default", exc_info=True)
+            return None
 
     @staticmethod
     def _build_fill_model(config: dict[str, Any]) -> FillModel:
@@ -521,7 +561,7 @@ class BacktestRunner:
             implicit=True,
         )
 
-    def _report_progress(self, pct: int) -> None:
+    def _report_progress(self, pct: int, total_bars: int = 0) -> None:
         """Report setup-phase progress (0-10%) to Redis if available."""
         if not self._redis_client or not self._run_id:
             return
@@ -531,9 +571,20 @@ class BacktestRunner:
             self._redis_client.setex(
                 f"tino:backtest:progress:{self._run_id}", 86400, str(pct),
             )
+            payload: dict = {
+                "type": "backtest.progress",
+                "run_id": self._run_id,
+                "pct": pct,
+                "elapsed_secs": elapsed,
+                "eta_secs": None,
+                "total_bars": total_bars if total_bars > 0 else None,
+                "processed_bars": None,
+                "bars_per_sec": None,
+                "trades": None,
+            }
             self._redis_client.publish(
                 f"tino:backtest:progress:{self._run_id}",
-                _json.dumps({"type": "backtest.progress", "run_id": self._run_id, "pct": pct, "elapsed_secs": elapsed}),
+                _json.dumps(payload),
             )
         except Exception:
             pass
@@ -590,6 +641,9 @@ class BacktestRunner:
             venue_kwargs["fill_model"] = fill_model_obj
         if latency_model_obj is not None:
             venue_kwargs["latency_model"] = latency_model_obj
+        fee_model_obj = self._build_fee_model()
+        if fee_model_obj is not None:
+            venue_kwargs["fee_model"] = fee_model_obj
         engine.add_venue(**venue_kwargs)
 
         # Load data from catalog
@@ -641,7 +695,7 @@ class BacktestRunner:
         if all_bar_type_strs:
             engine.sort_data()
 
-        self._report_progress(4)  # K-line data loaded
+        self._report_progress(4, total_bars=total_bar_count)  # K-line data loaded
 
         # Inject NT-format params for strategy config resolution
         self.strategy_params.setdefault("instrument_id", nt_symbols[0] if nt_symbols else "")
@@ -730,12 +784,12 @@ class BacktestRunner:
 
         # Add progress reporter actor for bar-level progress tracking
         if self._redis_client and self._run_id and total_bar_count > 0:
+            reporter = _ProgressReporter(config=_ProgressReporterConfig())
             reporter._redis = self._redis_client
             reporter._run_id = self._run_id
             reporter._total_bars = total_bar_count
             reporter._report_every = 2000
             reporter._bar_type_strs = loaded_bar_type_strs
-            reporter = _ProgressReporter(config=_ProgressReporterConfig())
             engine.add_actor(reporter)
             logger.info(
                 "Progress reporter enabled: %d total bars, run_id=%s",

@@ -21,6 +21,11 @@ def _publish_progress(
     run_id: str,
     pct: int,
     elapsed_secs: float | None = None,
+    eta_secs: float | None = None,
+    total_bars: int | None = None,
+    processed_bars: int | None = None,
+    bars_per_sec: float | None = None,
+    trades: int | None = None,
 ) -> None:
     """Publish a ``backtest.progress`` event to the EventBridge channel."""
     payload: dict = {
@@ -28,6 +33,11 @@ def _publish_progress(
         "run_id": run_id,
         "pct": pct,
         "elapsed_secs": elapsed_secs,
+        "eta_secs": eta_secs,
+        "total_bars": total_bars,
+        "processed_bars": processed_bars,
+        "bars_per_sec": bars_per_sec,
+        "trades": trades,
     }
     r.publish(
         f"tino:backtest:progress:{run_id}",
@@ -172,6 +182,10 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                     start=datetime.fromisoformat(job["start"]),
                     end=datetime.fromisoformat(job["end"]),
                     fill_model=job.get("fill_model"),
+                    maker_fee=job.get("maker_fee"),
+                    taker_fee=job.get("taker_fee"),
+                    warmup_bars=job.get("warmup_bars"),
+                    tags=job.get("tags"),
                 )
                 # Enable bar-level progress tracking via ProgressReporter actor
                 runner._redis_client = r

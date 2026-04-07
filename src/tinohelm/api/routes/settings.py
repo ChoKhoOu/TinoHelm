@@ -13,10 +13,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as aioredis
 
+import httpx
+
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep, get_process_manager, get_startup_time
 from tinohelm.core.audit import log_audit
 from tinohelm.core.config import Settings
 from tinohelm.core.process_manager import ProcessManager
+
+EXCHANGE_PING_URLS: list[tuple[str, str]] = [
+    ("Binance", "https://fapi.binance.com/fapi/v1/ping"),
+]
 
 logger = logging.getLogger(__name__)
 
@@ -164,3 +170,29 @@ async def health_check(
         redis_version=redis_ver,
         platform_version=platform_ver,
     )
+
+
+class ExchangeLatency(BaseModel):
+    name: str
+    latency_ms: float | None = None
+    reachable: bool = True
+
+
+@router.get("/exchanges/latency", response_model=list[ExchangeLatency])
+async def exchange_latency() -> list[ExchangeLatency]:
+    """Ping exchange REST endpoints and return latency in ms."""
+    results: list[ExchangeLatency] = []
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for name, url in EXCHANGE_PING_URLS:
+            try:
+                t0 = time.monotonic()
+                resp = await client.get(url)
+                elapsed = (time.monotonic() - t0) * 1000
+                results.append(ExchangeLatency(
+                    name=name,
+                    latency_ms=round(elapsed, 1),
+                    reachable=resp.status_code == 200,
+                ))
+            except Exception:
+                results.append(ExchangeLatency(name=name, latency_ms=None, reachable=False))
+    return results

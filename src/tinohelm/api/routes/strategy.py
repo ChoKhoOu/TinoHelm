@@ -203,12 +203,58 @@ async def get_strategy_params(
     }
 
 
+class StrategySubscription(BaseModel):
+    """A data subscription entry for a strategy."""
+
+    exchange: str = "binance"
+    symbol: str
+    granularity: str = "bar"  # "bar" or "tick"
+    timeframe: str | None = None  # e.g. "5min", None for tick
+    tick_type: str | None = None  # "trades", "quotes", "l2"
+    auto: bool = True
+
+
 class StrategyDefaults(BaseModel):
     """Default configuration for a strategy."""
 
     symbols: list[str] = []
     interval: str | None = None
     starting_balance: float | None = None
+    subscriptions: list[StrategySubscription] = []
+
+
+def _interval_to_timeframe(interval: str) -> str:
+    """Convert interval string (e.g. '5m') to display timeframe (e.g. '5min')."""
+    _map = {
+        "1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min", "30m": "30min",
+        "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "8h": "8h", "12h": "12h",
+        "1d": "1d",
+    }
+    return _map.get(interval, interval)
+
+
+def _build_subscriptions(symbols: list[str], interval: str | None) -> list[StrategySubscription]:
+    """Build subscription list from symbols and interval."""
+    subs = []
+    for sym in symbols:
+        # Strip .BINANCE suffix if present
+        display_sym = sym.replace(".BINANCE", "")
+        if interval:
+            subs.append(StrategySubscription(
+                exchange="binance",
+                symbol=display_sym,
+                granularity="bar",
+                timeframe=_interval_to_timeframe(interval),
+                auto=True,
+            ))
+        else:
+            subs.append(StrategySubscription(
+                exchange="binance",
+                symbol=display_sym,
+                granularity="bar",
+                auto=True,
+            ))
+    return subs
 
 
 @router.get("/{name}/defaults", response_model=StrategyDefaults)
@@ -218,12 +264,52 @@ async def get_strategy_defaults(
     settings: Settings = Depends(get_settings_dep),
 ) -> StrategyDefaults:
     """Get default run configuration for a strategy."""
+    import yaml
+
     stmt = select(Strategy).where(Strategy.name == name)
     row = (await db.execute(stmt)).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
 
-    return StrategyDefaults()
+    strategies_dir = Path(settings.paths.strategies)
+    symbols: list[str] = []
+    interval: str | None = None
+
+    try:
+        # Case 1: portfolio folder with portfolio.yaml
+        yaml_path = strategies_dir / name / "portfolio.yaml"
+        if yaml_path.exists():
+            with open(yaml_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            symbols = cfg.get("symbols", [])
+            interval = cfg.get("interval") or None
+
+        else:
+            # Case 2: single .py file — load module and inspect SYMBOL_PROFILES
+            file_path = Path(row.file_path)
+            if file_path.suffix == ".py" and file_path.exists():
+                from tinohelm.strategy.module_loader import load_module_from_file
+
+                mod = load_module_from_file(file_path)
+                profiles = getattr(mod, "SYMBOL_PROFILES", None)
+                if profiles and isinstance(profiles, dict):
+                    # Convert Jesse-format keys (BTC-USDT) back to NT format (BTCUSDT-PERP)
+                    for jesse_key in profiles:
+                        parts = jesse_key.split("-")
+                        if len(parts) == 2:
+                            symbols.append(f"{parts[0]}{parts[1]}-PERP")
+                        else:
+                            symbols.append(jesse_key)
+    except Exception as e:
+        logger.warning("Failed to load defaults for strategy %s: %s", name, e)
+
+    subscriptions = _build_subscriptions(symbols, interval)
+
+    return StrategyDefaults(
+        symbols=symbols,
+        interval=interval,
+        subscriptions=subscriptions,
+    )
 
 
 @router.post("/create", response_model=CreateStrategyResponse)

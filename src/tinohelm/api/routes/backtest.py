@@ -47,6 +47,12 @@ class BacktestRunRequest(BaseModel):
     params: dict | None = None
     # New: fill model config
     fill_model: dict | None = None
+    # Fee config — e.g. "0.02%" or "0.0002"
+    maker_fee: str | None = None
+    taker_fee: str | None = None
+    # Strategy warmup and tagging
+    warmup_bars: int | None = None
+    tags: str | None = None
 
     @model_validator(mode="after")
     def _normalise_symbols_intervals(self) -> "BacktestRunRequest":
@@ -116,6 +122,23 @@ class BacktestCancelResponse(BaseModel):
     status: str
 
 
+class BacktestEstimateRequest(BaseModel):
+    """Request body for POST /estimate."""
+
+    symbols: list[str]
+    interval: str  # e.g. "5m", "15m", "1h"
+    start_date: str  # "2026-01-01"
+    end_date: str  # "2026-03-31"
+
+
+class BacktestEstimateResponse(BaseModel):
+    """Response body for POST /estimate."""
+
+    total_bars: int
+    estimated_seconds: int
+    estimated_label: str  # e.g. "~15 min", "~2.5 小时"
+
+
 class BacktestDeleteResponse(BaseModel):
     """Response body for DELETE /{run_id}."""
 
@@ -124,6 +147,26 @@ class BacktestDeleteResponse(BaseModel):
 
 
 # ---- helpers ----
+
+_BARS_PER_DAY: dict[str, int] = {
+    "1m": 1440,
+    "5m": 288,
+    "15m": 96,
+    "1h": 24,
+    "4h": 6,
+}
+
+_BARS_PER_SEC = 50_000
+
+
+def _format_estimated_label(seconds: int) -> str:
+    if seconds < 60:
+        return f"~{seconds}s"
+    if seconds < 3600:
+        return f"~{seconds // 60}m"
+    hours = seconds / 3600
+    return f"~{hours:.1f} 小时"
+
 
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 _HEX_RE = re.compile(r'^[0-9a-f]+$')
@@ -183,6 +226,29 @@ async def resolve_run_id(prefix: str, db: AsyncSession) -> str:
 
 # ---- routes ----
 
+@router.post("/estimate", response_model=BacktestEstimateResponse)
+async def estimate_backtest(body: BacktestEstimateRequest) -> BacktestEstimateResponse:
+    """Return estimated runtime and bar count for a backtest configuration (no DB queries)."""
+    try:
+        start = date.fromisoformat(body.start_date)
+        end = date.fromisoformat(body.end_date)
+        days = max(0, (end - start).days)
+    except (ValueError, TypeError):
+        return BacktestEstimateResponse(total_bars=0, estimated_seconds=0, estimated_label="—")
+
+    bars_per_day = _BARS_PER_DAY.get(body.interval.lower(), 0)
+    num_symbols = len([s for s in body.symbols if s.strip()])
+    total_bars = days * bars_per_day * max(1, num_symbols)
+    estimated_seconds = max(1, total_bars // _BARS_PER_SEC) if total_bars > 0 else 0
+    label = _format_estimated_label(estimated_seconds) if total_bars > 0 else "—"
+
+    return BacktestEstimateResponse(
+        total_bars=total_bars,
+        estimated_seconds=estimated_seconds,
+        estimated_label=label,
+    )
+
+
 @router.post("/run", response_model=BacktestRunResponse)
 async def create_backtest_run(
     body: BacktestRunRequest,
@@ -240,6 +306,10 @@ async def create_backtest_run(
             "leverage": body.leverage,
         },
         "fill_model": body.fill_model,
+        "maker_fee": body.maker_fee,
+        "taker_fee": body.taker_fee,
+        "warmup_bars": body.warmup_bars,
+        "tags": body.tags,
     })
     await rds.lpush("tino:backtest:queue", job_payload)
 
