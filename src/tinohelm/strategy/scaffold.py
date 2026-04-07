@@ -91,6 +91,18 @@ class {class_name}Config(StrategyConfig):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 按品种参数 (可选)
+# ═══════════════════════════════════════════════════════════════════
+# Jesse 格式 key（如 "BTC-USDT"）。loader 启动时自动校验品种是否存在。
+# 未匹配的品种会 WARNING 并使用 Config 默认值。
+#
+# SYMBOL_PROFILES = {{
+#     "BTC-USDT": {{"trade_size": Decimal("0.001"), "sl_pct": 0.015, "tp_pct": 0.03}},
+#     "ETH-USDT": {{"trade_size": Decimal("0.01"),  "sl_pct": 0.02,  "tp_pct": 0.05}},
+# }}
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 策略
 # ═══════════════════════════════════════════════════════════════════
 
@@ -164,6 +176,10 @@ class {class_name}(Strategy):
                 continue
             self._instruments[symbol] = inst
 
+            # 按品种参数覆盖（symbol_params 或 SYMBOL_PROFILES 均可）
+            # sp = self._symbol_params.get(symbol, {{}})
+            # local_sl = sp.get("sl_pct", self.sl_pct)
+
             # 订阅 bar
             if nt_sym in resolved_map:
                 bt_str = resolved_map[nt_sym]
@@ -173,8 +189,9 @@ class {class_name}(Strategy):
             self._bar_types[symbol] = bt
             self.subscribe_bars(bt)
 
-            # 如需 tick 级执行，取消下行注释:
-            # self.subscribe_quote_ticks(inst.id)
+            # 如需 tick 级数据，取消对应注释:
+            # self.subscribe_quote_ticks(inst.id)   → on_quote_tick()
+            # self.subscribe_trade_ticks(inst.id)   → on_trade_tick()（需先 fetch aggTrades 数据）
 
         if self._instruments:
             first_inst = next(iter(self._instruments.values()))
@@ -188,9 +205,9 @@ class {class_name}(Strategy):
         # risk_engine.set_trading_state() 强制执行（HALTED/REDUCING）。
         # 策略无需自行管理 — 违规订单会直接 OrderDenied。
 
-        # 可选: 定时器 → on_event(TimeEvent)
+        # 可选: 定时器 → on_event() 中通过 TimeEvent 接收
         # import pandas as pd
-        # self.clock.set_timer("check", interval=pd.Timedelta(minutes=5))
+        # self.clock.set_timer("rebalance", interval=pd.Timedelta(minutes=5))
 
         self.log.info(f"启动，品种: {{self.symbols}}")
 
@@ -307,11 +324,31 @@ class {class_name}(Strategy):
         pass
 
     def on_trade_tick(self, tick: TradeTick) -> None:
-        """每笔成交时触发（需 subscribe_trade_ticks）。
+        """每笔成交时触发（需 subscribe_trade_ticks + fetch aggTrades 数据）。
 
-        字段: tick.price, tick.size, tick.aggressor_side
+        字段:
+            tick.price           — 成交价 (Price)
+            tick.size            — 成交量 (Quantity)
+            tick.aggressor_side  — 主动方 (AggressorSide.BUYER / SELLER / NO_AGGRESSOR)
+            tick.trade_id        — 成交 ID (TradeId)
+            tick.ts_event        — 成交时间 (纳秒)
+            tick.instrument_id   — 品种
+
         适合: 成交量分析、大单检测、微观结构策略。
+        回测中 TradeTick 会触发订单撮合（比纯 Bar 更精确）。
         """
+        # ┌─────────────────────────────────────────────────────┐
+        # │ 示例: 大单检测 — 主动买入量超阈值时记录              │
+        # └─────────────────────────────────────────────────────┘
+        # from nautilus_trader.model.enums import AggressorSide
+        # if (
+        #     tick.aggressor_side == AggressorSide.BUYER
+        #     and float(tick.size) > 10.0  # 自定义阈值
+        # ):
+        #     self.log.info(
+        #         f"大单买入: {{tick.instrument_id}} "
+        #         f"qty={{tick.size}} @ {{tick.price}}"
+        #     )
         pass
 
     # on_order_book(book)      — 订单簿快照（需 subscribe_order_book）
@@ -503,11 +540,19 @@ class {class_name}(Strategy):
     def on_event(self, event) -> None:
         """通用事件回退 — 捕获所有未被专用回调处理的事件。
 
-        常用于 TimeEvent（定时器）:
+        常用于 TimeEvent（定时器，需在 on_start 中 set_timer）:
             from nautilus_trader.common.events import TimeEvent
-            if isinstance(event, TimeEvent) and event.name == "check":
-                self._periodic_check()
+            if isinstance(event, TimeEvent) and event.name == "rebalance":
+                self._periodic_rebalance()
         """
+        # ┌─────────────────────────────────────────────────────┐
+        # │ 示例: 配合 on_start 中的 set_timer("rebalance")    │
+        # └─────────────────────────────────────────────────────┘
+        # from nautilus_trader.common.events import TimeEvent
+        # if isinstance(event, TimeEvent) and event.name == "rebalance":
+        #     for symbol, inst in self._instruments.items():
+        #         pos = self._position(inst.id)
+        #         self.log.info(f"定时检查 {{symbol}}: 持仓={{'有' if pos else '无'}}")
         pass
 
     # ═══════════════════════════════════════════════════════════════
