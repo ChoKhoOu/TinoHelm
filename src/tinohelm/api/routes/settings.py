@@ -187,7 +187,7 @@ async def exchange_latency() -> list[ExchangeLatency]:
             try:
                 t0 = time.monotonic()
                 resp = await client.get(url)
-                elapsed = (time.monotonic() - t0) * 1000
+                elapsed = (time.monotonic() - t0) * 1000 / 2  # one-way latency
                 results.append(ExchangeLatency(
                     name=name,
                     latency_ms=round(elapsed, 1),

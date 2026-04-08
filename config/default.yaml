@@ -18,5 +18,9 @@ paths:
   artifacts: "tino/data/artifacts"
   logs: "tino/logs"
 
+data:
+  download_concurrency: 5
+  convert_workers: 4
+
 backtest:
   max_workers: 2

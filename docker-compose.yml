@@ -44,6 +44,7 @@ services:
       - ~/.tino/data/catalog:/app/tino/data/catalog
       - ~/.tino/data/artifacts:/app/tino/data/artifacts
       - ~/.tino/logs:/app/tino/logs
+      - ~/.tino/research:/app/tino/research
       - ~/.tino/config:/app/config
     depends_on:
       postgres:

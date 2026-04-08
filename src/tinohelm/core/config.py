@@ -39,7 +39,13 @@ class PathSettings(BaseModel):
     strategies: Path = Path("tino/strategies")
     catalog: Path = Path("tino/data/catalog")
     artifacts: Path = Path("tino/data/artifacts")
+    research: Path = Path("tino/research")
     logs: Path = Path("tino/logs")
+
+
+class DataSettings(BaseModel):
+    download_concurrency: int = 5
+    convert_workers: int = 4
 
 
 class BacktestSettings(BaseModel):
@@ -65,6 +71,7 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     binance: BinanceSettings = Field(default_factory=BinanceSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
+    data: DataSettings = Field(default_factory=DataSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     risk: RiskConfig = Field(default_factory=RiskConfig)
 
