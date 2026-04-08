@@ -36,6 +36,7 @@ class DataCatalogItem(BaseModel):
     file_path: str
     size_bytes: int
     record_count: int | None = None
+    source_type: str | None = None
     created_at: str | None = None
 
 
@@ -161,6 +162,7 @@ async def list_data_catalog(
             file_path=r.file_path,
             size_bytes=r.size_bytes,
             record_count=r.record_count,
+            source_type=r.source_type,
             created_at=r.created_at.isoformat() if r.created_at else None,
         )
         for r in rows
@@ -426,12 +428,13 @@ async def scan_data_catalog(
                 DataCatalog.data_type == "bar",
                 DataCatalog.interval == interval,
             )
-            existing = (await db.execute(stmt)).scalar_one_or_none()
-            if existing:
-                existing.start_date = min(existing.start_date, start_date)
-                existing.end_date = max(existing.end_date, end_date)
-                existing.size_bytes = size_bytes
-                existing.record_count = record_count
+            existing_rows = (await db.execute(stmt)).scalars().all()
+            if existing_rows:
+                for row in existing_rows:
+                    row.start_date = min(row.start_date, start_date)
+                    row.end_date = max(row.end_date, end_date)
+                    row.size_bytes = size_bytes
+                    row.record_count = record_count
                 updated += 1
             else:
                 db.add(DataCatalog(
@@ -448,10 +451,16 @@ async def scan_data_catalog(
 
             logger.info("Scan: %s %s [%s..%s] %d bytes", symbol, interval, start_date, end_date, size_bytes)
 
-    # Scan trade_tick directories
-    trade_tick_dir = Path(catalog_path) / "data" / "trade_tick"
-    if trade_tick_dir.exists():
-        sym_pattern = re.compile(r"^(.+)\.BINANCE$")
+    # Scan trade_tick directories (resolve per source_type: aggTrades, trades)
+    from tinohelm.data.catalog import resolve_catalog_path
+    _tick_source_types = ("aggTrades", "trades")
+    seen_tick_symbols: set[str] = set()
+    sym_pattern = re.compile(r"^(.+)\.BINANCE$")
+    for _src_type in _tick_source_types:
+        resolved_path = resolve_catalog_path(catalog_path, _src_type)
+        trade_tick_dir = Path(resolved_path) / "data" / "trade_tick"
+        if not trade_tick_dir.exists():
+            continue
         for entry in sorted(trade_tick_dir.iterdir()):
             if not entry.is_dir():
                 continue
@@ -459,6 +468,9 @@ async def scan_data_catalog(
             if not m:
                 continue
             symbol = m.group(1)
+            if symbol in seen_tick_symbols:
+                continue
+            seen_tick_symbols.add(symbol)
             parquet_files = list(entry.glob("*.parquet"))
             if not parquet_files:
                 continue
@@ -472,6 +484,13 @@ async def scan_data_catalog(
                 for pf in parquet_files:
                     meta = pq.read_metadata(pf)
                     total_rows += meta.num_rows
+                    for rg_idx in range(meta.num_row_groups):
+                        rg = meta.row_group(rg_idx)
+                        for col_idx in range(rg.num_columns):
+                            col = rg.column(col_idx)
+                            if col.path_in_schema == "ts_init" and col.statistics and col.statistics.has_min_max:
+                                ts_min_val = min(ts_min_val, col.statistics.min)
+                                ts_max_val = max(ts_max_val, col.statistics.max)
                 start_dt = datetime.fromtimestamp(ts_min_val / 1e9, tz=timezone.utc).date() if ts_min_val != float("inf") else None
                 end_dt = datetime.fromtimestamp(ts_max_val / 1e9, tz=timezone.utc).date() if ts_max_val != 0 else None
             except Exception:
@@ -490,14 +509,15 @@ async def scan_data_catalog(
                 DataCatalog.data_type == "trade_tick",
                 DataCatalog.interval == "tick",
             )
-            existing = (await db.execute(stmt)).scalar_one_or_none()
-            if existing:
-                existing.start_date = min(existing.start_date, start_dt)
-                existing.end_date = max(existing.end_date, end_dt)
-                existing.size_bytes = sz
-                if total_rows is not None:
-                    existing.record_count = total_rows
-                updated += 1
+            existing_rows = (await db.execute(stmt)).scalars().all()
+            if existing_rows:
+                for row in existing_rows:
+                    row.start_date = min(row.start_date, start_dt)
+                    row.end_date = max(row.end_date, end_dt)
+                    row.size_bytes = sz
+                    if total_rows is not None:
+                        row.record_count = total_rows
+                    updated += 1
             else:
                 db.add(DataCatalog(
                     symbol=symbol,

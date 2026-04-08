@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 
 import redis.asyncio as aioredis
@@ -65,6 +66,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
     factory = get_session_factory()
     rds = aioredis.from_url(redis_url, decode_responses=True)
     progress_channel = f"tino:data:progress:{job_id}"
+    symbol = data_type = ""
 
     try:
         # Load job from DB
@@ -96,16 +98,22 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             asset_class = job.asset_class
 
         # Progress callback — updates DB + publishes to Redis
+        _last_db_write = 0.0
+
         async def _progress(pct: int, msg: str):
+            nonlocal _last_db_write
             payload = {
+                "type": "data.fetch.progress",
                 "job_id": job_id, "symbol": symbol, "data_type": data_type,
                 "progress": pct, "message": msg,
             }
             if interval:
                 payload["interval"] = interval
             await rds.publish(progress_channel, json.dumps(payload))
-            # Throttle DB writes: only on significant changes
-            if pct % 10 == 0 or pct >= 100:
+            # Time-based DB throttle: at most once per 2s, always at start/end
+            now = time.monotonic()
+            if pct == 0 or pct >= 100 or (now - _last_db_write) >= 2.0:
+                _last_db_write = now
                 async with factory() as db2:
                     await db2.execute(
                         update(DataFetchJob)
@@ -147,6 +155,15 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             job_id, symbol, data_type, result.objects_count,
         )
 
+        # Publish completion event → EventBridge → WS → toast
+        await rds.publish("tino:data:events", json.dumps({
+            "type": "data.fetch.completed",
+            "job_id": job_id,
+            "symbol": symbol,
+            "data_type": data_type,
+            "objects_count": result.objects_count,
+        }))
+
     except Exception as exc:
         logger.exception("Data-fetch job %s failed: %s", job_id, exc)
         try:
@@ -161,6 +178,14 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     )
                 )
                 await db.commit()
+            # Publish failure event → EventBridge → WS → toast
+            await rds.publish("tino:data:events", json.dumps({
+                "type": "data.fetch.failed",
+                "job_id": job_id,
+                "symbol": symbol,
+                "data_type": data_type,
+                "error": str(exc)[:200],
+            }))
         except Exception:
             logger.exception("Failed to update job %s status to failed", job_id)
     finally:

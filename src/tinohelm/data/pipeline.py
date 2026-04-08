@@ -55,7 +55,7 @@ _INTERVAL_CONVENTION: dict[str, str] = {
 }
 
 # Default chunk size for large-file converters
-_CHUNK_SIZE = 500_000
+_CHUNK_SIZE = 10_000_000
 
 
 @dataclass
@@ -89,8 +89,13 @@ class BinanceVisionPipeline:
         catalog_path: str | Path,
         raw_dir: str | Path = "~/.tino/data/raw",
     ) -> None:
+        from tinohelm.core.config import get_settings
+        cfg = get_settings()
         self.catalog_path = str(catalog_path)
-        self.downloader = VisionDownloader(raw_dir=raw_dir)
+        self.downloader = VisionDownloader(
+            raw_dir=raw_dir, concurrency=cfg.data.download_concurrency,
+        )
+        self._convert_workers = cfg.data.convert_workers
 
     # ------------------------------------------------------------------
     # Public API
@@ -159,57 +164,105 @@ class BinanceVisionPipeline:
                 start=start, end=end, skipped=True,
             )
 
-        # 2. Download + checksum + extract (parallel with semaphore)
-        concurrency = self.downloader.concurrency
-        sem = asyncio.Semaphore(concurrency)
-        await _progress(5, f"Downloading {len(tasks)} file(s) (×{concurrency})...")
-        csv_paths: list[Path] = []
-        done_count = 0
-
-        async def _download_one(task):
-            nonlocal done_count
-            async with sem:
-                try:
-                    csv_path = await self.downloader.execute_task(task)
-                    csv_paths.append(csv_path)
-                except Exception as exc:
-                    logger.warning(
-                        "Download failed for %s: %s — skipping", task.url, exc,
-                    )
-                done_count += 1
-                pct = 5 + int(70 * done_count / len(tasks))
-                await _progress(pct, f"Downloaded {done_count}/{len(tasks)}")
-
-        await asyncio.gather(*[_download_one(t) for t in tasks])
-
-        if not csv_paths:
-            await _progress(100, "All downloads failed")
-            return IngestResult(
-                symbol=symbol, data_type=data_type,
-                objects_count=0, files_written=0,
-                start=start, end=end,
-            )
-
-        # 3. Convert + write
-        await _progress(78, "Converting data...")
+        # 2. Prepare converter (before downloads so conversion can start immediately)
         instrument = self._get_instrument(symbol)
         converter = get_converter(data_type)
         kwargs = self._build_converter_kwargs(
             data_type, symbol, interval, instrument,
         )
+        self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
 
+        # 3. Pipelined download → convert (overlap via asyncio.Queue)
+        dl_concurrency = self.downloader.concurrency
+        n_converters = self._convert_workers
+        sem = asyncio.Semaphore(dl_concurrency)
+        total_tasks = len(tasks)
+        await _progress(5, f"Downloading {len(tasks)} file(s) (×{dl_concurrency}, convert ×{n_converters})...")
+
+        csv_queue: asyncio.Queue[Path | None] = asyncio.Queue()
+        download_done = 0
+        convert_done = 0
         total_objects = 0
         all_file_paths: list[str] = []
+        download_failed = 0
 
-        if converter.supports_chunked:
-            total_objects, all_file_paths = await self._ingest_chunked(
-                csv_paths, converter, instrument, kwargs,
-                symbol, data_type, interval, _progress,
-            )
-        else:
-            total_objects, all_file_paths = await self._ingest_full(
-                csv_paths, converter, instrument, kwargs,
-                symbol, data_type, interval, _progress,
+        async def _download_one(task):
+            nonlocal download_done, download_failed
+            async with sem:
+                try:
+                    csv_path = await self.downloader.execute_task(task)
+                    if csv_path:
+                        await csv_queue.put(csv_path)
+                    else:
+                        download_failed += 1
+                except Exception as exc:
+                    logger.warning(
+                        "Download failed for %s: %s — skipping", task.url, exc,
+                    )
+                    download_failed += 1
+                download_done += 1
+                await _progress(
+                    5 + round(85 * convert_done / total_tasks),
+                    f"下载 {download_done}/{total_tasks}",
+                )
+
+        async def _download_all():
+            await asyncio.gather(*[_download_one(t) for t in tasks])
+            # Send one sentinel per converter worker
+            for _ in range(n_converters):
+                await csv_queue.put(None)
+
+        async def _convert_consumer():
+            nonlocal convert_done, total_objects
+            schema_validated = False
+            loop = asyncio.get_running_loop()
+            while True:
+                csv_path = await csv_queue.get()
+                if csv_path is None:
+                    break
+
+                # Thread-safe chunk callback: interpolates within current file's range
+                _cd = convert_done  # snapshot before executor starts
+                def _chunk_cb(objects_so_far):
+                    base = 5 + round(85 * _cd / total_tasks)
+                    nxt = 5 + round(85 * (_cd + 1) / total_tasks)
+                    chunks = max(1, objects_so_far // _CHUNK_SIZE)
+                    sub = base + round((nxt - base) * chunks / (chunks + 2))
+                    sub = min(sub, nxt - 1)
+                    asyncio.run_coroutine_threadsafe(
+                        _progress(sub, f"转换中 {objects_so_far:,} objects..."),
+                        loop,
+                    )
+
+                try:
+                    n, fps = await loop.run_in_executor(
+                        None, self._convert_one_file,
+                        csv_path, converter, instrument, kwargs,
+                        symbol, data_type, interval, schema_validated,
+                        _chunk_cb,
+                    )
+                    schema_validated = True
+                    total_objects += n
+                    all_file_paths.extend(fps)
+                except Exception:
+                    logger.warning("Convert failed for %s", csv_path, exc_info=True)
+                self._cleanup_raw_file(csv_path)
+                convert_done += 1
+                pct = 5 + round(85 * convert_done / total_tasks)
+                await _progress(
+                    pct,
+                    f"已完成 {convert_done}/{total_tasks} ({total_objects:,} objects)",
+                )
+
+        consumers = [_convert_consumer() for _ in range(n_converters)]
+        await asyncio.gather(_download_all(), *consumers)
+
+        if total_objects == 0 and download_failed == total_tasks:
+            await _progress(100, "All downloads failed")
+            return IngestResult(
+                symbol=symbol, data_type=data_type,
+                objects_count=0, files_written=0,
+                start=start, end=end,
             )
 
         # 4. REST API fallback for recent data gap
@@ -239,10 +292,11 @@ class BinanceVisionPipeline:
         # 5. Update DB catalog
         await _progress(96, "Updating catalog database...")
         # Compute size_bytes from written files
+        unique_paths = set(all_file_paths)
         written_size = sum(
-            Path(p).stat().st_size for p in all_file_paths
+            Path(p).stat().st_size for p in unique_paths
             if Path(p).exists()
-        ) if all_file_paths else None
+        ) if unique_paths else None
         try:
             await self._update_db_catalog(
                 symbol, data_type, interval, start, end,
@@ -276,7 +330,7 @@ class BinanceVisionPipeline:
         return asyncio.run(self.ingest(**kwargs))
 
     # ------------------------------------------------------------------
-    # Conversion strategies
+    # Streaming conversion (bounded memory)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -289,7 +343,31 @@ class BinanceVisionPipeline:
             return 0
         return None
 
-    async def _ingest_full(
+    def _convert_one_file(
+        self, csv_path, converter, instrument, kwargs,
+        symbol, data_type, interval, schema_validated,
+        chunk_cb=None,
+    ) -> tuple[int, list[str]]:
+        """Convert a single CSV file (sync, runs in executor thread)."""
+        try:
+            hdr = self._detect_header(csv_path)
+        except Exception:
+            logger.warning("Failed to read CSV header %s", csv_path, exc_info=True)
+            return 0, []
+
+        if converter.supports_chunked:
+            return self._stream_chunked_file(
+                csv_path, hdr, converter, instrument, kwargs,
+                symbol, data_type, interval, schema_validated,
+                chunk_cb=chunk_cb,
+            )
+        else:
+            return self._stream_full_file(
+                csv_path, hdr, converter, instrument, kwargs,
+                symbol, data_type, interval, schema_validated,
+            )
+
+    async def _ingest_streaming(
         self,
         csv_paths: list[Path],
         converter,
@@ -300,49 +378,12 @@ class BinanceVisionPipeline:
         interval: str | None,
         _progress,
     ) -> tuple[int, list[str]]:
-        """Load all CSVs into one DataFrame, convert, write once."""
-        dfs = []
-        for p in csv_paths:
-            try:
-                hdr = self._detect_header(p)
-                df = pd.read_csv(p, header=hdr)
-                if hdr == 0:
-                    df.columns = range(len(df.columns))
-                dfs.append(df)
-            except Exception:
-                logger.warning("Failed to read CSV %s", p, exc_info=True)
+        """Process CSVs one at a time to bound memory usage.
 
-        if not dfs:
-            return 0, []
-
-        merged = pd.concat(dfs, ignore_index=True)
-        del dfs
-
-        converter.validate_schema(merged)
-        objects = converter.convert(merged, instrument, **kwargs)
-        del merged
-
-        if not objects:
-            return 0, []
-
-        await _progress(88, f"Writing {len(objects)} objects to catalog...")
-        file_paths = self._write_objects(
-            objects, symbol, data_type, interval,
-        )
-        return len(objects), file_paths
-
-    async def _ingest_chunked(
-        self,
-        csv_paths: list[Path],
-        converter,
-        instrument,
-        kwargs: dict,
-        symbol: str,
-        data_type: str,
-        interval: str | None,
-        _progress,
-    ) -> tuple[int, list[str]]:
-        """Process large CSVs in chunks to avoid OOM."""
+        For chunked converters: reads in chunks, converts, flushes periodically.
+        For non-chunked converters: reads one full CSV, converts, writes, moves on.
+        Deletes each CSV (and its ZIP) after processing to free disk space.
+        """
         total_objects = 0
         all_file_paths: list[str] = []
         schema_validated = False
@@ -350,43 +391,111 @@ class BinanceVisionPipeline:
         for csv_idx, csv_path in enumerate(csv_paths):
             try:
                 hdr = self._detect_header(csv_path)
-                reader = pd.read_csv(csv_path, header=hdr, chunksize=_CHUNK_SIZE)
             except Exception:
-                logger.warning("Failed to open CSV %s", csv_path, exc_info=True)
+                logger.warning("Failed to read CSV header %s", csv_path, exc_info=True)
                 continue
 
-            chunk_objects: list = []
-            for chunk in reader:
-                if hdr == 0:
-                    chunk.columns = range(len(chunk.columns))
-                if not schema_validated:
-                    converter.validate_schema(chunk)
-                    schema_validated = True
-
-                objs = converter.convert_chunk(chunk, instrument, **kwargs)
-                chunk_objects.extend(objs)
-
-                # Flush periodically to control memory
-                if len(chunk_objects) >= _CHUNK_SIZE:
-                    fps = self._write_objects(
-                        chunk_objects, symbol, data_type, interval,
-                    )
-                    total_objects += len(chunk_objects)
-                    all_file_paths.extend(fps)
-                    chunk_objects = []
-
-            # Flush remainder
-            if chunk_objects:
-                fps = self._write_objects(
-                    chunk_objects, symbol, data_type, interval,
+            if converter.supports_chunked:
+                n, fps = self._stream_chunked_file(
+                    csv_path, hdr, converter, instrument, kwargs,
+                    symbol, data_type, interval, schema_validated,
                 )
-                total_objects += len(chunk_objects)
-                all_file_paths.extend(fps)
+            else:
+                n, fps = self._stream_full_file(
+                    csv_path, hdr, converter, instrument, kwargs,
+                    symbol, data_type, interval, schema_validated,
+                )
+
+            schema_validated = True
+            total_objects += n
+            all_file_paths.extend(fps)
+
+            # Free disk: remove processed CSV and its ZIP
+            self._cleanup_raw_file(csv_path)
 
             pct = 78 + int(12 * (csv_idx + 1) / len(csv_paths))
-            await _progress(pct, f"Converted {csv_idx+1}/{len(csv_paths)} files ({total_objects} objects)")
+            await _progress(
+                pct,
+                f"Converted {csv_idx + 1}/{len(csv_paths)} files ({total_objects} objects)",
+            )
 
         return total_objects, all_file_paths
+
+    def _stream_chunked_file(
+        self, csv_path, hdr, converter, instrument, kwargs,
+        symbol, data_type, interval, schema_validated,
+        chunk_cb=None,
+    ) -> tuple[int, list[str]]:
+        """Read one CSV in chunks, convert, flush periodically."""
+        try:
+            reader = pd.read_csv(csv_path, header=hdr, chunksize=_CHUNK_SIZE)
+        except Exception:
+            logger.warning("Failed to open CSV %s", csv_path, exc_info=True)
+            return 0, []
+
+        count = 0
+        fps: list[str] = []
+        chunk_objects: list = []
+
+        for chunk in reader:
+            if hdr == 0:
+                chunk.columns = range(len(chunk.columns))
+            if not schema_validated:
+                converter.validate_schema(chunk)
+                schema_validated = True
+
+            objs = converter.convert_chunk(chunk, instrument, **kwargs)
+            chunk_objects.extend(objs)
+
+            if len(chunk_objects) >= _CHUNK_SIZE:
+                fp = self._write_objects(
+                    chunk_objects, symbol, data_type, interval, merge=False,
+                )
+                count += len(chunk_objects)
+                fps.extend(fp)
+                chunk_objects = []
+                if chunk_cb:
+                    chunk_cb(count)
+
+        if chunk_objects:
+            fp = self._write_objects(
+                chunk_objects, symbol, data_type, interval, merge=False,
+            )
+            count += len(chunk_objects)
+            fps.extend(fp)
+            if chunk_cb:
+                chunk_cb(count)
+
+        return count, fps
+
+    def _stream_full_file(
+        self, csv_path, hdr, converter, instrument, kwargs,
+        symbol, data_type, interval, schema_validated,
+    ) -> tuple[int, list[str]]:
+        """Read one full CSV, convert, write."""
+        try:
+            df = pd.read_csv(csv_path, header=hdr)
+            if hdr == 0:
+                df.columns = range(len(df.columns))
+        except Exception:
+            logger.warning("Failed to read CSV %s", csv_path, exc_info=True)
+            return 0, []
+
+        if not schema_validated:
+            converter.validate_schema(df)
+
+        objects = converter.convert(df, instrument, **kwargs)
+        del df
+
+        if not objects:
+            return 0, []
+
+        fps = self._write_objects(
+            objects, symbol, data_type, interval, merge=False,
+        )
+        count = len(objects)
+        del objects
+        return count, fps
 
     # ------------------------------------------------------------------
     # Write helpers
@@ -398,6 +507,7 @@ class BinanceVisionPipeline:
         symbol: str,
         data_type: str,
         interval: str | None,
+        merge: bool = True,
     ) -> list[str]:
         """Write converted NT objects to the Parquet catalog."""
         if not objects:
@@ -413,6 +523,7 @@ class BinanceVisionPipeline:
             paths = write_bars(
                 bars=objects, symbol=symbol,
                 interval=interval, catalog_path=self.catalog_path,
+                merge=merge, source_type=data_type,
             )
             return [str(p) for p in paths]
 
@@ -421,6 +532,7 @@ class BinanceVisionPipeline:
             paths = write_trade_ticks(
                 ticks=objects, symbol=symbol,
                 catalog_path=self.catalog_path,
+                source_type=data_type,
             )
             return paths
 
@@ -562,7 +674,7 @@ class BinanceVisionPipeline:
         df = pd.DataFrame(klines)
         bars = converter.convert(df, instrument, **kwargs)
         if bars:
-            paths = write_bars(bars, symbol, interval, self.catalog_path)
+            paths = write_bars(bars, symbol, interval, self.catalog_path, merge=False, source_type=data_type)
             return len(bars), [str(p) for p in paths]
         return 0, []
 
@@ -584,13 +696,117 @@ class BinanceVisionPipeline:
 
         ticks = agg_trades_to_trade_ticks(agg_trades, symbol)
         if ticks:
-            paths = write_trade_ticks(ticks, symbol, self.catalog_path)
+            paths = write_trade_ticks(ticks, symbol, self.catalog_path, source_type="aggTrades")
             return len(ticks), paths
         return 0, []
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _clean_overlapping_parquet(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        start: date,
+        end: date,
+    ) -> None:
+        """Delete parquet files whose time range overlaps with [start, end].
+
+        Uses parquet row-group statistics to check each file's timestamp
+        range **without loading data into memory**.  Files whose range
+        cannot be determined are deleted conservatively.
+        Non-overlapping files from other date ranges are preserved.
+        """
+        category = _WRITE_CATEGORY.get(data_type)
+        if category == "bar" and interval:
+            from tinohelm.data.catalog import _make_bar_type, _make_instrument
+            inst = _make_instrument(symbol)
+            bar_type = _make_bar_type(inst.id, interval)
+            target_dir = Path(self.catalog_path) / "data" / "bar" / str(bar_type)
+        elif category == "trade_tick":
+            inst = self._get_instrument(symbol)
+            target_dir = Path(self.catalog_path) / "data" / "trade_tick" / str(inst.id)
+        else:
+            return  # funding_rate etc. use JSON, no parquet cleanup needed
+
+        if not target_dir.exists():
+            return
+
+        start_ns = int(
+            datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+            .timestamp() * 1_000_000_000
+        )
+        end_ns = int(
+            datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+            .timestamp() * 1_000_000_000
+        )
+
+        deleted = 0
+        for fpath in list(target_dir.glob("*.parquet")):
+            time_range = self._parquet_time_range(fpath)
+            if time_range is None:
+                # Cannot determine range — delete to be safe (will be re-fetched)
+                fpath.unlink()
+                deleted += 1
+                continue
+            file_min, file_max = time_range
+            if file_max >= start_ns and file_min < end_ns:
+                fpath.unlink()
+                deleted += 1
+
+        if deleted:
+            logger.info(
+                "Cleaned %d overlapping parquet file(s) in %s for [%s, %s]",
+                deleted, target_dir, start, end,
+            )
+
+    @staticmethod
+    def _parquet_time_range(path: Path) -> tuple[int, int] | None:
+        """Read min/max timestamp from parquet row-group statistics.
+
+        Returns ``(min_ts_ns, max_ts_ns)`` or ``None`` if unavailable.
+        Only reads file metadata — zero row data loaded.
+        """
+        try:
+            import pyarrow.parquet as pq
+
+            pf = pq.ParquetFile(str(path))
+            schema = pf.schema_arrow
+            col_idx = None
+            for name in ("ts_event", "ts_init"):
+                try:
+                    col_idx = schema.get_field_index(name)
+                    break
+                except KeyError:
+                    continue
+            if col_idx is None:
+                return None
+
+            min_ts: int | None = None
+            max_ts: int | None = None
+            for i in range(pf.metadata.num_row_groups):
+                stats = pf.metadata.row_group(i).column(col_idx).statistics
+                if stats is None or not stats.has_min_max:
+                    return None  # incomplete statistics
+                if min_ts is None or stats.min < min_ts:
+                    min_ts = stats.min
+                if max_ts is None or stats.max > max_ts:
+                    max_ts = stats.max
+
+            return (int(min_ts), int(max_ts)) if min_ts is not None else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _cleanup_raw_file(csv_path: Path) -> None:
+        """Remove processed CSV and its ZIP to free disk space."""
+        try:
+            csv_path.unlink(missing_ok=True)
+            csv_path.with_suffix(".zip").unlink(missing_ok=True)
+        except Exception:
+            pass
 
     @staticmethod
     def _get_instrument(symbol: str):
@@ -631,8 +847,11 @@ class BinanceVisionPipeline:
         from tinohelm.db.models import DataCatalog
         from tinohelm.db.session import get_session_factory
 
+        from tinohelm.data.catalog import resolve_catalog_path
+
         category = _WRITE_CATEGORY.get(data_type, data_type)
         db_interval = interval if interval else _INTERVAL_CONVENTION.get(data_type, "tick")
+        effective_path = str(resolve_catalog_path(self.catalog_path, source_type))
 
         factory = get_session_factory()
         async with factory() as session:
@@ -640,12 +859,14 @@ class BinanceVisionPipeline:
                 DataCatalog.symbol == symbol,
                 DataCatalog.data_type == category,
                 DataCatalog.interval == db_interval,
+                DataCatalog.source_type == source_type,
             )
             existing = (await session.execute(stmt)).scalar_one_or_none()
 
             if existing:
                 existing.start_date = min(existing.start_date, start)
                 existing.end_date = max(existing.end_date, end)
+                existing.file_path = effective_path
                 if record_count is not None:
                     existing.record_count = record_count
                 if size_bytes is not None:
@@ -659,7 +880,7 @@ class BinanceVisionPipeline:
                     interval=db_interval,
                     start_date=start,
                     end_date=end,
-                    file_path=self.catalog_path,
+                    file_path=effective_path,
                     size_bytes=size_bytes or 0,
                     record_count=record_count,
                     source_type=source_type,

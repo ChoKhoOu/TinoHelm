@@ -53,6 +53,47 @@ def ensure_catalog_dirs(catalog_path: str | Path) -> Path:
     return path
 
 
+# Map DB category → user-facing directory name under the catalog root.
+_CATEGORY_DIR: dict[str, str] = {
+    "bar": "bar",
+    "trade_tick": "ticks",
+}
+
+# Re-use the pipeline's write-category mapping to resolve source→category.
+_SOURCE_TO_CATEGORY: dict[str, str] = {
+    "klines": "bar",
+    "markPriceKlines": "bar",
+    "indexPriceKlines": "bar",
+    "premiumIndexKlines": "bar",
+    "aggTrades": "trade_tick",
+    "trades": "trade_tick",
+}
+
+
+def resolve_catalog_path(base_path: str | Path, source_type: str | None) -> Path:
+    """Return the effective catalog path for a given source type.
+
+    Structure: ``base_path / {category_dir} / {source_type} /``
+
+    Examples::
+
+        resolve_catalog_path(catalog, "klines")          → catalog/bar/klines/
+        resolve_catalog_path(catalog, "markPriceKlines")  → catalog/bar/markPriceKlines/
+        resolve_catalog_path(catalog, "aggTrades")        → catalog/ticks/aggTrades/
+        resolve_catalog_path(catalog, "trades")           → catalog/ticks/trades/
+
+    Each resolved path is a valid NT ParquetDataCatalog root.
+    """
+    base = Path(base_path)
+    if not source_type:
+        return base
+    category = _SOURCE_TO_CATEGORY.get(source_type)
+    if not category:
+        return base
+    cat_dir = _CATEGORY_DIR[category]
+    return base / cat_dir / source_type
+
+
 def _interval_to_nanoseconds(interval: str) -> int:
     """Convert an interval string like '5m' or '1h' to nanoseconds."""
     step, agg_name = _INTERVAL_MAP[interval]
@@ -219,12 +260,17 @@ def write_bars(
     symbol: str,
     interval: str,
     catalog_path: str | Path,
+    merge: bool = True,
+    source_type: str | None = None,
 ) -> list[Path]:
     """Write pre-converted NT Bar objects to Parquet catalog.
 
-    Merges with any existing bars (for incremental updates), deletes old
-    parquet files, then writes everything as a single file in one write_data()
+    When *merge* is True (default), reads existing bars, deduplicates,
+    deletes old parquet files, then writes everything in one write_data()
     call — satisfying NT's disjoint-interval constraint.
+
+    When *merge* is False (streaming mode), writes directly without
+    reading existing data.  Caller must clean old files beforehand.
 
     Returns list of written file paths.
     """
@@ -233,39 +279,45 @@ def write_bars(
     if not bars:
         return []
 
-    catalog_path = ensure_catalog_dirs(catalog_path)
+    catalog_path = ensure_catalog_dirs(resolve_catalog_path(catalog_path, source_type))
     instrument = _make_instrument(symbol)
     bar_type = _make_bar_type(instrument.id, interval)
 
-    # Merge with existing bars if present (incremental update case)
-    existing_files: list[Path] = []
-    try:
-        catalog = ParquetDataCatalog(str(catalog_path))
-        existing_bars = catalog.bars(bar_types=[str(bar_type)])
-        if existing_bars:
-            # Track old files before writing new data
-            bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-            if bar_dir.exists():
-                existing_files = list(bar_dir.glob("*.parquet"))
+    if merge:
+        # Merge with existing bars if present (incremental update case)
+        existing_files: list[Path] = []
+        try:
+            catalog = ParquetDataCatalog(str(catalog_path))
+            existing_bars = catalog.bars(bar_types=[str(bar_type)])
+            if existing_bars:
+                # Track old files before writing new data
+                bar_dir = catalog_path / "data" / "bar" / str(bar_type)
+                if bar_dir.exists():
+                    existing_files = list(bar_dir.glob("*.parquet"))
 
-            seen: dict[int, Any] = {b.ts_event: b for b in existing_bars}
-            for b in bars:
-                seen[b.ts_event] = b
-            bars = sorted(seen.values(), key=lambda b: b.ts_event)
-            logger.info("Merged %d existing + %d new bars = %d total",
-                        len(existing_bars), len(bars) - len(existing_bars), len(bars))
-    except Exception:
-        logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
+                seen: dict[int, Any] = {b.ts_event: b for b in existing_bars}
+                for b in bars:
+                    seen[b.ts_event] = b
+                bars = sorted(seen.values(), key=lambda b: b.ts_event)
+                logger.info("Merged %d existing + %d new bars = %d total",
+                            len(existing_bars), len(bars) - len(existing_bars), len(bars))
+        except Exception:
+            logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
 
-    # Delete old parquet files BEFORE writing merged data to avoid
-    # NT's non-disjoint interval error (merged bars are already in memory)
-    for old_file in existing_files:
-        if old_file.exists():
-            old_file.unlink()
+        # Delete old parquet files BEFORE writing merged data to avoid
+        # NT's non-disjoint interval error (merged bars are already in memory)
+        for old_file in existing_files:
+            if old_file.exists():
+                old_file.unlink()
 
     catalog = ParquetDataCatalog(str(catalog_path))
     catalog.write_data([instrument])
-    catalog.write_data(bars)
+    # When merge=False (streaming mode), multiple files accumulate in the same
+    # directory within one ingest session.  NT uses P.closed() intervals so two
+    # files sharing a boundary nanosecond are treated as overlapping.  TinoHelm
+    # manages file lifecycle via _clean_overlapping_parquet, so it is safe to
+    # skip the disjoint check for append writes.
+    catalog.write_data(bars, skip_disjoint_check=not merge)
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
 
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)
@@ -404,6 +456,7 @@ def write_trade_ticks(
     ticks: list,
     symbol: str,
     catalog_path: str | Path,
+    source_type: str | None = None,
 ) -> list[str]:
     """Write TradeTick objects to the Parquet catalog.
 
@@ -411,15 +464,21 @@ def write_trade_ticks(
     """
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+    catalog_path = resolve_catalog_path(catalog_path, source_type)
     catalog_path = Path(catalog_path)
     catalog = ParquetDataCatalog(str(catalog_path))
 
-    catalog.write_data(ticks)
-
-    # Find written files
     from tinohelm.data.instruments import make_instrument
     instrument = make_instrument(symbol)
     tick_dir = catalog_path / "data" / "trade_tick" / str(instrument.id)
-    written = [str(f) for f in tick_dir.glob("*.parquet")] if tick_dir.exists() else []
+
+    # Snapshot existing files before write to return only new ones
+    existing = set(str(f) for f in tick_dir.glob("*.parquet")) if tick_dir.exists() else set()
+
+    catalog.write_data(ticks, skip_disjoint_check=True)
+
+    # Return only newly created files
+    current = set(str(f) for f in tick_dir.glob("*.parquet")) if tick_dir.exists() else set()
+    written = sorted(current - existing)
     logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
