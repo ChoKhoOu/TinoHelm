@@ -14,6 +14,7 @@ const pathTitles: Record<string, string> = {
   "/watchlist": "Watchlist",
   "/optimization": "Optimization",
   "/settings": "Settings",
+  "/research": "Factor Research",
 };
 
 export function TopBar() {

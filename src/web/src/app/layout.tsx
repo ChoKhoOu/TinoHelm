@@ -49,7 +49,7 @@ export default function RootLayout({
               <StatusBar />
             </div>
           </div>
-          <Toaster position="top-right" richColors />
+          <Toaster position="bottom-right" />
           <NotificationListener />
         </Providers>
       </body>

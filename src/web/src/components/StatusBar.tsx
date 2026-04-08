@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 import { FillTicker } from "@/components/FillTicker";
+import { useWsConnection } from "@/providers/WebSocketProvider";
 
 type ExchangeLatency = {
   name: string;
@@ -29,6 +30,22 @@ function useClock() {
 }
 
 const POLL_INTERVAL = 5_000; // 5s
+
+function WsIndicator() {
+  const { connected, reconnecting } = useWsConnection();
+  const dotColor = connected
+    ? "bg-qds-success"
+    : reconnecting
+      ? "bg-qds-warning"
+      : "bg-destructive";
+  const label = connected ? "WS" : reconnecting ? "WS reconnecting" : "WS disconnected";
+  return (
+    <div className="flex items-center gap-1.5 whitespace-nowrap">
+      <span className={`w-[5px] h-[5px] rounded-full ${dotColor}`} />
+      <span>{label}</span>
+    </div>
+  );
+}
 
 export function StatusBar() {
   const clock = useClock();
@@ -80,8 +97,11 @@ export function StatusBar() {
       {/* Fill ticker */}
       <FillTicker />
 
-      {/* Clock — right-aligned */}
-      <span className="ml-auto whitespace-nowrap">{clock}</span>
+      {/* WS status + Clock — right-aligned */}
+      <div className="ml-auto flex items-center gap-4">
+        <WsIndicator />
+        <span className="whitespace-nowrap">{clock}</span>
+      </div>
     </footer>
   );
 }

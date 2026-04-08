@@ -9,9 +9,10 @@ interface Props {
   delay?: number;
   duration?: number;
   direction?: "up" | "down" | "left" | "right" | "none";
+  scale?: number;
 }
 
-export function FadeIn({ children, className, style, delay = 0, duration = 0.28, direction = "up" }: Props) {
+export function FadeIn({ children, className, style, delay = 0, duration = 0.28, direction = "up", scale }: Props) {
   const offset = 12;
   const directionMap: Record<string, { x?: number; y?: number }> = {
     up: { y: offset },
@@ -23,8 +24,8 @@ export function FadeIn({ children, className, style, delay = 0, duration = 0.28,
 
   return (
     <motion.div
-      initial={{ opacity: 0, ...directionMap[direction] }}
-      animate={{ opacity: 1, x: 0, y: 0 }}
+      initial={{ opacity: 0, ...directionMap[direction], ...(scale !== undefined ? { scale } : {}) }}
+      animate={{ opacity: 1, x: 0, y: 0, ...(scale !== undefined ? { scale: 1 } : {}) }}
       transition={{ duration, delay, ease: [0.16, 1, 0.3, 1] }}
       className={className}
       style={style}

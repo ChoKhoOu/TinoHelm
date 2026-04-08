@@ -6,12 +6,11 @@ import Link from "next/link";
 import {
   LayoutDashboard, FlaskConical, Activity, Brain,
   Database, BarChart3, Eye, ArrowUpDown, Settings2, Settings,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, Hexagon,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useWsConnection } from "@/providers/WebSocketProvider";
 
 type NavItem = { href: string; label: string; icon: React.ComponentType<{ className?: string }> };
 
@@ -21,6 +20,7 @@ const navGroups: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
       { href: "/backtest", label: "Backtests", icon: FlaskConical },
+      { href: "/research", label: "Factor Research", icon: Hexagon },
     ],
   },
   {
@@ -52,7 +52,6 @@ const LS_KEY = "sidebar-collapsed";
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { connected, reconnecting } = useWsConnection();
   const [collapsed, setCollapsed] = useState(false);
 
   // Hydrate from localStorage after mount
@@ -68,13 +67,6 @@ export function Sidebar() {
       return next;
     });
   };
-
-  const wsColor = connected
-    ? "bg-qds-success"
-    : reconnecting
-      ? "bg-qds-warning animate-pulse"
-      : "bg-destructive";
-  const wsLabel = connected ? "WS connected" : reconnecting ? "Reconnecting..." : "WS disconnected";
 
   return (
     <aside
@@ -175,19 +167,6 @@ export function Sidebar() {
 
       {/* Bottom section */}
       <div className="flex flex-col gap-1 p-2 border-t shrink-0">
-        {/* WS status */}
-        <div className="flex items-center gap-2 px-2.5 py-1 font-mono text-[0.65rem] text-muted-foreground whitespace-nowrap overflow-hidden">
-          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${wsColor}`} />
-          <span
-            style={{
-              opacity: collapsed ? 0 : 1,
-              transition: `opacity var(--dur) var(--eo)`,
-            }}
-          >
-            {wsLabel}
-          </span>
-        </div>
-
         {/* Collapse toggle */}
         <button
           onClick={toggle}

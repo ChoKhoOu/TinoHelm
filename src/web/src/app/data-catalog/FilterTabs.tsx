@@ -5,6 +5,7 @@ import { FILTER_GROUPS } from "./types";
 interface FilterTabsProps {
   totalCount: number;
   typeCounts: Record<string, number>;
+  subTypeCounts: Record<string, number>;
   activeGroup: string;
   activeSub: string | null;
   onGroupChange: (group: string) => void;
@@ -20,14 +21,14 @@ function getGroupCount(groupKey: string, totalCount: number, typeCounts: Record<
 export function FilterTabs({
   totalCount,
   typeCounts,
+  subTypeCounts,
   activeGroup,
   activeSub,
   onGroupChange,
   onSubChange,
 }: FilterTabsProps) {
-  const activeGroupDef = FILTER_GROUPS[activeGroup];
-  const subTypes = activeGroupDef?.types ?? null;
-  const showSubFilter = subTypes !== null && subTypes.length > 1;
+  const subTypes = Object.keys(subTypeCounts).sort();
+  const showSubFilter = subTypes.length > 1;
 
   return (
     <>
@@ -63,7 +64,7 @@ export function FilterTabs({
           >
             全部
           </div>
-          {subTypes!.map((type) => (
+          {subTypes.map((type) => (
             <div
               key={type}
               className={`dc-sub-item${activeSub === type ? " active" : ""}`}

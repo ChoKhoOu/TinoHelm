@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { apiGet } from "@/lib/api";
+import { useWsEvent } from "@/providers/WebSocketProvider";
 
 interface DataFetchJob {
   job_id: string;
@@ -60,6 +61,23 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
     const id = setInterval(load, hasActive ? 3000 : 15000);
     return () => clearInterval(id);
   }, [jobs, load]);
+
+  // Real-time progress via WebSocket
+  const progressMsg = useWsEvent("data.fetch.progress");
+  useEffect(() => {
+    if (!progressMsg) return;
+    const p = (progressMsg as any).data ?? progressMsg;
+    const jobId = p.job_id;
+    const pct = p.progress;
+    if (!jobId || pct == null) return;
+    setJobs((prev) =>
+      prev.map((j) =>
+        j.job_id === jobId
+          ? { ...j, progress: pct, message: p.message ?? j.message, status: "running" }
+          : j,
+      ),
+    );
+  }, [progressMsg]);
 
   // Detect job completions and notify parent
   useEffect(() => {
@@ -154,12 +172,12 @@ function JobRow({ job }: { job: DataFetchJob }) {
         ) : job.status === "queued" ? (
           <span className="bt-status bt-status-queue">排队中</span>
         ) : job.status === "completed" ? (
-          <div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
             <span className="bt-status bt-status-done">✓ 完成</span>
             {job.message && <div className="dc-qprog-msg">{job.message}</div>}
           </div>
         ) : job.status === "failed" ? (
-          <div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
             <span className="bt-status bt-status-fail">✕ 失败</span>
             {(job.error || job.message) && <div className="dc-qprog-msg" style={{ color: "var(--dan)" }}>{job.error || job.message}</div>}
           </div>

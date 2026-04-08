@@ -285,7 +285,7 @@ export default function TradingPage() {
       {/* ── Environment Bar ─────────────────────────────────── */}
       <div
         className="shrink-0 flex items-center justify-between"
-        style={{ background: envBg, color: envColor, padding: ".5rem 1.25rem", borderBottom: "1px solid color-mix(in srgb, var(--env-color, currentColor) 30%, transparent)" }}
+        style={{ background: envBg, color: envColor, padding: ".5rem 1.25rem" }}
       >
         <div className="flex items-center gap-4">
           <span style={{ fontFamily: "var(--font-d)", fontSize: ".68rem", fontWeight: 600, letterSpacing: ".1em", textTransform: "uppercase" as const }}>
@@ -326,7 +326,7 @@ export default function TradingPage() {
       </div>
 
       {/* ── Title + Actions ─────────────────────────────────── */}
-      <div className="shrink-0 flex items-center justify-between px-5 py-4 border-b border">
+      <div className="shrink-0 flex items-center justify-between px-5 py-4">
         <div className="flex items-center gap-2">
           <h1 className="font-mono text-[1rem] font-semibold text-foreground">交易终端</h1>
           <span
@@ -371,7 +371,7 @@ export default function TradingPage() {
       </div>
 
       {/* ── Tab Navigation ──────────────────────────────────── */}
-      <div className="shrink-0 flex gap-0 px-5 border-b border bg-background pt-[.35rem]">
+      <div className="shrink-0 flex gap-0 px-5 bg-background pt-[.35rem]">
         {TABS.map((tab) => {
           const isActive = !selectedStrategy && activeTab === tab.id;
           const badge =

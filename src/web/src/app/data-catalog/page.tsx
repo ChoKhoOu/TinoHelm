@@ -89,13 +89,27 @@ export default function DataCatalogPage() {
     return m;
   }, [datasets]);
 
+  const subTypeCounts = useMemo(() => {
+    const group = FILTER_GROUPS[activeGroup];
+    if (!group || group.types === null) return {};
+    const m: Record<string, number> = {};
+    datasets.forEach((d) => {
+      if (group.types!.includes(d.data_type)) {
+        const st = d.source_type || d.data_type;
+        m[st] = (m[st] ?? 0) + 1;
+      }
+    });
+    return m;
+  }, [datasets, activeGroup]);
+
   const filtered = useMemo(() => {
     const group = FILTER_GROUPS[activeGroup];
     if (!group || group.types === null) {
-      return activeSub ? datasets.filter((d) => d.data_type === activeSub) : datasets;
+      return activeSub ? datasets.filter((d) => (d.source_type || d.data_type) === activeSub) : datasets;
     }
-    const types = activeSub ? [activeSub] : group.types;
-    return datasets.filter((d) => types.includes(d.data_type));
+    const groupData = datasets.filter((d) => group.types!.includes(d.data_type));
+    if (activeSub) return groupData.filter((d) => (d.source_type || d.data_type) === activeSub);
+    return groupData;
   }, [datasets, activeGroup, activeSub]);
 
   const sorted = useMemo(() => {
@@ -214,6 +228,7 @@ export default function DataCatalogPage() {
         <FilterTabs
           totalCount={datasets.length}
           typeCounts={typeCounts}
+          subTypeCounts={subTypeCounts}
           activeGroup={activeGroup}
           activeSub={activeSub}
           onGroupChange={(g) => { setActiveGroup(g); setPage(1); }}
@@ -269,8 +284,8 @@ export default function DataCatalogPage() {
                 </thead>
                 <tbody>
                   {slice.map((ds) => {
-                    const typeCls = TYPE_BADGE_CLS[ds.data_type] ?? "dc-type-kl";
-                    const typeLabel = SOURCE_TYPE_LABELS[ds.data_type] ?? ds.data_type;
+                    const typeCls = TYPE_BADGE_CLS[ds.source_type || ds.data_type] ?? "dc-type-kl";
+                    const typeLabel = SOURCE_TYPE_LABELS[ds.source_type || ds.data_type] ?? (ds.source_type || ds.data_type);
                     return (
                       <Fragment key={ds.id}>
                         <tr>
@@ -289,7 +304,7 @@ export default function DataCatalogPage() {
                                 <div style={{ fontFamily: "var(--font-d)", fontSize: ".72rem", fontWeight: 600, marginBottom: ".5rem" }}>{ds.symbol} — 数据覆盖</div>
                                 {covRows.map((r, i) => (
                                   <div key={`${r.id}-${i}`} className="dc-cov-row">
-                                    <span className={`dc-type ${TYPE_BADGE_CLS[r.data_type] ?? "dc-type-kl"}`}>{SOURCE_TYPE_LABELS[r.data_type] ?? r.data_type}</span>
+                                    <span className={`dc-type ${TYPE_BADGE_CLS[r.source_type || r.data_type] ?? "dc-type-kl"}`}>{SOURCE_TYPE_LABELS[r.source_type || r.data_type] ?? (r.source_type || r.data_type)}</span>
                                     <span className="dim">{r.interval}</span>
                                     <div className="dc-cov-bar-wrap"><div className="dc-cov-bar-fill" style={{ width: "60%" }} /></div>
                                     <span className="dim">{r.start_date}</span>

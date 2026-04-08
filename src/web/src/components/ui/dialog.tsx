@@ -31,7 +31,7 @@ function DialogOverlay({
     <DialogPrimitive.Backdrop
       data-slot="dialog-overlay"
       className={cn(
-        "qds-overlay fixed inset-0 isolate z-50 duration-100 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "qds-overlay fixed inset-0 isolate z-50 duration-300 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}
@@ -53,7 +53,7 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "qds-dialog fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 p-4 text-sm text-popover-foreground duration-200 outline-none sm:max-w-lg data-[state=open]:animate-qds-fade-up data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          "qds-dialog fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 p-4 text-sm text-popover-foreground duration-200 outline-none sm:max-w-lg data-[state=open]:animate-qds-dialog-enter data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-[0.92]",
           className
         )}
         {...props}

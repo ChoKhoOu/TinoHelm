@@ -9,8 +9,8 @@ interface Props {
 }
 
 const item: Variants = {
-  hidden: { opacity: 0, y: 12 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.28, ease: [0.16, 1, 0.3, 1] } },
+  hidden: { opacity: 0, y: 12, scale: 0.97 },
+  show: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.28, ease: [0.16, 1, 0.3, 1] } },
 };
 
 export function StaggerContainer({ children, className, staggerDelay = 0.05 }: Props) {

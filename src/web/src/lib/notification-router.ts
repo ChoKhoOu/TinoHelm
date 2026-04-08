@@ -21,6 +21,7 @@ export const ROUTING_TABLE: Record<string, RouteConfig> = {
   "funding.settled":     { channel: "silent" },
   "backtest.progress":   { channel: "silent" },
   "data.fetch.progress": { channel: "silent" },
+  "research.progress":   { channel: "silent" },
 
   // Layer 2: Inline — handled by useAction hook, NOT here
 
@@ -29,6 +30,8 @@ export const ROUTING_TABLE: Record<string, RouteConfig> = {
   "backtest.failed":      { channel: "toast", type: "error",   dedupeKey: (e) => e.run_id ?? e.id },
   "data.fetch.completed": { channel: "toast", type: "success", dedupeKey: (e) => e.job_id },
   "data.fetch.failed":    { channel: "toast", type: "error",   dedupeKey: (e) => e.job_id },
+  "research.completed":   { channel: "toast", type: "success", dedupeKey: (e) => e.job_id },
+  "research.failed":      { channel: "toast", type: "error",   dedupeKey: (e) => e.job_id },
   "strategy.started":     { channel: "toast", type: "info" },
   "strategy.stopped":     { channel: "toast", type: "info" },
   "connection.degraded":  { channel: "toast", type: "warning", dedupeKey: (e) => e.exchange, dedupeWindowMs: 30000 },
@@ -85,6 +88,12 @@ export function formatToastMessage(eventType: string, event: any): { title: stri
       return { title: `${event.symbol ?? ""} ${event.data_type ?? ""} 拉取完成` };
     case "data.fetch.failed":
       return { title: `${event.symbol ?? ""} ${event.data_type ?? ""} 拉取失败`, description: event.error ?? undefined };
+    case "research.completed": {
+      const stars = event.rating ? "\u2605".repeat(event.rating) : "\u2014";
+      return { title: `${event.factor_name ?? "因子"} 诊断完成`, description: stars };
+    }
+    case "research.failed":
+      return { title: `${event.factor_name ?? "因子"} 诊断失败`, description: event.error ?? undefined };
     case "strategy.started":
       return { title: `${event.strategy_id ?? "策略"} 已启动` };
     case "strategy.stopped":

@@ -19,8 +19,8 @@ function Toaster({ ...props }: ToasterProps) {
             "group-[.toast]:bg-primary group-[.toast]:text-primary-foreground",
           cancelButton:
             "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground",
-          error: "group-[.toaster]:!bg-qds-danger-dim group-[.toaster]:!text-destructive group-[.toaster]:!border-destructive/30",
-          success: "group-[.toaster]:!bg-qds-success-dim group-[.toaster]:!text-qds-success group-[.toaster]:!border-qds-success/30",
+          error: "",
+          success: "",
         },
       }}
       {...props}

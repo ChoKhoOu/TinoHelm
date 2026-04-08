@@ -8,6 +8,7 @@ export interface CatalogEntry {
   end_date: string;
   file_path?: string;
   size_bytes: number;
+  source_type?: string;
 }
 
 export interface DataTypeInfo {
@@ -59,9 +60,9 @@ export interface FilterGroup {
 }
 export const FILTER_GROUPS: Record<string, FilterGroup> = {
   all:         { label: "全部",    dot: "var(--t1)",   types: null },
-  klines:      { label: "Klines",  dot: "var(--info)",  types: ["bar", "klines", "indexPriceKlines", "markPriceKlines", "premiumIndexKlines"] },
-  trades:      { label: "Trades",  dot: "var(--acc)",   types: ["trade_tick", "aggTrades", "trades"] },
-  fundingRate: { label: "Funding", dot: "var(--suc)",   types: ["funding_rate", "fundingRate"] },
+  klines:      { label: "Klines",  dot: "var(--info)",  types: ["bar"] },
+  trades:      { label: "Trades",  dot: "var(--acc)",   types: ["trade_tick"] },
+  fundingRate: { label: "Funding", dot: "var(--suc)",   types: ["funding_rate"] },
 };
 
 /** Type badge CSS class mapping (vision data_type → dc-type-* class) */
