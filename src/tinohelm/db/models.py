@@ -271,6 +271,34 @@ class DataFetchJob(Base):
     )
 
 
+class ResearchJob(Base):
+    """Persistent factor research job — async diagnosis tasks."""
+    __tablename__ = "research_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, default=lambda: str(uuid4()))
+    factor_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    data_type: Mapped[str] = mapped_column(String(30), nullable=False, server_default="bar")
+    interval: Mapped[str] = mapped_column(String(10), nullable=False, server_default="1m")
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    parameters_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # factor params + analysis config
+    status: Mapped[str] = mapped_column(String(20), default="queued", server_default="queued", nullable=False)
+    progress: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_path: Mapped[str | None] = mapped_column(String(500), nullable=True)  # ~/.tino/data/research/{job_id}.json
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0-3 stars
+    verdict_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {signal_profile: "pass", ...}
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_research_jobs_status", "status"),
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
 
