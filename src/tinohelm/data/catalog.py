@@ -283,17 +283,19 @@ def write_bars(
     instrument = _make_instrument(symbol)
     bar_type = _make_bar_type(instrument.id, interval)
 
+    existing_files_to_delete: list[Path] = []
     if merge:
         # Merge with existing bars if present (incremental update case)
-        existing_files: list[Path] = []
         try:
             catalog = ParquetDataCatalog(str(catalog_path))
             existing_bars = catalog.bars(bar_types=[str(bar_type)])
             if existing_bars:
-                # Track old files before writing new data
+                # Track old files — they will be deleted AFTER the merged write
+                # succeeds, so a crash between write and delete leaves the old
+                # data intact (at worst we have duplicate bars, not missing ones).
                 bar_dir = catalog_path / "data" / "bar" / str(bar_type)
                 if bar_dir.exists():
-                    existing_files = list(bar_dir.glob("*.parquet"))
+                    existing_files_to_delete = list(bar_dir.glob("*.parquet"))
 
                 seen: dict[int, Any] = {b.ts_event: b for b in existing_bars}
                 for b in bars:
@@ -304,12 +306,6 @@ def write_bars(
         except Exception:
             logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
 
-        # Delete old parquet files BEFORE writing merged data to avoid
-        # NT's non-disjoint interval error (merged bars are already in memory)
-        for old_file in existing_files:
-            if old_file.exists():
-                old_file.unlink()
-
     catalog = ParquetDataCatalog(str(catalog_path))
     catalog.write_data([instrument])
     # When merge=False (streaming mode), multiple files accumulate in the same
@@ -317,8 +313,18 @@ def write_bars(
     # files sharing a boundary nanosecond are treated as overlapping.  TinoHelm
     # manages file lifecycle via _clean_overlapping_parquet, so it is safe to
     # skip the disjoint check for append writes.
-    catalog.write_data(bars, skip_disjoint_check=not merge)
+    # When merge=True, skip_disjoint_check=True so the write succeeds even
+    # while old files still exist on disk (they are deleted afterwards).
+    catalog.write_data(bars, skip_disjoint_check=True)
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
+
+    # Delete old parquet files AFTER the merged write has succeeded.  This
+    # order prevents data loss: if the process crashes between delete and
+    # write (the previous order) all data would be gone.  Now the worst case
+    # is stale duplicates that compact_bars can clean up.
+    for old_file in existing_files_to_delete:
+        if old_file.exists():
+            old_file.unlink()
 
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)
     return list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
