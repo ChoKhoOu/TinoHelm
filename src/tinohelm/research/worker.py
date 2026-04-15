@@ -103,6 +103,14 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
         # Run report generation in thread (CPU-bound)
         from tinohelm.research.report import generate_report
 
+        # Bridge async progress callback to sync for use in worker thread.
+        # asyncio.run_coroutine_threadsafe() is the thread-safe way to
+        # schedule a coroutine on the event loop from another thread.
+        loop = asyncio.get_running_loop()
+
+        def _sync_progress(pct: int, msg: str):
+            asyncio.run_coroutine_threadsafe(_progress(pct, msg), loop)
+
         result = await asyncio.to_thread(
             generate_report,
             job_id=job_id,
@@ -121,7 +129,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             fee_rate=params.get("fee_rate", 0.0004),
             slippage_bps=params.get("slippage_bps", 1.0),
             catalog_path=catalog_path,
-            progress_cb=_progress,
+            progress_cb=_sync_progress,
         )
 
         # Mark completed
