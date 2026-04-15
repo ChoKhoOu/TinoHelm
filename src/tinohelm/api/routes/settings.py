@@ -82,8 +82,8 @@ async def get_current_settings(
         "database": {"url": "****"},
         "redis": {"url": "****"},
         "binance": {
-            "api_key": _mask_key(settings.binance.api_key) if settings.binance.api_key else "",
-            "api_secret": _mask_key(settings.binance.api_secret) if settings.binance.api_secret else "",
+            "api_key": _mask_key(settings.binance.api_key.get_secret_value()) if settings.binance.api_key and settings.binance.api_key.get_secret_value() else "",
+            "api_secret": _mask_key(settings.binance.api_secret.get_secret_value()) if settings.binance.api_secret and settings.binance.api_secret.get_secret_value() else "",
             "account_type": settings.binance.account_type,
             "testnet": settings.binance.testnet,
         },
