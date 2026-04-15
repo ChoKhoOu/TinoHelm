@@ -1,6 +1,7 @@
 """Data catalog and fetch API routes."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime, timezone
@@ -250,10 +251,12 @@ async def _run_compact(symbol: str, interval: str, settings: Settings) -> None:
         from tinohelm.db.session import get_session_factory
 
         catalog_path = str(settings.paths.catalog) if settings else "data/catalog"
-        result = compact_bars(symbol=symbol, interval=interval, catalog_path=catalog_path)
+        result = await asyncio.to_thread(
+            compact_bars, symbol=symbol, interval=interval, catalog_path=catalog_path
+        )
 
         # Update DB catalog size_bytes
-        total_size = _parquet_size_for(catalog_path, symbol, interval)
+        total_size = await asyncio.to_thread(_parquet_size_for, catalog_path, symbol, interval)
 
         factory = get_session_factory()
         async with factory() as db:
@@ -343,7 +346,8 @@ async def validate_data(
     from tinohelm.data.catalog import validate_bars
 
     try:
-        result = validate_bars(
+        result = await asyncio.to_thread(
+            validate_bars,
             symbol=symbol,
             interval=interval,
             catalog_path=str(settings.paths.catalog),
@@ -409,7 +413,7 @@ async def scan_data_catalog(
             bar_type_str = f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
             try:
                 catalog = ParquetDataCatalog(catalog_path)
-                bars = catalog.bars(bar_types=[bar_type_str])
+                bars = await asyncio.to_thread(catalog.bars, bar_types=[bar_type_str])
                 if not bars:
                     logger.warning("Scan: no bars readable for %s, skipping", bar_type_str)
                     continue
@@ -548,7 +552,8 @@ async def delete_catalog_entry(
     if not row:
         raise HTTPException(status_code=404, detail="Catalog entry not found")
 
-    deleted_files, freed_bytes = _delete_storage_files(
+    deleted_files, freed_bytes = await asyncio.to_thread(
+        _delete_storage_files,
         row.symbol, row.data_type, row.interval,
         str(settings.paths.catalog),
     )
