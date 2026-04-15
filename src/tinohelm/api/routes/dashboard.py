@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -77,8 +78,11 @@ async def dashboard_summary(
     total_equity = float(row.equity)
     daily_pnl = float(row.pnl)
 
-    # Orders today
-    order_count = (await db.execute(select(func.count(Order.id)))).scalar() or 0
+    # Orders today — filter to current UTC day only
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+    order_count = (await db.execute(
+        select(func.count(Order.id)).where(Order.created_at >= today_start)
+    )).scalar() or 0
 
     # Active strategies
     strategy_count = (await db.execute(select(func.count(Strategy.id)))).scalar() or 0
