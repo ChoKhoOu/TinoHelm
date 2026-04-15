@@ -182,6 +182,23 @@ def scan_valid_strategy_files(strategies_dir: Path) -> dict[str, Path]:
 
     valid: dict[str, Path] = {}
     for item in sorted(strategies_dir.iterdir()):
+        # Portfolio-folder strategy: directory with portfolio.yaml + strategy.py
+        if item.is_dir() and not item.name.startswith("_"):
+            strategy_py = item / "strategy.py"
+            portfolio_yaml = item / "portfolio.yaml"
+            if portfolio_yaml.exists() and strategy_py.exists():
+                try:
+                    mod = load_module_from_file(strategy_py)
+                    strategy_cls, config_cls = discover_strategy_classes(mod)
+                    if strategy_cls is not None and config_cls is not None:
+                        valid[item.name] = strategy_py
+                    else:
+                        logger.debug("Skipped portfolio %s: no NT Strategy subclass", item.name)
+                except Exception as e:
+                    logger.debug("Skipped portfolio %s: %s", item.name, e)
+            continue
+
+        # Single-file strategy
         if not (item.is_file() and item.suffix == ".py") or item.name.startswith("_"):
             continue
         try:
