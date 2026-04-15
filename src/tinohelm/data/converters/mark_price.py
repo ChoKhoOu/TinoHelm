@@ -49,7 +49,8 @@ class MarkPriceConverter:
         for col in ["open", "high", "low", "close"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["volume"] = 0.0
-        df.index = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce")
+        df.index = pd.to_datetime(df["close_time"], unit="ms", utc=True)
         df.index.name = "timestamp"
         df = df[["open", "high", "low", "close", "volume"]].sort_index()
         df = df[~df.index.duplicated(keep="last")]
