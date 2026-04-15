@@ -60,7 +60,12 @@ class StrategyRegistry:
         # Detect new strategies
         for name, path in current_files.items():
             if name not in self._strategies:
-                self.register(name, path)
+                try:
+                    self.register(name, path)
+                except ValueError as exc:
+                    logger.warning("Skipping strategy '%s': %s", name, exc)
+                    changes.append(f"skipped_collision:{name}")
+                    continue
                 changes.append(f"added:{name}")
 
         # Detect deleted strategies (only remove if not running)
@@ -260,6 +265,8 @@ def _derive_tag(name: str) -> str:
     parts = name.split("_")
     tag = ""
     for part in parts:
+        if not part:
+            continue
         if part.startswith("v") and part[1:].isdigit():
             tag += part[1:]       # "v33" → "33"
         elif part.isdigit():
