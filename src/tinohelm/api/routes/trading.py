@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Literal
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -323,7 +324,7 @@ async def list_equity(
 @router.delete("/orders/{client_order_id}")
 async def cancel_order(
     client_order_id: str,
-    mode: str = Query(..., description="Node type (sandbox/live)"),
+    mode: Literal["sandbox", "live"] = Query(..., description="Node type (sandbox/live)"),
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Cancel an open order by client_order_id."""
