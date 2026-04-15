@@ -193,7 +193,7 @@ class DbWriterActor(Actor):
             "peak_qty": str(pos.peak_qty),
             "ts_opened": ts_ns_to_iso(pos.ts_opened),
             "ts_closed": ts_ns_to_iso(pos.ts_closed) if pos.ts_closed and pos.ts_closed > 0 else None,
-            "duration": str(pos.duration_ns) if pos.duration_ns else None,
+            "duration": str(pos.duration_ns) if pos.duration_ns is not None and pos.duration_ns > 0 else None,
             "is_open": pos.is_open,
             "event_count": pos.event_count,
         })
