@@ -2,12 +2,32 @@
 from __future__ import annotations
 
 import logging
+import math
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_for_json(obj: Any) -> Any:
+    """Recursively replace NaN/Infinity with None so PostgreSQL JSON columns don't crash.
+
+    PostgreSQL's JSON type rejects NaN and Infinity values which are valid in Python
+    floats but not in the JSON spec. This function walks nested dicts/lists and
+    replaces any non-finite float with None.
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_for_json(item) for item in obj]
+    return obj
 
 
 def forward_returns(close: pd.Series, period: int, log_ret: bool = False) -> pd.Series:

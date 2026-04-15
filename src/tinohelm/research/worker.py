@@ -133,6 +133,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
         )
 
         # Mark completed
+        from tinohelm.research.analysis import sanitize_for_json
         report = result.get("report", {})
         async with factory() as db:
             await db.execute(
@@ -144,7 +145,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     message="Done",
                     result_path=result.get("path"),
                     rating=report.get("summary", {}).get("rating"),
-                    verdict_json=report.get("verdict"),
+                    verdict_json=sanitize_for_json(report.get("verdict")),
                     completed_at=datetime.utcnow(),
                 )
             )
