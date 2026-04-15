@@ -368,10 +368,18 @@ async def paper_reset(
     await db.execute(text("DELETE FROM equity_snapshots WHERE node_type = :nt"), {"nt": mode})
     await db.commit()
 
-    # 4. Clear Redis state
-    keys = await rds.keys(f"tino:{mode}:*")
-    if keys:
-        await rds.delete(*keys)
+    # 4. Clear Redis state — delete all known keys explicitly (avoids O(N) redis.keys())
+    known_keys = [
+        f"tino:{mode}:positions",
+        f"tino:{mode}:fills",
+        f"tino:{mode}:lifecycle_state",
+        f"tino:{mode}:strategy_registry",
+        f"tino:{mode}:paper_config",
+        f"tino:{mode}:commands_ack",
+        f"tino:heartbeat:{mode}",
+        f"tino:{mode}:equity_snapshots",
+    ]
+    await rds.delete(*known_keys)
 
     result: dict = {"status": "ok", "action": "reset", "mode": mode, "data_cleared": True}
 
