@@ -125,7 +125,7 @@ class HealthActor(Actor):
             payload: dict[str, Any] = {
                 "ts": str(self.clock.utc_now()),
                 "node_type": self._node_type,
-                "strategies": len(strategies) if strategies else 0,
+                "strategies": {},
                 "positions": len(positions) if positions else 0,
             }
 
@@ -143,9 +143,14 @@ class HealthActor(Actor):
                 payload["trading_state"] = "active"
                 payload["strategy_states"] = {}
 
-            # Registry strategies
+            # Registry strategies — always a dict (keyed by strategy name)
             if self._registry is not None:
                 payload["strategies"] = self._registry.get_all_states()
+            else:
+                # Fall back to NT cache: dict of strategy_id -> "running"
+                payload["strategies"] = {
+                    str(sid): "running" for sid in (strategies or [])
+                }
 
             # Account balance
             try:
