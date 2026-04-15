@@ -761,6 +761,7 @@ class BacktestRunner:
                 _FundingCostTracker._bar_type_strs = loaded_bar_type_strs
                 tracker = _FundingCostTracker(config=_FundingCostTrackerConfig())
                 engine.add_actor(tracker)
+                self._funding_tracker = tracker
                 self._funding_enabled = True
 
                 # Inject NT-native FundingRateUpdate so strategies can
@@ -807,8 +808,7 @@ class BacktestRunner:
 
         # Merge funding cost data into results
         if self._funding_enabled:
-            from tinohelm.backtest.funding import _FundingCostTracker
-            funding_data = _FundingCostTracker.get_results()
+            funding_data = self._funding_tracker.get_results()
             results["funding"] = funding_data
             # Adjust statistics to reflect funding cost
             stats = results.get("statistics", {})

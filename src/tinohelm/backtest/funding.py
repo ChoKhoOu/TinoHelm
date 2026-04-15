@@ -38,37 +38,41 @@ class _FundingCostTracker(Actor):
     _funding_events: list[dict[str, Any]] = []
     _bar_type_strs: list[str] = []
 
-    # --- Class-level accumulators (reset in on_start) ---
-    _total_funding_cost: float = 0.0
-    _funding_records: list[dict[str, Any]] = []
-    _per_symbol_cost: dict[str, float] = {}
-    _next_event_idx: int = 0
+    def __init__(self, config: _FundingCostTrackerConfig | None = None) -> None:
+        super().__init__(config or _FundingCostTrackerConfig())
+        # Instance-level accumulators — avoids class-level mutable state leaking
+        # between backtests (e.g. during optimizer runs where multiple backtests
+        # share the same process and class object).
+        self._total_funding_cost: float = 0.0
+        self._funding_records: list[dict[str, Any]] = []
+        self._per_symbol_cost: dict[str, float] = {}
+        self._next_event_idx: int = 0
 
     def on_start(self) -> None:
         from nautilus_trader.model.data import BarType
 
-        cls = self.__class__
-        cls._total_funding_cost = 0.0
-        cls._funding_records = []
-        cls._per_symbol_cost = {}
-        cls._next_event_idx = 0
+        # Reset accumulators at the start of each backtest run
+        self._total_funding_cost = 0.0
+        self._funding_records = []
+        self._per_symbol_cost = {}
+        self._next_event_idx = 0
 
-        for bt_str in cls._bar_type_strs:
+        for bt_str in self.__class__._bar_type_strs:
             try:
                 self.subscribe_bars(BarType.from_str(bt_str))
             except Exception:
                 pass
 
     def on_bar(self, bar) -> None:
-        cls = self.__class__
         current_ns = bar.ts_init
+        funding_events = self.__class__._funding_events
 
         # Process all funding events up to the current bar timestamp
-        while cls._next_event_idx < len(cls._funding_events):
-            event = cls._funding_events[cls._next_event_idx]
+        while self._next_event_idx < len(funding_events):
+            event = funding_events[self._next_event_idx]
             if event["timestamp_ns"] <= current_ns:
                 self._apply_funding(event)
-                cls._next_event_idx += 1
+                self._next_event_idx += 1
             else:
                 break
 
@@ -93,10 +97,9 @@ class _FundingCostTracker(Actor):
             else:  # SHORT
                 cost = -notional * rate
 
-            cls = self.__class__
-            cls._total_funding_cost += cost
-            cls._per_symbol_cost[pos_symbol] = cls._per_symbol_cost.get(pos_symbol, 0.0) + cost
-            cls._funding_records.append({
+            self._total_funding_cost += cost
+            self._per_symbol_cost[pos_symbol] = self._per_symbol_cost.get(pos_symbol, 0.0) + cost
+            self._funding_records.append({
                 "timestamp": event["timestamp_iso"],
                 "symbol": pos_symbol,
                 "side": pos.side.name,
@@ -106,14 +109,13 @@ class _FundingCostTracker(Actor):
                 "cost": round(cost, 6),
             })
 
-    @classmethod
-    def get_results(cls) -> dict[str, Any]:
+    def get_results(self) -> dict[str, Any]:
         """Return accumulated funding cost data for result extraction."""
         return {
-            "total_funding_cost": round(cls._total_funding_cost, 4),
-            "funding_event_count": len(cls._funding_records),
+            "total_funding_cost": round(self._total_funding_cost, 4),
+            "funding_event_count": len(self._funding_records),
             "per_symbol_funding": {
-                k: round(v, 4) for k, v in cls._per_symbol_cost.items()
+                k: round(v, 4) for k, v in self._per_symbol_cost.items()
             },
-            "funding_records": cls._funding_records,
+            "funding_records": self._funding_records,
         }
