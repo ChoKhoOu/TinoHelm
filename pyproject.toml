@@ -25,5 +25,13 @@ dependencies = [
 [project.optional-dependencies]
 optimize = ["optuna>=3.0.0"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-x -q --tb=short"
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning:nautilus_trader.*",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
