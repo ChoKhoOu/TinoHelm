@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 from datetime import datetime, date, timedelta
 from typing import Any
 
@@ -151,24 +152,26 @@ class _PatienceCallback:
         self._patience = patience
         self._best: float = -math.inf
         self._no_improve_count: int = 0
+        self._lock = threading.Lock()
 
     def __call__(
         self,
         study: optuna.Study,
         trial: optuna.trial.FrozenTrial,
     ) -> None:
-        if trial.value is not None and trial.value > self._best:
-            self._best = trial.value
-            self._no_improve_count = 0
-        else:
-            self._no_improve_count += 1
+        with self._lock:
+            if trial.value is not None and trial.value > self._best:
+                self._best = trial.value
+                self._no_improve_count = 0
+            else:
+                self._no_improve_count += 1
 
-        if self._no_improve_count >= self._patience:
-            logger.info(
-                "Early stopping: no improvement for %d consecutive trials",
-                self._patience,
-            )
-            study.stop()
+            if self._no_improve_count >= self._patience:
+                logger.info(
+                    "Early stopping: no improvement for %d consecutive trials",
+                    self._patience,
+                )
+                study.stop()
 
 
 # ---------------------------------------------------------------------------
