@@ -202,7 +202,7 @@ class EventBridge:
     async def _relay(self, payload: str, clients: set[WebSocket]) -> None:
         """Send payload to a set of WebSocket clients, removing dead ones."""
         dead: list[WebSocket] = []
-        for ws in clients:
+        for ws in list(clients):
             try:
                 await ws.send_text(payload)
             except Exception:
