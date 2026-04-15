@@ -269,7 +269,7 @@ async def node_status(
     # Compute risk metrics from positions
     total_exposure = 0.0
     try:
-        stmt = select(Position.quantity, Position.avg_px_open)
+        stmt = select(Position.quantity, Position.avg_px_open).where(Position.is_open == True)  # noqa: E712
         rows = (await db.execute(stmt)).all()
         for row in rows:
             qty = float(row.quantity)
