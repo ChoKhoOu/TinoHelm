@@ -67,6 +67,13 @@ def load_funding_rates(
     3. Otherwise fetch missing data from Binance, merge into cache, save
     4. Return records filtered to [start, end]
     """
+    # Ensure UTC-aware datetimes for consistent timestamp conversion.
+    # Naive datetimes use local timezone in .timestamp(), which causes
+    # wrong filtering on non-UTC machines.
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
     start_ms = int(start.timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
 
