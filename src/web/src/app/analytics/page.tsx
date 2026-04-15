@@ -383,8 +383,8 @@ export default function AnalyticsPage() {
                   ))}
                   {/* Data rows */}
                   {correlation.strategies.map((row, ri) => (
-                    <>
-                      <div key={`label-${row}`} className="px-1 py-1 text-muted-foreground text-[0.65rem] flex items-center">
+                    <Fragment key={`row-${ri}`}>
+                      <div className="px-1 py-1 text-muted-foreground text-[0.65rem] flex items-center">
                         {row.length > 8 ? row.slice(0, 8) : row}
                       </div>
                       {correlation.matrix[ri].map((v, ci) => (
@@ -399,7 +399,7 @@ export default function AnalyticsPage() {
                           {v.toFixed(2)}
                         </div>
                       ))}
-                    </>
+                    </Fragment>
                   ))}
                 </div>
               )}

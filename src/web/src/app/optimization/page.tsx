@@ -525,8 +525,8 @@ export default function OptimizationPage() {
                                   <div key={x} className="px-1 py-1 text-center text-muted-foreground text-[0.6rem]">{x}</div>
                                 ))}
                                 {heatmap.ys.map((y, yi) => (
-                                  <>
-                                    <div key={`l-${y}`} className="px-1 py-1 text-muted-foreground text-[0.62rem] flex items-center justify-center">{y}</div>
+                                  <Fragment key={`row-${yi}`}>
+                                    <div className="px-1 py-1 text-muted-foreground text-[0.62rem] flex items-center justify-center">{y}</div>
                                     {heatmap.values[yi].map((v, xi) => (
                                       <div
                                         key={`${yi}-${xi}`}
@@ -539,7 +539,7 @@ export default function OptimizationPage() {
                                         {v.toFixed(2)}
                                       </div>
                                     ))}
-                                  </>
+                                  </Fragment>
                                 ))}
                               </div>
                             );
