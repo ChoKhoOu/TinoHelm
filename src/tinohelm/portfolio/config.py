@@ -105,16 +105,24 @@ def load_strategy_bundle(
     """Load a StrategyBundle from a strategy name or .py file path.
 
     Resolution order:
-    1. If ``~/.tino/strategies/<name>.py`` exists, wrap it.
-    2. If ``name_or_path`` is a ``.py`` file path, wrap it.
+    1. If ``~/.tino/strategies/<name>/portfolio.yaml`` exists, load portfolio.
+    2. If ``~/.tino/strategies/<name>.py`` exists, wrap it.
+    3. If ``name_or_path`` is a ``.py`` file path, wrap it.
 
-    ``symbol``/``symbols`` and ``interval`` are required.
+    ``symbol``/``symbols`` and ``interval`` are required for single .py files
+    but are read from ``portfolio.yaml`` for portfolio folders.
     """
     strategies_dir = Path(strategies_dir) if strategies_dir else _DEFAULT_STRATEGIES_DIR
     path = Path(name_or_path)
 
     # Merge symbol/symbols for backward compat
     effective_symbols = symbols or ([symbol] if symbol else None)
+
+    # Case 0: portfolio folder with portfolio.yaml
+    portfolio_dir = strategies_dir / name_or_path
+    yaml_path = portfolio_dir / "portfolio.yaml"
+    if yaml_path.exists():
+        return _load_portfolio_folder(portfolio_dir, yaml_path, params=strategy_params)
 
     # Case 1: name resolves to a single .py file
     py_file = strategies_dir / f"{name_or_path}.py"
@@ -127,7 +135,7 @@ def load_strategy_bundle(
 
     raise FileNotFoundError(
         f"Cannot find strategy: '{name_or_path}'. "
-        f"Looked in: {py_file}, {path}"
+        f"Looked in: {portfolio_dir}, {py_file}, {path}"
     )
 
 
@@ -169,6 +177,88 @@ def _wrap_single_file(
         optimize_ranges=optimize_ranges,
         source_path=py_file.parent,
         implicit=True,
+    )
+
+
+def _load_portfolio_folder(
+    portfolio_dir: Path,
+    yaml_path: Path,
+    *,
+    params: dict[str, Any] | None = None,
+) -> StrategyBundle:
+    """Load a StrategyBundle from a portfolio folder with portfolio.yaml."""
+    import yaml as _yaml
+
+    with open(yaml_path) as f:
+        cfg = _yaml.safe_load(f) or {}
+
+    symbols = cfg.get("symbols")
+    if not symbols:
+        raise ValueError(
+            f"portfolio.yaml in '{portfolio_dir.name}' requires 'symbols' field"
+        )
+    interval = cfg.get("interval")
+    if not interval:
+        raise ValueError(
+            f"portfolio.yaml in '{portfolio_dir.name}' requires 'interval' field"
+        )
+
+    # Discover strategy class from strategy.py in the folder
+    strategy_py = portfolio_dir / "strategy.py"
+    if not strategy_py.exists():
+        raise FileNotFoundError(
+            f"Portfolio folder '{portfolio_dir.name}' missing strategy.py"
+        )
+
+    strategy_class_name, config_class_name, optimize_ranges = _discover_classes(strategy_py)
+    module_stem = strategy_py.stem
+    strategy_class = f"{module_stem}:{strategy_class_name}"
+    config_class = f"{module_stem}:{config_class_name}"
+
+    # Merge params: portfolio.yaml params < runtime overrides
+    merged_params = cfg.get("params", {})
+    if params:
+        merged_params.update(params)
+
+    # Parse actors
+    actors = []
+    for actor_cfg in cfg.get("actors", []):
+        actors.append(ActorRef(
+            name=actor_cfg.get("name"),
+            class_path=actor_cfg.get("class_path"),
+            params=actor_cfg.get("params", {}),
+        ))
+
+    # Parse account settings
+    account_cfg = cfg.get("account", {})
+    account = AccountSettings(
+        starting_balance=account_cfg.get("starting_balance", 10000),
+        currency=account_cfg.get("currency", "USDT"),
+        leverage=account_cfg.get("leverage", 1),
+    )
+
+    # Parse risk guard settings
+    risk_guard = None
+    rg_cfg = cfg.get("risk_guard")
+    if rg_cfg and rg_cfg.get("enabled", True):
+        risk_guard = RiskGuardSettings(**{
+            k: v for k, v in rg_cfg.items()
+            if k in RiskGuardSettings.__dataclass_fields__
+        })
+
+    return StrategyBundle(
+        strategy_class=strategy_class,
+        config_class=config_class,
+        symbols=symbols,
+        interval=interval,
+        params=merged_params,
+        actors=actors,
+        account=account,
+        risk_guard=risk_guard,
+        optimize_ranges=optimize_ranges,
+        source_path=portfolio_dir,
+        tag=cfg.get("tag"),
+        implicit=False,
     )
 
 
