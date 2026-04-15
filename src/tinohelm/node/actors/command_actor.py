@@ -193,7 +193,11 @@ class CommandActor(Actor):
                     self._lifecycle.shutdown()
                 elif action == "start_strategy":
                     name = cmd.get("strategy_name", "")
-                    self._lifecycle.start_strategy(name)
+                    self._lifecycle.start_strategy(
+                        name,
+                        symbols=cmd.get("symbols"),
+                        interval=cmd.get("interval"),
+                    )
                 elif action == "flatten_stop_strategy":
                     name = cmd.get("strategy_name", "")
                     self._lifecycle.flatten_stop_strategy(name)

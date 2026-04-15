@@ -160,7 +160,11 @@ def load_components(
     # ---- Strategies and actors via strategy loader -----------------------
     strategy_config_name = config.get("strategy_bundle")
     if strategy_config_name:
-        strategy_cfg = load_strategy_bundle(strategy_config_name)
+        strategy_cfg = load_strategy_bundle(
+            strategy_config_name,
+            symbols=config.get("symbols"),
+            interval=config.get("interval"),
+        )
         # Register boot-time strategy and allocate prefixed tags
         registry.register(
             strategy_config_name,
