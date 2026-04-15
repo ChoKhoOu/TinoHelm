@@ -262,12 +262,14 @@ def load_components(
     # Restore was_running state from Redis (best-effort)
     try:
         r = redis.Redis.from_url(full_redis_url, decode_responses=True)
-        saved = r.get(f"tino:{node_type}:strategy_registry")
-        if saved:
-            saved_state = json.loads(saved)
-            registry.restore_was_running(saved_state)
-            logger.info("Restored strategy registry state from Redis")
-        r.close()
+        try:
+            saved = r.get(f"tino:{node_type}:strategy_registry")
+            if saved:
+                saved_state = json.loads(saved)
+                registry.restore_was_running(saved_state)
+                logger.info("Restored strategy registry state from Redis")
+        finally:
+            r.close()
     except Exception:
         logger.debug("Best-effort strategy registry restore failed", exc_info=True)
 
