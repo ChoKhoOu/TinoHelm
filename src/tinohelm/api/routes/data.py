@@ -517,7 +517,7 @@ async def scan_data_catalog(
                     row.size_bytes = sz
                     if total_rows is not None:
                         row.record_count = total_rows
-                    updated += 1
+                updated += 1
             else:
                 db.add(DataCatalog(
                     symbol=symbol,

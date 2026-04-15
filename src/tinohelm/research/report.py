@@ -106,10 +106,11 @@ def generate_report(
 ) -> dict:
     """Generate full diagnostic report.
 
-    progress_cb: async callable(pct: int, msg: str) or None
+    progress_cb: callable(pct: int, msg: str) or None — must be a sync callable.
+        The caller is responsible for bridging async callbacks to sync
+        (e.g. via asyncio.run_coroutine_threadsafe) before passing them here,
+        since generate_report runs in a worker thread via asyncio.to_thread().
     """
-    import asyncio
-
     if forward_periods is None:
         forward_periods = [5, 15, 30]
 
@@ -125,11 +126,7 @@ def generate_report(
     def _progress(pct: int, msg: str):
         if progress_cb:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(progress_cb(pct, msg))
-                else:
-                    loop.run_until_complete(progress_cb(pct, msg))
+                progress_cb(pct, msg)
             except Exception:
                 pass
 
