@@ -127,8 +127,8 @@ def generate_report(
         if progress_cb:
             try:
                 progress_cb(pct, msg)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Progress callback failed (pct=%d): %s", pct, exc)
 
     # 1. Load data
     _progress(5, "加载数据...")
