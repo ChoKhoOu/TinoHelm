@@ -207,7 +207,7 @@ class MaxConsecutiveLosses(PortfolioStatistic):
         max_streak = 0
         current = 0
         for pnl in realized_pnls:
-            if pnl <= 0:
+            if pnl < 0:
                 current += 1
                 max_streak = max(max_streak, current)
             else:
