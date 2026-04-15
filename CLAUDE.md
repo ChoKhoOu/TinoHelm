@@ -369,3 +369,6 @@ Key gotchas that have caused bugs in this project:
 ### Python String Methods
 - `str.lstrip("./")` removes individual **characters**, NOT the prefix `"./"`. Use `str.removeprefix("./")`.
 - When handling relative paths, always `resolve()` and verify within expected boundary directory.
+
+## 禁区
+- cli/ 目录及所有 CLI 相关代码 — 正在手动维护，不要修改
