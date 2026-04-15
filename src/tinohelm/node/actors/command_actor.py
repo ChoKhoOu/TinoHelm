@@ -64,6 +64,8 @@ class CommandActor(Actor):
         # Initialize LifecycleController
         if self._lifecycle_trader is not None and self._lifecycle_risk_engine is not None:
             from tinohelm.node.lifecycle_controller import LifecycleController
+            if self._lifecycle is not None:
+                self._lifecycle.dispose()
             self._lifecycle = LifecycleController(
                 trader=self._lifecycle_trader,
                 risk_engine=self._lifecycle_risk_engine,
