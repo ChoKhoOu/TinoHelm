@@ -184,7 +184,13 @@ class LifecycleController:
     # Strategy lifecycle operations
     # ------------------------------------------------------------------
 
-    def start_strategy(self, name: str) -> None:
+    def start_strategy(
+        self,
+        name: str,
+        *,
+        symbols: list[str] | None = None,
+        interval: str | None = None,
+    ) -> None:
         """Load and start all strategies for a strategy bundle."""
         if self._registry is None:
             raise ValueError("StrategyRegistry not initialized")
@@ -203,7 +209,10 @@ class LifecycleController:
 
             import os
             _strategies_dir = os.environ.get("TINO_STRATEGIES_DIR")
-            strategy_cfg = load_strategy_bundle(name, strategies_dir=_strategies_dir)
+            strategy_cfg = load_strategy_bundle(
+                name, strategies_dir=_strategies_dir,
+                symbols=symbols, interval=interval,
+            )
 
             # Allocate tags with collision check
             existing_tags = {str(sid) for sid in self._trader.strategy_ids()}

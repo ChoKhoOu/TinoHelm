@@ -47,6 +47,8 @@ class StrategyLifecycleRequest(BaseModel):
     """Request body for portfolio lifecycle commands."""
     name: str
     mode: Literal["sandbox", "live"] = "live"
+    symbols: list[str] | None = None
+    interval: str | None = None
 
 
 # ---- routes ----
@@ -153,6 +155,8 @@ async def start_strategy(
             action="start_strategy",
             node_type=body.mode,
             strategy_name=body.name,
+            symbols=body.symbols,
+            interval=body.interval,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -52,6 +52,8 @@ class ProcessManager:
         node_type: str = "live",
         strategy_id: str | None = None,
         strategy_name: str | None = None,
+        symbols: list[str] | None = None,
+        interval: str | None = None,
     ) -> None:
         """Publish a lifecycle command to the node via Redis PubSub.
 
@@ -67,6 +69,10 @@ class ProcessManager:
             cmd["strategy_id"] = strategy_id
         if strategy_name:
             cmd["strategy_name"] = strategy_name
+        if symbols:
+            cmd["symbols"] = symbols
+        if interval:
+            cmd["interval"] = interval
 
         self._redis.publish(channel, json.dumps(cmd))
         logger.warning("Lifecycle command: %s on %s (strategy=%s)", action, node_type, strategy_id)
