@@ -4,6 +4,7 @@ import { useState, useCallback } from "react";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Loader2, X } from "lucide-react";
 import { toast } from "sonner";
+import { apiDelete, ApiError } from "@/lib/api";
 import { EmptyState } from "@/components/EmptyState";
 import { FadeIn } from "@/components/motion/FadeIn";
 import type { Order, Fill } from "../../page";
@@ -47,16 +48,12 @@ export function OrdersTab({ nodeType, orders, fills, onRefresh }: Props) {
     async (clientOrderId: string) => {
       setCancellingIds((prev) => new Set(prev).add(clientOrderId));
       try {
-        const res = await fetch(`/api/trading/orders/${clientOrderId}?mode=${nodeType}`, { method: "DELETE" });
-        if (res.ok) {
-          toast.success("订单已取消");
-          onRefresh();
-        } else {
-          const data = await res.json().catch(() => ({}));
-          toast.error(data?.detail ?? "撤单失败");
-        }
-      } catch {
-        toast.error("撤单失败");
+        await apiDelete(`/api/trading/orders/${clientOrderId}?mode=${nodeType}`);
+        toast.success("订单已取消");
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : "撤单失败";
+        toast.error(message);
       } finally {
         setCancellingIds((prev) => {
           const next = new Set(prev);
