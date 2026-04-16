@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # TinoHelm API Server
 # Optimizations:
-#   P0: No Rust toolchain — nautilus_trader 1.224.0 ships manylinux wheels for aarch64 + x86_64
+#   P0: No Rust toolchain — nautilus_trader 1.225.0 ships manylinux wheels for aarch64 + x86_64
 #   P1: Multi-stage build — build-essential stays in deps stage, not in final image
 #   P2: Deps/source layer separation — source changes do NOT invalidate the wheel cache layer
 #   P3: BuildKit cache mounts — pip cache persists across rebuilds even after cache-miss

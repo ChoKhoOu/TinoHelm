@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Single-instance quantitative trading platform powered by NautilusTrader"
 requires-python = ">=3.12"
 dependencies = [
-    "nautilus_trader==1.224.0",
+    "nautilus_trader==1.225.0",
     "fastapi[standard]>=0.115.0",
     "uvicorn[standard]>=0.34.0",
     "sqlalchemy[asyncio]>=2.0.0",
