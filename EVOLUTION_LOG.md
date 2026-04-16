@@ -113,18 +113,3 @@ extract.py 还剩两个内联分析块未处理:
 - section 12b + section 14 在 extract.py 中的内联数学代码从 ~250 行降至 ~130 行
   (全部为 primitive 装配逻辑,零内联数学)
 
-**后续建议**:
-- `_ANN_FACTOR = 365`(crypto 365 天/年)仍硬编码在 `sections.py` 和 `statistics.py`
-  的滚动/per-instrument 计算中。下一轮可考虑提升为可配置参数以支持
-  股票/期货市场(252 交易日)。目前的 benchmark-relative metrics / per-instrument
-  advanced analytics 共用这个常量。
-- `_collect_bars_by_instrument` 目前把所有 bar-type 打平成一个列表,没有按
-  `ts_init` 去重。如果同一 bar-type 在 cache 里因复合聚合产生重复 bar,
-  MAE/MFE 结果不受影响(只影响性能 — high/low 是等幂的),但长远可以
-  引入基于 `ts_init` 的 `set()` 去重。
-- Schema 测试只锁 key,不锁值语义。下一轮可以逐 section 添加值层面的
-  集成测试(例如 `test_statistics_respect_closed_trades_counts`)形成更完整的
-  回归网。
-- 前端 TypeScript 类型 `BacktestResult` 应该从 `test_result_schema.py` 的
-  frozenset 自动生成或至少有一个配对测试断言两者 key 集合相等 —
-  目前仍靠人工保持同步。
