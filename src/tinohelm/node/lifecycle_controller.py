@@ -51,6 +51,13 @@ class LifecycleController:
         # Subscribe to RiskGuard breach actions for enforcement
         self._msgbus.subscribe(RISK_GUARD_STATE, self._on_risk_guard_breach)
 
+    def dispose(self) -> None:
+        """Unsubscribe from msgbus topics to prevent double dispatch on restart."""
+        try:
+            self._msgbus.unsubscribe(RISK_GUARD_STATE, self._on_risk_guard_breach)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # L1 — Soft Pause / Resume
     # ------------------------------------------------------------------
