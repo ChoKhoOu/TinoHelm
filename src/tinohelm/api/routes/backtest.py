@@ -532,12 +532,13 @@ async def backtest_compare(
     node_type: str = Query("sandbox", description="Node type for paper equity"),
     db: AsyncSession = Depends(get_db),
     rds: aioredis.Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Compare backtest results with paper trading equity."""
     # 1. Find most recent completed backtest for this strategy
     stmt = (
         select(BacktestRun)
-        .where(BacktestRun.strategy_name == strategy_name, BacktestRun.status == "completed")
+        .where(BacktestRun.strategy_name == strategy_name, BacktestRun.status == RunStatus.completed)
         .order_by(BacktestRun.created_at.desc())
         .limit(1)
     )
@@ -546,7 +547,7 @@ async def backtest_compare(
     backtest_data = None
     warning = None
     if run:
-        artifacts_dir = Path.home() / ".tino" / "data" / "artifacts" / str(run.run_id)
+        artifacts_dir = Path(settings.paths.artifacts) / str(run.run_id)
         results_file = artifacts_dir / "results.json"
         if results_file.exists():
             try:
