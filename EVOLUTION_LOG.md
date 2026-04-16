@@ -83,3 +83,47 @@ Chronological record of architectural improvements and maintenance work.
 - 为 `_safe_float`, `_format_duration_ns`, `_parse_realized_pnl` 等已有 statistics 函数
   补充单元测试
 - 考虑将 `_ANN_FACTOR = 365` 提升为可配置参数，支持非加密货币市场（252 交易日）
+
+## 2026-04-16 (2)
+
+**主题**: 消除回测引擎 run()/prepare_engine() 之间的 ~120 行重复代码，删除 275 行废弃方法
+**维度**: 架构重构
+**改动范围**:
+- `src/tinohelm/backtest/runner.py` — 提取 `_setup_engine()` 共享方法，简化 `run()` 和 `prepare_engine()`，删除 `_enhance_tearsheet_DELETED` 废弃方法
+- `tests/backtest/test_runner_helpers.py` — 新增 48 个测试覆盖 `_interval_to_minutes`、`_parse_fee`、`_build_latency_model`、`_build_fill_model` 及构造函数边界条件
+
+**动机**:
+`backtest/runner.py` 是整个平台最核心的模块 — 所有回测执行和参数优化都经过它。
+该文件存在三个严重的可维护性问题：
+
+1. **引擎初始化逻辑重复**: `run()` (288 行) 和 `prepare_engine()` (135 行) 各自独立实现了相同的
+   引擎配置流程：构建策略包 → 同步 symbols/intervals → warmup 扩展 → 创建 BacktestEngine →
+   构建 fill/latency 模型 → 添加 venue → 加载 instruments → 解析 bar 数据 → 处理缺失 instruments →
+   添加数据并排序 → 注入策略参数默认值。每次修改必须同步更新两处，遗漏风险极高。
+
+2. **Bug: 优化路径缺少 fee model**: `prepare_engine()` 没有调用 `_build_fee_model()`，
+   导致 Optuna 优化 trial 不应用手续费模型。通过共享 `_setup_engine()` 自动修复。
+
+3. **275 行废弃代码**: `_enhance_tearsheet_DELETED` 方法在名称中标记为 DELETED，
+   实际功能已迁移到 `backtest/tearsheet.py:enhance_tearsheet()`，但方法体仍占 275 行空间。
+
+**要点**:
+1. **`_setup_engine()` 共享方法**: 提取完整的引擎配置流程，返回 `(engine, strategy_bundle, starting_balance)` 元组，同时在 `self._nt_symbols`、`self._all_bar_type_strs`、`self._loaded_bar_type_strs`、
+   `self._total_bar_count`、`self._benchmark_daily_closes` 上存储元数据供后续使用。
+2. **`run()` 简化**: 现在调用 `_setup_engine()` 后仅处理策略/Actor 创建、统计注册、
+   funding 数据、进度上报、引擎执行和结果提取 — 去掉了所有重复的引擎配置代码。
+3. **`prepare_engine()` 简化**: 从 135 行缩减为 17 行 — 仅调用 `_setup_engine()` 并返回。
+4. **优化路径 bug 修复**: fee model 现在通过共享路径自动应用；benchmark daily closes 也传播到
+   优化 trial 的结果提取中，使 B&H 基准对比在优化模式下也可用。
+5. **废弃代码删除**: 净减 275 行，文件从 1619 行降至 1244 行（减少 23%）。
+6. **48 个新测试**: 覆盖 `_interval_to_minutes`（15 cases: 分钟/小时/天/秒/无效输入/大小写）、
+   `_parse_fee`（8 cases: 百分比/纯数字/空白/零值/大小值）、`_build_latency_model`（6 cases:
+   默认/自定义/禁用/高级纳秒参数）、`_build_fill_model`（7 cases: 所有模型类型/回退）、
+   构造函数多品种初始化（6 cases）、StrategyBundle 构建（6 cases）。
+   使用 `pytest.mark.skipif(not _HAS_NT)` 条件跳过，确保 CI 环境可运行。
+
+**后续建议**:
+- 为 `run()` 中剩余的 run-only 逻辑（策略/Actor 注册、funding、progress reporter）
+  考虑进一步提取，使 `run()` 更加声明式
+- 将 `extract.py` 的 1500 行单函数拆解为 8-10 个独立函数（最大的可维护性债务）
+- 为 `_resolve_bars()` 和 `_download_bars()` 补充测试（数据解析关键路径）
