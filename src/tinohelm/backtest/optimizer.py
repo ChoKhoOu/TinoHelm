@@ -2,6 +2,9 @@
 
 Supports walk-forward analysis, parallel trials, pruning, sampler selection,
 convergence-based early stopping, and parameter importance analysis.
+
+Pure arithmetic / shaping helpers live in :mod:`optimizer_helpers` (Optuna-
+and NT-free) so they can be unit-tested without the NT wheel installed.
 """
 from __future__ import annotations
 
@@ -9,7 +12,7 @@ import json
 import logging
 import math
 import threading
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import Any
 
 try:
@@ -19,110 +22,21 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+from tinohelm.backtest.optimizer_helpers import (
+    FAIL_VALUE as _FAIL_VALUE,
+    FITNESS_METRICS,
+    auto_n_trials as _auto_n_trials,
+    auto_sampler as _auto_sampler,
+    auto_workers as _auto_workers,
+    compute_dsr as _compute_dsr,
+    compute_param_sensitivity as _compute_param_sensitivity,
+    compute_param_stability as _compute_param_stability,
+    extract_fitness as _extract_fitness,
+    slim_result as _slim_result,
+    split_dates as _split_dates,
+    walk_forward_windows as _walk_forward_windows,
+)
 from tinohelm.db.sync_engine import get_sync_engine
-
-# Fitness objective mapping: key -> path into result["statistics"]
-FITNESS_METRICS: dict[str, str] = {
-    "sharpe": "sharpe_ratio",
-    "calmar": "calmar_ratio",
-    "sortino": "sortino_ratio",
-    "profit": "total_pnl",
-}
-
-# Sentinel value for failed / missing metrics so Optuna can continue.
-_FAIL_VALUE: float = -999.0
-
-
-# ---------------------------------------------------------------------------
-# Date helpers
-# ---------------------------------------------------------------------------
-
-def _split_dates(
-    start_date: date, end_date: date, train_pct: float,
-) -> tuple[date, date, date, date]:
-    """Split a date range into train and test periods.
-
-    Returns (train_start, train_end, test_start, test_end).
-    """
-    total_days = (end_date - start_date).days
-    train_days = int(total_days * train_pct / 100.0)
-    train_end = start_date + timedelta(days=train_days)
-    test_start = train_end + timedelta(days=1)
-    return start_date, train_end, test_start, end_date
-
-
-def _walk_forward_windows(
-    start_date: date,
-    end_date: date,
-    train_pct: float,
-    n_folds: int,
-) -> list[tuple[date, date, date, date]]:
-    """Generate rolling walk-forward windows.
-
-    Each window has the same train-to-test ratio defined by *train_pct*.
-    Windows slide forward so that the test segment of fold *i* ends where
-    fold *i+1*'s test segment begins.
-
-    Returns a list of (train_start, train_end, test_start, test_end) tuples.
-    """
-    total_days = (end_date - start_date).days
-
-    # Fixed rolling-window approach: divide the total test portion of the
-    # date range evenly across *n_folds* non-overlapping test segments.
-    # Each fold gets a training window sized by *train_pct* relative to
-    # its test window.
-    test_ratio = 1.0 - train_pct / 100.0
-    if test_ratio <= 0 or n_folds <= 0:
-        return [_split_dates(start_date, end_date, train_pct)]
-
-    test_window = max(1, int(total_days * test_ratio / n_folds))
-    train_window = max(1, int(test_window * train_pct / (100.0 * test_ratio)))
-
-    windows: list[tuple[date, date, date, date]] = []
-    for i in range(n_folds):
-        test_end_d = end_date - timedelta(days=(n_folds - 1 - i) * test_window)
-        test_start_d = test_end_d - timedelta(days=test_window - 1)
-        train_end_d = test_start_d - timedelta(days=1)
-        train_start_d = train_end_d - timedelta(days=train_window - 1)
-
-        # Clamp to data boundaries
-        if train_start_d < start_date:
-            train_start_d = start_date
-        if test_end_d > end_date:
-            test_end_d = end_date
-
-        if train_start_d >= train_end_d or test_start_d >= test_end_d:
-            continue
-        windows.append((train_start_d, train_end_d, test_start_d, test_end_d))
-
-    # Fallback: if no valid windows were produced, use simple split
-    if not windows:
-        return [_split_dates(start_date, end_date, train_pct)]
-
-    return windows
-
-
-# ---------------------------------------------------------------------------
-# Metric extraction
-# ---------------------------------------------------------------------------
-
-def _extract_fitness(result: dict[str, Any], objective: str) -> float:
-    """Extract the fitness metric from backtest results.
-
-    Returns ``_FAIL_VALUE`` when the metric is missing or ``None`` so Optuna
-    can continue without crashing.
-    """
-    metric_key = FITNESS_METRICS.get(objective)
-    if metric_key is None:
-        return _FAIL_VALUE
-    stats = result.get("statistics", {})
-    value = stats.get(metric_key)
-    if value is None:
-        return _FAIL_VALUE
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return _FAIL_VALUE
 
 
 # ---------------------------------------------------------------------------
@@ -209,244 +123,8 @@ def _run_backtest(
 
 
 # ---------------------------------------------------------------------------
-# Smart defaults
-# ---------------------------------------------------------------------------
-
-def _auto_n_trials(param_ranges: dict[str, dict[str, Any]]) -> int:
-    """Calculate a reasonable n_trials based on search space dimensionality."""
-    n_dims = len(param_ranges)
-    if n_dims == 0:
-        return 50
-    return max(50, n_dims * 20)
-
-
-def _auto_sampler(param_ranges: dict[str, dict[str, Any]]) -> str:
-    """Select sampler based on parameter types and count."""
-    n_dims = len(param_ranges)
-    has_int = any(p.get("type") == "int" for p in param_ranges.values())
-    if n_dims <= 3 and not has_int:
-        return "cmaes"
-    return "tpe"
-
-
-def _auto_workers() -> int:
-    """Select worker count based on CPU cores."""
-    import os
-    cpu_count = os.cpu_count() or 2
-    return min(4, max(1, cpu_count // 2))
-
-
-# ---------------------------------------------------------------------------
 # Main optimizer class
 # ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Robustness helpers (Layer 2/3)
-# ---------------------------------------------------------------------------
-
-def _slim_result(result: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Keep only fields needed for IS/OOS comparison charts."""
-    if result is None:
-        return None
-    return {
-        "statistics": result.get("statistics"),
-        "equity_curve": result.get("equity_curve"),
-        "monthly_returns": result.get("monthly_returns"),
-    }
-
-
-def _compute_dsr(
-    best_sharpe: float,
-    trials_data: list[dict[str, Any]],
-    skewness: float,
-    kurtosis: float,
-    n_obs: int,
-) -> float | None:
-    """Deflated Sharpe Ratio — Bailey & López de Prado (2014).
-
-    Only valid when fitness_objective is "sharpe".
-    Filters out failed trials (value == _FAIL_VALUE or state != COMPLETE).
-    """
-    from tinohelm.backtest.result import _norm_ppf, _norm_cdf
-
-    valid_values = [
-        t["value"] for t in trials_data
-        if t.get("state") == "COMPLETE"
-        and t.get("value") is not None
-        and t["value"] != _FAIL_VALUE
-    ]
-    n_trials = len(valid_values)
-    if n_trials < 5 or n_obs < 5 or best_sharpe is None:
-        return None
-
-    # De-annualize trial Sharpe values (stored as annualized)
-    sr_values = [v / math.sqrt(252) for v in valid_values]
-    sr_mean = sum(sr_values) / len(sr_values)
-    sr_var = sum((s - sr_mean) ** 2 for s in sr_values) / (len(sr_values) - 1)
-    if sr_var <= 0:
-        return None
-
-    gamma = 0.5772156649  # Euler-Mascheroni constant
-    e_val = math.e
-
-    # Expected maximum SR under null
-    sr_max_star = math.sqrt(sr_var) * (
-        (1 - gamma) * _norm_ppf(1 - 1 / n_trials)
-        + gamma * _norm_ppf(1 - 1 / (n_trials * e_val))
-    )
-
-    # DSR = PSR with sr_max_star as benchmark
-    daily_sr = best_sharpe / math.sqrt(252)  # de-annualize best
-    denom_sq = 1 - skewness * daily_sr + ((kurtosis - 1) / 4) * daily_sr * daily_sr
-    if denom_sq <= 0:
-        return None
-    z = (daily_sr - sr_max_star) * math.sqrt(n_obs - 1) / math.sqrt(denom_sq)
-    return round(_norm_cdf(z), 4)
-
-
-def _compute_param_sensitivity(
-    trials_data: list[dict[str, Any]],
-    param_ranges: dict[str, dict[str, Any]],
-    param_importances: dict[str, float],
-    n_bins: int = 10,
-    max_pairs: int = 3,
-) -> dict[str, Any] | None:
-    """Bin trial params and compute mean fitness per bin.
-
-    single_param: histogram for each param.
-    grid: 2D heatmap for top param pairs by importance.
-    """
-    import numpy as np
-
-    valid_trials = [
-        t for t in trials_data
-        if t.get("state") == "COMPLETE"
-        and t.get("value") is not None
-        and t["value"] != _FAIL_VALUE
-    ]
-    if len(valid_trials) < 10:
-        return None
-
-    param_names = list(param_ranges.keys())
-
-    # --- Single param sensitivity ---
-    single_param: dict[str, Any] = {}
-    for pname in param_names:
-        values = []
-        fitnesses = []
-        for t in valid_trials:
-            if pname in t.get("params", {}):
-                values.append(t["params"][pname])
-                fitnesses.append(t["value"])
-        if len(values) < 10:
-            continue
-        arr_v = np.array(values, dtype=np.float64)
-        arr_f = np.array(fitnesses, dtype=np.float64)
-        # Quantile-based bins
-        bin_edges = np.unique(np.percentile(arr_v, np.linspace(0, 100, n_bins + 1)))
-        if len(bin_edges) < 2:
-            continue
-        bin_indices = np.digitize(arr_v, bin_edges[1:-1])
-        bin_means = []
-        bin_centers = []
-        for bi in range(len(bin_edges) - 1):
-            mask = bin_indices == bi
-            if mask.any():
-                bin_means.append(round(float(arr_f[mask].mean()), 4))
-                bin_centers.append(round(float((bin_edges[bi] + bin_edges[bi + 1]) / 2), 6))
-        if bin_centers:
-            single_param[pname] = {"bins": bin_centers, "values": bin_means}
-
-    # --- Param pairs (top by importance) ---
-    grid: dict[str, Any] = {}
-    sorted_params = sorted(
-        [p for p in param_importances if p in param_names],
-        key=lambda k: param_importances.get(k, 0),
-        reverse=True,
-    )
-    top_params = sorted_params[:4]
-    pairs_done = 0
-    for i, pa in enumerate(top_params):
-        for pb in top_params[i + 1:]:
-            if pairs_done >= max_pairs:
-                break
-            va, vb, vf = [], [], []
-            for t in valid_trials:
-                p = t.get("params", {})
-                if pa in p and pb in p:
-                    va.append(p[pa])
-                    vb.append(p[pb])
-                    vf.append(t["value"])
-            if len(va) < 10:
-                continue
-            arr_a = np.array(va, dtype=np.float64)
-            arr_b = np.array(vb, dtype=np.float64)
-            arr_ff = np.array(vf, dtype=np.float64)
-            edges_a = np.unique(np.percentile(arr_a, np.linspace(0, 100, n_bins + 1)))
-            edges_b = np.unique(np.percentile(arr_b, np.linspace(0, 100, n_bins + 1)))
-            if len(edges_a) < 2 or len(edges_b) < 2:
-                continue
-            idx_a = np.digitize(arr_a, edges_a[1:-1])
-            idx_b = np.digitize(arr_b, edges_b[1:-1])
-            na, nb = len(edges_a) - 1, len(edges_b) - 1
-            grid_vals = [[None] * nb for _ in range(na)]
-            for ai in range(na):
-                for bi_idx in range(nb):
-                    mask = (idx_a == ai) & (idx_b == bi_idx)
-                    if mask.any():
-                        grid_vals[ai][bi_idx] = round(float(arr_ff[mask].mean()), 4)
-            key = f"{pa}__{pb}"
-            grid[key] = {
-                "x_bins": [round(float((edges_a[j] + edges_a[j + 1]) / 2), 6) for j in range(na)],
-                "y_bins": [round(float((edges_b[j] + edges_b[j + 1]) / 2), 6) for j in range(nb)],
-                "values": grid_vals,
-                "x_label": pa,
-                "y_label": pb,
-            }
-            pairs_done += 1
-        if pairs_done >= max_pairs:
-            break
-
-    return {"single_param": single_param, "grid": grid}
-
-
-def _compute_param_stability(
-    trials_data: list[dict[str, Any]],
-    best_params: dict[str, Any],
-    threshold: float = 0.20,
-) -> float | None:
-    """Std of fitness for trials within ±threshold of best params.
-
-    Lower = more stable (params don't affect fitness much near optimum).
-    """
-    if not best_params:
-        return None
-
-    valid_trials = [
-        t for t in trials_data
-        if t.get("state") == "COMPLETE"
-        and t.get("value") is not None
-        and t["value"] != _FAIL_VALUE
-    ]
-    nearby = []
-    for t in valid_trials:
-        params = t.get("params", {})
-        is_near = True
-        for k, bv in best_params.items():
-            if k not in params:
-                is_near = False
-                break
-            if abs(params[k] - bv) / max(abs(bv), 1e-9) > threshold:
-                is_near = False
-                break
-        if is_near:
-            nearby.append(t["value"])
-
-    if len(nearby) < 3:
-        return None
-    mean_v = sum(nearby) / len(nearby)
-    variance = sum((v - mean_v) ** 2 for v in nearby) / (len(nearby) - 1)
-    return round(variance ** 0.5, 4)
 
 
 class BacktestOptimizer:

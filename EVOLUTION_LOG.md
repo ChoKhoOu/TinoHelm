@@ -249,4 +249,176 @@ CI 会跳过 41 个测试。把真正 NT-free 的逻辑抽出来,可以同时解
 - 新增 245 行纯 helpers + 508 行 NT-free 测试
 - `_setup_engine` 内联 datetime/字符串/arithmetic 代码从 ~35 行降至 ~5 行
 
+## 2026-04-16 (6)
+
+**主题**: 将 `backtest/optimizer.py` 中的纯逻辑下沉到新建的 `optimizer_helpers.py`,并建立 Optuna/NT-free 的单元测试层(77 个测试,与上一轮 runner.py 同种打法)
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- `src/tinohelm/backtest/optimizer_helpers.py` — 新建 476 行,收纳 11 个 Optuna-free / NT-free 纯函数 + 9 个具名常量 + 内联 `_norm_ppf` / `_norm_cdf`
+- `src/tinohelm/backtest/optimizer.py` — 1115 → 793 行(-322 行,-28.9%),仅保留 Optuna 依赖(`_create_sampler`、`_PatienceCallback`)和 NT 依赖(`_run_backtest`、`BacktestOptimizer`)部分
+- `tests/backtest/test_optimizer_helpers.py` — 新建 733 行,77 个 Optuna/NT-free 单元测试(此前 optimizer.py 零测试覆盖)
+
+**动机**:
+
+上一轮(2026-04-16 (5))把 `runner.py` 中的纯逻辑下沉到 `runner_helpers.py`,
+建立 NT-free 测试层。本项目 `backtest/` 目录下剩下的"大文件、零测试、
+混合依赖"问题最严重的就是 `optimizer.py`(1115 行):
+
+1. **零测试覆盖** — 除 `runner`/`extract`/`sections` 之外的最后一个大文件,
+   `tests/` 下没有任何 `test_optim*`/`test_walk*` 文件。其中包含:
+   - `_split_dates` / `_walk_forward_windows` —— 日期切分和滚动窗口生成,
+     边界条件多(`train_pct=100`、`n_folds=0`、`test_ratio≤0`、窗口钳到
+     start/end 边界),错一个 off-by-one 就会让整个 WFO 失效
+   - `_compute_dsr` —— Bailey & López de Prado (2014) Deflated Sharpe Ratio,
+     数学密集,涉及方差、Euler-Mascheroni 常数、annualization、PSR denom
+     正性判断 —— 任一步骤出错都可能产生看似合理实则错误的结果
+   - `_compute_param_sensitivity` —— numpy 向量化直方图 + 2D heatmap 装配,
+     quantile 重复(`len(bin_edges) < 2`)、max_pairs 限制、top-importance
+     排序等逻辑复杂,写错一个 index 就是静默数据污染
+   - `_compute_param_stability` —— best_params 附近半径内的 stdev,分母
+     `max(abs(bv), 1e-9)` 的 epsilon 零除保护是关键,没有测试就容易被
+     "优化掉"
+
+2. **Optuna 依赖遮蔽测试执行** — `optimizer.py` 顶部 `try: import optuna`,
+   但整个文件无法被"无 Optuna"CI 导入测试。虽然纯函数本身不用 Optuna,
+   但它们被混在 Optuna-dependent 的 `BacktestOptimizer` 类中,
+   测试就得 `try: import optuna; _HAS_OPTUNA = True` + `skipif`。
+   把它们抽出来到 `optimizer_helpers.py` 可以彻底绕过这个限制。
+
+3. **NT 依赖的传递性污染** — 原 `_compute_dsr` 使用
+   `from tinohelm.backtest.result import _norm_ppf, _norm_cdf`,
+   而 `result/__init__.py` 顶部 `from .extract import extract_backtest_results`,
+   `extract.py` 又 `from nautilus_trader.backtest.engine import ...`。
+   结果调用 `_compute_dsr` **运行时** 触发 NT import。为了让 helpers 模块
+   无论导入时还是运行时都 NT-free,必须打破这条依赖链。
+
+4. **FAIL_VALUE 哨兵值散落使用** — `-999.0` 在 `_compute_dsr` /
+   `_compute_param_sensitivity` / `_compute_param_stability` 三处都有
+   `t["value"] != _FAIL_VALUE` 的 filter 逻辑重复,抽出
+   `filter_completed_trials()` 把"completed + 非 sentinel + 非 None"
+   的三重检查变成一处。
+
+5. **魔术数字** — 原代码 hardcode 的阈值(`< 5`、`< 10`、`< 3`、
+   `1e-9`、`0.20`、`math.sqrt(252)`)散落各处,只有通过看代码才知道
+   "为什么 5 而不是 3"。命名为 `DSR_MIN_TRIALS` / `SENSITIVITY_MIN_TRIALS`
+   / `STABILITY_MIN_NEARBY` / `STABILITY_EPSILON` /
+   `STABILITY_DEFAULT_THRESHOLD` / `TRADING_DAYS_PER_YEAR` 之后,
+   意图显性化、测试可以直接引用常量做断言。
+
+**要点**:
+
+1. **新建 `optimizer_helpers.py`,导出 20 个符号** —— 9 个常量 + 11 个函数:
+   - 常量:`FITNESS_METRICS`、`FAIL_VALUE`、`TRADING_DAYS_PER_YEAR`、
+     `DSR_MIN_TRIALS`、`DSR_MIN_OBSERVATIONS`、`SENSITIVITY_MIN_TRIALS`、
+     `STABILITY_MIN_NEARBY`、`STABILITY_DEFAULT_THRESHOLD`、`STABILITY_EPSILON`
+   - 日期:`split_dates`、`walk_forward_windows`
+   - Metric:`extract_fitness`
+   - Smart defaults:`auto_n_trials`、`auto_sampler`、`auto_workers`
+     (`auto_workers` 新增可注入 `cpu_count` 参数,便于测试时不依赖物理 CPU)
+   - 装配:`slim_result`、`filter_completed_trials`(新抽,消重三处)
+   - 鲁棒性:`compute_dsr`、`compute_param_sensitivity`、`compute_param_stability`
+   - 内联:`_norm_ppf`、`_norm_cdf`(从 `result/statistics.py` 复制的
+     15 行 Abramowitz & Stegun 近似公式,带显式 comment 标注去重理由和
+     drift 检测契约)
+
+2. **`optimizer.py` 变薄到 793 行** —— 顶部改为 `from optimizer_helpers
+   import ... as _FAIL_VALUE, ... as _auto_n_trials, ...` 别名进口,
+   20+ 个内部调用点 **零修改**。优势:
+   - `api/routes/optimize.py` 里的 `from tinohelm.backtest.optimizer import
+     _auto_n_trials, _auto_workers` **零影响**(backward compat 测试验证)
+   - 仅保留 Optuna-dependent 和 NT-dependent 部分:`_create_sampler`、
+     `_PatienceCallback`、`_run_backtest`、`BacktestOptimizer` 类、
+     `run_optimization` 入口
+
+3. **`test_optimizer_helpers.py` — 77 个 Optuna/NT-free 测试**:
+   - `TestModuleIsolation` (2): 确认 optimizer_helpers 在**子进程**里
+     import 后,`sys.modules` 里不出现 `optuna` / `nautilus_trader` /
+     `sqlalchemy` / `redis` —— 子进程隔离避免当前进程被其他测试污染;
+     常量数值锁定
+   - `TestSplitDates` (5): 70%/0%/100% 拆分 / 单日 / 原始身份
+   - `TestWalkForwardWindows` (8): 3 folds 正常 / n_folds=0 回退 /
+     train_pct=100 回退 / train_pct>100 回退 / 单 fold / test 段不重叠
+     / train 钳到 start / test 钳到 end
+   - `TestExtractFitness` (12): 四种 objective / 未知 objective / 缺
+     statistics / 缺 metric / None value / 非数值 / int 转 float /
+     非 dict result / 非 dict statistics
+   - `TestAutoDefaults` (13): n_trials 零维 / 单维 / 多维 / 50 floor;
+     sampler CMA-ES / 3 维边界 / int 触发 TPE / 多维触发 TPE / 默认 float;
+     workers 上界 4 / 下界 1 / 中间 / None 回落 os.cpu_count
+   - `TestSlimResult` (4): None / 三 key 保留 / 缺 key 填 None / 空 dict
+   - `TestFilterCompletedTrials` (5): 非 COMPLETE 过滤 / None value 过滤
+     / sentinel 过滤 / 空 / 全通过
+   - `TestComputeDsr` (8): trial 不足 / obs 不足 / None best_sharpe /
+     零方差 / 幸福路径返回概率 + 4 位小数 / sentinel 过滤 / 负 denom
+     返回 None / 可重现
+   - `TestComputeParamSensitivity` (9): trial 不足 / 空 / 单参幸福路径
+     单调增 / pair grid / 缺失参数静默跳过 / max_pairs 限流 / sentinel
+     全过滤返回 None / 空 importances / grid 值 4 位小数
+   - `TestComputeParamStability` (7): 空 best_params / 邻域不足 /
+     幸福路径正 stdev + 4 位小数 / 零 best_param 用 epsilon / 缺 best
+     key 的 trial 剔除 / 自定义阈值扩大邻域 / sentinel 剔除
+   - `TestNormalApproximationsEquivalence` (2): 用 `importlib.util`
+     直接加载 `result/statistics.py`(绕过 `result/__init__.py`
+     的 NT 污染),比对 `_norm_ppf` / `_norm_cdf` 与我们内联副本逐点
+     `abs_tol=1e-12` 等值 —— **把"复制粘贴的 drift 风险"变成显式契约**
+   - `TestBackwardCompat` (1): 断言 `optimizer.py` 的
+     `_FAIL_VALUE` / `FITNESS_METRICS` / 所有 `_`-前缀函数 `is`
+     identity 等于 helpers 里的对应符号,保护
+     `api/routes/optimize.py` 的私有 import 面
+
+4. **`_norm_ppf` / `_norm_cdf` 内联的三重保护** —— 避开
+   `result/__init__.py` 的 NT 污染是动机,但复制代码有 drift 风险。
+   三层保护:
+   - 复制处有明确 comment 指向原模块和公式(A&S 26.2.23 + `math.erf`)
+   - `TestNormalApproximationsEquivalence` 两个测试用 `importlib.util`
+     在测试时加载原始 `statistics.py`,**逐点数值比对** rel_tol=0,
+     abs_tol=1e-12 —— 任一侧被修改都会立刻失败
+   - 两份都是极短的闭式公式,没有隐式状态
+
+5. **`filter_completed_trials` 抽取消重** —— 原代码三处各有一段:
+   ```python
+   valid = [t for t in trials if t.get("state") == "COMPLETE"
+            and t.get("value") is not None
+            and t["value"] != _FAIL_VALUE]
+   ```
+   现在 `filter_completed_trials(trials)` 一处。修改过滤规则时(比如
+   将来支持更多的 trial state)只需改一处。
+
+6. **`auto_workers(cpu_count=None)` 新增可注入** —— 原 `_auto_workers()`
+   直接 `os.cpu_count()`,测试只能验证返回值在 `[1, 4]` 区间。
+   新签名可注入 `cpu_count` 参数,`None` 时回落 os.cpu_count,
+   让"1 核"、"4 核"、"16 核"的行为可以确定性单测。
+
+7. **`extract_fitness` 增强类型防御** —— 原代码在 `result` 不是 dict
+   或 `statistics` 不是 dict 时会抛 `AttributeError`。新版用 `isinstance
+   (result, dict)` 和 `isinstance(stats, dict)` 先过滤,异常输入返回
+   `FAIL_VALUE` 与其他"无效数据"路径一致。测试里显式覆盖两种边界。
+
+8. **完整回归**: `PYTHONPATH=src python3 -m pytest tests/` 从 677 个测试
+   增至 754 个,全部通过(+77 helpers 单测)。零回归。
+   `api/routes/optimize.py` 未动,其 private import 通过 backward
+   compat 别名继续 work。
+
+**验证**:
+- 754/754 pytest 全通过(`PYTHONPATH=src python3 -m pytest tests/`)
+- 字节码编译检查全部通过(`py_compile` on 修改/新建的 3 个文件)
+- `optimizer_helpers` 在 **子进程**下导入后 `sys.modules` 不出现
+  `optuna` / `nautilus_trader` / `sqlalchemy` / `redis` —— 证实完全
+  Optuna/NT-free(运行时 & 导入时)
+- 逐点数值等价性验证:helpers 里的 `_norm_ppf` / `_norm_cdf` 与
+  `result/statistics.py` 原版 abs_tol=1e-12 等值
+- 行为等价性手测:`split_dates`、`walk_forward_windows` 对
+  5 种 train_pct × 3 种 n_folds 组合全部 bit-for-bit 等于
+  重新复刻的原版逻辑
+- 检查 TODO/FIXME/XXX 注释清零
+- optimizer.py 行数: 1115 → 793(-322 行,-28.9%)
+- 新增 476 行纯 helpers + 733 行 Optuna/NT-free 测试
+- 六次演进累积(backtest/ 三大文件):
+  - `extract.py`:1500 → 942(-558 行)
+  - `runner.py`:1244 → 1205(-39 行)
+  - `optimizer.py`:1115 → 793(-322 行)
+  - 合计:3859 → 2940 行(-919 行,-23.8%)
+  - 对应三个 *_helpers.py 纯逻辑层累计 ~1165 行 + 1400+ 行
+    NT/Optuna-free 测试(可在无 NT、无 Optuna 的 CI 上独立运行)
+
 
