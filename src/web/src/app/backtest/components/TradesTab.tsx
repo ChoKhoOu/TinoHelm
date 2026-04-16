@@ -28,7 +28,13 @@ import {
 } from "@/components/ui/tooltip";
 import { API_BASE } from "@/lib/api";
 import { useCountUp } from "@/hooks/useCountUp";
-import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
+import {
+  CHART_TOOLTIP_PROPS,
+  CHART_AXIS_STYLE,
+  CHART_GRID_STYLE,
+  CHART_REFERENCE_LINE,
+  CHART_COLORS,
+} from "@/lib/chartTheme";
 import type {
   BacktestResult,
   TradePnlDistributionBin,
@@ -45,10 +51,10 @@ import type {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const ACCENT_GREEN = "var(--suc)";
-const ACCENT_RED = "var(--dan)";
-const ACCENT_BLUE = "var(--info)";
-const ACCENT_PURPLE = "var(--info)";
+const ACCENT_GREEN = CHART_COLORS.success;
+const ACCENT_RED = CHART_COLORS.danger;
+const ACCENT_LONG = CHART_COLORS.info;
+const ACCENT_SHORT = CHART_COLORS.accent;
 
 
 /* ------------------------------------------------------------------ */
@@ -70,21 +76,6 @@ function HelpTip({ text }: { text: string }) {
   );
 }
 
-function GlassCard({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={`rounded-xl border bg-card overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)] ${className}`}
-    >
-      {children}
-    </div>
-  );
-}
 
 function EmptyPlaceholder({ label }: { label?: string }) {
   return (
@@ -146,10 +137,10 @@ function MetricCard({
 
   const accentColor =
     positive == null
-      ? "rgba(76, 158, 235, 0.5)"
+      ? "var(--info)"
       : positive
-        ? "rgba(38, 217, 127, 0.5)"
-        : "rgba(239, 83, 80, 0.5)";
+        ? "var(--suc)"
+        : "var(--dan)";
 
   const formatted =
     value == null
@@ -168,7 +159,7 @@ function MetricCard({
         className="absolute bottom-0 left-0 right-0 h-[2px] opacity-30 group-hover:opacity-70 transition-opacity duration-500"
         style={{ background: `linear-gradient(90deg, transparent, ${accentColor}, transparent)` }}
       />
-      <span className="qds-section-label inline-flex items-center">
+      <span className="sc-l inline-flex items-center">
         {label}
         {tooltip && <HelpTip text={tooltip} />}
       </span>
@@ -185,7 +176,7 @@ function MetricCard({
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <span className="qds-section-label block">
+    <span className="sc-l">
       {children}
     </span>
   );
@@ -212,16 +203,16 @@ function PnlDistributionChart({ data }: { data?: TradePnlDistributionBin[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+        <CartesianGrid {...CHART_GRID_STYLE} />
         <XAxis
           dataKey="label"
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           width={32}
@@ -255,20 +246,20 @@ function CumulativePnlChart({ data }: { data?: CumulativeTradePnl[] }) {
       <AreaChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
         <defs>
           <linearGradient id="cumPnlFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={isPositive ? ACCENT_BLUE : ACCENT_RED} stopOpacity={0.25} />
-            <stop offset="100%" stopColor={isPositive ? ACCENT_BLUE : ACCENT_RED} stopOpacity={0.02} />
+            <stop offset="0%" stopColor={isPositive ? ACCENT_LONG : ACCENT_RED} stopOpacity={0.25} />
+            <stop offset="100%" stopColor={isPositive ? ACCENT_LONG : ACCENT_RED} stopOpacity={0.02} />
           </linearGradient>
         </defs>
-        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+        <CartesianGrid {...CHART_GRID_STYLE} />
         <XAxis
           dataKey="trade_num"
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           label={{ value: "交易序号", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "var(--t3)" }}
         />
         <YAxis
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           width={52}
@@ -278,11 +269,11 @@ function CumulativePnlChart({ data }: { data?: CumulativeTradePnl[] }) {
           {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${Number(value).toFixed(2)} USDT`, "累积盈亏"]}
         />
-        <ReferenceLine y={0} stroke="rgba(240,180,41,0.4)" strokeDasharray="6 4" strokeWidth={1} />
+        <ReferenceLine y={0} {...CHART_REFERENCE_LINE} />
         <Area
           type="monotone"
           dataKey="cumulative_pnl"
-          stroke={isPositive ? ACCENT_BLUE : ACCENT_RED}
+          stroke={isPositive ? ACCENT_LONG : ACCENT_RED}
           strokeWidth={1.5}
           fill="url(#cumPnlFill)"
           dot={false}
@@ -302,12 +293,14 @@ function CumulativePnlChart({ data }: { data?: CumulativeTradePnl[] }) {
 function PnlScatterChart({ data }: { data?: TradePnlScatterPoint[] }) {
   const chartData = useMemo(() => {
     if (!data || data.length === 0) return { long: [], short: [] };
-    const long = data
+    // Assign trade sequence number, then split by side
+    const indexed = data.map((d, i) => ({ ...d, tradeNum: i + 1 }));
+    const long = indexed
       .filter((d) => d.side?.toLowerCase() === "long" || d.side?.toLowerCase() === "buy")
-      .map((d) => ({ x: new Date(d.timestamp).getTime(), y: d.pnl, ...d }));
-    const short = data
+      .map((d) => ({ x: d.tradeNum, y: d.pnl, ...d }));
+    const short = indexed
       .filter((d) => d.side?.toLowerCase() === "short" || d.side?.toLowerCase() === "sell")
-      .map((d) => ({ x: new Date(d.timestamp).getTime(), y: d.pnl, ...d }));
+      .map((d) => ({ x: d.tradeNum, y: d.pnl, ...d }));
     return { long, short };
   }, [data]);
 
@@ -316,20 +309,20 @@ function PnlScatterChart({ data }: { data?: TradePnlScatterPoint[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <ScatterChart margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+        <CartesianGrid {...CHART_GRID_STYLE} />
         <XAxis
           dataKey="x"
           type="number"
           domain={["auto", "auto"]}
-          tickFormatter={(v) => new Date(v).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
+          label={{ value: "交易序号", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "var(--t3)" }}
         />
         <YAxis
           dataKey="y"
           type="number"
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           width={52}
@@ -339,13 +332,13 @@ function PnlScatterChart({ data }: { data?: TradePnlScatterPoint[] }) {
           {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown, name: unknown) => [`${Number(value).toFixed(2)} USDT`, name === "y" ? "盈亏" : String(name)]}
         />
-        <ReferenceLine y={0} stroke="rgba(240,180,41,0.4)" strokeDasharray="6 4" strokeWidth={1} />
+        <ReferenceLine y={0} {...CHART_REFERENCE_LINE} />
         <Legend
-          wrapperStyle={{ fontSize: 10, color: "rgba(255,255,255,0.4)" }}
+          wrapperStyle={{ fontSize: 10, color: "var(--t2)" }}
           formatter={(value) => value === "long" ? "多头" : "空头"}
         />
-        <Scatter name="long" data={chartData.long} fill={ACCENT_BLUE} fillOpacity={0.7} r={3} />
-        <Scatter name="short" data={chartData.short} fill={ACCENT_PURPLE} fillOpacity={0.7} r={3} />
+        <Scatter name="long" data={chartData.long} fill={ACCENT_LONG} fillOpacity={0.7} r={3} />
+        <Scatter name="short" data={chartData.short} fill={ACCENT_SHORT} fillOpacity={0.7} r={3} />
       </ScatterChart>
     </ResponsiveContainer>
   );
@@ -368,12 +361,12 @@ function MaeMfeChart({ data }: { data?: MaeMfePoint[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <ScatterChart margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+        <CartesianGrid {...CHART_GRID_STYLE} />
         <XAxis
           dataKey="x"
           type="number"
           domain={["auto", "auto"]}
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           label={{ value: "MAE", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "var(--t3)" }}
@@ -382,7 +375,7 @@ function MaeMfeChart({ data }: { data?: MaeMfePoint[] }) {
         <YAxis
           dataKey="y"
           type="number"
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           width={52}
@@ -392,7 +385,7 @@ function MaeMfeChart({ data }: { data?: MaeMfePoint[] }) {
           {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown, name: unknown) => [`${Number(value).toFixed(2)}`, name === "y" ? "最终盈亏" : "MAE"]}
         />
-        <ReferenceLine y={0} stroke="rgba(240,180,41,0.4)" strokeDasharray="6 4" strokeWidth={1} />
+        <ReferenceLine y={0} {...CHART_REFERENCE_LINE} />
         <Scatter
           name="mae"
           data={chartData.mae}
@@ -426,16 +419,16 @@ function HoldingTimeChart({ data }: { data?: HoldingTimeBin[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+        <CartesianGrid {...CHART_GRID_STYLE} />
         <XAxis
           dataKey="label"
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           width={32}
@@ -444,7 +437,7 @@ function HoldingTimeChart({ data }: { data?: HoldingTimeBin[] }) {
           {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${value} 笔`, "交易数"]}
         />
-        <Bar dataKey="count" fill={ACCENT_BLUE} fillOpacity={0.8} radius={[2, 2, 0, 0]} isAnimationActive animationDuration={1200} />
+        <Bar dataKey="count" fill={CHART_COLORS.accent} fillOpacity={0.8} radius={[2, 2, 0, 0]} isAnimationActive animationDuration={1200} />
       </BarChart>
     </ResponsiveContainer>
   );
@@ -469,16 +462,16 @@ function StreakChart({ data }: { data?: StreakEntry[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+        <CartesianGrid {...CHART_GRID_STYLE} />
         <XAxis
           dataKey="streak_num"
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           label={{ value: "连续序号", position: "insideBottomRight", offset: -4, fontSize: 9, fill: "var(--t3)" }}
         />
         <YAxis
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           width={32}
@@ -487,7 +480,7 @@ function StreakChart({ data }: { data?: StreakEntry[] }) {
           {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${Math.abs(Number(value))} 笔`, "连续长度"]}
         />
-        <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
+        <ReferenceLine y={0} {...CHART_REFERENCE_LINE} />
         <Bar dataKey="count" radius={[2, 2, 0, 0]} isAnimationActive animationDuration={1200}>
           {chartData.map((entry, i) => (
             <Cell key={i} fill={entry.win ? ACCENT_GREEN : ACCENT_RED} fillOpacity={0.8} />
@@ -519,14 +512,14 @@ function LongShortChart({ data }: { data?: LongVsShort }) {
         const longPct = total > 0 ? (Math.abs(m.long) / total) * 100 : 50;
         return (
           <div key={m.label} className="rounded-lg border bg-card p-3">
-            <div className="qds-section-label">{m.label}</div>
+            <div className="sc-l">{m.label}</div>
             <div className="flex items-center justify-between text-xs mb-1">
-              <span style={{ color: ACCENT_BLUE }}>{m.fmt(m.long)}</span>
-              <span style={{ color: ACCENT_PURPLE }}>{m.fmt(m.short)}</span>
+              <span style={{ color: ACCENT_LONG }}>{m.fmt(m.long)}</span>
+              <span style={{ color: ACCENT_SHORT }}>{m.fmt(m.short)}</span>
             </div>
             <div className="flex h-2 rounded-full overflow-hidden bg-secondary">
-              <div style={{ width: `${longPct}%`, background: ACCENT_BLUE, opacity: 0.8 }} />
-              <div style={{ width: `${100 - longPct}%`, background: ACCENT_PURPLE, opacity: 0.8 }} />
+              <div style={{ width: `${longPct}%`, background: ACCENT_LONG, opacity: 0.8 }} />
+              <div style={{ width: `${100 - longPct}%`, background: ACCENT_SHORT, opacity: 0.8 }} />
             </div>
             <div className="flex justify-between mt-1">
               <span className="text-[9px] text-qds-t3">多头</span>
@@ -577,15 +570,15 @@ function ReturnByGroupChart({ data, labelKey, title }: {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+        <CartesianGrid {...CHART_GRID_STYLE} />
         <XAxis
           dataKey="label"
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
         />
         <YAxis
-          tick={{ fill: "var(--t2)", fontSize: 9 }}
+          tick={CHART_AXIS_STYLE}
           tickLine={false}
           axisLine={false}
           width={48}
@@ -595,12 +588,12 @@ function ReturnByGroupChart({ data, labelKey, title }: {
           {...CHART_TOOLTIP_PROPS}
           formatter={(value: unknown) => [`${Number(value).toFixed(2)}`, "中位收益"]}
         />
-        <ReferenceLine y={0} stroke="rgba(240,180,41,0.4)" strokeDasharray="6 4" strokeWidth={1} />
+        <ReferenceLine y={0} {...CHART_REFERENCE_LINE} />
         <Bar dataKey="median" radius={[2, 2, 0, 0]} isAnimationActive animationDuration={1200}>
           {chartData.map((entry, i) => (
             <Cell key={i} fill={entry.median >= 0 ? ACCENT_GREEN : ACCENT_RED} fillOpacity={0.8} />
           ))}
-          <ErrorBar dataKey="errorHigh" width={4} strokeWidth={1.5} stroke="rgba(255,255,255,0.4)" direction="y" />
+          <ErrorBar dataKey="errorHigh" width={4} strokeWidth={1.5} stroke="var(--t2)" direction="y" />
         </Bar>
       </BarChart>
     </ResponsiveContainer>
@@ -784,95 +777,70 @@ export function TradesTab({ runId }: TradesTabProps) {
         />
       </div>
 
-      {/* ── Charts Grid 2 cols ── */}
+      {/* ── Trade PnL ── */}
+      <span className="qds-section-label">Trade PnL</span>
       <div className="grid grid-cols-2 gap-4">
+        <div className="bt-cd"><div className="bt-cd-body">
+          <SectionTitle>盈亏分布</SectionTitle>
+          <PnlDistributionChart data={result.trade_pnl_distribution} />
+        </div></div>
+        <div className="bt-cd"><div className="bt-cd-body">
+          <SectionTitle>累积盈亏</SectionTitle>
+          <CumulativePnlChart data={result.cumulative_trade_pnl} />
+        </div></div>
+      </div>
 
-        {/* Row 1: PnL Distribution | Cumulative PnL */}
-        <div
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>盈亏分布</SectionTitle>
-            <PnlDistributionChart data={result.trade_pnl_distribution} />
-          </GlassCard>
-        </div>
+      {/* ── Scatter & MAE/MFE ── */}
+      <span className="qds-section-label">Scatter &amp; MAE / MFE</span>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bt-cd"><div className="bt-cd-body">
+          <SectionTitle>逐笔盈亏散点</SectionTitle>
+          <PnlScatterChart data={result.trade_pnl_scatter} />
+        </div></div>
+        <div className="bt-cd"><div className="bt-cd-body">
+          <SectionTitle>MAE/MFE 分析</SectionTitle>
+          <MaeMfeChart data={result.mae_mfe} />
+        </div></div>
+      </div>
 
-        <div
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>累积盈亏</SectionTitle>
-            <CumulativePnlChart data={result.cumulative_trade_pnl} />
-          </GlassCard>
-        </div>
+      {/* ── Patterns & Streaks ── */}
+      <span className="qds-section-label">Patterns &amp; Streaks</span>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bt-cd"><div className="bt-cd-body">
+          <SectionTitle>持仓时长分布</SectionTitle>
+          <HoldingTimeChart data={result.holding_time_distribution} />
+        </div></div>
+        <div className="bt-cd"><div className="bt-cd-body">
+          <SectionTitle>连盈/连亏序列</SectionTitle>
+          <StreakChart data={result.streak_sequence} />
+        </div></div>
+      </div>
 
-        {/* Row 2: Trade Scatter | MAE/MFE */}
-        <div
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>逐笔盈亏散点</SectionTitle>
-            <PnlScatterChart data={result.trade_pnl_scatter} />
-          </GlassCard>
-        </div>
+      {/* ── Long vs Short ── */}
+      <span className="qds-section-label">Long vs Short</span>
+      <div className="bt-cd"><div className="bt-cd-body">
+        <LongShortChart data={result.long_vs_short} />
+      </div></div>
 
-        <div
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>MAE/MFE 分析</SectionTitle>
-            <MaeMfeChart data={result.mae_mfe} />
-          </GlassCard>
-        </div>
-
-        {/* Row 3: Holding Time | Streaks */}
-        <div
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>持仓时长分布</SectionTitle>
-            <HoldingTimeChart data={result.holding_time_distribution} />
-          </GlassCard>
-        </div>
-
-        <div
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>连盈/连亏序列</SectionTitle>
-            <StreakChart data={result.streak_sequence} />
-          </GlassCard>
-        </div>
-
-        {/* Row 4: Long vs Short (full width) */}
-        <div
-          className="col-span-2"
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>多空对比</SectionTitle>
-            <LongShortChart data={result.long_vs_short} />
-          </GlassCard>
-        </div>
-
-        {/* Row 5: Return by DOW | Return by Hour */}
-        <div
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>按星期收益分布</SectionTitle>
-            <ReturnByGroupChart
-              data={result.return_by_dow}
-              labelKey="dow_name"
-              title="按星期"
-            />
-          </GlassCard>
-        </div>
-
-        <div
-        >
-          <GlassCard className="p-4 flex flex-col gap-2">
-            <SectionTitle>按小时收益分布</SectionTitle>
-            <ReturnByGroupChart
-              data={result.return_by_hour}
-              labelKey="hour"
-              title="按小时"
-            />
-          </GlassCard>
-        </div>
-
+      {/* ── By Time ── */}
+      <span className="qds-section-label">By Time</span>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bt-cd"><div className="bt-cd-body">
+          <SectionTitle>按星期收益分布</SectionTitle>
+          <ReturnByGroupChart
+            data={result.return_by_dow}
+            labelKey="dow_name"
+            title="按星期"
+          />
+        </div></div>
+        <div className="bt-cd"><div className="bt-cd-body">
+          <SectionTitle>按小时收益分布</SectionTitle>
+          <ReturnByGroupChart
+            data={result.return_by_hour}
+            labelKey="hour"
+            title="按小时"
+          />
+        </div></div>
       </div>
     </div>
   );

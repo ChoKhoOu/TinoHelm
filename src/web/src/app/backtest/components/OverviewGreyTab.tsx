@@ -48,25 +48,6 @@ function HelpTip({ text }: { text: string }) {
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Glass Card wrapper                                                 */
-/* ------------------------------------------------------------------ */
-
-function GlassCard({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={`rounded-xl border bg-card overflow-hidden ${className}`}
-    >
-      {children}
-    </div>
-  );
-}
 
 /* ------------------------------------------------------------------ */
 /*  Hero Banner — Total Return + Final Equity + mini sparkline         */
@@ -100,7 +81,7 @@ function HeroBanner({
       <div className="relative flex items-end justify-between">
         {/* Left: Total Return */}
         <div className="flex flex-col gap-1.5">
-          <span className="qds-section-label inline-flex items-center">
+          <span className="sc-l inline-flex items-center">
             总收益率
             <HelpTip text="回测期间的总投资回报百分比，即 (最终权益 - 初始资金) / 初始资金" />
           </span>
@@ -150,7 +131,7 @@ function HeroBanner({
         {/* Right: Final Equity */}
         {finalEquity !== null && (
           <div className="flex flex-col items-end gap-1.5">
-            <span className="qds-section-label inline-flex items-center">
+            <span className="sc-l inline-flex items-center">
               最终权益
               <HelpTip text="回测结束时的账户总价值，包含初始资金和所有已实现盈亏" />
             </span>
@@ -236,7 +217,7 @@ function MetricCard({
         }}
       />
 
-      <span className="qds-section-label inline-flex items-center">
+      <span className="sc-l inline-flex items-center">
         {label}
         {tooltip && <HelpTip text={tooltip} />}
       </span>
@@ -286,12 +267,11 @@ function PerformanceRadar({ s }: { s: BacktestResult["statistics"] }) {
   return (
     <div
     >
-      <GlassCard className="p-4 h-full flex flex-col">
-        <span className="qds-section-label inline-flex items-center">
-          绩效画像
-          <HelpTip text="将多个关键指标归一化到 0-100 分制，直观展示策略的综合表现维度" />
-        </span>
-        <div className="flex-1 min-h-0">
+      <div className="bt-cd h-full">
+        <div className="bt-cd-header">
+          <span className="inline-flex items-center gap-1">绩效画像<HelpTip text="将多个关键指标归一化到 0-100 分制，直观展示策略的综合表现维度" /></span>
+        </div>
+        <div className="bt-cd-body flex-1 min-h-0 flex flex-col">
           <ResponsiveContainer width="100%" height={240}>
             <RadarChart data={data} cx="50%" cy="50%" outerRadius="72%">
               <defs>
@@ -332,7 +312,7 @@ function PerformanceRadar({ s }: { s: BacktestResult["statistics"] }) {
             </RadarChart>
           </ResponsiveContainer>
         </div>
-      </GlassCard>
+      </div>
     </div>
   );
 }
@@ -381,10 +361,9 @@ function EquityDrawdownChart({
   return (
     <div
     >
-      <GlassCard className="p-4 flex flex-col gap-3">
-        <span className="qds-section-label">
-          权益曲线
-        </span>
+      <div className="bt-cd">
+        <div className="bt-cd-header">权益曲线</div>
+        <div className="bt-cd-body flex flex-col gap-3">
         <ResponsiveContainer width="100%" height={210}>
           <AreaChart
             data={chartData}
@@ -476,7 +455,7 @@ function EquityDrawdownChart({
         </ResponsiveContainer>
 
         {/* Drawdown underwater chart */}
-        <span className="qds-section-label mt-1">
+        <span className="sc-l mt-1">
           回撤曲线
         </span>
         <ResponsiveContainer width="100%" height={80}>
@@ -522,7 +501,8 @@ function EquityDrawdownChart({
             />
           </AreaChart>
         </ResponsiveContainer>
-      </GlassCard>
+      </div>
+      </div>
     </div>
   );
 }

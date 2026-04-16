@@ -45,7 +45,7 @@ export function TearsheetTab({ runId }: TearsheetTabProps) {
     <div className="flex flex-col h-full">
       {/* Controls bar */}
       <div className="flex items-center justify-between px-4 py-2 border-b bg-card shrink-0">
-        <span className="qds-section-label">
+        <span className="sc-l">
           回测报告
         </span>
         <div className="flex items-center gap-2">
@@ -87,7 +87,7 @@ export function TearsheetTab({ runId }: TearsheetTabProps) {
 
       {/* CSV download bar */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-t bg-card shrink-0 flex-wrap">
-        <span className="qds-section-label mr-1">
+        <span className="sc-l mr-1">
           下载报表
         </span>
         {CSV_REPORTS.map(({ key, label }) => (

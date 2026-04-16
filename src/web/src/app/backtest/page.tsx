@@ -65,18 +65,33 @@ interface CreateForm {
   taker_fee: string;
   latency_mode: string;
   latency_ms: string;
-  slippage_mode: string;
-  slippage_bps: string;
-  impact_coeff: string;
+  fill_model_type: string;
+  prob_fill_on_limit: string;
+  prob_slippage: string;
   warmup_bars: string;
   tags: string;
 }
+
+const FILL_MODEL_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: "default", label: "默认 (概率滑点)", hint: "可配置限价单成交概率和滑点概率" },
+  { value: "best_price", label: "最优价成交", hint: "始终以最优买卖价成交，无滑点" },
+  { value: "one_tick_slippage", label: "固定 1-tick 滑点", hint: "每笔成交固定滑动 1 个最小价格单位" },
+  { value: "two_tier", label: "双层深度", hint: "10 手 @ 最优价，其余 @ ±1 tick" },
+  { value: "three_tier", label: "三层深度 (50/30/20)", hint: "50 手 @ 最优 / 30 @ ±1 tick / 20 @ ±2 tick" },
+  { value: "probabilistic", label: "概率模型 (50/50)", hint: "50% 最优价成交，50% 滑动 ±1 tick" },
+  { value: "size_aware", label: "订单量感知", hint: "≤10 手最优价成交，>10 手产生市场冲击" },
+  { value: "volume_sensitive", label: "成交量敏感", hint: "可用流动性 = 近期成交量 × 25%，超出部分 ±1 tick" },
+  { value: "competition_aware", label: "竞争感知", hint: "模拟多参与者竞争，默认 30% 可见流动性" },
+];
 
 interface Subscription {
   exchange: string;
   symbol: string;
   granularity: "bar" | "tick";
+  dataType?: string;
   timeframe?: string;
+  timeframeValue?: number;
+  timeframeUnit?: string;
   tickType?: string;
   depth?: number;
   snapMs?: number;
@@ -87,7 +102,7 @@ interface Subscription {
 /*  Progress ring placeholder for running/queued backtests             */
 /* ------------------------------------------------------------------ */
 
-function RunningPlaceholder({ status, pct, fallbackMsg }: { status?: string; pct: number; fallbackMsg?: string }) {
+function RunningPlaceholder({ status, pct, message, fallbackMsg }: { status?: string; pct: number; message?: string; fallbackMsg?: string }) {
   const isRunning = status === "running" || status === "queued";
   if (!isRunning) {
     return (
@@ -152,7 +167,7 @@ function RunningPlaceholder({ status, pct, fallbackMsg }: { status?: string; pct
           </div>
         </div>
         <span className="text-sm font-medium text-muted-foreground">
-          {isQueued ? "等待运行..." : "回测运行中"}
+          {isQueued ? "等待运行..." : (message || "回测运行中")}
         </span>
       </div>
     </div>
@@ -631,6 +646,16 @@ function Pager({ curPage, totalPages, total, pageSize, onPageChange }: {
 /*  Create Form                                                        */
 /* ------------------------------------------------------------------ */
 
+function parseTimeframe(tf: string): { value: number; unit: string; clean: string } {
+  const m = tf.match(/^(\d+)(s|m|h|d|min|hour)$/i);
+  if (!m) return { value: 5, unit: "m", clean: "5m" };
+  let unit = m[2].toLowerCase();
+  if (unit === "min") unit = "m";
+  if (unit === "hour") unit = "h";
+  const value = parseInt(m[1]) || 1;
+  return { value, unit, clean: `${value}${unit}` };
+}
+
 function CreateFormView({ strategies, onSubmit, onCancel }: {
   strategies: StrategyInfo[];
   onSubmit: () => Promise<void>;
@@ -645,9 +670,9 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
     taker_fee: "0.05%",
     latency_mode: "fixed",
     latency_ms: "5",
-    slippage_mode: "fixed",
-    slippage_bps: "1.0",
-    impact_coeff: "0.1",
+    fill_model_type: "one_tick_slippage",
+    prob_fill_on_limit: "1.0",
+    prob_slippage: "0.0",
     warmup_bars: "200",
     tags: "",
   });
@@ -659,8 +684,18 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
   const [paramOverrides, setParamOverrides] = useState<Record<string, string>>({});
   const [strategySearch, setStrategySearch] = useState("");
   const [strategyDropdownOpen, setStrategyDropdownOpen] = useState(false);
+  const [allSymbols, setAllSymbols] = useState<{symbol: string; base: string; quote: string}[]>([]);
+  const [symbolDropdownIdx, setSymbolDropdownIdx] = useState<number | null>(null);
+  const [symbolSearchText, setSymbolSearchText] = useState("");
   const strategyRef = useRef<HTMLDivElement>(null);
   const sectionsRef = useRef<HTMLDivElement>(null);
+
+  // Fetch Binance symbols on mount
+  useEffect(() => {
+    apiGet<{symbol: string; base: string; quote: string}[]>("/api/data/symbols")
+      .then(res => { if (res) setAllSymbols(res); })
+      .catch(() => {});
+  }, []);
 
   // Animate form sections on mount
   useEffect(() => {
@@ -686,7 +721,7 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
   useEffect(() => {
     const symbols = [...new Set(subscriptions.map(s => s.symbol))];
     const barSubs = subscriptions.filter(s => s.granularity === "bar");
-    const interval = barSubs.length > 0 ? (barSubs[0].timeframe || "5min").replace("min", "m").replace("hour", "h") : "5m";
+    const interval = barSubs.length > 0 ? (barSubs[0].timeframe || "5m") : "5m";
     if (symbols.length === 0 || !form.start_date || !form.end_date) { setEstimate(null); return; }
     const timer = setTimeout(() => {
       apiPost<{ total_bars: number; estimated_label: string }>("/api/backtest/estimate", {
@@ -724,18 +759,25 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
     }> }>(`/api/strategies/${encodeURIComponent(form.strategy_name)}/defaults`)
       .then((d) => {
         if (d?.subscriptions?.length) {
-          setSubscriptions(d.subscriptions.map(s => ({
-            exchange: s.exchange || "binance",
-            symbol: s.symbol,
-            granularity: (s.granularity as "bar" | "tick") || "bar",
-            timeframe: s.timeframe || "5min",
-            tickType: s.tick_type || "trades",
-            auto: s.auto,
-          })));
+          setSubscriptions(d.subscriptions.map(s => {
+            const parsed = parseTimeframe(s.timeframe || "5m");
+            return {
+              exchange: "binance",
+              symbol: s.symbol,
+              granularity: (s.granularity as "bar" | "tick") || "bar",
+              dataType: s.granularity === "tick" ? "aggTrades" : "klines",
+              timeframe: parsed.clean,
+              timeframeValue: parsed.value,
+              timeframeUnit: parsed.unit,
+              tickType: s.tick_type || "trades",
+              auto: s.auto,
+            };
+          }));
         } else if (d?.symbols?.length) {
+          const parsed = parseTimeframe(d.interval || "5m");
           setSubscriptions(d.symbols.map(sym => ({
             exchange: "binance", symbol: sym, granularity: "bar" as const,
-            timeframe: d.interval || "5min", auto: true,
+            dataType: "klines", timeframe: parsed.clean, timeframeValue: parsed.value, timeframeUnit: parsed.unit, auto: true,
           })));
         }
       })
@@ -755,22 +797,20 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
       }
       const symbols = [...new Set(subscriptions.map(s => s.symbol))];
       const barSubs = subscriptions.filter(s => s.granularity === "bar");
-      const interval = barSubs.length > 0 ? (barSubs[0].timeframe || "5min").replace("min", "m").replace("hour", "h") : "5m";
-      // Construct fill_model from latency/slippage settings
-      let fill_model: Record<string, unknown> | undefined = undefined;
-      if (form.latency_mode !== "off" || form.slippage_mode !== "off") {
-        fill_model = {};
-        if (form.latency_mode !== "off") {
-          fill_model.latency_mode = form.latency_mode;
-          fill_model.latency_ms = parseFloat(form.latency_ms) || 5;
-        }
-        if (form.slippage_mode === "fixed") {
-          fill_model.fill_model_type = "fixed_slippage";
-          fill_model.slippage_bps = parseFloat(form.slippage_bps) || 1.0;
-        } else if (form.slippage_mode === "volume") {
-          fill_model.fill_model_type = "volume_impact";
-          fill_model.impact_coeff = parseFloat(form.impact_coeff) || 0.1;
-        }
+      const interval = barSubs.length > 0 ? (barSubs[0].timeframe || "5m") : "5m";
+      // Construct fill_model — always include latency_ms (0 when off)
+      const fill_model: Record<string, unknown> = {};
+      if (form.latency_mode !== "off") {
+        fill_model.latency_mode = form.latency_mode;
+        fill_model.latency_ms = parseFloat(form.latency_ms) || 5;
+      } else {
+        fill_model.latency_ms = 0;
+      }
+      // FillModel type selection (maps to NT built-in models)
+      fill_model.fill_model_type = form.fill_model_type;
+      if (form.fill_model_type === "default") {
+        fill_model.prob_fill_on_limit = parseFloat(form.prob_fill_on_limit) || 1.0;
+        fill_model.prob_slippage = parseFloat(form.prob_slippage) || 0.0;
       }
       return apiPost("/api/backtest/run", {
         strategy: form.strategy_name,
@@ -780,6 +820,7 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
         end_date: form.end_date,
         initial_capital: capitalNum,
         params: Object.keys(params).length > 0 ? params : undefined,
+        data_type: barSubs[0]?.dataType || "klines",
         maker_fee: form.maker_fee || undefined,
         taker_fee: form.taker_fee || undefined,
         fill_model,
@@ -885,81 +926,178 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
             </div>
           ) : (
             <>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--font-d)", fontSize: ".72rem" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--font-d)", fontSize: ".8rem" }}>
                 <thead>
                   <tr>
-                    <th style={{ fontSize: ".58rem", fontWeight: 400, color: "var(--t3)", padding: ".45rem .65rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", textAlign: "left", textTransform: "uppercase" }}>交易所</th>
-                    <th style={{ fontSize: ".58rem", fontWeight: 400, color: "var(--t3)", padding: ".45rem .65rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", textAlign: "left", textTransform: "uppercase" }}>品种</th>
-                    <th style={{ fontSize: ".58rem", fontWeight: 400, color: "var(--t3)", padding: ".45rem .65rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", textAlign: "left", textTransform: "uppercase" }}>粒度</th>
-                    <th style={{ fontSize: ".58rem", fontWeight: 400, color: "var(--t3)", padding: ".45rem .65rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", textAlign: "left", textTransform: "uppercase" }}>详情</th>
-                    <th style={{ fontSize: ".58rem", fontWeight: 400, color: "var(--t3)", padding: ".45rem .65rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", width: "28px" }} />
+                    <th style={{ fontSize: ".7rem", fontWeight: 500, color: "var(--t2)", padding: ".7rem 1.25rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", textAlign: "left", textTransform: "uppercase" }}>品种</th>
+                    <th style={{ fontSize: ".7rem", fontWeight: 500, color: "var(--t2)", padding: ".7rem 1.25rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", textAlign: "left", textTransform: "uppercase" }}>数据类型</th>
+                    <th style={{ fontSize: ".7rem", fontWeight: 500, color: "var(--t2)", padding: ".7rem 1.25rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", textAlign: "left", textTransform: "uppercase" }}>周期</th>
+                    <th style={{ fontSize: ".7rem", fontWeight: 500, color: "var(--t2)", padding: ".7rem 1.25rem", letterSpacing: ".08em", borderBottom: "1px solid var(--bd)", width: "32px" }} />
                   </tr>
                 </thead>
                 <tbody>
                   {subscriptions.map((sub, idx) => {
-                    const subSelectStyle: React.CSSProperties = {
-                      padding: ".25rem .45rem",
+                    const ctrlStyle: React.CSSProperties = {
                       fontFamily: "var(--font-d)",
-                      fontSize: ".68rem",
+                      fontSize: ".82rem",
+                      padding: ".5rem .75rem",
                       background: "var(--bg-in)",
                       border: "1px solid var(--bd)",
-                      borderRadius: "4px",
+                      borderRadius: "var(--rs)",
                       color: "var(--t0)",
                       outline: "none",
-                      cursor: "pointer",
+                      transition: "border-color 150ms, box-shadow 300ms",
                     };
                     const updateSub = (patch: Partial<Subscription>) => {
                       setSubscriptions(prev => prev.map((s, i) => i === idx ? { ...s, ...patch, auto: false } : s));
                     };
                     return (
-                      <tr key={idx} style={{ borderBottom: idx < subscriptions.length - 1 ? "1px solid var(--bd)" : "none", transition: "background 150ms" }}
+                      <tr key={idx} style={{ borderBottom: "1px solid var(--bd)", transition: "background 150ms" }}
                         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-t)")}
                         onMouseLeave={(e) => (e.currentTarget.style.background = "")}
                       >
-                        <td style={{ padding: ".55rem .65rem", verticalAlign: "middle" }}>
-                          <select style={subSelectStyle} value={sub.exchange} onChange={(e) => updateSub({ exchange: e.target.value })}>
-                            <option value="binance">Binance</option>
-                            <option value="hyperliquid">Hyperliquid</option>
-                            <option value="okx">OKX</option>
-                          </select>
-                        </td>
-                        <td style={{ padding: ".55rem .65rem", verticalAlign: "middle" }}>
-                          <select style={subSelectStyle} value={sub.symbol} onChange={(e) => updateSub({ symbol: e.target.value })}>
-                            <option value="BTCUSDT-PERP">BTCUSDT-PERP</option>
-                            <option value="ETHUSDT-PERP">ETHUSDT-PERP</option>
-                            <option value="SOLUSDT-PERP">SOLUSDT-PERP</option>
-                            <option value="ARBUSDT-PERP">ARBUSDT-PERP</option>
-                            <option value="DOGEUSDT-PERP">DOGEUSDT-PERP</option>
-                          </select>
-                        </td>
-                        <td style={{ padding: ".55rem .65rem", verticalAlign: "middle" }}>
-                          <select style={subSelectStyle} value={sub.granularity} onChange={(e) => updateSub({ granularity: e.target.value as "bar" | "tick" })}>
-                            <option value="bar">Bar</option>
-                            <option value="tick">Tick</option>
-                          </select>
-                        </td>
-                        <td style={{ padding: ".55rem .65rem", verticalAlign: "middle" }}>
-                          <div style={{ fontFamily: "var(--font-d)", fontSize: ".72rem", display: "flex", alignItems: "center", gap: ".4rem", flexWrap: "wrap" }}>
-                            <span style={{
-                              fontFamily: "var(--font-d)", fontSize: ".55rem", padding: ".1rem .3rem", borderRadius: "3px", display: "inline-block", flexShrink: 0,
-                              background: sub.auto ? "var(--info-d)" : "var(--bg-t)",
-                              color: sub.auto ? "var(--info)" : "var(--t2)",
+                        {/* 品种 */}
+                        <td style={{ padding: ".65rem 1.25rem", verticalAlign: "middle", position: "relative" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: ".5rem" }}>
+                            <span style={{ fontSize: ".65rem", color: "var(--t3)", fontWeight: 400, flexShrink: 0 }}>Binance</span>
+                            <input
+                              style={{ ...ctrlStyle, cursor: "text", width: "150px" }}
+                              value={symbolDropdownIdx === idx ? symbolSearchText : sub.symbol}
+                              onChange={(e) => { setSymbolSearchText(e.target.value.toUpperCase()); setSymbolDropdownIdx(idx); }}
+                              onFocus={(e) => { setSymbolSearchText(sub.symbol); setSymbolDropdownIdx(idx); e.currentTarget.style.borderColor = "var(--acc)"; e.currentTarget.style.boxShadow = "0 0 0 3px var(--acc-d)"; }}
+                              onBlur={(e) => {
+                                e.currentTarget.style.borderColor = "var(--bd)"; e.currentTarget.style.boxShadow = "none";
+                                setTimeout(() => {
+                                  if (symbolDropdownIdx === idx) {
+                                    if (symbolSearchText.trim()) updateSub({ symbol: symbolSearchText.trim() });
+                                    setSymbolDropdownIdx(null);
+                                  }
+                                }, 200);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  if (symbolSearchText.trim()) updateSub({ symbol: symbolSearchText.trim() });
+                                  setSymbolDropdownIdx(null);
+                                  (e.target as HTMLInputElement).blur();
+                                }
+                              }}
+                              placeholder="搜索品种..."
+                            />
+                          </div>
+                          {symbolDropdownIdx === idx && (
+                            <div style={{
+                              position: "absolute", top: "100%", left: "1.25rem", zIndex: 50,
+                              maxHeight: "220px", overflowY: "auto", width: "240px",
+                              background: "var(--bg-p)", border: "1px solid var(--bd)", borderRadius: "10px",
+                              boxShadow: "0 12px 40px rgba(0,0,0,.15)", marginTop: "4px", padding: ".35rem",
                             }}>
-                              {sub.auto ? "auto" : "manual"}
-                            </span>
+                              {allSymbols
+                                .filter(s => {
+                                  const q = symbolSearchText.toUpperCase();
+                                  return !q || s.symbol.includes(q) || s.base.includes(q);
+                                })
+                                .slice(0, 50)
+                                .map(s => (
+                                  <button key={s.symbol} type="button"
+                                    style={{
+                                      width: "100%", textAlign: "left", padding: ".4rem .65rem",
+                                      fontFamily: "var(--font-d)", fontSize: ".78rem", border: "none", borderRadius: "var(--rs)",
+                                      background: s.symbol === sub.symbol ? "var(--bg-t)" : "transparent",
+                                      color: "var(--t0)", cursor: "pointer", display: "block",
+                                      transition: "background 150ms, transform 150ms",
+                                    }}
+                                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-t)"; e.currentTarget.style.transform = "translateX(3px)"; }}
+                                    onMouseLeave={(e) => { e.currentTarget.style.background = s.symbol === sub.symbol ? "var(--bg-t)" : "transparent"; e.currentTarget.style.transform = "none"; }}
+                                    onMouseDown={(e) => {
+                                      e.preventDefault();
+                                      updateSub({ symbol: s.symbol });
+                                      setSymbolDropdownIdx(null);
+                                    }}
+                                  >
+                                    <span style={{ fontWeight: 500 }}>{s.symbol}</span>
+                                    <span style={{ fontSize: ".65rem", color: "var(--t3)", marginLeft: ".5rem" }}>{s.base}</span>
+                                  </button>
+                                ))}
+                              {allSymbols.filter(s => { const q = symbolSearchText.toUpperCase(); return !q || s.symbol.includes(q) || s.base.includes(q); }).length === 0 && (
+                                <div style={{ padding: ".5rem .65rem", fontSize: ".72rem", color: "var(--t3)" }}>无匹配 — 按 Enter 使用自定义值</div>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        {/* 数据类型 */}
+                        <td style={{ padding: ".65rem 1.25rem", verticalAlign: "middle" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: ".4rem" }}>
+                            <select style={{ ...ctrlStyle, cursor: "pointer", padding: ".5rem .6rem" }} value={sub.granularity} onChange={(e) => {
+                              const g = e.target.value as "bar" | "tick";
+                              updateSub({ granularity: g, dataType: g === "bar" ? "klines" : "aggTrades" });
+                            }}>
+                              <option value="bar">Bar</option>
+                              <option value="tick">Tick</option>
+                            </select>
+                            <span style={{ color: "var(--t3)", fontSize: ".7rem" }}>·</span>
+                            <select style={{ ...ctrlStyle, cursor: "pointer", padding: ".5rem .6rem" }}
+                              value={sub.dataType || (sub.granularity === "bar" ? "klines" : "aggTrades")}
+                              onChange={(e) => updateSub({ dataType: e.target.value })}
+                            >
+                              {sub.granularity === "bar" ? (
+                                <>
+                                  <option value="klines">klines</option>
+                                  <option value="markPriceKlines">markPrice</option>
+                                  <option value="indexPriceKlines">indexPrice</option>
+                                  <option value="premiumIndexKlines">premiumIndex</option>
+                                </>
+                              ) : (
+                                <>
+                                  <option value="aggTrades">aggTrades</option>
+                                  <option value="trades">trades</option>
+                                </>
+                              )}
+                            </select>
+                          </div>
+                        </td>
+                        {/* 周期 */}
+                        <td style={{ padding: ".65rem 1.25rem", verticalAlign: "middle" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: ".5rem" }}>
+                            {sub.auto && (
+                              <span style={{
+                                fontFamily: "var(--font-d)", fontSize: ".6rem", padding: ".15rem .4rem", borderRadius: "3px",
+                                background: "var(--info-d)", color: "var(--info)", flexShrink: 0,
+                              }}>auto</span>
+                            )}
                             {sub.granularity === "bar" ? (
-                              <select style={{ ...subSelectStyle, border: "none", background: "none", padding: ".1rem .2rem", fontWeight: 500, color: "var(--t0)" }}
-                                value={sub.timeframe || "5min"}
-                                onChange={(e) => updateSub({ timeframe: e.target.value })}
-                              >
-                                <option value="1min">1min</option>
-                                <option value="5min">5min</option>
-                                <option value="15min">15min</option>
-                                <option value="1h">1h</option>
-                                <option value="4h">4h</option>
-                              </select>
+                              <span style={{ display: "inline-flex", alignItems: "center", background: "var(--bg-in)", border: "1px solid var(--bd)", borderRadius: "var(--rs)", overflow: "hidden", transition: "border-color 150ms, box-shadow 300ms" }}>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  step={1}
+                                  value={sub.timeframeValue ?? 5}
+                                  onChange={(e) => {
+                                    const v = Math.max(1, Math.round(Number(e.target.value) || 1));
+                                    const unit = sub.timeframeUnit || "m";
+                                    updateSub({ timeframeValue: v, timeframeUnit: unit, timeframe: `${v}${unit}` });
+                                  }}
+                                  onFocus={(e) => { const p = e.currentTarget.parentElement as HTMLElement; p.style.borderColor = "var(--acc)"; p.style.boxShadow = "0 0 0 3px var(--acc-d)"; }}
+                                  onBlur={(e) => { const p = e.currentTarget.parentElement as HTMLElement; p.style.borderColor = "var(--bd)"; p.style.boxShadow = "none"; }}
+                                  style={{ width: "40px", textAlign: "center", border: "none", background: "transparent", padding: ".45rem .15rem", fontFamily: "var(--font-d)", fontSize: ".82rem", fontWeight: 500, color: "var(--t0)", outline: "none", MozAppearance: "textfield" as never }}
+                                />
+                                <span style={{ width: "1px", alignSelf: "stretch", background: "var(--bd)", flexShrink: 0 }} />
+                                <select
+                                  style={{ border: "none", background: "transparent", padding: ".45rem .5rem .45rem .4rem", fontFamily: "var(--font-d)", fontSize: ".82rem", fontWeight: 500, color: "var(--t0)", outline: "none", cursor: "pointer" }}
+                                  value={sub.timeframeUnit || "m"}
+                                  onChange={(e) => {
+                                    const unit = e.target.value;
+                                    const v = sub.timeframeValue ?? 5;
+                                    updateSub({ timeframeUnit: unit, timeframe: `${v}${unit}` });
+                                  }}
+                                >
+                                  <option value="s">秒</option>
+                                  <option value="m">分</option>
+                                  <option value="h">时</option>
+                                  <option value="d">天</option>
+                                </select>
+                              </span>
                             ) : (
-                              <select style={{ ...subSelectStyle, border: "none", background: "none", padding: ".1rem .2rem", fontWeight: 500, color: "var(--t0)" }}
+                              <select style={{ ...ctrlStyle, cursor: "pointer", padding: ".5rem .6rem" }}
                                 value={sub.tickType || "trades"}
                                 onChange={(e) => updateSub({ tickType: e.target.value })}
                               >
@@ -968,20 +1106,15 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
                                 <option value="l2">L2 Orderbook</option>
                               </select>
                             )}
-                            <span style={{ color: "var(--t3)", cursor: "pointer", fontSize: ".6rem", flexShrink: 0, transition: "color 150ms" }}
-                              onMouseEnter={(e) => (e.currentTarget.style.color = "var(--acc)")}
-                              onMouseLeave={(e) => (e.currentTarget.style.color = "var(--t3)")}
-                              title="编辑详情"
-                            >✎</span>
                           </div>
                         </td>
-                        <td style={{ padding: ".55rem .65rem", verticalAlign: "middle" }}>
+                        <td style={{ padding: ".65rem .75rem", verticalAlign: "middle" }}>
                           <button
                             onClick={() => setSubscriptions(prev => prev.filter((_, i) => i !== idx))}
                             style={{
-                              width: "22px", height: "22px", borderRadius: "4px", border: "1px solid transparent",
+                              width: "24px", height: "24px", borderRadius: "var(--rs)", border: "1px solid transparent",
                               background: "none", color: "var(--t3)", cursor: "pointer", display: "flex",
-                              alignItems: "center", justifyContent: "center", fontSize: ".68rem", transition: "all 150ms",
+                              alignItems: "center", justifyContent: "center", fontSize: ".75rem", transition: "all 150ms",
                             }}
                             onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--dan)"; e.currentTarget.style.color = "var(--dan)"; e.currentTarget.style.background = "var(--dan-d)"; }}
                             onMouseLeave={(e) => { e.currentTarget.style.borderColor = "transparent"; e.currentTarget.style.color = "var(--t3)"; e.currentTarget.style.background = "none"; }}
@@ -996,7 +1129,7 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
               </table>
               <div style={{ padding: ".45rem .65rem", borderTop: "1px solid var(--bd)", display: "flex", justifyContent: "flex-end" }}>
                 <button
-                  onClick={() => setSubscriptions(prev => [...prev, { exchange: "binance", symbol: "BTCUSDT-PERP", granularity: "bar", timeframe: "5min", auto: false }])}
+                  onClick={() => setSubscriptions(prev => [...prev, { exchange: "binance", symbol: "BTCUSDT-PERP", granularity: "bar", dataType: "klines", timeframe: "5m", timeframeValue: 5, timeframeUnit: "m", auto: false }])}
                   style={{
                     fontFamily: "var(--font-d)", fontSize: ".62rem", padding: ".25rem .55rem", borderRadius: "var(--rs)",
                     border: "1px solid var(--bd)", background: "none", color: "var(--t1)", cursor: "pointer", transition: "all 150ms",
@@ -1045,70 +1178,94 @@ function CreateFormView({ strategies, onSubmit, onCancel }: {
             <input className="qds-input" type="text" value={form.initial_capital} onChange={(e) => setForm((f) => ({ ...f, initial_capital: e.target.value }))} placeholder="e.g. 100000" />
           </div>
         </div>
-        <div className="bt-form-row-3">
-          <div className="bt-form-group">
-            <div className="bt-form-label">Maker 手续费</div>
-            <input className="qds-input" type="text" value={form.maker_fee} onChange={(e) => setForm((f) => ({ ...f, maker_fee: e.target.value }))} placeholder="e.g. 0.02%" />
-            <div className="bt-form-hint">Binance VIP0 默认 0.02%</div>
+      </div>
+
+      {/* Section 2b: Simulation Environment — 3 sub-cards */}
+      <div className="bt-form-section">
+        <div className="qds-section-label">模拟环境</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: ".75rem" }}>
+          {/* Card 1: Fee Model */}
+          <div style={{
+            background: "var(--bg-p)", border: "1px solid var(--bd)", borderRadius: "var(--r)",
+            padding: ".85rem", display: "flex", flexDirection: "column", gap: ".6rem",
+            transition: "border-color 150ms",
+          }}>
+            <div style={{ fontFamily: "var(--font-d)", fontSize: ".6rem", color: "var(--t2)", textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 600 }}>手续费</div>
+            <div>
+              <div className="bt-form-label">Maker</div>
+              <input className="qds-input" type="text" value={form.maker_fee} onChange={(e) => setForm((f) => ({ ...f, maker_fee: e.target.value }))} placeholder="0.02%" />
+            </div>
+            <div>
+              <div className="bt-form-label">Taker</div>
+              <input className="qds-input" type="text" value={form.taker_fee} onChange={(e) => setForm((f) => ({ ...f, taker_fee: e.target.value }))} placeholder="0.05%" />
+            </div>
+            <div style={{ fontFamily: "var(--font-d)", fontSize: ".6rem", color: "var(--t3)", marginTop: "auto" }}>
+              MakerTakerFeeModel · 百分比或小数
+            </div>
           </div>
-          <div className="bt-form-group">
-            <div className="bt-form-label">Taker 手续费</div>
-            <input className="qds-input" type="text" value={form.taker_fee} onChange={(e) => setForm((f) => ({ ...f, taker_fee: e.target.value }))} placeholder="e.g. 0.05%" />
+
+          {/* Card 2: Latency Model */}
+          <div style={{
+            background: "var(--bg-p)", border: "1px solid var(--bd)", borderRadius: "var(--r)",
+            padding: ".85rem", display: "flex", flexDirection: "column", gap: ".6rem",
+            transition: "border-color 150ms",
+          }}>
+            <div style={{ fontFamily: "var(--font-d)", fontSize: ".6rem", color: "var(--t2)", textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 600 }}>延迟模拟</div>
+            <div>
+              <div className="bt-form-label">模式</div>
+              <select className="qds-select" value={form.latency_mode} onChange={(e) => setForm((f) => ({ ...f, latency_mode: e.target.value }))}>
+                <option value="off">关闭</option>
+                <option value="fixed">固定延迟</option>
+              </select>
+            </div>
+            <div style={form.latency_mode === "off" ? { opacity: 0.35, pointerEvents: "none" } : undefined}>
+              <div className="bt-form-label">延迟 (ms)</div>
+              <input
+                className="qds-input"
+                type="text"
+                value={form.latency_ms}
+                onChange={(e) => setForm((f) => ({ ...f, latency_ms: e.target.value }))}
+                placeholder="5"
+                disabled={form.latency_mode === "off"}
+              />
+            </div>
+            <div style={{ fontFamily: "var(--font-d)", fontSize: ".6rem", color: "var(--t3)", marginTop: "auto" }}>
+              LatencyModel · 订单到达交易所的网络延迟
+            </div>
           </div>
-          <div />
-        </div>
-        <div className="bt-form-row-3">
-          <div className="bt-form-group">
-            <div className="bt-form-label">延迟模拟</div>
-            <select className="qds-select" value={form.latency_mode} onChange={(e) => setForm((f) => ({ ...f, latency_mode: e.target.value }))}>
-              <option value="off">关闭</option>
-              <option value="fixed">固定延迟</option>
-              <option value="sampled">采样分布</option>
-            </select>
-            <div className="bt-form-hint">模拟订单从发出到到达交易所的网络延迟</div>
-          </div>
-          <div className="bt-form-group" style={form.latency_mode === "off" ? { opacity: 0.35, pointerEvents: "none" } : undefined}>
-            <div className="bt-form-label">延迟参数 (ms)</div>
-            <input
-              className="qds-input"
-              type="text"
-              value={form.latency_ms}
-              onChange={(e) => setForm((f) => ({ ...f, latency_ms: e.target.value }))}
-              placeholder={form.latency_mode === "sampled" ? "e.g. 5 ± 3" : "e.g. 5"}
-              disabled={form.latency_mode === "off"}
-            />
-            <div className="bt-form-hint">{form.latency_mode === "sampled" ? "均值 ± 标准差，从正态分布采样" : "固定延迟，每笔订单延迟 N ms"}</div>
-          </div>
-          <div className="bt-form-group">
-            <div className="bt-form-label">交易滑点</div>
-            <select className="qds-select" value={form.slippage_mode} onChange={(e) => setForm((f) => ({ ...f, slippage_mode: e.target.value }))}>
-              <option value="off">关闭</option>
-              <option value="fixed">固定滑点</option>
-              <option value="volume">成交量模型</option>
-            </select>
-            <div className="bt-form-hint">模拟市价单的价格冲击和 spread 穿越</div>
-          </div>
-        </div>
-        {form.slippage_mode !== "off" && (
-          <div className="bt-form-row-3">
-            {form.slippage_mode === "fixed" && (
-              <div className="bt-form-group">
-                <div className="bt-form-label">滑点大小 (bps)</div>
-                <input className="qds-input" type="text" value={form.slippage_bps} onChange={(e) => setForm((f) => ({ ...f, slippage_bps: e.target.value }))} placeholder="e.g. 1.0" />
-                <div className="bt-form-hint">1 bps = 0.01%，固定加到成交价上</div>
-              </div>
+
+          {/* Card 3: Fill Model */}
+          <div style={{
+            background: "var(--bg-p)", border: "1px solid var(--bd)", borderRadius: "var(--r)",
+            padding: ".85rem", display: "flex", flexDirection: "column", gap: ".6rem",
+            transition: "border-color 150ms",
+          }}>
+            <div style={{ fontFamily: "var(--font-d)", fontSize: ".6rem", color: "var(--t2)", textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 600 }}>成交模型</div>
+            <div>
+              <div className="bt-form-label">模型</div>
+              <select className="qds-select" value={form.fill_model_type} onChange={(e) => setForm((f) => ({ ...f, fill_model_type: e.target.value }))}>
+                {FILL_MODEL_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            {form.fill_model_type === "default" && (
+              <>
+                <div>
+                  <div className="bt-form-label">限价单成交概率</div>
+                  <input className="qds-input" type="text" value={form.prob_fill_on_limit} onChange={(e) => setForm((f) => ({ ...f, prob_fill_on_limit: e.target.value }))} placeholder="1.0" />
+                </div>
+                <div>
+                  <div className="bt-form-label">滑点概率</div>
+                  <input className="qds-input" type="text" value={form.prob_slippage} onChange={(e) => setForm((f) => ({ ...f, prob_slippage: e.target.value }))} placeholder="0.0" />
+                </div>
+              </>
             )}
-            {form.slippage_mode === "volume" && (
-              <div className="bt-form-group">
-                <div className="bt-form-label">冲击系数</div>
-                <input className="qds-input" type="text" value={form.impact_coeff} onChange={(e) => setForm((f) => ({ ...f, impact_coeff: e.target.value }))} placeholder="e.g. 0.1" />
-                <div className="bt-form-hint">滑点 = 系数 × √(order_size / ADV)</div>
-              </div>
-            )}
-            <div />
-            <div />
+            <div style={{ fontFamily: "var(--font-d)", fontSize: ".6rem", color: "var(--t3)", marginTop: "auto" }}>
+              {FILL_MODEL_OPTIONS.find((o) => o.value === form.fill_model_type)?.hint ?? ""}
+            </div>
           </div>
-        )}
+        </div>
       </div>
 
       {/* Section 3: Param Override */}
@@ -1229,6 +1386,7 @@ export default function BacktestPage() {
     processed_bars?: number;
     bars_per_sec?: number;
     trades?: number;
+    message?: string;
   }>>({});
 
   const resultCacheRef = useRef<Record<string, BacktestResult>>({});
@@ -1251,6 +1409,7 @@ export default function BacktestPage() {
           processed_bars: raw.processed_bars as number | undefined,
           bars_per_sec: raw.bars_per_sec as number | undefined,
           trades: raw.trades as number | undefined,
+          message: raw.message as string | undefined,
         },
       }));
       setRuns((prev) =>
@@ -1266,7 +1425,7 @@ export default function BacktestPage() {
   // Load runs list
   const loadRuns = useCallback(async () => {
     try {
-      const data = await apiGet<{ runs: BacktestRunSummary[]; total: number }>("/api/backtest/runs?limit=500");
+      const data = await apiGet<{ runs: BacktestRunSummary[]; total: number }>("/api/backtest/runs?limit=100");
       if (data) setRuns(data.runs ?? []);
     } catch {
       // ignore
@@ -1351,11 +1510,11 @@ export default function BacktestPage() {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <div className="flex-1 overflow-y-auto" ref={contentRef} style={{ padding: "1.25rem 2rem 4rem" }}>
+      <div className="flex-1 overflow-y-auto" ref={contentRef} style={{ padding: "0 2rem 4rem" }}>
 
         {/* ===== LIST VIEW ===== */}
         {view === "list" && (
-          <div>
+          <div style={{ marginTop: "1.25rem" }}>
             {/* Header */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1.5rem" }}>
               <div>
@@ -1493,7 +1652,7 @@ export default function BacktestPage() {
         {view === "detail" && selectedRun && (
           <div>
             {/* Detail top bar */}
-            <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginBottom: "1rem", paddingBottom: "1rem", borderBottom: "1px solid var(--bd)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginTop: "1.25rem", marginBottom: "1rem", paddingBottom: "1rem", borderBottom: "1px solid var(--bd)" }}>
               <button
                 className="bt-view-btn"
                 onClick={handleBack}
@@ -1541,49 +1700,49 @@ export default function BacktestPage() {
                 selectedRun.status === "completed" ? (
                   <OverviewTab runId={selectedRunId!} />
                 ) : (
-                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} />
+                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} message={progressDetailMap[selectedRunId!]?.message} />
                 )
               )}
               {activeTab === "performance" && (
                 selectedRun.status === "completed" && selectedRunId ? (
                   <PerformanceTab runId={selectedRunId} />
                 ) : (
-                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} />
+                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} message={progressDetailMap[selectedRunId!]?.message} />
                 )
               )}
               {activeTab === "trades" && (
                 selectedRun.status === "completed" && selectedRunId ? (
                   <TradesTab runId={selectedRunId} />
                 ) : (
-                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} />
+                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} message={progressDetailMap[selectedRunId!]?.message} />
                 )
               )}
               {activeTab === "robustness" && (
                 selectedRun.status === "completed" && selectedRunId ? (
                   <RobustnessTab runId={selectedRunId} />
                 ) : (
-                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} />
+                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} message={progressDetailMap[selectedRunId!]?.message} />
                 )
               )}
               {activeTab === "tearsheet" && (
                 selectedRun.status === "completed" ? (
                   <TearsheetTab runId={selectedRunId!} />
                 ) : (
-                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} />
+                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} message={progressDetailMap[selectedRunId!]?.message} />
                 )
               )}
               {activeTab === "tradelog" && (
                 selectedRun.status === "completed" ? (
                   <TradeLogTab tradeLog={tradeLog} />
                 ) : (
-                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} />
+                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} message={progressDetailMap[selectedRunId!]?.message} />
                 )
               )}
               {activeTab === "reports" && (
                 selectedRun.status === "completed" ? (
                   <ReportsTab runId={selectedRunId!} />
                 ) : (
-                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} />
+                  <RunningPlaceholder status={selectedRun.status} pct={progressMap[selectedRunId!] ?? selectedRun.progress_pct ?? 0} message={progressDetailMap[selectedRunId!]?.message} />
                 )
               )}
             </div>

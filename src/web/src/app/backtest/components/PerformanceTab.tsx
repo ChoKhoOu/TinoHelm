@@ -118,21 +118,27 @@ function HelpTip({ text }: { text: string }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  GlassCard                                                          */
+/*  ChartCard — bt-cd / bt-cd-header / bt-cd-body                      */
 /* ------------------------------------------------------------------ */
 
-function GlassCard({
+function ChartCard({
+  title,
   children,
-  className = "",
+  headerRight,
 }: {
+  title?: string;
   children: React.ReactNode;
-  className?: string;
+  headerRight?: React.ReactNode;
 }) {
   return (
-    <div
-      className={`rounded-xl border bg-card overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)] ${className}`}
-    >
-      {children}
+    <div className="bt-cd">
+      {title != null && (
+        <div className="bt-cd-header">
+          <span>{title}</span>
+          {headerRight}
+        </div>
+      )}
+      <div className="bt-cd-body">{children}</div>
     </div>
   );
 }
@@ -143,20 +149,12 @@ function GlassCard({
 
 function SectionHeader({
   title,
-  index,
 }: {
   title: string;
-  index: number;
+  index?: number;
 }) {
   return (
-    <div
-      className="flex items-center gap-2"
-    >
-      <div className="w-1 h-4 rounded-full bg-qds-info opacity-70" />
-      <span className="text-xs font-semibold tracking-[1.2px] uppercase text-muted-foreground">
-        {title}
-      </span>
-    </div>
+    <span className="qds-section-label">{title}</span>
   );
 }
 
@@ -225,7 +223,7 @@ function MetricCard({
           background: `linear-gradient(90deg, transparent, ${accentColor}, transparent)`,
         }}
       />
-      <span className="qds-section-label inline-flex items-center">
+      <span className="sc-l inline-flex items-center">
         {label}
         <HelpTip text={tooltip} />
       </span>
@@ -358,9 +356,9 @@ function EnhancedEquityCurve({
   const balanceStop = clamp((maxVal - refValue) / range, 0.01, 0.99);
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="qds-section-label">
+    <div className="bt-cd">
+      <div className="bt-cd-header">
+        <span>
           权益曲线
         </span>
         <div className="flex items-center gap-1">
@@ -377,6 +375,7 @@ function EnhancedEquityCurve({
           )}
         </div>
       </div>
+      <div className="bt-cd-body">
       {/* Legend */}
       <div className="flex items-center gap-4 text-[9px] text-muted-foreground px-1">
         <span className="flex items-center gap-1.5">
@@ -525,7 +524,8 @@ function EnhancedEquityCurve({
         </ComposedChart>
       </ResponsiveContainer>
       </div>
-    </GlassCard>
+    </div>
+    </div>
   );
 }
 
@@ -545,10 +545,7 @@ function DrawdownChart({
   if (chartData.length < 2) return <ChartPlaceholder />;
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <span className="qds-section-label">
-        水下回撤曲线
-      </span>
+    <ChartCard title="水下回撤曲线">
       <ResponsiveContainer width="100%" height={160}>
         <AreaChart
           data={chartData}
@@ -614,7 +611,7 @@ function DrawdownChart({
           />
         </AreaChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </ChartCard>
   );
 }
 
@@ -630,20 +627,14 @@ function Top5DrawdownsTable({
 
   if (!top5.length) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          Top 5 最大回撤
-        </span>
+      <ChartCard title="Top 5 最大回撤">
         <ChartPlaceholder />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4">
-      <span className="qds-section-label block">
-        Top 5 最大回撤
-      </span>
+    <ChartCard title="Top 5 最大回撤">
       <Table>
         <TableHeader>
           <TableRow className="border hover:bg-transparent">
@@ -672,7 +663,7 @@ function Top5DrawdownsTable({
           ))}
         </TableBody>
       </Table>
-    </GlassCard>
+    </ChartCard>
   );
 }
 
@@ -713,12 +704,9 @@ function MonthlyHeatmap({
 
   if (!years.length) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          月度收益热力图
-        </span>
+      <ChartCard title="月度收益热力图">
         <ChartPlaceholder />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
@@ -734,69 +722,68 @@ function MonthlyHeatmap({
     }
   }
 
-  function textColor(val: number | undefined): string {
-    if (val == null) return "var(--t3)";
-    return val >= 0 ? "var(--suc)" : "var(--dan)";
-  }
+  // Build per-year row data for Recharts BarChart
+  const rowData = years.map((yr) =>
+    monthLabels.map((label, i) => ({
+      month: label,
+      value: grid.get(`${yr}-${i + 1}`) as number | undefined,
+      display: 1,
+    }))
+  );
 
   return (
-    <GlassCard className="p-4">
-      <span className="qds-section-label block">
-        月度收益热力图
-      </span>
-      <div className="overflow-x-auto">
-        <div
-          className="grid gap-[2px] text-[8px]"
-          style={{
-            gridTemplateColumns: `40px repeat(12, minmax(0, 1fr))`,
-            minWidth: 520,
-          }}
-        >
-          <div />
+    <ChartCard title="月度收益热力图">
+      <div className="overflow-x-auto" style={{ minWidth: 480 }}>
+        {/* Month header labels */}
+        <div className="flex items-center" style={{ paddingLeft: 40 }}>
           {monthLabels.map((m) => (
             <div
               key={m}
-              className="text-center text-qds-t3 font-medium pb-1"
+              className="flex-1 text-center font-mono"
+              style={{ fontSize: 9, color: "var(--t2)" }}
             >
               {m}
             </div>
           ))}
-          {years.map((year) => (
-            <div key={`row-${year}`} className="contents">
-              <div
-                className="flex items-center text-muted-foreground font-medium pr-1"
-                style={{ fontSize: 9 }}
-              >
-                {year}
-              </div>
-              {months.map((mo) => {
-                const val = grid.get(`${year}-${mo}`);
-                return (
-                  <div
-                    key={`${year}-${mo}`}
-                    title={val != null ? `${val > 0 ? "+" : ""}${val.toFixed(2)}%` : "—"}
-                    className="rounded flex items-center justify-center h-7 transition-all duration-200 hover:brightness-125 cursor-default"
-                    style={{ background: cellColor(val) }}
-                  >
-                    <span
-                      style={{
-                        color: textColor(val),
-                        fontSize: 8,
-                        fontWeight: 600,
-                      }}
-                    >
-                      {val != null
-                        ? `${val > 0 ? "+" : ""}${val.toFixed(1)}%`
-                        : ""}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          ))}
         </div>
+        {/* Year rows — one BarChart per year */}
+        {years.map((yr, yi) => (
+          <div key={yr} className="flex items-center">
+            <div
+              className="shrink-0 font-mono"
+              style={{ width: 40, fontSize: 9, color: "var(--t2)" }}
+            >
+              {yr}
+            </div>
+            <div className="flex-1" style={{ height: 30 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={rowData[yi]}
+                  margin={{ top: 1, right: 1, left: 1, bottom: 1 }}
+                  barCategoryGap={2}
+                >
+                  <XAxis hide dataKey="month" />
+                  <RechartsTooltip
+                    {...CHART_TOOLTIP_PROPS}
+                    cursor={false}
+                    formatter={(_: unknown, __: unknown, props: { payload?: { value?: number; month?: string } }) => {
+                      const v = props.payload?.value;
+                      if (v == null) return ["—", ""];
+                      return [`${v >= 0 ? "+" : ""}${v.toFixed(2)}%`, `${yr}年${props.payload?.month}`];
+                    }}
+                  />
+                  <Bar dataKey="display" radius={3} isAnimationActive={false}>
+                    {rowData[yi].map((d, i) => (
+                      <Cell key={i} fill={cellColor(d.value)} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        ))}
       </div>
-    </GlassCard>
+    </ChartCard>
   );
 }
 
@@ -807,20 +794,14 @@ function AnnualReturnsChart({
 }) {
   if (!annualReturns?.length) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          年度收益
-        </span>
+      <ChartCard title="年度收益">
         <ChartPlaceholder />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <span className="qds-section-label">
-        年度收益
-      </span>
+    <ChartCard title="年度收益">
       <ResponsiveContainer width="100%" height={180}>
         <BarChart
           data={annualReturns}
@@ -865,7 +846,7 @@ function AnnualReturnsChart({
           </Bar>
         </BarChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </ChartCard>
   );
 }
 
@@ -884,20 +865,14 @@ function WeeklyReturnsChart({
 
   if (!data.length) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          周度收益
-        </span>
+      <ChartCard title="周度收益">
         <ChartPlaceholder />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <span className="qds-section-label">
-        周度收益
-      </span>
+    <ChartCard title="周度收益">
       <ResponsiveContainer width="100%" height={160}>
         <BarChart
           data={data}
@@ -943,7 +918,7 @@ function WeeklyReturnsChart({
           </Bar>
         </BarChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </ChartCard>
   );
 }
 
@@ -972,19 +947,16 @@ function RollingSharpeChart({
 
   if (!hasData) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          滚动 Sharpe 比率
-        </span>
+      <ChartCard title="滚动 Sharpe 比率">
         <ChartPlaceholder message="数据不足（需要 3 个月以上）" />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="qds-section-label">
+    <div className="bt-cd">
+      <div className="bt-cd-header">
+        <span>
           滚动 Sharpe 比率
         </span>
         <RollingLegend items={[
@@ -993,6 +965,7 @@ function RollingSharpeChart({
           { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
+      <div className="bt-cd-body">
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
@@ -1034,7 +1007,8 @@ function RollingSharpeChart({
           <Line type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </LineChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </div>
+    </div>
   );
 }
 
@@ -1056,19 +1030,16 @@ function RollingSortinoChart({
 
   if (!hasData) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          滚动 Sortino 比率
-        </span>
+      <ChartCard title="滚动 Sortino 比率">
         <ChartPlaceholder message="数据不足（需要 6 个月以上）" />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="qds-section-label">
+    <div className="bt-cd">
+      <div className="bt-cd-header">
+        <span>
           滚动 Sortino 比率
         </span>
         <RollingLegend items={[
@@ -1076,6 +1047,7 @@ function RollingSortinoChart({
           { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
+      <div className="bt-cd-body">
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
@@ -1099,7 +1071,8 @@ function RollingSortinoChart({
           <Line type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </LineChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </div>
+    </div>
   );
 }
 
@@ -1121,19 +1094,16 @@ function RollingVolatilityChart({
 
   if (!hasData) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          滚动波动率
-        </span>
+      <ChartCard title="滚动波动率">
         <ChartPlaceholder message="数据不足（需要 6 个月以上）" />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="qds-section-label">
+    <div className="bt-cd">
+      <div className="bt-cd-header">
+        <span>
           滚动波动率
         </span>
         <RollingLegend items={[
@@ -1141,6 +1111,7 @@ function RollingVolatilityChart({
           { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
+      <div className="bt-cd-body">
       <ResponsiveContainer width="100%" height={180}>
         <AreaChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
           <defs>
@@ -1173,7 +1144,8 @@ function RollingVolatilityChart({
           <Area type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} fill="url(#perfVol12mFill)" dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </AreaChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </div>
+    </div>
   );
 }
 
@@ -1195,19 +1167,16 @@ function RollingBetaChart({
 
   if (!hasData) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          滚动 Beta
-        </span>
+      <ChartCard title="滚动 Beta">
         <ChartPlaceholder message="数据不足或无基准" />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="qds-section-label">
+    <div className="bt-cd">
+      <div className="bt-cd-header">
+        <span>
           滚动 Beta
         </span>
         <RollingLegend items={[
@@ -1215,6 +1184,7 @@ function RollingBetaChart({
           { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
+      <div className="bt-cd-body">
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
@@ -1238,7 +1208,8 @@ function RollingBetaChart({
           <Line type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </LineChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </div>
+    </div>
   );
 }
 
@@ -1263,19 +1234,16 @@ function RollingReturnsChart({
 
   if (!hasData) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          滚动收益 (3m / 6m / 12m)
-        </span>
+      <ChartCard title="滚动收益 (3m / 6m / 12m)">
         <ChartPlaceholder message="数据不足（需要 3 个月以上）" />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="qds-section-label">
+    <div className="bt-cd">
+      <div className="bt-cd-header">
+        <span>
           滚动收益
         </span>
         <RollingLegend items={[
@@ -1284,6 +1252,7 @@ function RollingReturnsChart({
           { color: "var(--warn)", label: "12m" },
         ]} />
       </div>
+      <div className="bt-cd-body">
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
@@ -1314,7 +1283,8 @@ function RollingReturnsChart({
           <Line type="monotone" dataKey="rolling_12m" stroke="var(--warn)" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive animationDuration={1400} />
         </LineChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </div>
+    </div>
   );
 }
 
@@ -1390,19 +1360,16 @@ function DistributionHistogram({
 
   if (!barData.length) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          日收益分布
-        </span>
+      <ChartCard title="日收益分布">
         <ChartPlaceholder />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="qds-section-label">
+    <div className="bt-cd">
+      <div className="bt-cd-header">
+        <span>
           日收益分布
         </span>
         {normalCurve.length > 0 && (
@@ -1418,6 +1385,7 @@ function DistributionHistogram({
           </div>
         )}
       </div>
+      <div className="bt-cd-body">
       <ResponsiveContainer width="100%" height={220}>
         <ComposedChart
           data={mergedData}
@@ -1479,7 +1447,8 @@ function DistributionHistogram({
           )}
         </ComposedChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </div>
+    </div>
   );
 }
 
@@ -1502,25 +1471,23 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
 
   if (!data.length) {
     return (
-      <GlassCard className="p-4">
-        <span className="qds-section-label block">
-          Q-Q 正态图
-        </span>
+      <ChartCard title="Q-Q 正态图">
         <ChartPlaceholder />
-      </GlassCard>
+      </ChartCard>
     );
   }
 
   return (
-    <GlassCard className="p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="qds-section-label">
+    <div className="bt-cd">
+      <div className="bt-cd-header">
+        <span>
           Q-Q 正态图
         </span>
         <span className="text-[9px] text-qds-t3">
           偏离对角线 = 非正态
         </span>
       </div>
+      <div className="bt-cd-body">
       <ResponsiveContainer width="100%" height={220}>
         <ScatterChart margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
@@ -1578,7 +1545,8 @@ function QQPlotChart({ qqData }: { qqData?: QQPlotPoint[] }) {
           <Scatter data={data} fill="var(--info)" fillOpacity={0.6} r={2} />
         </ScatterChart>
       </ResponsiveContainer>
-    </GlassCard>
+    </div>
+    </div>
   );
 }
 
@@ -1749,30 +1717,27 @@ function MetricsSummaryTable({
   ];
 
   return (
-    <GlassCard className="p-5">
-      <span className="qds-section-label block">
-        Performance 指标汇总
-      </span>
+    <ChartCard>
       <div className="grid grid-cols-2 gap-6">
         {categories
           .filter((cat) => !cat.hidden)
           .map((cat) => (
             <div key={cat.title}>
-              <span className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-info opacity-70 block mb-2">
+              <span className="sc-l">
                 {cat.title}
               </span>
               <div className="flex flex-col">
                 {cat.rows.map((row) => (
                   <div
                     key={row.label}
-                    className="flex items-center justify-between py-1.5 border-b border last:border-0"
+                    className="flex items-center justify-between py-1.5 border-b border-border last:border-b-0"
                   >
-                    <span className="text-[10px] text-muted-foreground inline-flex items-center">
+                    <span className="text-xs text-muted-foreground inline-flex items-center gap-0.5">
                       {row.label}
                       <HelpTip text={row.tooltip} />
                     </span>
                     <span
-                      className="text-[11px] font-medium font-mono"
+                      className="text-xs font-medium font-mono"
                       style={{ color: row.color ?? "var(--t0)" }}
                     >
                       {row.value}
@@ -1783,7 +1748,7 @@ function MetricsSummaryTable({
             </div>
           ))}
       </div>
-    </GlassCard>
+    </ChartCard>
   );
 }
 

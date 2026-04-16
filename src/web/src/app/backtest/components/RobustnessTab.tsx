@@ -25,21 +25,6 @@ import type { BacktestResult, RobustnessMetrics } from "../types";
 /*  Shared UI Primitives                                               */
 /* ------------------------------------------------------------------ */
 
-function GlassCard({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return (
-    <div className={`rounded-xl border bg-card overflow-hidden hover:border-qds-border-hover transition-colors duration-[var(--dur)] ${className}`}>
-      {children}
-    </div>
-  );
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="qds-section-label">
-      {children}
-    </div>
-  );
-}
 
 function HelpTip({ text }: { text: string }) {
   return (
@@ -107,8 +92,9 @@ function StatisticalTestsSection({ r }: { r: RobustnessMetrics }) {
 
   return (
     <div {...cardAnim(0)}>
-      <GlassCard className="p-5">
-        <SectionLabel>Statistical Tests</SectionLabel>
+      <div className="bt-cd">
+        <div className="bt-cd-header">Statistical Tests</div>
+        <div className="bt-cd-body">
         <div className="space-y-0">
           <MetricRow
             label="PSR"
@@ -146,7 +132,8 @@ function StatisticalTestsSection({ r }: { r: RobustnessMetrics }) {
             </div>
           )}
         </div>
-      </GlassCard>
+      </div>
+      </div>
     </div>
   );
 }
@@ -178,11 +165,10 @@ function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
 
   return (
     <div {...cardAnim(0.07)}>
-      <GlassCard className="p-5">
-        <SectionLabel>
-          Monte Carlo Equity Cone
-          <HelpTip text={`随机打乱 ${r.mc_num_simulations ?? 1000} 次交易顺序后的权益曲线分布。阴影区域为 5%/95% 和 25%/75% 置信带。白线为实际结果。`} />
-        </SectionLabel>
+      <div className="bt-cd">
+        <div className="bt-cd-header">Monte Carlo Equity Cone
+          <HelpTip text={`随机打乱 ${r.mc_num_simulations ?? 1000} 次交易顺序后的权益曲线分布。阴影区域为 5%/95% 和 25%/75% 置信带。白线为实际结果。`} /></div>
+        <div className="bt-cd-body">
         <div className="h-[300px]">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
@@ -224,7 +210,8 @@ function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
             </AreaChart>
           </ResponsiveContainer>
         </div>
-      </GlassCard>
+      </div>
+      </div>
     </div>
   );
 }
@@ -241,8 +228,9 @@ function McSummarySection({ r }: { r: RobustnessMetrics }) {
 
   return (
     <div {...cardAnim(0.14)}>
-      <GlassCard className="p-5">
-        <SectionLabel>Monte Carlo Summary</SectionLabel>
+      <div className="bt-cd">
+        <div className="bt-cd-header">Monte Carlo Summary</div>
+        <div className="bt-cd-body">
         <div className="flex items-center gap-6 flex-wrap">
           <div className="flex items-center gap-2">
             <span className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3">亏损概率</span>
@@ -276,7 +264,8 @@ function McSummarySection({ r }: { r: RobustnessMetrics }) {
             </span>
           </div>
         </div>
-      </GlassCard>
+      </div>
+      </div>
     </div>
   );
 }
@@ -336,16 +325,15 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
 
   return (
     <div {...cardAnim(0.21)}>
-      <GlassCard className="p-5">
-        <SectionLabel>
-          IS vs OOS 对比
+      <div className="bt-cd">
+        <div className="bt-cd-header">IS vs OOS 对比
           <HelpTip text="样本内（训练期）与样本外（测试期）的权益曲线和核心指标对比。衰减越小，策略过拟合风险越低。" />
           {opt.dsr != null && (
             <span className="ml-3 text-[10px] font-mono text-muted-foreground">
               DSR: {(opt.dsr * 100).toFixed(1)}%
             </span>
-          )}
-        </SectionLabel>
+          )}</div>
+        <div className="bt-cd-body">
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Equity overlay */}
@@ -402,7 +390,8 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
             </div>
           </div>
         </div>
-      </GlassCard>
+      </div>
+      </div>
     </div>
   );
 }
@@ -427,16 +416,15 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
 
   return (
     <div {...cardAnim(0.28)}>
-      <GlassCard className="p-5">
-        <SectionLabel>
-          Parameter Analysis
+      <div className="bt-cd">
+        <div className="bt-cd-header">Parameter Analysis
           {stability != null && (
             <span className="ml-3 text-[10px] font-mono text-muted-foreground">
               稳定性: {stability.toFixed(4)}
               <HelpTip text="最优参数附近 (±20%) 的 fitness 标准差。越低越稳定。" />
             </span>
-          )}
-        </SectionLabel>
+          )}</div>
+        <div className="bt-cd-body">
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Sensitivity: single param line charts */}
@@ -485,7 +473,8 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
             </div>
           )}
         </div>
-      </GlassCard>
+      </div>
+      </div>
     </div>
   );
 }
