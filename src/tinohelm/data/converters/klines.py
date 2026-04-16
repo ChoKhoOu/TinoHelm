@@ -48,7 +48,10 @@ class KlinesConverter:
 
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.index = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        # Use close_time as bar timestamp to avoid look-ahead bias
+        # (bar should be "seen" at close, not at open)
+        df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce")
+        df.index = pd.to_datetime(df["close_time"], unit="ms", utc=True)
         df.index.name = "timestamp"
         df = df[["open", "high", "low", "close", "volume"]].sort_index()
         df = df[~df.index.duplicated(keep="last")]
