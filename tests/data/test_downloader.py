@@ -145,12 +145,12 @@ class TestBuildUrl:
         url = self.dl._build_url("klines", "BTCUSDT", "um", "daily", "2025-01-15", interval="1m")
         assert url.startswith("https://data.binance.vision/")
         assert "futures/um/daily/klines/BTCUSDT/1m/" in url
-        assert url.endswith("BTCUSDT-klines-1m-2025-01-15.zip")
+        assert url.endswith("BTCUSDT-1m-2025-01-15.zip")
 
     def test_klines_monthly_url_structure(self):
         url = self.dl._build_url("klines", "BTCUSDT", "um", "monthly", "2025-01", interval="5m")
         assert "futures/um/monthly/klines/BTCUSDT/5m/" in url
-        assert url.endswith("BTCUSDT-klines-5m-2025-01.zip")
+        assert url.endswith("BTCUSDT-5m-2025-01.zip")
 
     def test_non_klines_url_no_interval_segment(self):
         url = self.dl._build_url("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15")

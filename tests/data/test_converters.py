@@ -161,13 +161,12 @@ class TestAggTradesConverter:
         mock_instrument.make_price.side_effect = lambda v: v
         mock_instrument.make_qty.side_effect = lambda v: v
 
-        with pytest.MonkeyPatch().context() as mp:
-            with patch("nautilus_trader.model.data.TradeTick") as mock_tick_cls:
-                mock_tick_cls.return_value = MagicMock()
-                result = self.c.convert(df, mock_instrument)
+        with patch("nautilus_trader.model.data.TradeTick") as mock_tick_cls:
+            mock_tick_cls.return_value = MagicMock()
+            result = self.c.convert(df, mock_instrument)
 
-            call_kwargs = mock_tick_cls.call_args[1]
-            assert call_kwargs["aggressor_side"] == AggressorSide.BUYER
+        call_kwargs = mock_tick_cls.call_args[1]
+        assert call_kwargs["aggressor_side"] == AggressorSide.BUYER
 
     def test_convert_aggressor_side_seller_when_buyer_maker(self):
         pytest.importorskip("nautilus_trader")
