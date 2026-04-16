@@ -45,6 +45,7 @@ class HealthActor(Actor):
         self._running = False
         # Shared deque with CommandActor for file-watcher rescan commands
         self._command_deque: Any = None
+        self._strategy_file_mtimes: dict[str, float] = {}
 
     def on_start(self) -> None:
         self._redis = redis.from_url(self._redis_url)
@@ -108,12 +109,42 @@ class HealthActor(Actor):
         self._pending_auto_resume = []
 
     def _file_watcher(self) -> None:
-        """Poll strategies directory for changes."""
+        """Poll strategies directory for changes.
+
+        Tracks modification times of strategy files and only sends a rescan
+        command when files have actually changed, avoiding expensive module
+        import scans on every 10-second tick.
+        """
+        import os
         import time
+
+        strategies_dir = os.environ.get(
+            "TINO_STRATEGIES_DIR",
+            str(Path.home() / ".tino" / "strategies"),
+        )
+
         while self._running:
             time.sleep(10)
-            if self._command_deque is not None:
-                self._command_deque.append({"cmd": "_rescan_strategies"})
+            if self._command_deque is None:
+                continue
+
+            try:
+                dir_path = Path(strategies_dir)
+                if not dir_path.exists():
+                    continue
+
+                current_mtimes: dict[str, float] = {}
+                for py_file in dir_path.rglob("*.py"):
+                    try:
+                        current_mtimes[str(py_file)] = py_file.stat().st_mtime
+                    except OSError:
+                        pass
+
+                if current_mtimes != self._strategy_file_mtimes:
+                    self._strategy_file_mtimes = current_mtimes
+                    self._command_deque.append({"cmd": "_rescan_strategies"})
+            except Exception:
+                pass
 
     def _send_heartbeat(self, event: Any) -> None:
         if not self._redis:
