@@ -1,0 +1,43 @@
+# Cage 配置文件
+# 由 cage init 生成，请根据项目实际情况调整。
+version: 1
+
+# 开发者身份是否已初始化
+developer_init: true
+
+# 规范根目录（相对于 .cage/）
+spec_root: spec
+
+# 验证阶段配置
+verify:
+  # E↔V 循环最大回退轮数（超过后停止并报告）
+  max_kickback_rounds: 10
+  # 必须通过的验证通道
+  required_passes:
+    - verifier         # 功能验收 + 需求覆盖
+    - code-reviewer    # 代码质量 + 逻辑缺陷
+    - code-simplifier  # 反熵检查 + 不必要复杂度
+
+# 硬性 spec（按 agent 类型配置，始终注入，不依赖 scout 发现）
+# 路径相对于 .cage/，context-inject hook 会转为绝对路径
+# type: directory 表示读取目录下所有 .md 文件
+#
+# key = agent 名（对应 agents/ 目录下的文件名，不含 .md）
+# 只放"该 agent 无论什么任务都应该遵守"的规范。
+# knowledge/ 中的知识由 scout agent 按任务相关性自主拾取，不在此处配置。
+base_specs:
+  executor:
+    - path: spec/guides/
+      type: directory
+      reason: "通用编码指南（命名、风格、错误处理模式）"
+  verifier:
+    - path: spec/guides/
+      type: directory
+      reason: "通用编码指南（用于对照审查）"
+  code-reviewer:
+    - path: spec/guides/
+      type: directory
+      reason: "通用编码指南（代码质量审查）"
+  # code-simplifier: []   # 反熵检查不需要额外 spec
+  # debugger: []           # debugger 自行读取需要的文件
+  # recorder: []           # recorder 只读不需要 spec
