@@ -260,6 +260,8 @@ def _derive_tag(name: str) -> str:
     parts = name.split("_")
     tag = ""
     for part in parts:
+        if not part:
+            continue              # skip empty parts from consecutive underscores
         if part.startswith("v") and part[1:].isdigit():
             tag += part[1:]       # "v33" → "33"
         elif part.isdigit():
