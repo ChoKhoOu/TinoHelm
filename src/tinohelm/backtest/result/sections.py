@@ -643,3 +643,252 @@ def compute_periodic_returns(
         for p in sorted(weekly_agg.keys())
     ]
     return monthly, weekly
+
+
+# ---------------------------------------------------------------------------
+# Section 9b — advanced per-instrument analytics
+# ---------------------------------------------------------------------------
+
+def _safe_round(v: float | None, n: int = 4) -> float | None:
+    """Round a value to *n* decimals, returning None for NaN/Inf/None."""
+    if v is None:
+        return None
+    if math.isnan(v) or math.isinf(v):
+        return None
+    return round(v, n)
+
+
+def compute_per_instrument_advanced(
+    closed_trades: list[dict[str, Any]],
+    per_instrument_basic: dict[str, dict[str, Any]],
+    starting_balance: float,
+) -> dict[str, Any]:
+    """Advanced multi-instrument analytics (correlation, diversification, per-inst risk).
+
+    *closed_trades* is a list of dicts with keys ``instrument`` (str),
+    ``ts_closed`` (int nanoseconds), and ``pnl`` (float).  Each entry represents
+    one realised trade.  *per_instrument_basic* is the output of
+    :func:`compute_per_instrument_basic`; it is consulted for ``total_pnl``
+    when deriving recovery factor.
+
+    Returns a dict with five keys (all empty when ``len(per_instrument_basic) < 2``):
+
+    * ``per_instrument_updates`` — dict of dicts containing
+      ``sharpe_ratio``, ``sortino_ratio``, ``max_drawdown``, ``recovery_factor``
+      for each instrument.  Intended to be merged into the per-instrument rows.
+    * ``instrument_cumulative_pnl`` — dict of instrument -> list of
+      ``{date, cum_pnl}`` rows suitable for stacked-area plots.
+    * ``instrument_correlation`` — dict of dicts giving pairwise Pearson
+      correlations of daily PnL (empty when fewer than 10 trading days).
+    * ``monthly_pnl_heatmap`` — list of ``{instrument, month, pnl}`` rows
+      (cartesian product of sorted instruments × sorted months).
+    * ``portfolio_analytics`` — dict with ``diversification_ratio`` and
+      ``diversification_benefit_pct`` (equal-weight basket; empty when <10
+      days or <2 instruments).
+
+    All annualisation uses 365 (crypto convention) to match the monolithic
+    behaviour that preceded the extraction.  NaN/Inf values are sanitised to
+    ``None``.
+    """
+    empty: dict[str, Any] = {
+        "per_instrument_updates": {},
+        "instrument_cumulative_pnl": {},
+        "instrument_correlation": {},
+        "monthly_pnl_heatmap": [],
+        "portfolio_analytics": {},
+    }
+    if len(per_instrument_basic) < 2:
+        return empty
+
+    # Build per-instrument daily PnL matrix (grouped by UTC close date).
+    daily_pnl_map: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    all_dates: set[str] = set()
+    for t in closed_trades:
+        inst = str(t["instrument"])
+        ts_closed = t.get("ts_closed")
+        if not ts_closed or ts_closed <= 0:
+            continue
+        close_date = datetime.fromtimestamp(
+            int(ts_closed) / 1e9, tz=timezone.utc,
+        ).strftime("%Y-%m-%d")
+        daily_pnl_map[inst][close_date] += float(t["pnl"])
+        all_dates.add(close_date)
+
+    sorted_dates = sorted(all_dates)
+    instruments = sorted(per_instrument_basic.keys())
+    n_dates = len(sorted_dates)
+    n_inst = len(instruments)
+
+    # Cumulative PnL per instrument (stacked-area chart source).
+    instrument_cumulative_pnl: dict[str, list[dict[str, Any]]] = {}
+    for inst in instruments:
+        cum = 0.0
+        curve: list[dict[str, Any]] = []
+        for d in sorted_dates:
+            cum += daily_pnl_map[inst].get(d, 0.0)
+            curve.append({"date": d, "cum_pnl": round(cum, 2)})
+        instrument_cumulative_pnl[inst] = curve
+
+    # Daily returns matrix (n_dates x n_inst).  Returns are expressed as
+    # fractions of *starting_balance* to match the monolithic behaviour.
+    returns_matrix = np.zeros((n_dates, n_inst)) if n_dates > 0 else np.zeros((0, n_inst))
+    for j, inst in enumerate(instruments):
+        for i, d in enumerate(sorted_dates):
+            returns_matrix[i, j] = daily_pnl_map[inst].get(d, 0.0) / starting_balance if starting_balance else 0.0
+
+    # Pairwise Pearson correlation (requires ≥10 trading days).
+    instrument_correlation: dict[str, dict[str, float]] = {}
+    if n_dates >= 10:
+        corr = np.corrcoef(returns_matrix.T)
+        for i, inst_i in enumerate(instruments):
+            instrument_correlation[inst_i] = {}
+            for j, inst_j in enumerate(instruments):
+                if i == j:
+                    continue
+                val = corr[i, j]
+                if not (np.isnan(val) or np.isinf(val)):
+                    instrument_correlation[inst_i][inst_j] = round(float(val), 4)
+
+    # Per-instrument risk (Sharpe/Sortino/MaxDD/Recovery factor).
+    per_instrument_updates: dict[str, dict[str, Any]] = {}
+    for idx, inst in enumerate(instruments):
+        arr = returns_matrix[:, idx] if n_dates > 0 else np.zeros(0)
+        mean_ret = float(arr.mean()) if n_dates > 0 else 0.0
+        std_ret = float(arr.std(ddof=1)) if n_dates > 1 else 0.0
+
+        inst_sharpe = (mean_ret / std_ret * math.sqrt(365)) if std_ret > 1e-12 else None
+
+        downside = arr[arr < 0]
+        ds_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+        inst_sortino = (mean_ret / ds_std * math.sqrt(365)) if ds_std > 1e-12 else None
+
+        cum_pnl = np.cumsum([daily_pnl_map[inst].get(d, 0.0) for d in sorted_dates]) if n_dates > 0 else np.zeros(0)
+        running_max = np.maximum.accumulate(cum_pnl) if len(cum_pnl) > 0 else np.zeros(0)
+        dd = cum_pnl - running_max if len(cum_pnl) > 0 else np.zeros(0)
+        max_dd = float(dd.min()) if len(dd) > 0 else 0.0
+        max_dd_pct = max_dd / starting_balance if starting_balance > 0 else 0.0
+
+        inst_total_pnl = per_instrument_basic[inst].get("total_pnl", 0.0)
+        recovery = abs(inst_total_pnl / max_dd) if max_dd < -0.01 else None
+
+        per_instrument_updates[inst] = {
+            "sharpe_ratio": _safe_round(inst_sharpe),
+            "sortino_ratio": _safe_round(inst_sortino),
+            "max_drawdown": _safe_round(max_dd_pct),
+            "recovery_factor": _safe_round(recovery),
+        }
+
+    # Monthly PnL heatmap (instrument × month).
+    monthly_map: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for t in closed_trades:
+        ts_closed = t.get("ts_closed")
+        if not ts_closed or ts_closed <= 0:
+            continue
+        inst = str(t["instrument"])
+        close_month = datetime.fromtimestamp(
+            int(ts_closed) / 1e9, tz=timezone.utc,
+        ).strftime("%Y-%m")
+        monthly_map[inst][close_month] += float(t["pnl"])
+
+    all_months = sorted({m for mm in monthly_map.values() for m in mm})
+    monthly_pnl_heatmap: list[dict[str, Any]] = []
+    for inst in instruments:
+        for month in all_months:
+            monthly_pnl_heatmap.append({
+                "instrument": inst,
+                "month": month,
+                "pnl": round(monthly_map[inst].get(month, 0.0), 2),
+            })
+
+    # Diversification ratio (equal-weight basket).
+    portfolio_analytics: dict[str, Any] = {}
+    if n_dates >= 10 and n_inst >= 2:
+        weights = np.ones(n_inst) / n_inst
+        inst_vols = np.array([returns_matrix[:, j].std(ddof=1) for j in range(n_inst)])
+        cov = np.cov(returns_matrix.T)
+        port_vol = float(np.sqrt(weights @ cov @ weights))
+        wav = float(np.dot(weights, inst_vols))
+        if port_vol > 1e-12 and wav > 1e-12:
+            portfolio_analytics["diversification_ratio"] = round(wav / port_vol, 4)
+            portfolio_analytics["diversification_benefit_pct"] = round((1.0 - port_vol / wav) * 100, 2)
+
+    return {
+        "per_instrument_updates": per_instrument_updates,
+        "instrument_cumulative_pnl": instrument_cumulative_pnl,
+        "instrument_correlation": instrument_correlation,
+        "monthly_pnl_heatmap": monthly_pnl_heatmap,
+        "portfolio_analytics": portfolio_analytics,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section 11f — benchmark equity curve (equal-weight buy & hold)
+# ---------------------------------------------------------------------------
+
+def compute_benchmark_equity_curve(
+    equity_curve: list[dict[str, Any]],
+    inst_daily_close: dict[str, dict[str, float]],
+    starting_balance: float,
+) -> list[dict[str, Any]]:
+    """Equal-weight buy-and-hold benchmark curve aligned to *equity_curve* dates.
+
+    *inst_daily_close* is ``{instrument: {YYYY-MM-DD: close_price}}``.  Each
+    instrument is allocated ``starting_balance / len(inst_daily_close)`` worth
+    of units at its earliest available price on/after the first equity-curve
+    date.  Missing daily prices are forward-filled from the last seen price;
+    instruments that never trade on any equity date contribute a flat allocation.
+
+    Returns a list of ``{timestamp, equity}`` rows (rounded to 4 decimals) or
+    an empty list when the inputs are insufficient.
+    """
+    if not equity_curve or len(equity_curve) < 2 or not inst_daily_close:
+        return []
+
+    eq_dates = [pt["timestamp"] for pt in equity_curve]
+    alloc_per_inst = starting_balance / len(inst_daily_close) if len(inst_daily_close) else 0.0
+
+    inst_units: dict[str, float] = {}
+    for inst, closes in inst_daily_close.items():
+        for d in eq_dates:
+            price = closes.get(d)
+            if price is not None and price > 0:
+                inst_units[inst] = alloc_per_inst / price
+                break
+
+    curve: list[dict[str, Any]] = []
+    last_price: dict[str, float] = {}
+    for d in eq_dates:
+        bm_equity = 0.0
+        for inst, units in inst_units.items():
+            closes = inst_daily_close.get(inst, {})
+            price = closes.get(d)
+            if price is not None:
+                last_price[inst] = price
+            elif inst in last_price:
+                price = last_price[inst]
+            else:
+                price = alloc_per_inst / units if units > 0 else 0
+            bm_equity += units * price
+        curve.append({
+            "timestamp": d,
+            "equity": round(bm_equity, 4),
+        })
+    return curve
+
+
+def compute_benchmark_daily_returns(
+    benchmark_equity_curve: list[dict[str, Any]],
+    starting_balance: float,
+) -> np.ndarray | None:
+    """Daily return series prepended by *starting_balance*.
+
+    Returns ``None`` when the curve has fewer than 2 points.
+    """
+    if not benchmark_equity_curve or len(benchmark_equity_curve) < 2:
+        return None
+    bm_values = [starting_balance] + [pt["equity"] for pt in benchmark_equity_curve]
+    bm_arr = np.array(bm_values, dtype=float)
+    denom = bm_arr[:-1]
+    if np.any(denom <= 0):
+        return None
+    return np.diff(bm_arr) / denom

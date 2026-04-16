@@ -185,3 +185,72 @@ benchmark-relative metrics、streak sequence、long vs short、DOW/hour buckets�
   可能需要抽象出 `BarProvider` 协议降低 NT 耦合
 - 考虑对 `extract_backtest_results` 本体建立集成测试（基于 MagicMock(engine)），
   锁定各 section 输出的 key schema（防止字段重命名破坏前端契约）
+
+## 2026-04-16 (4)
+
+**主题**: 提取 extract.py 中剩余的两大内联分析块（section 9b 与 11f）为纯函数助手
+**维度**: 架构重构
+**改动范围**:
+- `src/tinohelm/backtest/result/sections.py` — 新增 3 个纯计算助手 `compute_per_instrument_advanced`、`compute_benchmark_equity_curve`、`compute_benchmark_daily_returns` + `_safe_round` 工具
+- `src/tinohelm/backtest/result/extract.py` — 1159 → 1055 行（净减 104 行，-9%）；新增 `_build_inst_daily_close_from_cache` 模块级助手封装 NT cache fallback
+- `tests/backtest/test_sections.py` — 新增 28 个测试覆盖新助手（3 类共 5 个子类：advanced analytics、benchmark equity curve、benchmark daily returns）
+
+**动机**:
+上一轮 evolution log (2026-04-16 (3)) 已将 `extract.py` 从 1500 行拆解为 13 个 section 助手，
+但仍遗留两个最大的内联分析块没有提取：
+1. **Section 9b（~110 行）**: advanced per-instrument analytics（correlation matrix、
+   diversification ratio、per-instrument Sharpe/Sortino/MaxDD/Recovery factor、
+   monthly PnL heatmap、cumulative PnL curves）。这是整个 extract.py 中最复杂的
+   数学运算密集段落，涉及多个独立可验证的子计算，但完全没有单元测试。
+2. **Section 11f（~70 行）**: benchmark equity curve（等权买入持有基金）+ 
+   benchmark daily returns 推算。该段与 section 9b 类似，核心计算为纯数学，
+   唯一的 NT 耦合点是"如果 runner 未预先提供 daily closes，则从 engine.cache
+   反推"的 fallback 分支。
+
+两段共 ~180 行难以维护、零测试覆盖、修改风险高，是 section 拆解的最后主要技术债务。
+
+**要点**:
+1. **`compute_per_instrument_advanced()`** — 签名 `(closed_trades, per_instrument_basic,
+   starting_balance) -> dict[str, Any]`。输入为 primitive `{instrument, ts_closed, pnl}` 
+   列表，输出统一 dict 包含 5 个 key：`per_instrument_updates`（要合并进 per_instrument 
+   的风险指标）、`instrument_cumulative_pnl`、`instrument_correlation`、
+   `monthly_pnl_heatmap`、`portfolio_analytics`。保留了所有原行为细节：
+   单品种 → 空 dict、correlation 需 ≥10 天、diversification 需 ≥10 天且 ≥2 品种、
+   recovery factor 仅在 max_dd < -0.01 时计算、365 日年化、`ddof=1` 样本方差、
+   NaN/Inf 清洗为 None（通过新 `_safe_round` 助手）。
+2. **`compute_benchmark_equity_curve()`** — 签名 `(equity_curve, inst_daily_close,
+   starting_balance) -> list[dict]`。等权篮子买入持有。保留了原有的
+   forward-fill（当日无价格 → 前一日价格）、延迟挂牌（首价格在曲线中间时用作分配
+   基准）、alloc/units 的 fallback 行为。
+3. **`compute_benchmark_daily_returns()`** — 签名 `(benchmark_equity_curve,
+   starting_balance) -> np.ndarray | None`。前置 starting_balance 计算差分收益，
+   零除保护返回 None。
+4. **`_build_inst_daily_close_from_cache()`** — extract.py 模块级助手，封装 NT 
+   engine.cache fallback（bar_types 遍历 + 日期聚合），使主函数更声明式；
+   保持与纯函数 `compute_benchmark_equity_curve` 的解耦。
+5. **Extract.py 简化**: 原 section 9b 110 行 + section 11f 70 行 = 180 行 
+   降为 30 行三次声明式调用 + 1 个 30 行模块级 fallback 助手。主函数内不再有
+   大段数学运算。
+6. **28 个新测试**: 
+   - 15 个覆盖 advanced analytics（单品种→空、0/负 ts 过滤、cum_pnl 单调性、
+     日期并集排序、相关矩阵门槛 10 天、perfect +/-1 相关、per-instrument 风险 key 
+     完整性、recovery_factor 触发条件、月度 heatmap 笛卡尔积、diversification 
+     出现/缺失、`_safe_round` NaN/Inf 处理）
+   - 7 个覆盖 benchmark equity curve（短曲线→空、无 closes→空、单品种价格比、
+     等权篮子 +10%、前向填充、延迟挂牌、零价格的分配逻辑）
+   - 4 个覆盖 benchmark daily returns（空/单点→None、长度正确、首日收益计算、
+     zero starting_balance 保护）
+7. **完整保留行为**: 通过 `.venv/bin/python -m pytest tests/ -q` 540/540 全通过，
+   无回归。Pure helpers 在测试模块中通过现有 `_load_sections_isolated()` 机制加载，
+   无需 NT 运行即可验证。
+
+**后续建议**:
+- Extract.py 中仍内联的 section 12b 子块（MAE/MFE 计算需遍历 `engine.cache.bar_types()`、
+  trade PnL 分布/散点/累积图表、holding time 直方图）可继续提取，但这些轻量计算
+  的杠杆远低于 9b/11f，优先级较低。
+- 考虑抽取 `BarProvider` 协议/Protocol，让 MAE/MFE 能完全摆脱 NT 耦合——
+  目前它需要 `engine.cache.bar_types()` + `engine.cache.bars(bt)` 返回的 bar 对象。
+- 为 `extract_backtest_results` 主体建立基于 `MagicMock(engine)` 的集成测试，
+  锁定最终 dict 的全部 60+ key schema，防止未来改动意外破坏前端契约。
+- 将 `_ANN_FACTOR = 365` 提升为函数参数，使 advanced analytics 的年化系数可配置
+  （股票/期货市场 252）。

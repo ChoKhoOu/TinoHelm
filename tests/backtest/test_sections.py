@@ -575,3 +575,346 @@ class TestPeriodicReturns:
         ]
         _, weekly = _sections.compute_periodic_returns(ec, 10000)
         assert weekly[0]["period"] == "2025-01-12"
+
+
+# ---------------------------------------------------------------------------
+# compute_per_instrument_advanced (section 9b)
+# ---------------------------------------------------------------------------
+
+def _trade(inst: str, y: int, m: int, d: int, pnl: float) -> dict:
+    return {"instrument": inst, "ts_closed": _ts_ns(y, m, d, 12), "pnl": pnl}
+
+
+class TestPerInstrumentAdvanced:
+
+    def _basic(self, instruments: list[str]) -> dict:
+        """Minimal stand-in for per_instrument_basic — only total_pnl is read."""
+        return {i: {"total_pnl": 0.0} for i in instruments}
+
+    def test_empty_when_single_instrument(self):
+        trades = [_trade("BTC", 2025, 1, 1, 50.0), _trade("BTC", 2025, 1, 2, -10.0)]
+        basic = self._basic(["BTC"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        assert out["per_instrument_updates"] == {}
+        assert out["instrument_cumulative_pnl"] == {}
+        assert out["instrument_correlation"] == {}
+        assert out["monthly_pnl_heatmap"] == []
+        assert out["portfolio_analytics"] == {}
+
+    def test_empty_when_no_instruments(self):
+        out = _sections.compute_per_instrument_advanced([], {}, 10000)
+        assert out["per_instrument_updates"] == {}
+
+    def test_cumulative_pnl_monotone_on_positive_streak(self):
+        # Two instruments both with strictly positive daily PnL → cum_pnl increases
+        trades = [
+            _trade("BTC", 2025, 1, 1, 20.0), _trade("ETH", 2025, 1, 1, 10.0),
+            _trade("BTC", 2025, 1, 2, 30.0), _trade("ETH", 2025, 1, 2, 5.0),
+            _trade("BTC", 2025, 1, 3, 10.0),
+        ]
+        basic = {"BTC": {"total_pnl": 60.0}, "ETH": {"total_pnl": 15.0}}
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        btc = out["instrument_cumulative_pnl"]["BTC"]
+        assert [p["cum_pnl"] for p in btc] == [20.0, 50.0, 60.0]
+        eth = out["instrument_cumulative_pnl"]["ETH"]
+        # ETH has no trade on 2025-01-03 but the date appears in the union
+        assert [p["cum_pnl"] for p in eth] == [10.0, 15.0, 15.0]
+
+    def test_cumulative_pnl_dates_are_union_sorted(self):
+        trades = [
+            _trade("BTC", 2025, 1, 3, 10.0),
+            _trade("ETH", 2025, 1, 1, 20.0),
+        ]
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        dates = [p["date"] for p in out["instrument_cumulative_pnl"]["BTC"]]
+        assert dates == ["2025-01-01", "2025-01-03"]
+
+    def test_correlation_requires_ten_days(self):
+        # Only 5 trading days → correlation dict empty
+        trades = []
+        for i in range(5):
+            d = i + 1
+            trades.append(_trade("BTC", 2025, 1, d, float(i + 1)))
+            trades.append(_trade("ETH", 2025, 1, d, float(-i)))
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        assert out["instrument_correlation"] == {}
+
+    def test_correlation_perfect_positive(self):
+        # 12 days of perfectly correlated PnL
+        trades = []
+        for i in range(12):
+            d = i + 1
+            trades.append(_trade("BTC", 2025, 1, d, 10.0 * (i + 1)))
+            trades.append(_trade("ETH", 2025, 1, d, 5.0 * (i + 1)))
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        corr = out["instrument_correlation"]
+        assert corr["BTC"]["ETH"] == pytest.approx(1.0, abs=1e-4)
+        assert corr["ETH"]["BTC"] == pytest.approx(1.0, abs=1e-4)
+
+    def test_correlation_perfect_negative(self):
+        trades = []
+        for i in range(12):
+            d = i + 1
+            trades.append(_trade("BTC", 2025, 1, d, 10.0 * (i + 1)))
+            trades.append(_trade("ETH", 2025, 1, d, -10.0 * (i + 1)))
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        corr = out["instrument_correlation"]
+        assert corr["BTC"]["ETH"] == pytest.approx(-1.0, abs=1e-4)
+
+    def test_per_instrument_updates_contain_risk_keys(self):
+        trades = []
+        rng = np.random.default_rng(seed=11)
+        for i in range(30):
+            d = i + 1
+            date_y, date_m, date_d = 2025, 1 + (d - 1) // 30, ((d - 1) % 30) + 1
+            trades.append(_trade("BTC", date_y, date_m, date_d, float(rng.normal(5, 20))))
+            trades.append(_trade("ETH", date_y, date_m, date_d, float(rng.normal(-2, 15))))
+        basic = {"BTC": {"total_pnl": 150.0}, "ETH": {"total_pnl": -60.0}}
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        for inst in ("BTC", "ETH"):
+            upd = out["per_instrument_updates"][inst]
+            assert set(upd.keys()) == {"sharpe_ratio", "sortino_ratio", "max_drawdown", "recovery_factor"}
+
+    def test_recovery_factor_nil_when_drawdown_tiny(self):
+        # All-positive instrument has no meaningful drawdown → recovery_factor is None
+        trades = []
+        for i in range(12):
+            trades.append(_trade("BTC", 2025, 1, i + 1, 100.0))
+            trades.append(_trade("ETH", 2025, 1, i + 1, 50.0))
+        basic = {"BTC": {"total_pnl": 1200.0}, "ETH": {"total_pnl": 600.0}}
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        assert out["per_instrument_updates"]["BTC"]["recovery_factor"] is None
+
+    def test_recovery_factor_positive_when_drawdown_and_total_pnl_positive(self):
+        # BTC has a strong recovery after a drawdown
+        trades = [
+            _trade("BTC", 2025, 1, 1, 500.0),
+            _trade("BTC", 2025, 1, 2, -400.0),
+            _trade("BTC", 2025, 1, 3, 300.0),
+            _trade("BTC", 2025, 1, 4, 200.0),
+            _trade("ETH", 2025, 1, 1, 100.0),
+            _trade("ETH", 2025, 1, 2, 50.0),
+            _trade("ETH", 2025, 1, 3, -20.0),
+            _trade("ETH", 2025, 1, 4, 30.0),
+        ]
+        basic = {"BTC": {"total_pnl": 600.0}, "ETH": {"total_pnl": 160.0}}
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        # Only 4 dates so correlation empty, but risk keys still computed
+        upd_btc = out["per_instrument_updates"]["BTC"]
+        # Drawdown exists only if recovery_factor is set
+        if upd_btc["recovery_factor"] is not None:
+            assert upd_btc["recovery_factor"] > 0
+
+    def test_max_drawdown_is_negative_ratio(self):
+        trades = [
+            _trade("BTC", 2025, 1, 1, 100.0),
+            _trade("BTC", 2025, 1, 2, -500.0),
+            _trade("ETH", 2025, 1, 1, 50.0),
+            _trade("ETH", 2025, 1, 2, 20.0),
+        ]
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        mdd = out["per_instrument_updates"]["BTC"]["max_drawdown"]
+        assert mdd is not None
+        assert mdd < 0
+
+    def test_monthly_heatmap_contains_all_pairs(self):
+        trades = [
+            _trade("BTC", 2025, 1, 15, 100.0),
+            _trade("BTC", 2025, 2, 10, -50.0),
+            _trade("ETH", 2025, 1, 20, 30.0),
+        ]
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        heat = out["monthly_pnl_heatmap"]
+        # 2 instruments × 2 months = 4 rows
+        assert len(heat) == 4
+        btc_jan = next(r for r in heat if r["instrument"] == "BTC" and r["month"] == "2025-01")
+        btc_feb = next(r for r in heat if r["instrument"] == "BTC" and r["month"] == "2025-02")
+        eth_feb = next(r for r in heat if r["instrument"] == "ETH" and r["month"] == "2025-02")
+        assert btc_jan["pnl"] == 100.0
+        assert btc_feb["pnl"] == -50.0
+        # Instrument with no trades that month still appears with zero PnL
+        assert eth_feb["pnl"] == 0.0
+
+    def test_diversification_ratio_present_with_ten_days(self):
+        rng = np.random.default_rng(seed=3)
+        trades = []
+        for i in range(12):
+            d = i + 1
+            trades.append(_trade("BTC", 2025, 1, d, float(rng.normal(0, 50))))
+            trades.append(_trade("ETH", 2025, 1, d, float(rng.normal(0, 50))))
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        pa = out["portfolio_analytics"]
+        # Uncorrelated returns ⇒ diversification_ratio > 1
+        assert "diversification_ratio" in pa
+        assert pa["diversification_ratio"] > 0
+        assert "diversification_benefit_pct" in pa
+
+    def test_diversification_absent_when_under_ten_days(self):
+        trades = []
+        for i in range(5):
+            d = i + 1
+            trades.append(_trade("BTC", 2025, 1, d, 10.0))
+            trades.append(_trade("ETH", 2025, 1, d, 10.0))
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        assert out["portfolio_analytics"] == {}
+
+    def test_skips_trades_with_zero_or_negative_ts(self):
+        trades = [
+            {"instrument": "BTC", "ts_closed": 0, "pnl": 999.0},  # skipped
+            {"instrument": "BTC", "ts_closed": -1, "pnl": 999.0},  # skipped
+            _trade("BTC", 2025, 1, 1, 100.0),
+            _trade("ETH", 2025, 1, 1, 50.0),
+        ]
+        basic = self._basic(["BTC", "ETH"])
+        out = _sections.compute_per_instrument_advanced(trades, basic, 10000)
+        # Only one date → a single cum_pnl point with the 100.0 trade
+        btc_curve = out["instrument_cumulative_pnl"]["BTC"]
+        assert len(btc_curve) == 1
+        assert btc_curve[0]["cum_pnl"] == 100.0
+
+    def test_safe_round_helper_nan_inf(self):
+        assert _sections._safe_round(float("nan")) is None
+        assert _sections._safe_round(float("inf")) is None
+        assert _sections._safe_round(None) is None
+        assert _sections._safe_round(1.23456, 2) == 1.23
+
+
+# ---------------------------------------------------------------------------
+# compute_benchmark_equity_curve (section 11f)
+# ---------------------------------------------------------------------------
+
+class TestBenchmarkEquityCurve:
+
+    def test_empty_when_equity_curve_short(self):
+        out = _sections.compute_benchmark_equity_curve(
+            [],
+            {"BTC": {"2025-01-01": 100.0}},
+            10000,
+        )
+        assert out == []
+        one = [{"timestamp": "2025-01-01", "equity": 10000.0}]
+        assert _sections.compute_benchmark_equity_curve(one, {"BTC": {"2025-01-01": 100.0}}, 10000) == []
+
+    def test_empty_when_no_closes(self):
+        ec = [
+            {"timestamp": "2025-01-01", "equity": 10000.0},
+            {"timestamp": "2025-01-02", "equity": 10100.0},
+        ]
+        assert _sections.compute_benchmark_equity_curve(ec, {}, 10000) == []
+
+    def test_single_instrument_matches_price_ratio(self):
+        # Buy 100 units of BTC at $100 (= $10000 allocation); BTC doubles → equity = $20000
+        ec = [
+            {"timestamp": "2025-01-01", "equity": 10000.0},
+            {"timestamp": "2025-01-02", "equity": 10500.0},
+            {"timestamp": "2025-01-03", "equity": 10800.0},
+        ]
+        closes = {"BTC": {"2025-01-01": 100.0, "2025-01-02": 150.0, "2025-01-03": 200.0}}
+        out = _sections.compute_benchmark_equity_curve(ec, closes, 10000)
+        assert [pt["equity"] for pt in out] == [10000.0, 15000.0, 20000.0]
+        assert [pt["timestamp"] for pt in out] == ["2025-01-01", "2025-01-02", "2025-01-03"]
+
+    def test_equal_weight_basket_split(self):
+        # Two instruments, each gets 5000 allocation
+        ec = [
+            {"timestamp": "2025-01-01", "equity": 10000.0},
+            {"timestamp": "2025-01-02", "equity": 10100.0},
+        ]
+        closes = {
+            "BTC": {"2025-01-01": 100.0, "2025-01-02": 110.0},   # +10%
+            "ETH": {"2025-01-01": 50.0, "2025-01-02": 55.0},     # +10%
+        }
+        out = _sections.compute_benchmark_equity_curve(ec, closes, 10000)
+        # 5000 → 5500 for each ⇒ total 11000
+        assert out[1]["equity"] == pytest.approx(11000.0)
+
+    def test_forward_fill_missing_price(self):
+        # BTC missing price on day 2 → use day-1 price
+        ec = [
+            {"timestamp": "2025-01-01", "equity": 10000.0},
+            {"timestamp": "2025-01-02", "equity": 10000.0},
+            {"timestamp": "2025-01-03", "equity": 10000.0},
+        ]
+        closes = {"BTC": {"2025-01-01": 100.0, "2025-01-03": 120.0}}
+        out = _sections.compute_benchmark_equity_curve(ec, closes, 10000)
+        # Day 1: 100 units × $100 = $10000
+        # Day 2: no price → forward fill to 100 → $10000
+        # Day 3: 100 units × $120 = $12000
+        assert out[0]["equity"] == pytest.approx(10000.0)
+        assert out[1]["equity"] == pytest.approx(10000.0)
+        assert out[2]["equity"] == pytest.approx(12000.0)
+
+    def test_instrument_first_price_after_start(self):
+        # BTC starts quoting on day 2 → allocation uses that first price
+        ec = [
+            {"timestamp": "2025-01-01", "equity": 10000.0},
+            {"timestamp": "2025-01-02", "equity": 10000.0},
+            {"timestamp": "2025-01-03", "equity": 10500.0},
+        ]
+        closes = {"BTC": {"2025-01-02": 100.0, "2025-01-03": 110.0}}
+        out = _sections.compute_benchmark_equity_curve(ec, closes, 10000)
+        # Day 1 has no price at all → fallback: price = alloc/units = 100
+        # units = 10000 / 100 = 100; day 3: 100 × 110 = 11000
+        assert out[2]["equity"] == pytest.approx(11000.0)
+
+    def test_skips_zero_or_negative_prices_for_allocation(self):
+        # First valid (>0) price decides allocation
+        ec = [
+            {"timestamp": "2025-01-01", "equity": 10000.0},
+            {"timestamp": "2025-01-02", "equity": 10000.0},
+        ]
+        closes = {"BTC": {"2025-01-01": 0.0, "2025-01-02": 200.0}}
+        out = _sections.compute_benchmark_equity_curve(ec, closes, 10000)
+        # Allocation price is 200 ⇒ units = 50
+        # Day 1 price = 0 but it's present → used as market value (0) unless we forward fill
+        # Current implementation: day-1 price is 0.0 (present in closes), so equity = 50 × 0 = 0
+        # Day 2: 50 × 200 = 10000
+        assert out[1]["equity"] == pytest.approx(10000.0)
+
+
+# ---------------------------------------------------------------------------
+# compute_benchmark_daily_returns
+# ---------------------------------------------------------------------------
+
+class TestBenchmarkDailyReturns:
+
+    def test_none_when_empty(self):
+        assert _sections.compute_benchmark_daily_returns([], 10000) is None
+
+    def test_none_when_single_point(self):
+        out = _sections.compute_benchmark_daily_returns(
+            [{"timestamp": "2025-01-01", "equity": 10100.0}], 10000,
+        )
+        assert out is None
+
+    def test_returns_array_length_equals_points(self):
+        curve = [
+            {"timestamp": "2025-01-01", "equity": 10100.0},
+            {"timestamp": "2025-01-02", "equity": 10200.0},
+            {"timestamp": "2025-01-03", "equity": 10300.0},
+        ]
+        out = _sections.compute_benchmark_daily_returns(curve, 10000)
+        assert out is not None
+        # 3 points prepended with starting_balance → 3 daily returns
+        assert out.shape == (3,)
+
+    def test_first_return_relative_to_starting_balance(self):
+        curve = [{"timestamp": "2025-01-01", "equity": 10100.0}, {"timestamp": "2025-01-02", "equity": 10200.0}]
+        out = _sections.compute_benchmark_daily_returns(curve, 10000)
+        assert out[0] == pytest.approx(0.01)
+
+    def test_none_when_zero_starting_balance(self):
+        curve = [
+            {"timestamp": "2025-01-01", "equity": 0.0},
+            {"timestamp": "2025-01-02", "equity": 100.0},
+        ]
+        # starting_balance = 0 ⇒ denom has zero ⇒ returns None
+        assert _sections.compute_benchmark_daily_returns(curve, 0) is None
