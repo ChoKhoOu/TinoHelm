@@ -81,15 +81,16 @@ class _RiskGuardStub:
         self.on_event(bar)
 
     def _check_risks(self):
-        if self._breached:
-            return
-
         equity = self._get_equity()
         if equity <= 0:
             return
 
+        # Update HWM (always, even after breach — matches production)
         if equity > self._peak_equity:
             self._peak_equity = equity
+
+        if self._breached:
+            return
 
         if self._daily_stop_loss_pct is not None and self._day_start_equity > 0:
             daily_return = (equity - self._day_start_equity) / self._day_start_equity
