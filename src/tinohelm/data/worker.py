@@ -47,12 +47,15 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
         result = await db.execute(stmt)
         recovered += result.rowcount  # type: ignore[assignment]
 
-        # Re-queue all queued jobs
+        # Re-queue all queued jobs — clear the Redis queue first to prevent
+        # duplicate entries if the API restarted while jobs were already queued.
         rows = (await db.execute(
             select(DataFetchJob.job_id).where(DataFetchJob.status == "queued")
         )).scalars().all()
-        for job_id in rows:
-            await rds.lpush(QUEUE_KEY, job_id)
+        if rows:
+            await rds.delete(QUEUE_KEY)
+            for job_id in rows:
+                await rds.lpush(QUEUE_KEY, job_id)
 
         await db.commit()
 
