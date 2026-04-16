@@ -101,6 +101,11 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
     running = True
     current_run_id: str | None = None
 
+    # Initialize r before registering the signal handler so the handler can
+    # safely reference it.  Without this, a SIGTERM arriving between handler
+    # registration and redis.from_url() would raise NameError.
+    r = redis.from_url(redis_url)
+
     def _signal_handler(sig, frame):
         nonlocal running
         running = False
@@ -114,8 +119,6 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
-
-    r = redis.from_url(redis_url)
     kind = "keep-alive" if idle_timeout == 0 else f"ephemeral({idle_timeout}s)"
     logger.info("Backtest worker started (%s), waiting for jobs...", kind)
 
