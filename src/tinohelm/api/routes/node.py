@@ -98,7 +98,7 @@ async def lifecycle_state(
 
 def _enrich_strategy_meta(strategies: dict, settings: Settings) -> dict:
     """Enrich each strategy entry with symbols/interval from portfolio.yaml."""
-    strategies_dir = Path.home() / settings.paths.strategies
+    strategies_dir = Path(settings.paths.strategies)
     for name, info in strategies.items():
         yaml_path = strategies_dir / name / "portfolio.yaml"
         if yaml_path.exists():
