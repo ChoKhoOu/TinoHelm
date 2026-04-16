@@ -1,12 +1,16 @@
-"""Backtest result extraction from NautilusTrader BacktestEngine."""
+"""Backtest result statistics helpers.
+
+Pure-computation helpers used by ``extract.py``.  These functions have no
+NautilusTrader dependency so they can be unit-tested in isolation.
+"""
 from __future__ import annotations
 
 import logging
 import math
-from typing import Any
+from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
-from nautilus_trader.backtest.engine import BacktestEngine
 
 logger = logging.getLogger(__name__)
 
@@ -250,4 +254,98 @@ def _compute_monte_carlo(
         "mc_median_final_return": round(float(np.median(final_returns)) * 100, 2),
         "mc_num_simulations": n_sims,
     }
+
+
+# ---------------------------------------------------------------------------
+# Rolling metric computation helpers
+# ---------------------------------------------------------------------------
+
+def _compute_rolling_series(
+    daily_rets: np.ndarray,
+    timestamps: list[str],
+    windows: dict[str, int],
+    metric_fn: Callable[[np.ndarray, int, int], float | None],
+    max_points: int = 500,
+) -> list[dict[str, Any]]:
+    """Compute a rolling metric over daily returns with multiple window sizes.
+
+    Parameters
+    ----------
+    daily_rets : 1-D array of daily portfolio returns.
+    timestamps : date strings aligned with *daily_rets* (same length).
+    windows : ``{"rolling_3m": 63, "rolling_6m": 126, ...}`` — key names
+        become dict keys in the output; values are the look-back window size.
+    metric_fn : ``fn(daily_rets, start, end) -> float | None``.  Receives the
+        full *daily_rets* array and the half-open slice indices ``[start, end)``
+        for the current window.
+    max_points : downsample the output to at most this many evenly-spaced
+        points.  Set to 0 to disable downsampling.
+
+    Returns
+    -------
+    list[dict] — each entry has ``"timestamp"`` plus one key per window.
+    """
+    result: list[dict[str, Any]] = []
+    for i, ts in enumerate(timestamps):
+        entry: dict[str, Any] = {"timestamp": ts}
+        for key, w in windows.items():
+            if i + 1 >= w:
+                entry[key] = metric_fn(daily_rets, i + 1 - w, i + 1)
+            else:
+                entry[key] = None
+        result.append(entry)
+
+    if max_points > 0 and len(result) > max_points:
+        indices = np.linspace(0, len(result) - 1, max_points, dtype=int)
+        result = [result[int(idx)] for idx in indices]
+
+    return result
+
+
+# ---- Metric functions for _compute_rolling_series ----
+
+_ANN_FACTOR = 365  # crypto markets trade 365 days/year
+
+
+def _rolling_sharpe_fn(daily_rets: np.ndarray, start: int, end: int) -> float | None:
+    """Annualized Sharpe ratio for a window slice."""
+    wr = daily_rets[start:end]
+    m, s = float(wr.mean()), float(wr.std(ddof=1))
+    return round(m / s * np.sqrt(_ANN_FACTOR), 4) if s > 1e-12 else None
+
+
+def _rolling_sortino_fn(daily_rets: np.ndarray, start: int, end: int) -> float | None:
+    """Annualized Sortino ratio for a window slice."""
+    wr = daily_rets[start:end]
+    ds = wr[wr < 0]
+    ds_s = float(ds.std(ddof=1)) if len(ds) > 1 else 0.0
+    return round(float(wr.mean()) / ds_s * np.sqrt(_ANN_FACTOR), 4) if ds_s > 1e-12 else None
+
+
+def _rolling_volatility_fn(daily_rets: np.ndarray, start: int, end: int) -> float | None:
+    """Annualized volatility for a window slice."""
+    wr = daily_rets[start:end]
+    s = float(wr.std(ddof=1))
+    return round(s * np.sqrt(_ANN_FACTOR), 4)
+
+
+def _rolling_cumret_fn(daily_rets: np.ndarray, start: int, end: int) -> float | None:
+    """Cumulative return (%) for a window slice."""
+    wr = daily_rets[start:end]
+    return round(float(np.prod(1 + wr) - 1) * 100, 4)
+
+
+def _make_rolling_beta_fn(
+    benchmark_rets: np.ndarray,
+) -> Callable[[np.ndarray, int, int], float | None]:
+    """Create a rolling beta metric function bound to *benchmark_rets*."""
+
+    def fn(daily_rets: np.ndarray, start: int, end: int) -> float | None:
+        sr = daily_rets[start:end]
+        br = benchmark_rets[start:end]
+        cov_val = float(np.cov(sr, br)[0, 1])
+        var_bm = float(np.var(br, ddof=1))
+        return round(cov_val / var_bm, 4) if var_bm > 1e-12 else None
+
+    return fn
 
