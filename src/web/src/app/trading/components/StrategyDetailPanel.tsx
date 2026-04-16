@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { ArrowLeft, Settings2 } from "lucide-react";
 import {
   AreaChart,
@@ -12,7 +12,7 @@ import {
   CartesianGrid,
   ReferenceLine,
 } from "recharts";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
 import { useWsEvent } from "@/providers/WebSocketProvider";
@@ -89,7 +89,27 @@ export function StrategyDetailPanel({ strategyId, nodeType, positions, fills, on
   const [equityPoints, setEquityPoints] = useState<EquityPoint[]>([]);
   const [equityLoading, setEquityLoading] = useState(true);
   const [isRunning, setIsRunning] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
   const [strategyConfig, setStrategyConfig] = useState<Record<string, string> | null>(null);
+
+  const handleToggle = useCallback(async (checked: boolean) => {
+    setActionLoading(true);
+    try {
+      const action = checked ? "resume" : "pause";
+      await apiPost(`/api/node/strategy/${action}`, { name: strategyId, mode: nodeType });
+      setIsRunning(checked);
+    } catch { /* inline error handled by visual state */ }
+    finally { setActionLoading(false); }
+  }, [strategyId, nodeType]);
+
+  const handleFlattenStop = useCallback(async () => {
+    setActionLoading(true);
+    try {
+      await apiPost("/api/node/strategy/flatten-stop", { name: strategyId, mode: nodeType });
+      setIsRunning(false);
+    } catch { /* inline error handled by visual state */ }
+    finally { setActionLoading(false); }
+  }, [strategyId, nodeType]);
 
   // Filter positions/fills for this strategy
   const stratPositions = positions.filter((p) => p.strategy_id_tag === strategyId);
@@ -194,7 +214,7 @@ export function StrategyDetailPanel({ strategyId, nodeType, positions, fills, on
             </span>
 
             {/* Toggle */}
-            <Toggle checked={isRunning} onChange={setIsRunning} />
+            <Toggle checked={isRunning} onChange={handleToggle} />
 
             {/* Config button */}
             <button
@@ -207,7 +227,9 @@ export function StrategyDetailPanel({ strategyId, nodeType, positions, fills, on
 
             {/* Stop button */}
             <button
-              className="rounded-[var(--rs)] border text-[0.72rem] px-3 py-1.5 hover:bg-[var(--dan)]/10 transition-colors"
+              onClick={handleFlattenStop}
+              disabled={actionLoading}
+              className="rounded-[var(--rs)] border text-[0.72rem] px-3 py-1.5 hover:bg-[var(--dan)]/10 transition-colors disabled:opacity-50"
               style={{
                 borderColor: "var(--dan)",
                 color: "var(--dan)",
@@ -319,6 +341,7 @@ export function StrategyDetailPanel({ strategyId, nodeType, positions, fills, on
                         <TableCell className="font-mono whitespace-nowrap">{p.duration ?? "—"}</TableCell>
                         <TableCell className="whitespace-nowrap">
                           <button
+                            onClick={() => apiPost("/api/node/lifecycle", { action: "flatten", mode: nodeType, strategy_id: strategyId })}
                             className="text-[0.62rem] rounded px-2 py-1 border border-destructive text-destructive hover:bg-destructive/10 transition-colors"
                             style={{ transitionDuration: "var(--dur)" }}
                           >
