@@ -22,6 +22,9 @@ import pandas as pd
 
 from tinohelm.backtest.result.statistics import (
     _ANN_FACTOR,
+    _compute_min_backtest_length,
+    _compute_monte_carlo,
+    _compute_psr,
     _norm_ppf,
     _safe_float,
 )
@@ -892,3 +895,328 @@ def compute_benchmark_daily_returns(
     if np.any(denom <= 0):
         return None
     return np.diff(bm_arr) / denom
+
+
+# ---------------------------------------------------------------------------
+# Section 12b — trade-level scalar metrics & chart arrays
+# ---------------------------------------------------------------------------
+
+def _histogram_bins(n_items: int, *, cap: int = 30, floor: int = 10) -> int:
+    """Choose a histogram bin count from sample size.
+
+    Matches the rule used throughout section 12b: ``min(cap, max(floor, n//5))``.
+    """
+    return min(cap, max(floor, n_items // 5))
+
+
+def compute_trade_scalar_metrics(
+    pnls: list[float],
+    *,
+    n_orders: int,
+    n_filled_orders: int,
+    n_returns_periods: int,
+    total_trades: int,
+    total_pnl: float,
+    max_drawdown: float | None,
+    starting_balance: float,
+    win_rate: float | None,
+    avg_win: float | None,
+    avg_loss: float | None,
+    expectancy: float | None,
+) -> dict[str, float | None]:
+    """Compute nine scalar trade-analytics metrics.
+
+    Returned keys:
+
+    * ``median_trade_pnl`` — median realised PnL per trade.
+    * ``std_trade_pnl`` — sample std of trade PnL (``ddof=1``); ``None`` if
+      fewer than 2 trades.
+    * ``fill_rate`` — ``filled/total * 100`` percent; ``None`` when no orders.
+    * ``avg_trades_per_day`` — ``total_trades / n_returns_periods``; ``None``
+      when no return periods.
+    * ``recovery_factor`` — ``(total_pnl / starting_balance) / |max_drawdown|``
+      when max_drawdown exceeds the numerical floor; ``None`` otherwise.
+    * ``sqn`` — System Quality Number: ``sqrt(N) * mean(pnls) / std(pnls)``.
+    * ``kelly_criterion`` — ``(win_rate - (1 - win_rate) / R) * 100`` where
+      ``R = |avg_win / avg_loss|``.
+    * ``k_ratio`` — Kestner (2003) scale-independent regression slope-to-noise
+      ratio of ``log(cumulative_equity)``.
+    * ``expectancy_r`` — ``expectancy / |avg_loss|`` (R-multiples).
+
+    All values are JSON-safe (NaN/Inf sanitised to ``None`` via
+    :func:`_safe_float`).  Empty *pnls* returns all nine keys set to ``None``.
+    """
+    keys = (
+        "median_trade_pnl",
+        "std_trade_pnl",
+        "fill_rate",
+        "avg_trades_per_day",
+        "recovery_factor",
+        "sqn",
+        "kelly_criterion",
+        "k_ratio",
+        "expectancy_r",
+    )
+    out: dict[str, float | None] = {k: None for k in keys}
+    if not pnls:
+        return out
+
+    pnl_arr = np.array(pnls, dtype=float)
+    out["median_trade_pnl"] = _safe_float(round(float(np.median(pnl_arr)), 4))
+    if len(pnls) > 1:
+        out["std_trade_pnl"] = _safe_float(round(float(np.std(pnl_arr, ddof=1)), 4))
+
+    if n_orders > 0:
+        out["fill_rate"] = _safe_float(round(n_filled_orders / n_orders * 100, 4))
+
+    if n_returns_periods > 0:
+        out["avg_trades_per_day"] = _safe_float(round(total_trades / n_returns_periods, 4))
+
+    if max_drawdown is not None and abs(max_drawdown) > 1e-12 and starting_balance > 0:
+        net_return = total_pnl / starting_balance
+        out["recovery_factor"] = _safe_float(round(net_return / abs(max_drawdown), 4))
+
+    pnl_std = float(np.std(pnl_arr, ddof=1)) if len(pnls) > 1 else 0.0
+    pnl_mean = float(np.mean(pnl_arr))
+    if pnl_std > 1e-12:
+        out["sqn"] = _safe_float(round(float(np.sqrt(len(pnls)) * pnl_mean / pnl_std), 4))
+
+    if avg_win is not None and avg_loss is not None and abs(avg_loss) > 1e-12:
+        r = abs(avg_win / avg_loss)
+        wr = win_rate if win_rate is not None else 0.0
+        out["kelly_criterion"] = _safe_float(round((wr - (1 - wr) / r) * 100, 4))
+
+    # K-Ratio: slope of OLS on log(cumulative equity) / (std_err(slope) * sqrt(N)).
+    try:
+        cum_equity = starting_balance + np.cumsum(pnl_arr)
+        pos_mask = cum_equity > 0
+        if pos_mask.sum() >= 2:
+            log_eq = np.log(cum_equity[pos_mask])
+            x = np.arange(len(log_eq), dtype=float)
+            n_k = len(x)
+            coeffs = np.polyfit(x, log_eq, 1)
+            slope = coeffs[0]
+            y_pred = slope * x + coeffs[1]
+            residuals = log_eq - y_pred
+            mse = float(np.sum(residuals ** 2) / (n_k - 2)) if n_k > 2 else 0.0
+            x_var = float(np.sum((x - x.mean()) ** 2))
+            if x_var > 1e-12 and mse > 0:
+                std_err = float(np.sqrt(mse / x_var))
+                if std_err > 1e-12:
+                    out["k_ratio"] = _safe_float(
+                        round(float(slope / (std_err * np.sqrt(n_k))), 4),
+                    )
+    except (ValueError, FloatingPointError):
+        pass
+
+    if expectancy is not None and avg_loss is not None and abs(avg_loss) > 1e-12:
+        out["expectancy_r"] = _safe_float(round(expectancy / abs(avg_loss), 4))
+
+    return out
+
+
+def compute_trade_pnl_distribution(pnls: list[float]) -> list[dict[str, Any]]:
+    """Histogram of trade PnL values (adaptive bin count)."""
+    if not pnls:
+        return []
+    pnl_arr = np.array(pnls, dtype=float)
+    counts, edges = np.histogram(pnl_arr, bins=_histogram_bins(len(pnls)))
+    return [
+        {
+            "bin_start": round(float(edges[j]), 4),
+            "bin_end": round(float(edges[j + 1]), 4),
+            "count": int(counts[j]),
+        }
+        for j in range(len(counts))
+    ]
+
+
+def compute_cumulative_trade_pnl(pnls: list[float]) -> list[dict[str, Any]]:
+    """Cumulative realised-PnL curve indexed by trade number (1-based)."""
+    if not pnls:
+        return []
+    cum = np.cumsum(np.array(pnls, dtype=float))
+    return [
+        {"trade_num": idx + 1, "cumulative_pnl": round(float(v), 4)}
+        for idx, v in enumerate(cum)
+    ]
+
+
+def compute_trade_pnl_scatter(
+    trades: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Per-trade scatter points: timestamp, PnL, side, instrument.
+
+    *trades* is a list of dicts with keys ``ts_closed`` (int ns), ``pnl``
+    (float), ``side`` (str), and ``instrument`` (str).  ``ts_closed`` of zero
+    or ``None`` produces a ``null`` timestamp (matches prior behaviour).
+    """
+    out: list[dict[str, Any]] = []
+    for t in trades:
+        ts_c = t.get("ts_closed")
+        out.append({
+            "timestamp": _format_ns_timestamp_local(ts_c) if ts_c else None,
+            "pnl": round(float(t["pnl"]), 4),
+            "side": str(t["side"]),
+            "instrument": str(t["instrument"]),
+        })
+    return out
+
+
+def _format_ns_timestamp_local(ts_ns: Any) -> str | None:
+    """Isomorphic ns→ISO formatter (mirror of statistics._format_ns_timestamp).
+
+    Inlined here to avoid a cross-module import cycle when sections.py is
+    loaded in isolation during tests.
+    """
+    if ts_ns is None or ts_ns == 0:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts_ns) / 1e9, tz=timezone.utc).isoformat()
+    except (ValueError, TypeError, OSError):
+        return None
+
+
+def compute_holding_time_distribution(
+    durations_ns: list[int | float],
+) -> list[dict[str, Any]]:
+    """Histogram of position holding times in hours.
+
+    Entries with ``duration <= 0`` or ``None`` are ignored.  Adaptive bin count
+    matches :func:`compute_trade_pnl_distribution`.
+    """
+    hours = [int(d) / 3.6e12 for d in durations_ns if d and d > 0]
+    if not hours:
+        return []
+    dur_arr = np.array(hours, dtype=float)
+    counts, edges = np.histogram(dur_arr, bins=_histogram_bins(len(hours)))
+    return [
+        {
+            "bin_start": round(float(edges[j]), 4),
+            "bin_end": round(float(edges[j + 1]), 4),
+            "count": int(counts[j]),
+        }
+        for j in range(len(counts))
+    ]
+
+
+def compute_mae_mfe(
+    positions: list[dict[str, Any]],
+    bars_by_instrument: dict[str, list[tuple[int, float, float]]],
+) -> list[dict[str, Any]]:
+    """Maximum adverse/favourable excursion per closed position.
+
+    *positions* entries must contain: ``instrument`` (str), ``ts_opened`` (int
+    ns), ``ts_closed`` (int ns), ``entry_price`` (float), ``side`` (``"BUY"``
+    or ``"SELL"``), and ``pnl`` (float).
+
+    *bars_by_instrument* is a mapping ``{instrument_id: [(ts_init_ns, high,
+    low), ...]}`` of primitive bar tuples.  The caller is responsible for
+    collapsing all bar-types for an instrument into a single list (bars may
+    be in any order; filtering is done by timestamp window only).
+
+    For a BUY (long) position:
+
+    * MAE = ``entry - min_low`` within the holding window.
+    * MFE = ``max_high - entry``.
+
+    For a SELL (short) position these are inverted.  Positions without
+    matching bars or timestamps are skipped.  Returned entries are aligned
+    with the surviving positions in input order.
+    """
+    out: list[dict[str, Any]] = []
+    for p in positions:
+        inst = str(p.get("instrument") or "")
+        bars = bars_by_instrument.get(inst)
+        if not bars:
+            continue
+        ts_o = p.get("ts_opened")
+        ts_c = p.get("ts_closed")
+        if not ts_o or not ts_c:
+            continue
+
+        highs: list[float] = []
+        lows: list[float] = []
+        for ts_init, high, low in bars:
+            if ts_o <= ts_init <= ts_c:
+                highs.append(float(high))
+                lows.append(float(low))
+        if not highs:
+            continue
+
+        entry = float(p["entry_price"])
+        side = str(p["side"])
+        max_high = max(highs)
+        min_low = min(lows)
+
+        if side == "BUY":
+            mae = entry - min_low
+            mfe = max_high - entry
+        else:
+            mae = max_high - entry
+            mfe = entry - min_low
+
+        out.append({
+            "pnl": round(float(p["pnl"]), 4),
+            "mae": round(float(mae), 4),
+            "mfe": round(float(mfe), 4),
+            "side": side,
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Section 14 — robustness (PSR + MBL + Monte Carlo)
+# ---------------------------------------------------------------------------
+
+def compute_robustness(
+    trade_pnls: list[float],
+    starting_balance: float,
+    *,
+    daily_sharpe: float | None,
+    n_days: int,
+    skewness: float | None,
+    kurtosis: float | None,
+) -> dict[str, Any] | None:
+    """Assemble the Layer-1 robustness block.
+
+    Combines Probabilistic Sharpe Ratio (PSR), Minimum Backtest Length (MBL),
+    and Monte Carlo equity cone into a single dict ready for inclusion in the
+    final result.
+
+    PSR / MBL keys are always present (possibly ``None`` when the backtest has
+    insufficient signal).  The five Monte-Carlo keys are only added when
+    ``len(trade_pnls) >= 2``; otherwise the returned dict contains only the
+    four PSR/MBL keys.
+    """
+    safe_sk = 0.0 if skewness is None else float(skewness)
+    safe_ku = 0.0 if kurtosis is None else float(kurtosis)
+    nobs = int(n_days) if n_days else 0
+
+    psr_val = _compute_psr(daily_sharpe, nobs, safe_sk, safe_ku)
+    mbl_val = _compute_min_backtest_length(daily_sharpe, safe_sk, safe_ku)
+
+    robustness: dict[str, Any] = {
+        "psr": psr_val,
+        "min_backtest_length_days": mbl_val,
+        "actual_backtest_length_days": nobs,
+        "backtest_length_sufficient": (
+            (nobs >= mbl_val) if mbl_val is not None else None
+        ),
+    }
+
+    mc_result = _compute_monte_carlo(trade_pnls, starting_balance)
+    if mc_result:
+        robustness["mc_equity_cone"] = {
+            "percentiles": mc_result["percentiles"],
+            "curves": mc_result["curves"],
+            "original": mc_result["original"],
+            "x_labels": mc_result["x_labels"],
+        }
+        robustness["mc_probability_of_loss"] = mc_result["mc_probability_of_loss"]
+        robustness["mc_5th_percentile_return"] = mc_result["mc_5th_percentile_return"]
+        robustness["mc_median_max_drawdown"] = mc_result["mc_median_max_drawdown"]
+        robustness["mc_median_final_return"] = mc_result["mc_median_final_return"]
+        robustness["mc_num_simulations"] = mc_result["mc_num_simulations"]
+
+    return robustness
