@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useReducer, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useReducer, useCallback, useEffect, useRef, useState, useMemo, type ReactNode } from "react";
 import { useWebSocket, type WsEventMessage } from "@/hooks/useWebSocket";
 
 interface WsState {
@@ -92,13 +92,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     return state.lastKnown[eventType];
   }, [state.lastKnown]);
 
+  const contextValue = useMemo(() => ({
+    connected: state.connected,
+    reconnecting: state.reconnecting,
+    subscribe,
+    getLastKnown,
+  }), [state.connected, state.reconnecting, subscribe, getLastKnown]);
+
   return (
-    <WsContext.Provider value={{
-      connected: state.connected,
-      reconnecting: state.reconnecting,
-      subscribe,
-      getLastKnown,
-    }}>
+    <WsContext.Provider value={contextValue}>
       {children}
     </WsContext.Provider>
   );
