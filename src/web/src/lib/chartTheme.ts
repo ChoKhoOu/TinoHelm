@@ -41,6 +41,7 @@ export const CHART_TOOLTIP_PROPS = {
   contentStyle: CHART_TOOLTIP_STYLE,
   labelStyle: CHART_TOOLTIP_LABEL_STYLE,
   itemStyle: CHART_TOOLTIP_ITEM_STYLE,
+  cursor: { fill: "var(--bg-t)", opacity: 0.3 },
 };
 
 /* === Grid Style === */

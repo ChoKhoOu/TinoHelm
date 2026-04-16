@@ -28,6 +28,7 @@ export const ROUTING_TABLE: Record<string, RouteConfig> = {
   // Layer 3: Toast — async background events
   "backtest.completed":   { channel: "toast", type: "success", dedupeKey: (e) => e.run_id ?? e.id },
   "backtest.failed":      { channel: "toast", type: "error",   dedupeKey: (e) => e.run_id ?? e.id },
+  "backtest.cancelled":   { channel: "toast", type: "warning", dedupeKey: (e) => e.run_id ?? e.id },
   "data.fetch.completed": { channel: "toast", type: "success", dedupeKey: (e) => e.job_id },
   "data.fetch.failed":    { channel: "toast", type: "error",   dedupeKey: (e) => e.job_id },
   "research.completed":   { channel: "toast", type: "success", dedupeKey: (e) => e.job_id },
@@ -83,6 +84,10 @@ export function formatToastMessage(eventType: string, event: any): { title: stri
     case "backtest.failed": {
       const id = (event.run_id ?? "").slice(0, 6);
       return { title: `回测失败 ${id ? `· ${id}` : ""}`, description: event.error ?? undefined };
+    }
+    case "backtest.cancelled": {
+      const id = (event.run_id ?? "").slice(0, 6);
+      return { title: `回测已取消 ${id ? `· ${id}` : ""}` };
     }
     case "data.fetch.completed":
       return { title: `${event.symbol ?? ""} ${event.data_type ?? ""} 拉取完成` };
