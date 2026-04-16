@@ -176,14 +176,14 @@ async def start_optimization(
             param_ranges_dict = None
 
     # Resolve smart defaults for n_trials/n_workers so the DB has correct values
-    from tinohelm.backtest.optimizer import _auto_n_trials, _auto_workers
+    from tinohelm.backtest.optimizer_helpers import auto_n_trials, auto_workers
 
     resolved_n_trials = body.n_trials
     if resolved_n_trials <= 0:
-        resolved_n_trials = _auto_n_trials(param_ranges_dict or {})
+        resolved_n_trials = auto_n_trials(param_ranges_dict or {})
     resolved_n_workers = body.n_workers
     if resolved_n_workers <= 0:
-        resolved_n_workers = _auto_workers()
+        resolved_n_workers = auto_workers()
 
     # Update DB record with resolved values
     opt_run.n_trials = resolved_n_trials

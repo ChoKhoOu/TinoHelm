@@ -2,6 +2,164 @@
 
 Chronological record of architectural improvements and maintenance work.
 
+## 2026-04-16 (6)
+
+**主题**: 把 `backtest/optimizer.py` 中的纯逻辑下沉到新建的 `optimizer_helpers.py`,锁定优化结果 schema 契约,并为之前完全没有测试的优化器建立首条 NT-free 单元测试基线
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- `src/tinohelm/backtest/optimizer_helpers.py` — 新建 604 行,导出 20 个符号(2 常量 + 17 纯函数 + 1 状态机类)
+- `src/tinohelm/backtest/optimizer.py` — 1115 → 766 行(-349 行,-31.3%);所有"日期分割 / fitness 提取 / 智能默认 / DSR / 参数敏感度 / 参数稳定性 / payload 装配 / 早停状态机"被抽出后,本文件只剩 Optuna study 编排 + Redis 发布 + DB 持久化 + 共享引擎管理
+- `src/tinohelm/api/routes/optimize.py` — 把 `_auto_n_trials` / `_auto_workers` 私有 import 切换到 `optimizer_helpers.auto_n_trials` / `auto_workers` 公共名
+- `tests/backtest/test_optimizer_helpers.py` — 新建 862 行,102 个 NT-free / Optuna-free 单元测试
+
+**动机**:
+
+1. **`optimizer.py` 是项目里测试覆盖率最低的大文件** —— 1115 行,
+   零测试,负责回测策略调优(walk-forward 滚动窗口、并行 trial、剪枝、
+   早停、参数重要性 / 敏感度 / 稳定性 / Deflated Sharpe Ratio)。
+   一旦回退,影响面覆盖整条优化产品线,但完全没有 CI 兜底。
+2. **DSR 与参数敏感度的数学非常脆弱** —— `_compute_dsr` 内嵌 Bailey & López
+   de Prado (2014) 的退化分支(trials < 5 / n_obs < 5 / sr_var ≤ 0 /
+   denom_sq ≤ 0),任何一个分支条件被改坏都会让 DSR 静默退回 None
+   或抛 NaN。`_compute_param_sensitivity` 用 numpy 做分位数 binning
+   + 二维网格,边界(空 trials、单 bin、并列 importance)无任何测试。
+3. **重复的 "filter completed trials" 模式** —— 同样的过滤逻辑
+   (`state == COMPLETE and value is not None and value != _FAIL_VALUE`)
+   在 `_compute_dsr`、`_compute_param_sensitivity`、`_compute_param_stability`
+   重复了 3 次,任何一次"漏掉一个 fail_value sentinel"都会污染下游统计。
+4. **Redis publish payload 漂移** —— `objective()` 进度发布(running 状态)
+   和 `run()` 末尾完成发布(completed 状态)各自手写一份字面量 dict,
+   字段集合一致但顺序和构造方式不同。前端 `NotificationListener`
+   再次面临"两个 shape"的隐式契约问题(跟上一轮 runner.py 同样的反模式)。
+5. **`_PatienceCallback` 状态机和 Optuna 类型耦合** —— 真正纯的 "no-improve
+   counter + threadlock" 逻辑被锁在 `__call__(study, trial)` 里,
+   trial.value 一行的判断逻辑无法独立测试,本身却是优化早停最关键的
+   决策点。
+6. **结果 JSON schema 契约缺乏锁定** —— `full_result` 字段集合(16 个
+   顶层 key,前端 OptimizationDetail 全部依赖)是 `run()` 末尾一段
+   ~60 行的内联 dict 字面量,任何一次重命名都不会触发任何告警。
+   上一轮(extract.py)成功用 `test_result_schema.py` 锁定 backtest
+   结果 schema,这一轮对 optimization 结果做同样的事。
+
+**要点**:
+
+1. **`optimizer_helpers.py` — 20 个导出符号** —— 全部纯函数 / 数据结构,
+   零 NT、零 Optuna、零 Redis、零 SQLAlchemy 依赖:
+   - 常量: `FAIL_VALUE`、`FITNESS_METRICS`(从 `optimizer.py` 平移,公共名)
+   - 日期: `split_dates`、`walk_forward_windows`(逐字平移,加 docstring)
+   - 提取: `extract_fitness(result, objective, *, fail_value)` —— 新增
+     `result is None` 安全分支(老版本会抛 AttributeError),
+     `fail_value` 关键字注入便于自定义
+   - 智能默认: `auto_n_trials`、`auto_sampler`、`auto_workers(cpu_count=None)`、
+     `auto_patience(n_trials)` —— `auto_workers` 把 `os.cpu_count()` 调用
+     可注入化,`auto_patience` 是新抽取的(原来内联在 run() 里)
+   - 装配: `slim_result`、`build_progress_payload`、`build_full_result`、
+     `build_walk_forward_fold_record` —— 新增 `build_progress_payload`
+     强制保证 7 个 key(含 `message`)始终存在,弥合 running / completed
+     两个发布路径的隐式 shape 差异
+   - 重复消除: `filter_completed_trials(trials, *, fail_value)`、
+     `select_best_params(trial_params, param_ranges)` —— 把 3 处重复的
+     "filter completed" 和 2 处重复的 "filter best params keys" 收敛
+     到单一实现
+   - 适配: `serialize_trial(trial)` —— duck-typed Optuna `FrozenTrial`
+     → primitive dict,只要求 `.number / .params / .value / .state.name`,
+     可用 `SimpleNamespace` 在测试里构造
+   - 状态机: `PatienceTracker(patience)` + `.observe(value) -> bool` ——
+     从 `_PatienceCallback` 中提取的纯 "no-improve counter",
+     线程安全,完全无 Optuna 依赖
+   - 数学: `compute_dsr(*, ..., norm_ppf, norm_cdf)`、
+     `compute_param_sensitivity`、`compute_param_stability` ——
+     `compute_dsr` 把 `_norm_ppf` / `_norm_cdf` 改为依赖注入,
+     避免 helper 模块依赖 `tinohelm.backtest.result.statistics`
+     (原来是 `from tinohelm.backtest.result import _norm_ppf, _norm_cdf`
+     的局部 import —— 现在 helper 完全不知道 statistics 模块的存在)。
+     `compute_param_sensitivity` 引入 `min_trials=10` 关键字,
+     之前是写死的字面量。
+
+2. **`optimizer.py` 编排化** —— 1115 → 766 行(-349 行,-31.3%):
+   - `objective()` 内的进度发布:从 12 行字面量 dict 缩为
+     `json.dumps(build_progress_payload(...))` 一行
+   - `run()` 末尾的完成发布:同样收敛
+   - DSR 计算块:从 11 行嵌套 `try` + 局部 import 缩为 13 行
+     `compute_dsr(..., norm_ppf=_norm_ppf, norm_cdf=_norm_cdf)` 调用
+     —— statistics 的局部 import 仍然在 `optimizer.py` 内,helper 模块
+     不引入这个依赖
+   - `_PatienceCallback` 从 30 行嵌套 lock 状态机缩为 14 行 thin shim
+     (内部委托 `PatienceTracker`)
+   - `full_result` 装配:从 56 行字面量 dict 缩为 19 行 `build_full_result(...)`
+     声明式调用
+   - walk-forward 每折记录:从 9 行字面量 dict 缩为 5 行
+     `build_walk_forward_fold_record(...)`
+   - 抽取 `_cleanup_shared_engine()` 私有方法,消除 3 处 try/except 重复
+   - 保留向后兼容的私有名(`_FAIL_VALUE`, `_split_dates`, `_walk_forward_windows`,
+     `_extract_fitness`, `_auto_n_trials`, `_auto_sampler`, `_auto_workers`,
+     `_slim_result`, `_compute_dsr`, `_compute_param_sensitivity`,
+     `_compute_param_stability`)作为 helper 公共名的别名
+
+3. **`routes/optimize.py` 切换到公共 API** —— 之前直接 import 私有
+   `_auto_n_trials` / `_auto_workers`,改为 import `optimizer_helpers.auto_n_trials`
+   / `auto_workers`。其他 8 个私有名仍保留 alias 是为了不破坏外部测试代码
+   (如果有的话),但是新代码不应该再用它们。
+
+4. **修复了一个潜在 AttributeError** —— 老版本 `_extract_fitness`:
+   ```python
+   stats = result.get("statistics", {})  # 假设 result 不为 None
+   ```
+   如果 `_run_backtest` 返回 None(理论上不会,但防御性),老代码会抛
+   `AttributeError: 'NoneType' object has no attribute 'get'`。
+   新版本的 `extract_fitness(None, ...) → FAIL_VALUE`,显式 None-safe。
+
+5. **102 个 NT-free 单元测试** —— `tests/backtest/test_optimizer_helpers.py`:
+   - `TestSplitDates` (5): 50% / 70% / 0% / 100% / 端点保留
+   - `TestWalkForwardWindows` (8): 折数正确 / 测试段不重叠 / 训练在测试前 /
+     0/负 folds fallback / 100% train fallback / train_start clamp / test_end clamp /
+     端点不超
+   - `TestExtractFitness` (10): parametrize 4 个对象的幸福路径 + 6 个边界
+     (unknown / missing stats / None stats / None value / 不可解析 /
+     None result / int 转 float / 自定义 fail_value)
+   - `TestAutoNTrials` (4): 0/1/3/10 维
+   - `TestAutoSampler` (6): 低维 float / 三 float / 四 float / int / 混合 / 空
+   - `TestAutoWorkers` (7): parametrize 6 个 CPU 数 + 0 CPU 边界
+   - `TestAutoPatience` (5): parametrize 3 个低于阈值 + at-threshold + large + floor
+   - `TestSlimResult` (3): 三字段保留 / None / 缺失键变 None
+   - `TestBuildProgressPayload` (5): 7 keys / message 默认 None / 显式 message /
+     best_params copy / running vs completed 同 shape
+   - `TestSerializeTrial` (3): 基础 trial / state 字符串 / params dict copy
+   - `TestFilterCompletedTrials` (3): 过滤 5 种状态 / 空 / 自定义 fail_value
+   - `TestSelectBestParams` (3): 过滤到 ranges keys / 空 ranges / trial 缺 param
+   - `TestBuildWalkForwardFoldRecord` (2): ISO 格式 + 1-based / 第一折 = 1
+   - `TestBuildFullResult` (8): 顶层 key 严格匹配(无 WF)/ WF 添加 /
+     WF 省略 / 周期 ISO / DSR/sensitivity 默认 None / DSR 透传 /
+     列表深拷贝(防 mutation 串流)/ best_params 深拷贝
+   - `TestPatienceTracker` (6): 首次 observe / 改进重置 / 累计停止 /
+     None value 算非改进 / 等值非改进 / -inf 初始
+   - `TestComputeDsr` (7): 太少 trials / 太少 obs / None best_sharpe /
+     0 方差 / 过滤 fail_value 与 PRUNED / 正常路径 / denom_sq 退化
+   - `TestComputeParamSensitivity` (7): 太少 trials / 返回 single+grid /
+     每参数子键 / 顶 pair / max_pairs limit / grid 必需键 / 过滤失败 trial
+   - `TestComputeParamStability` (6): 空 best_params / 太少邻居 / 正常 std=1.0 /
+     过滤失败 trial / 缺 param 的邻居被排除 / best=0 不发生 ZeroDiv
+
+   全部不依赖 NT / Optuna / Redis / SQLAlchemy,可在标准 Python 3.11+
+   环境下运行。
+
+6. **NT-free 验证** —— `optimizer_helpers.py` 在 `sys.meta_path` blocker
+   下完整加载,且加载后 `sys.modules` 不含任何
+   `nautilus_trader / optuna / redis / sqlalchemy` 模块,
+   证实零依赖契约。
+
+7. **完整回归**: `.venv/bin/python -m pytest tests/` 从 677 个测试增至 779 个,
+   全部通过(+102 helper 测试)。零回归。
+
+**验证**:
+- 779/779 pytest 全通过(`PYTHONPATH=src python3 -m pytest tests/`)
+- 字节码编译检查全部通过(`py_compile` on 4 个修改/新建文件)
+- `optimizer_helpers.py` 在 `sys.meta_path` blocker 下独立导入通过
+- 检查 TODO/FIXME/XXX 注释清零
+- optimizer.py 行数: 1115 → 766(-349 行,-31.3%)
+- 新增 604 行纯 helpers + 862 行 NT-free 测试
+- routes/optimize.py 切换到公共 API,无私有 import
+
 ## 2026-04-16
 
 **主题**: 提取 extract.py 中最后的大型内联分析块(section 12b 全部 + section 14 Robustness),并建立结果 schema 锁定集成测试
