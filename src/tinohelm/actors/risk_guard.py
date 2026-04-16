@@ -120,7 +120,11 @@ class RiskGuardActor(Actor):
         if self._strategy_tag_prefix is None:
             return True  # No filtering — monitor everything (backward compat)
         strategy_id = str(position.strategy_id)
-        return self._strategy_tag_prefix in strategy_id
+        # Strategy ID format: "StrategyClass-{order_id_tag}". Extract the tag
+        # portion and check prefix to avoid false positives when one prefix is
+        # a substring of another (e.g., "m" incorrectly matches "om000").
+        tag_part = strategy_id.rsplit("-", 1)[-1] if "-" in strategy_id else strategy_id
+        return tag_part.startswith(self._strategy_tag_prefix)
 
     def on_start(self) -> None:
         """Initialize equity tracking and start periodic risk-check timer."""
