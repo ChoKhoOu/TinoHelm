@@ -47,6 +47,8 @@ class BacktestRunRequest(BaseModel):
     params: dict | None = None
     # New: fill model config
     fill_model: dict | None = None
+    # Bar data source type (klines, markPriceKlines, indexPriceKlines, premiumIndexKlines)
+    data_type: str = "klines"
     # Fee config — e.g. "0.02%" or "0.0002"
     maker_fee: str | None = None
     taker_fee: str | None = None
@@ -148,7 +150,7 @@ class BacktestDeleteResponse(BaseModel):
 
 # ---- helpers ----
 
-_BARS_PER_DAY: dict[str, int] = {
+_BARS_PER_DAY_KNOWN: dict[str, int] = {
     "1m": 1440,
     "5m": 288,
     "15m": 96,
@@ -157,6 +159,29 @@ _BARS_PER_DAY: dict[str, int] = {
 }
 
 _BARS_PER_SEC = 50_000
+
+
+def _calc_bars_per_day(interval: str) -> int:
+    """Calculate bars per day for any interval string (e.g. '2m', '3h', '1d')."""
+    if interval in _BARS_PER_DAY_KNOWN:
+        return _BARS_PER_DAY_KNOWN[interval]
+    import re
+    m = re.match(r"^(\d+)([smhd])$", interval.lower())
+    if not m:
+        return 0
+    n = int(m.group(1))
+    if n <= 0:
+        return 0
+    unit = m.group(2)
+    if unit == "s":
+        return 86400 // n
+    if unit == "m":
+        return 1440 // n
+    if unit == "h":
+        return max(1, 24 // n)
+    if unit == "d":
+        return max(1, 1 // n)
+    return 0
 
 
 def _format_estimated_label(seconds: int) -> str:
@@ -236,7 +261,7 @@ async def estimate_backtest(body: BacktestEstimateRequest) -> BacktestEstimateRe
     except (ValueError, TypeError):
         return BacktestEstimateResponse(total_bars=0, estimated_seconds=0, estimated_label="—")
 
-    bars_per_day = _BARS_PER_DAY.get(body.interval.lower(), 0)
+    bars_per_day = _calc_bars_per_day(body.interval.lower())
     num_symbols = len([s for s in body.symbols if s.strip()])
     total_bars = days * bars_per_day * max(1, num_symbols)
     estimated_seconds = max(1, total_bars // _BARS_PER_SEC) if total_bars > 0 else 0
@@ -274,24 +299,8 @@ async def create_backtest_run(
     strategy_version_id = latest_version.id if latest_version else None
 
     run_id = str(uuid4())
-    run = BacktestRun(
-        run_id=run_id,
-        strategy_name=body.strategy,
-        strategy_id=row.id,
-        strategy_version_id=strategy_version_id,
-        symbol=",".join(body.symbols) if body.symbols else "(default)",
-        interval=",".join(body.intervals),
-        start_date=body.start_date,
-        end_date=body.end_date,
-        params_json=body.params,
-        status=RunStatus.queued,
-    )
-    db.add(run)
-    await db.flush()
-    await db.commit()
-
-    # Push job to Redis queue — include all fields the worker expects
-    job_payload = json.dumps({
+    # Build job payload before DB insert so we can persist it atomically
+    job_dict = {
         "run_id": run_id,
         "strategy_path": f"{row.file_path}:{row.strategy_class}",
         "config_path": f"{row.file_path}:{row.config_class}",
@@ -305,13 +314,33 @@ async def create_backtest_run(
             "starting_balance": body.initial_capital,
             "leverage": body.leverage,
         },
+        "data_type": body.data_type,
         "fill_model": body.fill_model,
         "maker_fee": body.maker_fee,
         "taker_fee": body.taker_fee,
         "warmup_bars": body.warmup_bars,
         "tags": body.tags,
-    })
-    await rds.lpush("tino:backtest:queue", job_payload)
+    }
+
+    run = BacktestRun(
+        run_id=run_id,
+        strategy_name=body.strategy,
+        strategy_id=row.id,
+        strategy_version_id=strategy_version_id,
+        symbol=",".join(body.symbols) if body.symbols else "(default)",
+        interval=",".join(body.intervals),
+        start_date=body.start_date,
+        end_date=body.end_date,
+        params_json=body.params,
+        status=RunStatus.queued,
+        job_payload_json=job_dict,
+    )
+    db.add(run)
+    await db.flush()
+    await db.commit()
+
+    # Push job to Redis queue
+    await rds.lpush("tino:backtest:queue", json.dumps(job_dict))
 
     await log_audit(db, "backtest.queued", {"run_id": run_id, "strategy": body.strategy})
     logger.info("Backtest run queued: %s", run_id)

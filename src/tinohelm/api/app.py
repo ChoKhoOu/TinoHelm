@@ -20,6 +20,7 @@ from tinohelm.core.bridge import EventBridge
 from tinohelm.core.config import get_settings
 from tinohelm.core.process_manager import ProcessManager
 from tinohelm.core.watchdog import Watchdog
+from tinohelm.backtest.worker import recover_interrupted_runs as recover_backtest_runs
 from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker
 from tinohelm.research.worker import (
     recover_interrupted_jobs as recover_research_jobs,
@@ -90,6 +91,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     bridge = EventBridge(cfg.redis.url)
     await bridge.start()
     deps.set_event_bridge(bridge)
+
+    # Recover stuck backtest runs (mark running → failed)
+    await recover_backtest_runs(redis_client)
 
     # Data-fetch worker (async, in-process)
     await recover_interrupted_jobs(redis_client)

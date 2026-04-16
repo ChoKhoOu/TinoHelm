@@ -9,11 +9,62 @@ import time
 from datetime import datetime
 from pathlib import Path
 import redis
+import redis.asyncio as aioredis
+from sqlalchemy import update as sa_update
 
 logger = logging.getLogger(__name__)
 
 from tinohelm.core.utils import sanitize_for_json
 from tinohelm.db.sync_engine import get_sync_engine
+
+
+async def recover_interrupted_runs(rds: aioredis.Redis) -> int:
+    """Re-queue backtest runs that were *running* when the API last stopped.
+
+    Reads the stored ``job_payload_json`` from each interrupted run, resets
+    status to *queued*, and pushes the payload back onto the Redis queue.
+    Runs without a stored payload are marked *failed* instead (legacy rows
+    created before the payload column existed).
+
+    Called once during API lifespan startup. Returns the count of recovered runs.
+    """
+    from sqlalchemy import select
+
+    from tinohelm.db.models import BacktestRun, RunStatus
+    from tinohelm.db.session import get_session_factory
+
+    factory = get_session_factory()
+    recovered = 0
+    async with factory() as db:
+        # Fetch all interrupted runs
+        rows = (
+            await db.execute(
+                select(BacktestRun).where(BacktestRun.status == RunStatus.running)
+            )
+        ).scalars().all()
+
+        for run in rows:
+            if run.job_payload_json:
+                # Has stored payload — reset to queued and re-enqueue
+                run.status = RunStatus.queued
+                run.error = None
+                run.completed_at = None
+                await rds.lpush(
+                    "tino:backtest:queue",
+                    json.dumps(run.job_payload_json, default=str),
+                )
+                recovered += 1
+            else:
+                # Legacy row without payload — cannot re-enqueue
+                run.status = RunStatus.failed
+                run.error = "Interrupted by server restart (no stored payload)"
+                run.completed_at = datetime.utcnow()
+
+        await db.commit()
+
+    if recovered:
+        logger.info("Re-queued %d interrupted backtest run(s)", recovered)
+    return recovered
 
 
 def _publish_progress(
@@ -73,9 +124,10 @@ def _publish_completed(
     summary: dict | None = None,
     error: str | None = None,
 ) -> None:
-    """Publish a ``backtest.completed`` event to the EventBridge channel."""
+    """Publish a terminal backtest event to the EventBridge channel."""
+    _type_map = {"failed": "backtest.failed", "cancelled": "backtest.cancelled"}
     payload: dict = {
-        "type": "backtest.completed",
+        "type": _type_map.get(status, "backtest.completed"),
         "run_id": run_id,
         "status": status,
         "summary": summary or {},
@@ -189,6 +241,7 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                     taker_fee=job.get("taker_fee"),
                     warmup_bars=job.get("warmup_bars"),
                     tags=job.get("tags"),
+                    data_type=job.get("data_type", "klines"),
                 )
                 # Enable bar-level progress tracking via ProgressReporter actor
                 runner._redis_client = r
