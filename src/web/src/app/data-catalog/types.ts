@@ -21,6 +21,7 @@ export interface DataTypeInfo {
 
 export interface CoverageItem {
   data_type: string;
+  source_type?: string;
   interval: string;
   start_date: string;
   end_date: string;

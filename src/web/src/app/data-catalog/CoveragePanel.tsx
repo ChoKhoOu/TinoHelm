@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { X } from "lucide-react";
 import { apiGet } from "@/lib/api";
-import { CoverageItem, CATEGORY_LABELS, formatBytes } from "./types";
+import { CoverageItem, SOURCE_TYPE_LABELS, formatBytes } from "./types";
 
 interface CoveragePanelProps {
   symbol: string | null;
@@ -54,7 +54,7 @@ export function CoveragePanel({ symbol, onClose }: CoveragePanelProps) {
           {items.map((item, i) => (
             <div key={i} className="grid grid-cols-4 gap-2 text-[11px] py-1.5">
               <span className="text-foreground">
-                {CATEGORY_LABELS[item.data_type] || item.data_type}
+                {SOURCE_TYPE_LABELS[item.source_type || item.data_type] ?? (item.source_type || item.data_type)}
               </span>
               <span className="text-muted-foreground">{item.interval}</span>
               <span className="text-muted-foreground">

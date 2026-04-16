@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { apiDelete } from "@/lib/api";
 import { useAction } from "@/hooks/use-action";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { CatalogEntry, CATEGORY_LABELS, formatBytes } from "./types";
+import { CatalogEntry, SOURCE_TYPE_LABELS, formatBytes } from "./types";
 
 interface DeleteDialogProps {
   entry: CatalogEntry | null;
@@ -23,7 +23,7 @@ export function DeleteDialog({ entry, open, onClose, onDeleted }: DeleteDialogPr
     if (!open) deleteAction.reset();
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const typeLabel = entry ? (CATEGORY_LABELS[entry.data_type] || entry.data_type) : "";
+  const typeLabel = entry ? (SOURCE_TYPE_LABELS[entry.source_type || entry.data_type] ?? (entry.source_type || entry.data_type)) : "";
 
   const infoRows = entry ? [
     { label: "品种", value: entry.symbol },

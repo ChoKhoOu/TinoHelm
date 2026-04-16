@@ -374,7 +374,7 @@ async def scan_data_catalog(
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     catalog_path = str(settings.paths.catalog)
-    bar_dir = Path(catalog_path) / "data" / "bar"
+    from tinohelm.data.catalog import resolve_catalog_path
 
     # Parse bar_type directory names:
     #   BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL
@@ -384,7 +384,20 @@ async def scan_data_catalog(
     updated = 0
     scanned = 0
 
-    if bar_dir.exists():
+    # Scan bar directories per source_type
+    _bar_source_types = ("klines", "markPriceKlines", "indexPriceKlines", "premiumIndexKlines")
+    _bar_scan_targets: list[tuple[Path, str, str]] = []
+    for _src_type in _bar_source_types:
+        resolved = str(resolve_catalog_path(catalog_path, _src_type))
+        d = Path(resolved) / "data" / "bar"
+        if d.exists():
+            _bar_scan_targets.append((d, resolved, _src_type))
+    # Old flat path fallback (pre-migration data)
+    _old_bar = Path(catalog_path) / "data" / "bar"
+    if _old_bar.exists() and not any(d == _old_bar for d, _, _ in _bar_scan_targets):
+        _bar_scan_targets.append((_old_bar, catalog_path, "klines"))
+
+    for bar_dir, cat_root, _bar_src in _bar_scan_targets:
         for entry in sorted(bar_dir.iterdir()):
             if not entry.is_dir():
                 continue
@@ -399,7 +412,6 @@ async def scan_data_catalog(
                 logger.warning("Scan: unknown interval %s in %s, skipping", nt_interval, entry.name)
                 continue
 
-            # Strip .BINANCE suffix for user-facing symbol
             symbol = nt_sym.removesuffix(".BINANCE")
 
             parquet_files = list(entry.glob("*.parquet"))
@@ -409,10 +421,9 @@ async def scan_data_catalog(
             scanned += 1
             size_bytes = sum(f.stat().st_size for f in parquet_files)
 
-            # Read actual date range from Parquet data
             bar_type_str = f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
             try:
-                catalog = ParquetDataCatalog(catalog_path)
+                catalog = ParquetDataCatalog(cat_root)
                 bars = await asyncio.to_thread(catalog.bars, bar_types=[bar_type_str])
                 if not bars:
                     logger.warning("Scan: no bars readable for %s, skipping", bar_type_str)
@@ -426,19 +437,29 @@ async def scan_data_catalog(
                 logger.warning("Scan: failed to read bars for %s", bar_type_str, exc_info=True)
                 continue
 
-            # Upsert DB
             stmt = select(DataCatalog).where(
                 DataCatalog.symbol == symbol,
                 DataCatalog.data_type == "bar",
                 DataCatalog.interval == interval,
+                DataCatalog.source_type == _bar_src,
             )
-            existing_rows = (await db.execute(stmt)).scalars().all()
-            if existing_rows:
-                for row in existing_rows:
-                    row.start_date = min(row.start_date, start_date)
-                    row.end_date = max(row.end_date, end_date)
-                    row.size_bytes = size_bytes
-                    row.record_count = record_count
+            existing_row = (await db.execute(stmt)).scalar_one_or_none()
+            if not existing_row:
+                # Adopt old record with source_type=NULL if present
+                stmt_null = select(DataCatalog).where(
+                    DataCatalog.symbol == symbol,
+                    DataCatalog.data_type == "bar",
+                    DataCatalog.interval == interval,
+                    DataCatalog.source_type.is_(None),
+                )
+                existing_row = (await db.execute(stmt_null)).scalar_one_or_none()
+            if existing_row:
+                existing_row.start_date = min(existing_row.start_date, start_date)
+                existing_row.end_date = max(existing_row.end_date, end_date)
+                existing_row.size_bytes = size_bytes
+                existing_row.record_count = record_count
+                existing_row.file_path = cat_root
+                existing_row.source_type = _bar_src
                 updated += 1
             else:
                 db.add(DataCatalog(
@@ -447,24 +468,31 @@ async def scan_data_catalog(
                     interval=interval,
                     start_date=start_date,
                     end_date=end_date,
-                    file_path=catalog_path,
+                    file_path=cat_root,
                     size_bytes=size_bytes,
                     record_count=record_count,
+                    source_type=_bar_src,
                 ))
                 created += 1
 
-            logger.info("Scan: %s %s [%s..%s] %d bytes", symbol, interval, start_date, end_date, size_bytes)
+            logger.info("Scan: %s %s %s [%s..%s] %d bytes", _bar_src, symbol, interval, start_date, end_date, size_bytes)
 
-    # Scan trade_tick directories (resolve per source_type: aggTrades, trades)
-    from tinohelm.data.catalog import resolve_catalog_path
+    # Scan trade_tick directories per source_type
     _tick_source_types = ("aggTrades", "trades")
-    seen_tick_symbols: set[str] = set()
-    sym_pattern = re.compile(r"^(.+)\.BINANCE$")
+    _tick_scan_targets: list[tuple[Path, str, str]] = []
     for _src_type in _tick_source_types:
-        resolved_path = resolve_catalog_path(catalog_path, _src_type)
-        trade_tick_dir = Path(resolved_path) / "data" / "trade_tick"
-        if not trade_tick_dir.exists():
-            continue
+        resolved = str(resolve_catalog_path(catalog_path, _src_type))
+        d = Path(resolved) / "data" / "trade_tick"
+        if d.exists():
+            _tick_scan_targets.append((d, resolved, _src_type))
+    # Old flat path fallback (pre-migration data, default to aggTrades)
+    _old_tick = Path(catalog_path) / "data" / "trade_tick"
+    if _old_tick.exists() and not any(d == _old_tick for d, _, _ in _tick_scan_targets):
+        _tick_scan_targets.append((_old_tick, catalog_path, "aggTrades"))
+
+    sym_pattern = re.compile(r"^(.+)\.BINANCE$")
+    for trade_tick_dir, _tick_root, _src_type in _tick_scan_targets:
+        resolved_path = _tick_root
         for entry in sorted(trade_tick_dir.iterdir()):
             if not entry.is_dir():
                 continue
@@ -472,9 +500,6 @@ async def scan_data_catalog(
             if not m:
                 continue
             symbol = m.group(1)
-            if symbol in seen_tick_symbols:
-                continue
-            seen_tick_symbols.add(symbol)
             parquet_files = list(entry.glob("*.parquet"))
             if not parquet_files:
                 continue
@@ -498,7 +523,6 @@ async def scan_data_catalog(
                 start_dt = datetime.fromtimestamp(ts_min_val / 1e9, tz=timezone.utc).date() if ts_min_val != float("inf") else None
                 end_dt = datetime.fromtimestamp(ts_max_val / 1e9, tz=timezone.utc).date() if ts_max_val != 0 else None
             except Exception:
-                # Fallback: use file modification times
                 import os
                 file_times = [os.path.getmtime(pf) for pf in parquet_files]
                 start_dt = datetime.fromtimestamp(min(file_times), tz=timezone.utc).date()
@@ -512,15 +536,26 @@ async def scan_data_catalog(
                 DataCatalog.symbol == symbol,
                 DataCatalog.data_type == "trade_tick",
                 DataCatalog.interval == "tick",
+                DataCatalog.source_type == _src_type,
             )
-            existing_rows = (await db.execute(stmt)).scalars().all()
-            if existing_rows:
-                for row in existing_rows:
-                    row.start_date = min(row.start_date, start_dt)
-                    row.end_date = max(row.end_date, end_dt)
-                    row.size_bytes = sz
-                    if total_rows is not None:
-                        row.record_count = total_rows
+            existing_row = (await db.execute(stmt)).scalar_one_or_none()
+            if not existing_row:
+                # Adopt old record with source_type=NULL if present
+                stmt_null = select(DataCatalog).where(
+                    DataCatalog.symbol == symbol,
+                    DataCatalog.data_type == "trade_tick",
+                    DataCatalog.interval == "tick",
+                    DataCatalog.source_type.is_(None),
+                )
+                existing_row = (await db.execute(stmt_null)).scalar_one_or_none()
+            if existing_row:
+                existing_row.start_date = min(existing_row.start_date, start_dt)
+                existing_row.end_date = max(existing_row.end_date, end_dt)
+                existing_row.size_bytes = sz
+                existing_row.file_path = resolved_path
+                existing_row.source_type = _src_type
+                if total_rows is not None:
+                    existing_row.record_count = total_rows
                 updated += 1
             else:
                 db.add(DataCatalog(
@@ -529,9 +564,10 @@ async def scan_data_catalog(
                     interval="tick",
                     start_date=start_dt,
                     end_date=end_dt,
-                    file_path=catalog_path,
+                    file_path=resolved_path,
                     size_bytes=sz,
                     record_count=total_rows,
+                    source_type=_src_type,
                 ))
                 created += 1
 
@@ -652,6 +688,7 @@ async def get_data_coverage(
     return [
         {
             "data_type": r.data_type,
+            "source_type": r.source_type,
             "interval": r.interval,
             "start_date": r.start_date.isoformat(),
             "end_date": r.end_date.isoformat(),
