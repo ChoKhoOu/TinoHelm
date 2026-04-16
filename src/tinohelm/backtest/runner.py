@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re as _re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,23 @@ from tinohelm.strategy.loader import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _interval_to_minutes(interval: str) -> int:
+    """Convert an interval string like '5m', '1h', '1d' to minutes."""
+    m = _re.match(r"^(\d+)([smhd])$", interval.lower())
+    if not m:
+        return 0
+    n, unit = int(m.group(1)), m.group(2)
+    if unit == "s":
+        return max(1, n // 60)
+    if unit == "m":
+        return n
+    if unit == "h":
+        return n * 60
+    if unit == "d":
+        return n * 1440
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +139,7 @@ class BacktestRunner:
         taker_fee: str | None = None,
         warmup_bars: int | None = None,
         tags: str | None = None,
+        data_type: str = "klines",
     ) -> None:
         self.strategy_path = strategy_path
         self.config_path = config_path
@@ -158,6 +177,7 @@ class BacktestRunner:
         self.fill_model_config = fill_model
         self.warmup_bars = warmup_bars
         self.tags = tags
+        self.data_type = data_type
         self.artifacts_dir: Path | None = None
         self._engine: BacktestEngine | None = None
         self._redis_client = None  # sync Redis for progress reporting
@@ -172,6 +192,36 @@ class BacktestRunner:
         "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d",
     ]
 
+    def _try_load_bars(self, bar_type_str: str, source_type: str = "klines") -> list | None:
+        """Load bars from the resolved catalog path for a specific source_type.
+
+        Only searches the exact source_type path + legacy base path.
+        Different kline types (klines, markPriceKlines, indexPriceKlines,
+        premiumIndexKlines) are distinct datasets and must NOT be mixed.
+        """
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        # 1. Resolved source_type path (new layout)
+        resolved = str(resolve_catalog_path(self.catalog_path, source_type))
+        try:
+            cat = ParquetDataCatalog(resolved)
+            bars = cat.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
+            if bars:
+                return bars
+        except Exception:
+            pass
+
+        # 2. Legacy base path fallback
+        try:
+            cat = ParquetDataCatalog(str(self.catalog_path))
+            bars = cat.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
+            if bars:
+                return bars
+        except Exception:
+            pass
+
+        return None
+
     def _resolve_bars(
         self,
         catalog: ParquetDataCatalog,
@@ -182,9 +232,9 @@ class BacktestRunner:
         """Resolve bar data for a (symbol, interval) pair.
 
         Strategy:
-          1. Try loading target interval directly from catalog.
+          1. Try loading target interval from all catalog paths.
           2. Find the lowest available timeframe below target for composite aggregation.
-          3. If nothing local, download target interval from Binance and write to catalog.
+          3. If nothing local, fetch via data job queue and wait for completion.
 
         Returns:
             (bars, bar_type_str, source_bar_type_str_or_None)
@@ -194,7 +244,7 @@ class BacktestRunner:
         """
         # 1. Direct load: target interval exists in catalog
         bar_type_str = _make_bar_type_str(sym, ivl)
-        bars = catalog.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
+        bars = self._try_load_bars(bar_type_str, source_type=self.data_type)
         if bars:
             logger.info("Loaded %d %s bars for %s directly", len(bars), ivl, sym)
             return bars, bar_type_str, None
@@ -209,7 +259,7 @@ class BacktestRunner:
         source_bars = None
         for candidate in self._TIMEFRAME_PRIORITY[:target_idx]:
             candidate_bt = _make_bar_type_str(sym, candidate)
-            source_bars = catalog.bars(bar_types=[candidate_bt], start=self.start, end=self.end)
+            source_bars = self._try_load_bars(candidate_bt, source_type=self.data_type)
             if source_bars:
                 source_ivl = candidate
                 break
@@ -227,13 +277,12 @@ class BacktestRunner:
             )
             return source_bars, composite_bt_str, source_bt_str
 
-        # 3. Auto-download: fetch target interval from Binance and write to catalog
-        logger.info("No local data for %s %s, downloading from Binance...", sym, ivl)
+        # 3. Fetch via data job queue
+        logger.info("No local data for %s %s, submitting fetch job...", sym, ivl)
         bars = self._download_bars(sym, ivl, catalog)
         if bars:
-            bar_type_str = _make_bar_type_str(sym, ivl)
-            logger.info("Downloaded and loaded %d %s bars for %s", len(bars), ivl, sym)
-            return bars, bar_type_str, None
+            logger.info("Fetched and loaded %d %s bars for %s", len(bars), ivl, sym)
+            return bars, _make_bar_type_str(sym, ivl), None
 
         return None, bar_type_str, None
 
@@ -243,36 +292,99 @@ class BacktestRunner:
         ivl: str,
         catalog: ParquetDataCatalog,
     ) -> list | None:
-        """Download bars via BinanceVisionPipeline and write to catalog.
+        """Fetch bars via DataFetchJob queue and wait for completion.
 
+        Creates a DataFetchJob record visible in the frontend,
+        enqueues it to the data worker, and blocks until done.
         Returns the loaded Bar objects, or None on failure.
         """
-        from tinohelm.data.pipeline import BinanceVisionPipeline
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        try:
+            success = loop.run_until_complete(self._submit_and_wait_fetch(sym, ivl))
+        finally:
+            loop.close()
+
+        if not success:
+            return None
+
+        # Reload from catalog using the correct source_type path
+        bar_type_str = _make_bar_type_str(sym, ivl)
+        return self._try_load_bars(bar_type_str, source_type=self.data_type)
+
+    async def _submit_and_wait_fetch(
+        self, sym: str, ivl: str | None = None, data_type: str | None = None,
+    ) -> bool:
+        """Create a DataFetchJob, enqueue to Redis, and poll until done."""
+        import uuid
+        import asyncio as _aio
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from tinohelm.db.models import DataFetchJob
+        from tinohelm.core.config import get_settings
+
+        # Create a fresh engine for this event loop — the global singleton
+        # from the parent process is bound to a different loop after fork.
+        settings = get_settings()
+        engine = create_async_engine(settings.database.url, echo=False, pool_size=2)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        effective_data_type = data_type or self.data_type
+        job_id = str(uuid.uuid4())
+        start_date = self.start.date() if isinstance(self.start, datetime) else self.start
+        end_date = self.end.date() if isinstance(self.end, datetime) else self.end
 
         try:
-            pipeline = BinanceVisionPipeline(catalog_path=str(catalog.path))
-            result = pipeline.ingest_sync(
-                symbol=sym,
-                data_type="klines",
-                start=self.start.date() if isinstance(self.start, datetime) else self.start,
-                end=self.end.date() if isinstance(self.end, datetime) else self.end,
-                interval=ivl,
-            )
-            if result.objects_count == 0:
-                logger.warning("Pipeline returned no data for %s %s", sym, ivl)
-                return None
+            # Create job in DB
+            async with factory() as session:
+                session.add(DataFetchJob(
+                    job_id=job_id,
+                    symbol=sym,
+                    data_type=effective_data_type,
+                    interval=ivl,
+                    start_date=start_date,
+                    end_date=end_date,
+                    asset_class="um",
+                    status="queued",
+                    progress=0,
+                    message="Queued by backtest",
+                ))
+                await session.commit()
+
+            # Enqueue to Redis
+            rds = self._redis_client
+            if rds is None:
+                logger.warning("No Redis client; cannot enqueue data fetch job")
+                return False
+            rds.lpush("tino:data:queue", job_id)
 
             logger.info(
-                "Pipeline ingested %d bars for %s %s (rest_fallback=%s)",
-                result.objects_count, sym, ivl, result.rest_fallback_used,
+                "Submitted data fetch job %s for %s %s [%s..%s]",
+                job_id, sym, ivl, start_date, end_date,
             )
 
-            # Reload from catalog to get properly indexed data
-            bar_type_str = _make_bar_type_str(sym, ivl)
-            return catalog.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
-        except Exception:
-            logger.warning("Failed to download bars for %s %s via Pipeline", sym, ivl, exc_info=True)
-            return None
+            # Poll for completion
+            while True:
+                async with factory() as session:
+                    stmt = select(DataFetchJob).where(DataFetchJob.job_id == job_id)
+                    job = (await session.execute(stmt)).scalar_one_or_none()
+                    if not job:
+                        logger.error("DataFetchJob %s disappeared", job_id)
+                        return False
+
+                    if job.status == "completed":
+                        logger.info("Data fetch completed: %s %s — %s", sym, ivl, job.message)
+                        return True
+                    if job.status in ("failed", "cancelled"):
+                        logger.warning("Data fetch %s: %s %s — %s", job.status, sym, ivl, job.error)
+                        return False
+
+                    self._report_progress(3, message=f"Fetching {sym} {ivl}: {job.progress}%")
+
+                await _aio.sleep(2)
+        finally:
+            await engine.dispose()
 
     # ------------------------------------------------------------------
     # Fill model & latency model builders
@@ -282,7 +394,12 @@ class BacktestRunner:
         "default": "FillModel",
         "best_price": "BestPriceFillModel",
         "one_tick_slippage": "OneTickSlippageFillModel",
+        "two_tier": "TwoTierFillModel",
         "three_tier": "ThreeTierFillModel",
+        "probabilistic": "ProbabilisticFillModel",
+        "size_aware": "SizeAwareFillModel",
+        "volume_sensitive": "VolumeSensitiveFillModel",
+        "competition_aware": "CompetitionAwareFillModel",
     }
 
     @staticmethod
@@ -314,23 +431,48 @@ class BacktestRunner:
     def _build_fill_model(config: dict[str, Any]) -> FillModel:
         """Build a FillModel from config dict.
 
-        Supports ``fill_model_type`` key to select model class:
+        Supports ``fill_model_type`` key to select NT built-in model class:
           - ``"default"`` → FillModel (probabilistic)
           - ``"best_price"`` → BestPriceFillModel (fills inside spread)
           - ``"one_tick_slippage"`` → OneTickSlippageFillModel
+          - ``"two_tier"`` → TwoTierFillModel (10 @ best, rest @ ±1 tick)
           - ``"three_tier"`` → ThreeTierFillModel (50/30/20 distribution)
+          - ``"probabilistic"`` → ProbabilisticFillModel (50/50 best vs ±1 tick)
+          - ``"size_aware"`` → SizeAwareFillModel (size-dependent impact)
+          - ``"fixed_slippage"`` → OneTickSlippageFillModel (guaranteed 1-tick slippage)
+          - ``"volume_impact"`` → VolumeSensitiveFillModel (volume-dependent liquidity)
+          - ``"competition_aware"`` → CompetitionAwareFillModel (liquidity_factor)
         """
         model_type = config.get("fill_model_type", "default")
 
         if model_type == "best_price":
             from nautilus_trader.backtest.models import BestPriceFillModel
             return BestPriceFillModel()
-        elif model_type == "one_tick_slippage":
+        elif model_type in ("one_tick_slippage", "fixed_slippage"):
+            # "fixed_slippage" from UI maps to NT's OneTickSlippageFillModel —
+            # guaranteed 1-tick slippage per fill (NT has no bps-configurable model)
             from nautilus_trader.backtest.models import OneTickSlippageFillModel
             return OneTickSlippageFillModel()
+        elif model_type == "two_tier":
+            from nautilus_trader.backtest.models import TwoTierFillModel
+            return TwoTierFillModel()
         elif model_type == "three_tier":
             from nautilus_trader.backtest.models import ThreeTierFillModel
             return ThreeTierFillModel()
+        elif model_type == "probabilistic":
+            from nautilus_trader.backtest.models import ProbabilisticFillModel
+            return ProbabilisticFillModel()
+        elif model_type == "size_aware":
+            from nautilus_trader.backtest.models import SizeAwareFillModel
+            return SizeAwareFillModel()
+        elif model_type in ("volume_sensitive", "volume_impact"):
+            # NT's VolumeSensitiveFillModel —
+            # liquidity at best = max(1, int(recent_volume * 0.25)), rest at ±1 tick
+            from nautilus_trader.backtest.models import VolumeSensitiveFillModel
+            return VolumeSensitiveFillModel()
+        elif model_type == "competition_aware":
+            from nautilus_trader.backtest.models import CompetitionAwareFillModel
+            return CompetitionAwareFillModel()
         else:
             return FillModel(
                 prob_fill_on_limit=config.get("prob_fill_on_limit", 1.0),
@@ -479,6 +621,7 @@ class BacktestRunner:
                     rate=_Decimal(str(ev["rate"])),
                     ts_event=ev["timestamp_ns"],
                     ts_init=ev["timestamp_ns"],
+                    interval=ev.get("funding_interval_minutes"),
                 ))
             return updates
         except Exception:
@@ -486,20 +629,39 @@ class BacktestRunner:
             return []
 
     def _load_funding_rates(self, nt_symbols: list[str]) -> list[dict]:
-        """Load historical funding rates for all symbols with local caching.
+        """Load historical funding rates for all symbols via data catalog queue.
 
-        Uses ``funding_cache`` for persistent storage and incremental updates —
-        only fetches new data from Binance when the cache doesn't cover the
-        requested date range.
+        Submits DataFetchJobs for fundingRate data, waits for completion,
+        then loads from the local JSON cache.
 
         Returns a list of funding events sorted by timestamp_ns, ready for the
         FundingCostTracker actor.
         """
+        import asyncio
         from datetime import datetime as _dt, timezone
         from tinohelm.data.funding_cache import load_funding_rates
+        from tinohelm.data.instruments import fetch_funding_info, strip_to_binance_api_symbol
+
+        # Fetch funding rate data via job queue
+        if self._redis_client:
+            loop = asyncio.new_event_loop()
+            try:
+                for sym in self.symbols:
+                    self._report_progress(5, message=f"Fetching funding rates: {sym}...")
+                    loop.run_until_complete(
+                        self._submit_and_wait_fetch(sym, None, data_type="fundingRate")
+                    )
+            finally:
+                loop.close()
+
+        # Load per-symbol funding interval (hours) from Binance
+        funding_info = fetch_funding_info()
 
         all_events: list[dict] = []
         for sym, nt_sym in zip(self.symbols, nt_symbols):
+            api_sym = strip_to_binance_api_symbol(sym)
+            interval_hours = funding_info.get(api_sym, 8)
+            interval_minutes = interval_hours * 60
             try:
                 rates = load_funding_rates(
                     symbol=sym,
@@ -521,6 +683,7 @@ class BacktestRunner:
                         "symbol": nt_sym,
                         "rate": r["funding_rate"],
                         "mark_price": mark_price,
+                        "funding_interval_minutes": interval_minutes,
                     })
                 logger.info(
                     "Loaded %d funding rate events for %s", len(rates), sym,
@@ -561,7 +724,7 @@ class BacktestRunner:
             implicit=True,
         )
 
-    def _report_progress(self, pct: int, total_bars: int = 0) -> None:
+    def _report_progress(self, pct: int, total_bars: int = 0, message: str | None = None) -> None:
         """Report setup-phase progress (0-10%) to Redis if available."""
         if not self._redis_client or not self._run_id:
             return
@@ -581,6 +744,7 @@ class BacktestRunner:
                 "processed_bars": None,
                 "bars_per_sec": None,
                 "trades": None,
+                "message": message,
             }
             self._redis_client.publish(
                 f"tino:backtest:progress:{self._run_id}",
@@ -602,6 +766,17 @@ class BacktestRunner:
         if not self.intervals and strategy_bundle.interval:
             self.intervals = [strategy_bundle.interval]
             self.interval = strategy_bundle.interval
+
+        # Extend data loading window for warmup bars
+        if self.warmup_bars and self.warmup_bars > 0 and self.intervals:
+            mins = _interval_to_minutes(self.intervals[0])
+            if mins > 0:
+                warmup_delta = timedelta(minutes=mins * self.warmup_bars)
+                self.start = self.start - warmup_delta
+                logger.info(
+                    "Warmup: extended start by %d bars (%s) to %s",
+                    self.warmup_bars, warmup_delta, self.start,
+                )
 
         # Configure engine
         engine_config = BacktestEngineConfig(
@@ -651,6 +826,7 @@ class BacktestRunner:
 
         # Load instruments for each symbol
         nt_symbols: list[str] = []
+        missing_instrument_syms: list[tuple[str, str]] = []  # (raw_sym, nt_sym)
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             nt_symbols.append(nt_sym)
@@ -658,6 +834,8 @@ class BacktestRunner:
             if instruments:
                 for inst in instruments:
                     engine.add_instrument(inst)
+            else:
+                missing_instrument_syms.append((sym, nt_sym))
 
         # Load bar data for each (symbol, interval) combination
         all_bar_type_strs: list[str] = []
@@ -666,6 +844,7 @@ class BacktestRunner:
         # Capture daily close prices from raw bars for benchmark computation
         # (engine.cache.bars() has limited capacity and evicts old bars)
         benchmark_daily_closes: dict[str, dict[str, float]] = {}
+        pending_bars: list[list] = []  # collect before add_data — instruments must be loaded first
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
@@ -675,7 +854,7 @@ class BacktestRunner:
                 if bars:
                     total_bar_count += len(bars)
                     loaded_bar_type_strs.append(source_bt_str or bt_str)
-                    engine.add_data(bars, sort=False)
+                    pending_bars.append(bars)
                     all_bar_type_strs.append(bt_str)
                     # Extract daily close prices for benchmark B&H (only first interval per symbol)
                     if nt_sym not in benchmark_daily_closes:
@@ -690,6 +869,33 @@ class BacktestRunner:
                 else:
                     logger.warning("No bar data available for %s at %s", sym, ivl)
         self._benchmark_daily_closes = benchmark_daily_closes
+
+        # Re-check instruments that were missing before bar auto-fetch
+        # (must happen BEFORE engine.add_data — NT requires instruments in cache first)
+        if missing_instrument_syms:
+            from tinohelm.data.catalog import resolve_catalog_path
+            for raw_sym, nt_sym in missing_instrument_syms:
+                resolved = str(resolve_catalog_path(self.catalog_path, self.data_type))
+                try:
+                    resolved_cat = ParquetDataCatalog(resolved)
+                    instruments = resolved_cat.instruments(instrument_ids=[nt_sym])
+                    if instruments:
+                        for inst in instruments:
+                            engine.add_instrument(inst)
+                        logger.info("Loaded instrument %s from resolved catalog after auto-fetch", nt_sym)
+                        continue
+                except Exception:
+                    pass
+                # Also try base catalog (pipeline may have written there)
+                instruments = catalog.instruments(instrument_ids=[nt_sym])
+                if instruments:
+                    for inst in instruments:
+                        engine.add_instrument(inst)
+                    logger.info("Loaded instrument %s from base catalog after auto-fetch", nt_sym)
+
+        # Add all bar data to engine (instruments are now guaranteed loaded)
+        for bars in pending_bars:
+            engine.add_data(bars, sort=False)
 
         # Single efficient sort after all data is loaded (avoids O(n*k) re-sorting)
         if all_bar_type_strs:
@@ -854,6 +1060,17 @@ class BacktestRunner:
             self.intervals = [strategy_bundle.interval]
             self.interval = strategy_bundle.interval
 
+        # Extend data loading window for warmup bars
+        if self.warmup_bars and self.warmup_bars > 0 and self.intervals:
+            mins = _interval_to_minutes(self.intervals[0])
+            if mins > 0:
+                warmup_delta = timedelta(minutes=mins * self.warmup_bars)
+                self.start = self.start - warmup_delta
+                logger.info(
+                    "Warmup (optimize): extended start by %d bars (%s) to %s",
+                    self.warmup_bars, warmup_delta, self.start,
+                )
+
         engine_config = BacktestEngineConfig(
             trader_id=TraderId("BACKTESTER-001"),
             logging=LoggingConfig(log_level="WARNING"),
@@ -892,6 +1109,7 @@ class BacktestRunner:
         # Load instruments + bar data
         catalog = ParquetDataCatalog(str(self.catalog_path))
         nt_symbols: list[str] = []
+        missing_instrument_syms: list[tuple[str, str]] = []
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             nt_symbols.append(nt_sym)
@@ -899,8 +1117,11 @@ class BacktestRunner:
             if instruments:
                 for inst in instruments:
                     engine.add_instrument(inst)
+            else:
+                missing_instrument_syms.append((sym, nt_sym))
 
         all_bar_type_strs: list[str] = []
+        pending_bars: list[list] = []
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
@@ -908,8 +1129,31 @@ class BacktestRunner:
                     catalog, sym, nt_sym, ivl,
                 )
                 if bars:
-                    engine.add_data(bars, sort=False)
+                    pending_bars.append(bars)
                     all_bar_type_strs.append(bt_str)
+
+        # Re-check instruments after auto-fetch (before add_data)
+        if missing_instrument_syms:
+            from tinohelm.data.catalog import resolve_catalog_path
+            for raw_sym, nt_sym in missing_instrument_syms:
+                resolved = str(resolve_catalog_path(self.catalog_path, self.data_type))
+                try:
+                    resolved_cat = ParquetDataCatalog(resolved)
+                    instruments = resolved_cat.instruments(instrument_ids=[nt_sym])
+                    if instruments:
+                        for inst in instruments:
+                            engine.add_instrument(inst)
+                        continue
+                except Exception:
+                    pass
+                instruments = catalog.instruments(instrument_ids=[nt_sym])
+                if instruments:
+                    for inst in instruments:
+                        engine.add_instrument(inst)
+
+        # Add bar data after instruments are loaded
+        for bars in pending_bars:
+            engine.add_data(bars, sort=False)
 
         if all_bar_type_strs:
             engine.sort_data()
@@ -1007,12 +1251,31 @@ class BacktestRunner:
         """
         from nautilus_trader.analysis import (
             create_tearsheet,
+            register_theme,
             TearsheetConfig,
             TearsheetBarsWithFillsChart,
             TearsheetDrawdownChart,
             TearsheetEquityChart,
             TearsheetRunInfoChart,
             TearsheetStatsTableChart,
+        )
+
+        # Register QDS Warm light theme (based on docs/ui/qds-warm-theme.css)
+        register_theme(
+            name="qds_warm",
+            template="plotly_white",
+            colors={
+                "primary": "#D97857",       # Burnt orange accent
+                "positive": "#36884B",      # Success green
+                "negative": "#8A2425",      # Danger red (light mode)
+                "neutral": "#73726C",       # Text secondary
+                "background": "#faf9f5",    # Body warm white
+                "grid": "#dedbd3",          # Border default
+                "table_section": "#eae8e0", # Tertiary bg
+                "table_row_odd": "#f5f4ed", # Card bg (warm cream)
+                "table_row_even": "#faf9f5",# Body bg
+                "table_text": "#2C2C2A",    # Text primary
+            },
         )
 
         try:
@@ -1052,7 +1315,7 @@ class BacktestRunner:
 
             config = TearsheetConfig(
                 charts=charts,
-                theme="plotly_dark",
+                theme="qds_warm",
             )
 
             output_path = self.artifacts_dir / "tearsheet.html"

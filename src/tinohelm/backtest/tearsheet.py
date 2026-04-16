@@ -33,7 +33,7 @@ def enhance_tearsheet(artifacts_dir: Path, results: dict[str, Any]) -> None:
     # Plotly data (reversed for bottom-to-top horizontal bar display)
     symbols = [k.replace(".BINANCE", "") for k, _ in reversed(sorted_items)]
     pnls = [round(v.get("total_pnl", 0), 2) for _, v in reversed(sorted_items)]
-    colors = ["#00963c" if p >= 0 else "#c62828" for p in pnls]
+    colors = ["#36884B" if p >= 0 else "#8A2425" for p in pnls]
     chart_height = max(300, len(sorted_items) * 35 + 100)
 
     trace = json.dumps([{
@@ -200,7 +200,7 @@ def enhance_tearsheet(artifacts_dir: Path, results: dict[str, Any]) -> None:
         tm_abs = [abs(p) for p in tm_pnls]
         tm_parents = ["Portfolio"] * len(tm_labels)
         tm_text = [f"{p:+.2f}" for p in tm_pnls]
-        tm_colors = ["#00963c" if p >= 0 else "#c62828" for p in tm_pnls]
+        tm_colors = ["#36884B" if p >= 0 else "#8A2425" for p in tm_pnls]
         treemap_trace = json.dumps([{
             "type": "treemap",
             "labels": tm_labels,
@@ -234,8 +234,8 @@ def enhance_tearsheet(artifacts_dir: Path, results: dict[str, Any]) -> None:
             parts.append(f"<b>Diversification Benefit:</b> {db:.1f}%")
         if parts:
             analytics_html = (
-                '<div style="margin-top:20px;padding:16px;background:#f9f9f9;'
-                'border-radius:8px;font-size:14px;">'
+                '<div style="margin-top:20px;padding:16px;background:#f5f4ed;'
+                'border:1px solid #dedbd3;border-radius:12px;font-size:14px;color:#2C2C2A;">'
                 + " &nbsp;\u2502&nbsp; ".join(parts)
                 + "</div>"
             )
@@ -244,17 +244,17 @@ def enhance_tearsheet(artifacts_dir: Path, results: dict[str, Any]) -> None:
 <!-- TinoHelm: Per-Instrument Breakdown -->
 <style>
 .th-inst {{ max-width:1200px; margin:40px auto; padding:0 20px;
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }}
-.th-inst h2 {{ color:#333; border-bottom:3px solid #ffb000; padding-bottom:10px; font-size:20px; }}
-.th-inst h3 {{ color:#555; margin-top:30px; font-size:16px; }}
+  font-family:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,sans-serif; }}
+.th-inst h2 {{ color:#2C2C2A; border-bottom:3px solid #D97857; padding-bottom:10px; font-size:20px; }}
+.th-inst h3 {{ color:#73726C; margin-top:30px; font-size:16px; }}
 .th-inst table {{ width:100%; border-collapse:collapse; margin-top:16px; font-size:13px; }}
-.th-inst th {{ padding:10px 12px; text-align:left; border-bottom:2px solid #ffb000;
-  font-weight:600; color:#555; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }}
-.th-inst td {{ padding:8px 12px; border-bottom:1px solid #eee; }}
-.th-inst tbody tr:hover {{ background:#f7f7f7; }}
-.th-inst .sym {{ font-weight:600; color:#2c6fbb; }}
-.th-inst .pos {{ color:#00963c; font-weight:600; }}
-.th-inst .neg {{ color:#c62828; font-weight:600; }}
+.th-inst th {{ padding:10px 12px; text-align:left; border-bottom:2px solid #D97857;
+  font-weight:600; color:#73726C; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }}
+.th-inst td {{ padding:8px 12px; border-bottom:1px solid #dedbd3; }}
+.th-inst tbody tr:hover {{ background:#f5f4ed; }}
+.th-inst .sym {{ font-weight:600; color:#D97857; }}
+.th-inst .pos {{ color:#36884B; font-weight:600; }}
+.th-inst .neg {{ color:#8A2425; font-weight:600; }}
 </style>
 <div class="th-inst">
 <h2>Per-Instrument Performance</h2>

@@ -33,6 +33,23 @@ INTERVAL_MAP = {
     "1d": "1-DAY",
 }
 
+_UNIT_MAP = {"s": "SECOND", "m": "MINUTE", "h": "HOUR", "d": "DAY"}
+
+
+def parse_interval(interval: str) -> str:
+    """Parse interval string to NT format: '5m' -> '5-MINUTE', '2h' -> '2-HOUR'.
+
+    Supports arbitrary positive integers with s/m/h/d units.
+    Falls back to INTERVAL_MAP for known values, then dynamic parsing.
+    """
+    if interval in INTERVAL_MAP:
+        return INTERVAL_MAP[interval]
+    import re
+    m = re.match(r"^(\d+)([smhd])$", interval.lower())
+    if m:
+        return f"{m.group(1)}-{_UNIT_MAP[m.group(2)]}"
+    return "1-MINUTE"
+
 
 def normalize_symbol(symbol: str) -> str:
     """Normalize symbol to NT format: BTCUSDT-PERP -> BTCUSDT-PERP.BINANCE"""
@@ -43,7 +60,7 @@ def normalize_symbol(symbol: str) -> str:
 def make_bar_type_str(symbol: str, interval: str) -> str:
     """Build NT bar type string: BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-EXTERNAL"""
     nt_symbol = normalize_symbol(symbol)
-    interval_part = INTERVAL_MAP.get(interval, "1-MINUTE")
+    interval_part = parse_interval(interval)
     return f"{nt_symbol}-{interval_part}-LAST-EXTERNAL"
 
 

@@ -27,7 +27,9 @@ BINANCE_FUTURES_TESTNET = "https://testnet.binancefuture.com"
 
 _CACHE_DIR = Path.home() / ".tino" / "data"
 _CACHE_FILE = _CACHE_DIR / "instruments_cache.json"
+_FUNDING_INFO_CACHE_FILE = _CACHE_DIR / "funding_info_cache.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+_FUNDING_INFO_TTL_SECONDS = 1 * 60 * 60  # 1 hour
 
 # Known NT currency constants (import once, map for fast lookup)
 _KNOWN_CURRENCIES: dict[str, Any] | None = None
@@ -190,6 +192,73 @@ def fetch_exchange_info(testnet: bool = False) -> dict:
         logger.warning("Could not write instruments cache to %s", _CACHE_FILE)
 
     return data
+
+
+def fetch_funding_info(testnet: bool = False) -> dict[str, int]:
+    """Fetch ``/fapi/v1/fundingInfo`` from Binance Futures.
+
+    Returns a mapping of ``{binance_symbol: funding_interval_hours}``.
+    Symbols absent from the response use the default 8-hour interval.
+
+    Results are cached to ``~/.tino/data/funding_info_cache.json`` with a
+    24-hour TTL.
+    """
+    # --- Check cache ---
+    if _FUNDING_INFO_CACHE_FILE.exists():
+        try:
+            raw = json.loads(_FUNDING_INFO_CACHE_FILE.read_text(encoding="utf-8"))
+            fetched_at = raw.get("fetched_at", 0)
+            if time.time() - fetched_at < _FUNDING_INFO_TTL_SECONDS:
+                logger.debug(
+                    "Using cached fundingInfo (age %.0f s)",
+                    time.time() - fetched_at,
+                )
+                return raw.get("intervals", {})
+        except (json.JSONDecodeError, KeyError, TypeError):
+            logger.warning("Corrupt funding info cache, refetching")
+
+    # --- Fetch from API ---
+    import httpx
+
+    base = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
+    url = f"{base}/fapi/v1/fundingInfo"
+
+    logger.info("Fetching fundingInfo from %s", url)
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data: list[dict] = resp.json()
+    except Exception:
+        logger.warning("Failed to fetch fundingInfo, defaulting to 8h for all symbols")
+        return {}
+
+    intervals = {
+        item["symbol"]: item.get("fundingIntervalHours", 8)
+        for item in data
+        if "symbol" in item
+    }
+
+    # --- Write cache (atomic) ---
+    cache_data = {"fetched_at": time.time(), "intervals": intervals}
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(_FUNDING_INFO_CACHE_FILE.parent), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(cache_data, f, ensure_ascii=False)
+            os.replace(tmp_path, str(_FUNDING_INFO_CACHE_FILE))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        logger.debug("Wrote fundingInfo cache to %s", _FUNDING_INFO_CACHE_FILE)
+    except OSError:
+        logger.warning("Could not write funding info cache to %s", _FUNDING_INFO_CACHE_FILE)
+
+    return intervals
 
 
 def _find_symbol_info(
