@@ -1,0 +1,645 @@
+"""Pure-computation helpers for backtest result sections.
+
+These functions operate on primitive inputs (lists of dicts/tuples, numpy
+arrays, dicts) rather than NautilusTrader objects, so they can be unit-tested
+independently of NT.  ``extract.py`` is responsible for converting NT objects
+into the primitive inputs consumed here.
+
+Each helper returns a small, well-defined result dictionary or list suitable
+for JSON serialisation, matching the keys produced by the original monolithic
+``extract_backtest_results`` function.
+"""
+from __future__ import annotations
+
+import logging
+import math
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from tinohelm.backtest.result.statistics import (
+    _ANN_FACTOR,
+    _norm_ppf,
+    _safe_float,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Section 8 — equity curve construction
+# ---------------------------------------------------------------------------
+
+def build_equity_curve(
+    trade_closes: list[tuple[int, float]],
+    starting_balance: float,
+    max_points: int = 2000,
+) -> list[dict[str, Any]]:
+    """Build a daily equity curve from closed-trade (ts_closed_ns, pnl) tuples.
+
+    Aggregates realized PnL by UTC close date, then produces a chronologically
+    sorted list of ``{timestamp, equity, returns_pct, drawdown_pct}`` points.
+    If the resulting curve exceeds *max_points*, it is uniformly downsampled
+    (first and last points always preserved).
+
+    ``returns_pct`` is relative to *starting_balance*; it is overwritten with
+    proper daily portfolio returns in :func:`recompute_risk_metrics_from_equity_curve`.
+    """
+    daily_pnl: dict[str, float] = defaultdict(float)
+    for ts_closed, pnl in trade_closes:
+        if ts_closed and ts_closed > 0:
+            close_date = datetime.fromtimestamp(
+                int(ts_closed) / 1e9, tz=timezone.utc
+            ).strftime("%Y-%m-%d")
+            daily_pnl[close_date] += float(pnl)
+
+    equity_curve: list[dict[str, Any]] = []
+    if not daily_pnl:
+        return equity_curve
+
+    cum_pnl = 0.0
+    peak_equity = starting_balance
+    for d in sorted(daily_pnl.keys()):
+        cum_pnl += daily_pnl[d]
+        equity_val = starting_balance + cum_pnl
+        peak_equity = max(peak_equity, equity_val)
+        dd_pct = ((equity_val - peak_equity) / peak_equity * 100) if peak_equity > 0 else 0.0
+        ret_pct = (daily_pnl[d] / starting_balance * 100) if starting_balance > 0 else 0.0
+        equity_curve.append({
+            "timestamp": d,
+            "equity": round(equity_val, 4),
+            "returns_pct": round(ret_pct, 4),
+            "drawdown_pct": round(dd_pct, 4),
+        })
+
+    if max_points > 0 and len(equity_curve) > max_points:
+        step = len(equity_curve) / max_points
+        indices = [int(i * step) for i in range(max_points)]
+        indices[-1] = len(equity_curve) - 1
+        equity_curve = [equity_curve[i] for i in indices]
+
+    return equity_curve
+
+
+# ---------------------------------------------------------------------------
+# Section 8b — risk metrics recomputation
+# ---------------------------------------------------------------------------
+
+def recompute_risk_metrics_from_equity_curve(
+    equity_curve: list[dict[str, Any]],
+    starting_balance: float,
+) -> dict[str, Any] | None:
+    """Recompute Sharpe/Sortino/Calmar/CAGR/MaxDD from a dollar equity curve.
+
+    NT's ``analyzer.returns()`` uses per-trade notional returns which inflate
+    metrics for leveraged futures.  Recomputing from equity better matches the
+    industry-standard portfolio-return definition.
+
+    Mutates each entry's ``returns_pct`` in *equity_curve* in place to reflect
+    the proper daily portfolio return (previously it was a ratio relative to
+    starting balance).
+
+    Returns a dict of metrics plus the intermediate arrays needed by
+    downstream sections (extended statistics, rolling analytics).  Returns
+    ``None`` when fewer than 2 equity points are available.
+    """
+    if len(equity_curve) < 2:
+        return None
+
+    eq_values = [starting_balance] + [pt["equity"] for pt in equity_curve]
+    eq_arr = np.array(eq_values, dtype=float)
+    daily_rets = np.diff(eq_arr) / eq_arr[:-1]
+
+    # Mutate returns_pct to proper daily portfolio return (replaces placeholder)
+    for i, pt in enumerate(equity_curve):
+        pt["returns_pct"] = round(float(daily_rets[i]) * 100, 4)
+
+    n_days = len(daily_rets)
+    mean_ret = float(daily_rets.mean())
+    std_ret = float(daily_rets.std(ddof=1)) if n_days > 1 else 0.0
+
+    first_date = datetime.strptime(equity_curve[0]["timestamp"], "%Y-%m-%d")
+    last_date = datetime.strptime(equity_curve[-1]["timestamp"], "%Y-%m-%d")
+    calendar_days = max((last_date - first_date).days, 1)
+
+    peak_arr = np.maximum.accumulate(eq_arr[1:])
+    dd_arr = (eq_arr[1:] - peak_arr) / peak_arr
+    max_drawdown = round(float(dd_arr.min()), 6) if len(dd_arr) > 0 else 0.0
+
+    final_eq = eq_arr[-1]
+    if final_eq > 0 and starting_balance > 0:
+        cagr = round((final_eq / starting_balance) ** (_ANN_FACTOR / calendar_days) - 1, 6)
+    else:
+        cagr = None
+
+    sharpe = round(mean_ret / std_ret * math.sqrt(_ANN_FACTOR), 4) if std_ret > 1e-12 else None
+
+    downside = daily_rets[daily_rets < 0]
+    ds_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+    sortino = round(mean_ret / ds_std * math.sqrt(_ANN_FACTOR), 4) if ds_std > 1e-12 else None
+
+    if cagr is not None and abs(max_drawdown) > 1e-12:
+        calmar = round(cagr / abs(max_drawdown), 4)
+    else:
+        calmar = None
+
+    returns_volatility = round(std_ret * math.sqrt(_ANN_FACTOR), 4) if std_ret > 1e-12 else None
+    total_return_pct = round((final_eq / starting_balance - 1) * 100, 4) if starting_balance > 0 else 0.0
+
+    return {
+        "daily_rets": daily_rets,
+        "dd_arr": dd_arr,
+        "n_days": n_days,
+        "mean_ret": mean_ret,
+        "std_ret": std_ret,
+        "calendar_days": calendar_days,
+        "max_drawdown": max_drawdown,
+        "cagr": cagr,
+        "sharpe": sharpe,
+        "sortino": sortino,
+        "calmar": calmar,
+        "returns_volatility": returns_volatility,
+        "total_return_pct": total_return_pct,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section 8c — extended statistics
+# ---------------------------------------------------------------------------
+
+def compute_extended_statistics(
+    daily_rets: np.ndarray,
+    dd_arr: np.ndarray,
+    mean_ret: float,
+    std_ret: float,
+) -> dict[str, Any]:
+    """Extended per-day and tail-risk statistics.
+
+    Returns a flat dict with best/worst day, skewness, kurtosis, tail ratio,
+    stability (R² of cumulative returns), VaR/CVaR, downside deviation, ulcer
+    index, and normal distribution parameters.  All values are JSON-safe
+    (NaN/Inf sanitised to None).
+    """
+    n_days = len(daily_rets)
+    if n_days == 0:
+        return {}
+
+    best_day = round(float(daily_rets.max() * 100), 4)
+    worst_day = round(float(daily_rets.min() * 100), 4)
+    positive_days_pct = round(float((daily_rets > 0).sum() / n_days * 100), 2)
+
+    try:
+        from scipy.stats import skew as _sp_skew, kurtosis as _sp_kurt
+        skewness = _safe_float(_sp_skew(daily_rets))
+        kurtosis_val = _safe_float(_sp_kurt(daily_rets, fisher=True))
+    except ImportError:
+        if std_ret > 1e-12:
+            skewness = _safe_float(float(np.mean(((daily_rets - mean_ret) / std_ret) ** 3)))
+            kurtosis_val = _safe_float(float(np.mean(((daily_rets - mean_ret) / std_ret) ** 4) - 3))
+        else:
+            skewness = kurtosis_val = None
+
+    p95 = float(np.percentile(daily_rets, 95))
+    p5 = float(np.percentile(daily_rets, 5))
+    tail_ratio = round(p95 / abs(p5), 4) if abs(p5) > 1e-12 else None
+
+    cum_rets = np.cumsum(daily_rets)
+    x_idx = np.arange(len(cum_rets))
+    if len(x_idx) > 1:
+        slope, intercept = np.polyfit(x_idx, cum_rets, 1)
+        y_pred = slope * x_idx + intercept
+        ss_res = float(np.sum((cum_rets - y_pred) ** 2))
+        ss_tot = float(np.sum((cum_rets - cum_rets.mean()) ** 2))
+        stability = round(1 - ss_res / ss_tot, 4) if ss_tot > 1e-12 else None
+    else:
+        stability = None
+
+    gains = daily_rets[daily_rets > 0].sum()
+    losses_abs = abs(daily_rets[daily_rets < 0].sum())
+    omega_ratio = round(float(gains / losses_abs), 4) if losses_abs > 1e-12 else None
+
+    var_95 = round(float(np.percentile(daily_rets, 5) * 100), 4)
+    var_99 = round(float(np.percentile(daily_rets, 1) * 100), 4)
+
+    var_thresh = np.percentile(daily_rets, 5)
+    below_var = daily_rets[daily_rets <= var_thresh]
+    cvar_95 = round(float(below_var.mean() * 100), 4) if len(below_var) > 0 else None
+
+    ds_rets = daily_rets[daily_rets < 0]
+    downside_dev = round(float(ds_rets.std(ddof=1) * math.sqrt(_ANN_FACTOR)), 4) if len(ds_rets) > 1 else None
+
+    ulcer_index = round(float(np.sqrt(np.mean(dd_arr ** 2))), 6) if len(dd_arr) > 0 else None
+
+    max_daily_loss = round(float(daily_rets.min() * 100), 4)
+    normal_dist_mean = round(float(mean_ret * 100), 6)
+    normal_dist_std = round(float(std_ret * 100), 6)
+
+    return {
+        "best_day": best_day,
+        "worst_day": worst_day,
+        "positive_days_pct": positive_days_pct,
+        "skewness": skewness,
+        "kurtosis": kurtosis_val,
+        "tail_ratio": tail_ratio,
+        "stability": stability,
+        "omega_ratio": omega_ratio,
+        "var_95": var_95,
+        "var_99": var_99,
+        "cvar_95": cvar_95,
+        "downside_dev": downside_dev,
+        "ulcer_index": ulcer_index,
+        "max_daily_loss": max_daily_loss,
+        "normal_dist_mean": normal_dist_mean,
+        "normal_dist_std": normal_dist_std,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section 9 — per-instrument breakdown
+# ---------------------------------------------------------------------------
+
+def compute_per_instrument_basic(
+    trade_records: list[dict[str, Any]],
+    starting_balance: float,
+) -> dict[str, dict[str, Any]]:
+    """Per-instrument PnL, win rate, profit factor, and trade counts.
+
+    *trade_records* is a list of dicts with keys ``instrument``, ``pnl``.
+    Zero-PnL trades are counted as losses (matches the monolithic behaviour
+    prior to refactor where the ``else`` branch swept them in).
+    """
+    inst_buckets: dict[str, list[float]] = defaultdict(list)
+    for t in trade_records:
+        inst_buckets[t["instrument"]].append(float(t["pnl"]))
+
+    result: dict[str, dict[str, Any]] = {}
+    for inst_id, pnls in inst_buckets.items():
+        wins = sum(1 for v in pnls if v > 0)
+        losses = sum(1 for v in pnls if v <= 0)
+        profit = sum(v for v in pnls if v > 0)
+        loss = abs(sum(v for v in pnls if v <= 0))
+        total = wins + losses
+        result[inst_id] = {
+            "total_trades": total,
+            "winning_trades": wins,
+            "losing_trades": losses,
+            "win_rate": round(wins / total, 4) if total > 0 else 0.0,
+            "total_pnl": round(sum(pnls), 4),
+            "gross_profit": round(profit, 4),
+            "gross_loss": round(loss, 4),
+            "profit_factor": round(profit / loss, 4) if loss > 0 else None,
+            "largest_win": round(max(pnls), 4) if pnls else None,
+            "largest_loss": round(min(pnls), 4) if pnls else None,
+            "avg_pnl": round(sum(pnls) / len(pnls), 4) if pnls else None,
+            "return_pct": round(sum(pnls) / starting_balance * 100, 4) if starting_balance > 0 else 0.0,
+        }
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Section 11 — drawdown periods from equity curve
+# ---------------------------------------------------------------------------
+
+def compute_drawdown_periods(
+    equity_curve: list[dict[str, Any]],
+    top_n: int = 10,
+) -> list[dict[str, Any]]:
+    """Identify contiguous drawdown periods from an equity curve.
+
+    A drawdown period starts when ``drawdown_pct`` drops below zero and ends
+    when it recovers to zero.  Returns the *top_n* most severe periods (most
+    negative max_drawdown first).
+    """
+    if not equity_curve or len(equity_curve) < 2:
+        return []
+
+    periods: list[dict[str, Any]] = []
+    in_drawdown = False
+    dd_start = None
+    dd_trough = 0.0
+    dd_trough_ts = None
+
+    for pt in equity_curve:
+        dd_val = pt["drawdown_pct"] / 100.0
+        ts = datetime.strptime(pt["timestamp"], "%Y-%m-%d")
+
+        if dd_val < -1e-8:
+            if not in_drawdown:
+                in_drawdown = True
+                dd_start = ts
+                dd_trough = dd_val
+                dd_trough_ts = ts
+            elif dd_val < dd_trough:
+                dd_trough = dd_val
+                dd_trough_ts = ts
+        else:
+            if in_drawdown:
+                periods.append({
+                    "start": str(dd_start.date()),
+                    "trough_date": str(dd_trough_ts.date()),
+                    "recovery_date": str(ts.date()),
+                    "max_drawdown_pct": round(float(dd_trough) * 100, 4),
+                    "duration_days": (ts - dd_start).days,
+                    "recovery_days": (ts - dd_trough_ts).days,
+                })
+                in_drawdown = False
+
+    # Ongoing drawdown at the end
+    if in_drawdown and dd_start is not None:
+        last_ts = datetime.strptime(equity_curve[-1]["timestamp"], "%Y-%m-%d")
+        periods.append({
+            "start": str(dd_start.date()),
+            "trough_date": str(dd_trough_ts.date()),
+            "recovery_date": None,
+            "max_drawdown_pct": round(float(dd_trough) * 100, 4),
+            "duration_days": (last_ts - dd_start).days,
+            "recovery_days": None,
+        })
+
+    periods.sort(key=lambda x: x["max_drawdown_pct"])
+    return periods[:top_n]
+
+
+# ---------------------------------------------------------------------------
+# Section 11b — annual returns
+# ---------------------------------------------------------------------------
+
+def compute_annual_returns(
+    equity_curve: list[dict[str, Any]],
+    starting_balance: float,
+) -> list[dict[str, Any]]:
+    """Year-over-year compounded return (%), computed from equity curve."""
+    if not equity_curve or len(equity_curve) < 2:
+        return []
+
+    year_boundaries: dict[int, dict[str, float]] = {}
+    prev_eq = starting_balance
+    for pt in equity_curve:
+        year = int(pt["timestamp"][:4])
+        eq = pt["equity"]
+        if year not in year_boundaries:
+            year_boundaries[year] = {"first_eq": prev_eq, "last_eq": eq}
+        else:
+            year_boundaries[year]["last_eq"] = eq
+        prev_eq = eq
+
+    out: list[dict[str, Any]] = []
+    for y in sorted(year_boundaries.keys()):
+        b = year_boundaries[y]
+        ret = (b["last_eq"] / b["first_eq"] - 1) * 100 if b["first_eq"] > 0 else 0.0
+        out.append({"year": y, "return_pct": round(ret, 4)})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Section 11d — daily-returns distribution histogram
+# ---------------------------------------------------------------------------
+
+def compute_returns_distribution(
+    daily_rets: np.ndarray,
+    bins: int = 40,
+) -> list[dict[str, Any]]:
+    """Histogram of daily returns (as percentages)."""
+    if daily_rets is None or len(daily_rets) < 2:
+        return []
+    dr_pct = daily_rets * 100
+    counts, edges = np.histogram(dr_pct, bins=bins)
+    return [
+        {
+            "bin_start": round(float(edges[j]), 4),
+            "bin_end": round(float(edges[j + 1]), 4),
+            "count": int(counts[j]),
+        }
+        for j in range(len(counts))
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Section 11e — QQ plot data
+# ---------------------------------------------------------------------------
+
+def compute_qq_plot_data(
+    daily_rets: np.ndarray,
+    max_points: int = 200,
+) -> list[dict[str, float]]:
+    """Theoretical (normal) vs empirical quantiles for a QQ plot."""
+    if daily_rets is None or len(daily_rets) < 2:
+        return []
+
+    n = len(daily_rets)
+    sorted_rets = np.sort(daily_rets)
+    probs = np.linspace(1 / (n + 1), n / (n + 1), n)
+
+    try:
+        from scipy.stats import norm as _norm
+        theoretical = _norm.ppf(probs)
+    except ImportError:
+        theoretical = np.array([_norm_ppf(float(p)) for p in probs])
+
+    if n > max_points:
+        indices = np.linspace(0, n - 1, max_points, dtype=int)
+        sorted_rets = sorted_rets[indices]
+        theoretical = theoretical[indices]
+
+    return [
+        {"theoretical": round(float(t), 6), "empirical": round(float(e), 6)}
+        for t, e in zip(theoretical, sorted_rets)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Section 11k — benchmark-relative metrics (alpha / beta / R² / IR)
+# ---------------------------------------------------------------------------
+
+def compute_benchmark_relative_metrics(
+    daily_rets: np.ndarray,
+    benchmark_daily_returns: np.ndarray,
+    min_obs: int = 30,
+) -> dict[str, Any]:
+    """Alpha (annualised), beta, R², and information ratio vs benchmark."""
+    result: dict[str, Any] = {
+        "alpha": None,
+        "beta": None,
+        "r_squared": None,
+        "information_ratio": None,
+    }
+    if daily_rets is None or benchmark_daily_returns is None:
+        return result
+    min_len = min(len(daily_rets), len(benchmark_daily_returns))
+    if min_len < min_obs:
+        return result
+
+    sr = daily_rets[:min_len]
+    br = benchmark_daily_returns[:min_len]
+    cov_sb = float(np.cov(sr, br)[0, 1])
+    var_b = float(np.var(br, ddof=1))
+    if var_b <= 1e-12:
+        return result
+
+    beta = round(cov_sb / var_b, 4)
+    alpha = round((float(sr.mean()) - beta * float(br.mean())) * _ANN_FACTOR, 4)
+    corr = float(np.corrcoef(sr, br)[0, 1])
+    r_squared = round(corr ** 2, 4) if not math.isnan(corr) else None
+    excess = sr - br
+    te = float(excess.std(ddof=1))
+    ir = round(float(excess.mean()) / te * math.sqrt(_ANN_FACTOR), 4) if te > 1e-12 else None
+
+    result.update({
+        "alpha": alpha,
+        "beta": beta,
+        "r_squared": r_squared,
+        "information_ratio": ir,
+    })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Section 12b — streak sequence
+# ---------------------------------------------------------------------------
+
+def compute_streak_sequence(pnls: list[float]) -> list[dict[str, Any]]:
+    """Contiguous win/loss streaks with count and aggregated PnL.
+
+    Zero-PnL trades are counted as loss streaks (matches prior behaviour).
+    """
+    streaks: list[dict[str, Any]] = []
+    cur_type: str | None = None
+    cur_count = 0
+    cur_pnl = 0.0
+    for pv in pnls:
+        t = "win" if pv > 0 else "loss"
+        if t == cur_type:
+            cur_count += 1
+            cur_pnl += pv
+        else:
+            if cur_type is not None:
+                streaks.append({
+                    "streak_num": len(streaks) + 1,
+                    "type": cur_type,
+                    "count": cur_count,
+                    "total_pnl": round(cur_pnl, 4),
+                })
+            cur_type = t
+            cur_count = 1
+            cur_pnl = pv
+    if cur_type is not None:
+        streaks.append({
+            "streak_num": len(streaks) + 1,
+            "type": cur_type,
+            "count": cur_count,
+            "total_pnl": round(cur_pnl, 4),
+        })
+    return streaks
+
+
+# ---------------------------------------------------------------------------
+# Section 12b — long vs short comparison
+# ---------------------------------------------------------------------------
+
+def compute_long_vs_short(trade_sides: list[tuple[str, float]]) -> dict[str, Any]:
+    """Long/short summary given (side, pnl) tuples."""
+    def _side_stats(pnls: list[float]) -> dict[str, Any]:
+        if not pnls:
+            return {"trades": 0, "total_pnl": 0.0, "avg_pnl": 0.0, "win_rate": 0.0}
+        wins = sum(1 for v in pnls if v > 0)
+        total = sum(pnls)
+        return {
+            "trades": len(pnls),
+            "total_pnl": round(total, 4),
+            "avg_pnl": round(total / len(pnls), 4),
+            "win_rate": round(wins / len(pnls), 4),
+        }
+
+    longs = [p for s, p in trade_sides if s == "BUY"]
+    shorts = [p for s, p in trade_sides if s == "SELL"]
+    return {"long": _side_stats(longs), "short": _side_stats(shorts)}
+
+
+# ---------------------------------------------------------------------------
+# Section 12b — return by day-of-week / hour
+# ---------------------------------------------------------------------------
+
+_DOW_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def compute_return_by_dow(
+    trade_times: list[tuple[int, float]],
+) -> list[dict[str, Any]]:
+    """Group PnLs by UTC day-of-week (0=Mon..6=Sun) given (ts_ns, pnl) tuples."""
+    buckets: dict[int, list[float]] = {i: [] for i in range(7)}
+    for ts_ns, pnl in trade_times:
+        if not ts_ns or ts_ns <= 0:
+            continue
+        dt = datetime.fromtimestamp(int(ts_ns) / 1e9, tz=timezone.utc)
+        buckets[dt.weekday()].append(float(pnl))
+    return [
+        {
+            "dow": i,
+            "dow_name": _DOW_NAMES[i],
+            "values": [round(v, 4) for v in buckets[i]],
+        }
+        for i in range(7)
+    ]
+
+
+def compute_return_by_hour(
+    trade_times: list[tuple[int, float]],
+) -> list[dict[str, Any]]:
+    """Group PnLs by UTC hour-of-day (0..23) given (ts_ns, pnl) tuples."""
+    buckets: dict[int, list[float]] = {i: [] for i in range(24)}
+    for ts_ns, pnl in trade_times:
+        if not ts_ns or ts_ns <= 0:
+            continue
+        dt = datetime.fromtimestamp(int(ts_ns) / 1e9, tz=timezone.utc)
+        buckets[dt.hour].append(float(pnl))
+    return [
+        {"hour": h, "values": [round(v, 4) for v in buckets[h]]}
+        for h in range(24)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Section 10 — monthly & weekly returns from equity curve
+# ---------------------------------------------------------------------------
+
+def compute_periodic_returns(
+    equity_curve: list[dict[str, Any]],
+    starting_balance: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Monthly and weekly compounded daily returns (sum-of-daily approximation).
+
+    Matches the monolithic implementation: weekly key is the Sunday ending date
+    (ISO Monday-start week + 6 days).
+    """
+    if not equity_curve or len(equity_curve) < 2:
+        return [], []
+
+    monthly_agg: dict[str, float] = defaultdict(float)
+    weekly_agg: dict[str, float] = defaultdict(float)
+
+    prev_equity = starting_balance
+    for pt in equity_curve:
+        eq = pt["equity"]
+        daily_ret = (eq - prev_equity) / prev_equity if prev_equity > 0 else 0.0
+        month_key = pt["timestamp"][:7]
+        monthly_agg[month_key] += daily_ret
+
+        d = datetime.strptime(pt["timestamp"], "%Y-%m-%d")
+        week_start = d - pd.Timedelta(days=d.weekday())
+        week_key = (week_start + pd.Timedelta(days=6)).strftime("%Y-%m-%d")
+        weekly_agg[week_key] += daily_ret
+
+        prev_equity = eq
+
+    monthly = [
+        {"period": p, "return_pct": round(float(monthly_agg[p]) * 100, 4)}
+        for p in sorted(monthly_agg.keys())
+    ]
+    weekly = [
+        {"period": p, "return_pct": round(float(weekly_agg[p]) * 100, 4)}
+        for p in sorted(weekly_agg.keys())
+    ]
+    return monthly, weekly

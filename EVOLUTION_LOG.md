@@ -127,3 +127,61 @@ Chronological record of architectural improvements and maintenance work.
   考虑进一步提取，使 `run()` 更加声明式
 - 将 `extract.py` 的 1500 行单函数拆解为 8-10 个独立函数（最大的可维护性债务）
 - 为 `_resolve_bars()` 和 `_download_bars()` 补充测试（数据解析关键路径）
+
+## 2026-04-16 (3)
+
+**主题**: 将 `extract_backtest_results` 1500 行单函数拆解为 13 个可独立测试的 section 助手
+**维度**: 架构重构
+**改动范围**:
+- `src/tinohelm/backtest/result/sections.py` — 新增，645 行，13 个 NT 无关的纯计算助手
+- `src/tinohelm/backtest/result/extract.py` — 1500 → 1159 行（净减 341 行，-22.7%），改为声明式调用
+- `tests/backtest/test_sections.py` — 新增 52 个单元测试，覆盖全部新助手
+
+**动机**:
+`extract_backtest_results` 是所有回测结果的单一提取入口，但它是一个 1500 行的巨型函数，
+被 13+ 个主题分段（equity curve、risk metrics、extended statistics、per-instrument、
+drawdown periods、annual returns、periodic returns、returns distribution、QQ plot、
+benchmark-relative metrics、streak sequence、long vs short、DOW/hour buckets）塞在一起。
+问题：
+1. **无法单元测试**: 每个分段的逻辑无法独立验证，必须通过完整的 NT BacktestEngine mock
+   才能触达任何一段。上一轮 evolution log 已明确将此标记为"最大的可维护性债务"。
+2. **关注点混淆**: 每个分段内 `try/except Exception` 掩盖了错误，但同一函数内 20+ 个
+   try/except 块意味着 bug 定位只能靠 log 猜。
+3. **长函数心智负担**: 1500 行单函数阅读和修改都极为费力，修改一个分段可能意外影响其他。
+
+**要点**:
+1. **新模块 `sections.py`**: 13 个纯计算助手，接受 primitive 输入（tuple/list/dict/ndarray），
+   返回 JSON-safe 结构。完全不依赖 NautilusTrader，CI 可独立运行：
+   - `build_equity_curve(trade_closes, starting_balance)` — 从 (ts_ns, pnl) 列表构建权益曲线
+   - `recompute_risk_metrics_from_equity_curve(equity_curve, starting_balance)` — Sharpe/Sortino/Calmar/CAGR/MaxDD
+   - `compute_extended_statistics(daily_rets, dd_arr, mean_ret, std_ret)` — skew/kurt/tail/VaR/CVaR/ulcer
+   - `compute_per_instrument_basic(trade_records, starting_balance)` — 每品种 PnL/WinRate/ProfitFactor
+   - `compute_drawdown_periods(equity_curve, top_n=10)` — 回撤区间识别与排序
+   - `compute_annual_returns(equity_curve, starting_balance)` — 年度复合收益
+   - `compute_returns_distribution(daily_rets, bins=40)` — 日收益直方图
+   - `compute_qq_plot_data(daily_rets, max_points=200)` — QQ 图数据（理论正态 vs 经验分位）
+   - `compute_benchmark_relative_metrics(daily_rets, bm_rets, min_obs=30)` — alpha/beta/R²/IR
+   - `compute_streak_sequence(pnls)` — 连胜连败序列
+   - `compute_long_vs_short(trade_sides)` — 多/空对比
+   - `compute_return_by_dow(trade_times)` / `compute_return_by_hour(trade_times)` — 时段分桶
+   - `compute_periodic_returns(equity_curve, starting_balance)` — 月度/周度收益（含周键 = Sunday）
+2. **`extract.py` 声明式化**: 每个 section 从 15-150 行缩为 4-10 行，`try/except` 语义保留，
+   错误定位粒度从"整段 fallback"变为"单一函数 fallback"。
+3. **测试独立性**: 沿用 `test_rolling_metrics.py` 的 file-path 加载模式（pre-stub
+   `tinohelm.backtest.result.statistics` 进 `sys.modules`），避免引入 NT 依赖。
+   CI 无需安装 NT 即可验证所有 section 助手。
+4. **52 个新测试**: 覆盖每个助手的空输入、正常路径、边界条件（零标准差、无亏损、ongoing
+   drawdown、zero starting_balance 等），使用 seeded RNG 保证可重复。
+5. **行为完全保留**: 包括 `zero-PnL counts as loss`（streak + per-instrument）、
+   `weekly key = Sunday`、`drawdown top 10 by severity`、`QQ downsample to 200` 等
+   细节行为均通过单元测试固化。
+
+**后续建议**:
+- 将 section 9b (advanced per-instrument analytics, ~110 行) 提取为 `compute_per_instrument_advanced()`
+  — 当前仍内联，因其涉及大量矩阵运算（相关矩阵、多元协方差）与 NT 位置对象的混合
+- 将 section 11f (`benchmark_equity_curve` 构建) 提取为 `compute_benchmark_equity_curve()` 助手
+  — 当前仍内联，因其依赖 `engine.cache.bar_types()` 与 `engine.cache.bars()` fallback
+- 将 section 12b 中 MAE/MFE 计算（需要遍历 engine.cache.bar_types）提取为助手，
+  可能需要抽象出 `BarProvider` 协议降低 NT 耦合
+- 考虑对 `extract_backtest_results` 本体建立集成测试（基于 MagicMock(engine)），
+  锁定各 section 输出的 key schema（防止字段重命名破坏前端契约）

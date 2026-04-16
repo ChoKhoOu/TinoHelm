@@ -9,6 +9,22 @@ import numpy as np
 import pandas as pd
 from nautilus_trader.backtest.engine import BacktestEngine
 
+from tinohelm.backtest.result.sections import (
+    build_equity_curve,
+    compute_annual_returns,
+    compute_benchmark_relative_metrics,
+    compute_drawdown_periods,
+    compute_extended_statistics,
+    compute_long_vs_short,
+    compute_per_instrument_basic,
+    compute_periodic_returns,
+    compute_qq_plot_data,
+    compute_return_by_dow,
+    compute_return_by_hour,
+    compute_returns_distribution,
+    compute_streak_sequence,
+    recompute_risk_metrics_from_equity_curve,
+)
 from tinohelm.backtest.result.statistics import (
     _compute_monte_carlo,
     _compute_psr,
@@ -19,8 +35,6 @@ from tinohelm.backtest.result.statistics import (
     _format_ns_timestamp,
     _format_order_side,
     _make_rolling_beta_fn,
-    _norm_cdf,
-    _norm_ppf,
     _parse_realized_pnl,
     _rolling_cumret_fn,
     _rolling_sharpe_fn,
@@ -250,44 +264,13 @@ def extract_backtest_results(
     # the actual account PnL (gross_profit - gross_loss).
     equity_curve: list[dict[str, Any]] = []
     try:
-        from collections import defaultdict as _ec_defaultdict
-        from datetime import datetime as _ec_dt, timezone as _ec_tz
-
-        # Aggregate realized PnL by close date
-        daily_pnl: dict[str, float] = _ec_defaultdict(float)
-        for p in closed_positions:
-            ts_closed = getattr(p, "ts_closed", None)
-            if ts_closed and ts_closed > 0:
-                close_date = _ec_dt.fromtimestamp(
-                    int(ts_closed) / 1e9, tz=_ec_tz.utc
-                ).strftime("%Y-%m-%d")
-                daily_pnl[close_date] += _parse_realized_pnl(p.realized_pnl)
-
-        if daily_pnl:
-            sorted_dates = sorted(daily_pnl.keys())
-            cum_pnl = 0.0
-            peak_equity = starting_balance
-            for d in sorted_dates:
-                cum_pnl += daily_pnl[d]
-                equity_val = starting_balance + cum_pnl
-                peak_equity = max(peak_equity, equity_val)
-                dd_pct = ((equity_val - peak_equity) / peak_equity * 100) if peak_equity > 0 else 0.0
-                ret_pct = (daily_pnl[d] / starting_balance * 100) if starting_balance > 0 else 0.0
-                equity_curve.append({
-                    "timestamp": d,
-                    "equity": round(equity_val, 4),
-                    "returns_pct": round(ret_pct, 4),
-                    "drawdown_pct": round(dd_pct, 4),
-                })
+        trade_closes = [
+            (getattr(p, "ts_closed", 0) or 0, _parse_realized_pnl(p.realized_pnl))
+            for p in closed_positions
+        ]
+        equity_curve = build_equity_curve(trade_closes, starting_balance)
     except Exception:
         logger.warning("Failed to build equity curve", exc_info=True)
-
-    # Downsample if too many points (> 2000)
-    if len(equity_curve) > 2000:
-        step = len(equity_curve) / 2000
-        indices = [int(i * step) for i in range(2000)]
-        indices[-1] = len(equity_curve) - 1  # Always include last point
-        equity_curve = [equity_curve[i] for i in indices]
 
     # Function-scope variables for daily returns (used by sections 8b, 8c, 11b-11f)
     _daily_rets = None  # numpy array, set in section 8b
@@ -319,145 +302,52 @@ def extract_backtest_results(
     # futures. We recompute all risk metrics from the actual dollar equity
     # curve built in section 8 — this matches industry-standard portfolio
     # return definitions.
+    mean_ret = 0.0
+    std_ret = 0.0
+    dd_arr = np.empty(0, dtype=float)
     try:
-        if len(equity_curve) >= 2:
-            from datetime import datetime as _eq_dt
-
-            eq_values = [starting_balance] + [pt["equity"] for pt in equity_curve]
-            eq_arr = np.array(eq_values, dtype=float)
-
-            # Daily portfolio returns: r_t = (equity_t - equity_{t-1}) / equity_{t-1}
-            daily_rets = np.diff(eq_arr) / eq_arr[:-1]
-
-            # Hoist to function scope for downstream sections (8c, 11b-11f)
-            _daily_rets = daily_rets
-            _n_days = len(daily_rets)
-
-            # Also fix returns_pct in equity_curve to use proper daily return
-            for i, pt in enumerate(equity_curve):
-                pt["returns_pct"] = round(float(daily_rets[i]) * 100, 4)
-
-            n_days = len(daily_rets)
-            mean_ret = float(daily_rets.mean())
-            std_ret = float(daily_rets.std(ddof=1)) if n_days > 1 else 0.0
-
-            # Calendar days for annualization (crypto = 365)
-            first_date = _eq_dt.strptime(equity_curve[0]["timestamp"], "%Y-%m-%d")
-            last_date = _eq_dt.strptime(equity_curve[-1]["timestamp"], "%Y-%m-%d")
-            calendar_days = max((last_date - first_date).days, 1)
-            ann_factor = 365  # crypto markets trade 365 days/year
-
-            # Max Drawdown (peak-to-trough of equity)
-            peak_arr = np.maximum.accumulate(eq_arr[1:])  # skip prepended starting_balance
-            dd_arr = (eq_arr[1:] - peak_arr) / peak_arr
-            max_drawdown = round(float(dd_arr.min()), 6) if len(dd_arr) > 0 else 0.0
-
-            # CAGR: (final / initial) ^ (365 / calendar_days) - 1
-            final_eq = eq_arr[-1]
-            if final_eq > 0 and starting_balance > 0:
-                cagr = round((final_eq / starting_balance) ** (ann_factor / calendar_days) - 1, 6)
-            else:
-                cagr = None
-
-            # Sharpe Ratio: mean(daily_ret) / std(daily_ret) * sqrt(365)
-            if std_ret > 1e-12:
-                sharpe = round(mean_ret / std_ret * np.sqrt(ann_factor), 4)
-            else:
-                sharpe = None
-
-            # Sortino Ratio: mean(daily_ret) / downside_std * sqrt(365)
-            downside = daily_rets[daily_rets < 0]
-            ds_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
-            if ds_std > 1e-12:
-                sortino = round(mean_ret / ds_std * np.sqrt(ann_factor), 4)
-            else:
-                sortino = None
-
-            # Calmar Ratio: CAGR / |max_drawdown|
-            if cagr is not None and max_drawdown is not None and abs(max_drawdown) > 1e-12:
-                calmar = round(cagr / abs(max_drawdown), 4)
-            else:
-                calmar = None
-
-            # Volatility: std(daily_ret) * sqrt(365)
-            returns_volatility = round(std_ret * np.sqrt(ann_factor), 4) if std_ret > 1e-12 else None
-
-            # Total return % (consistent with equity curve)
-            total_return_pct = round((final_eq / starting_balance - 1) * 100, 4)
-
+        metrics = recompute_risk_metrics_from_equity_curve(equity_curve, starting_balance)
+        if metrics is not None:
+            _daily_rets = metrics["daily_rets"]
+            _n_days = metrics["n_days"]
+            dd_arr = metrics["dd_arr"]
+            mean_ret = metrics["mean_ret"]
+            std_ret = metrics["std_ret"]
+            max_drawdown = metrics["max_drawdown"]
+            cagr = metrics["cagr"]
+            sharpe = metrics["sharpe"]
+            sortino = metrics["sortino"]
+            calmar = metrics["calmar"]
+            returns_volatility = metrics["returns_volatility"]
+            total_return_pct = metrics["total_return_pct"]
             logger.info(
                 "Risk metrics recomputed from equity curve: max_dd=%.4f, sharpe=%.4f, cagr=%.4f (%d calendar days, %d data points)",
-                max_drawdown, sharpe or 0, cagr or 0, calendar_days, n_days,
+                max_drawdown, sharpe or 0, cagr or 0, metrics["calendar_days"], _n_days,
             )
 
             # ----------------------------------------------------------
             # 8c. Extended statistics for returns analytics
             # ----------------------------------------------------------
             try:
-                best_day = round(float(daily_rets.max() * 100), 4)
-                worst_day = round(float(daily_rets.min() * 100), 4)
-                positive_days_pct = round(float((daily_rets > 0).sum() / n_days * 100), 2) if n_days > 0 else None
-
-                # Skewness & Kurtosis
-                try:
-                    from scipy.stats import skew as _sp_skew, kurtosis as _sp_kurt
-                    skewness = _safe_float(_sp_skew(daily_rets))
-                    kurtosis_val = _safe_float(_sp_kurt(daily_rets, fisher=True))
-                except ImportError:
-                    skewness = _safe_float(float(np.mean(((daily_rets - mean_ret) / std_ret) ** 3))) if std_ret > 1e-12 else None
-                    kurtosis_val = _safe_float(float(np.mean(((daily_rets - mean_ret) / std_ret) ** 4) - 3)) if std_ret > 1e-12 else None
-
-                # Tail Ratio: 95th percentile / abs(5th percentile)
-                p95 = float(np.percentile(daily_rets, 95))
-                p5 = float(np.percentile(daily_rets, 5))
-                tail_ratio = round(p95 / abs(p5), 4) if abs(p5) > 1e-12 else None
-
-                # Stability: R² of cumulative returns linear regression
-                cum_rets = np.cumsum(daily_rets)
-                x_idx = np.arange(len(cum_rets))
-                if len(x_idx) > 1:
-                    slope, intercept = np.polyfit(x_idx, cum_rets, 1)
-                    y_pred = slope * x_idx + intercept
-                    ss_res = float(np.sum((cum_rets - y_pred) ** 2))
-                    ss_tot = float(np.sum((cum_rets - cum_rets.mean()) ** 2))
-                    stability = round(1 - ss_res / ss_tot, 4) if ss_tot > 1e-12 else None
-                else:
-                    stability = None
-
-                # ----------------------------------------------------------
-                # 8c-ext. Additional risk metrics for Performance tab
-                # ----------------------------------------------------------
-                # Omega Ratio: sum(gains) / sum(|losses|)
-                _gains = daily_rets[daily_rets > 0].sum()
-                _losses_abs = abs(daily_rets[daily_rets < 0].sum())
-                omega_ratio = round(float(_gains / _losses_abs), 4) if _losses_abs > 1e-12 else None
-
-                # VaR (95% and 99%) — percentile of daily returns as %
-                var_95 = round(float(np.percentile(daily_rets, 5) * 100), 4)
-                var_99 = round(float(np.percentile(daily_rets, 1) * 100), 4)
-
-                # CVaR / Expected Shortfall (mean of returns below VaR threshold)
-                _var_thresh = np.percentile(daily_rets, 5)
-                _below_var = daily_rets[daily_rets <= _var_thresh]
-                cvar_95 = round(float(_below_var.mean() * 100), 4) if len(_below_var) > 0 else None
-
-                # Downside Deviation (annualized)
-                _ds_rets = daily_rets[daily_rets < 0]
-                downside_dev = round(float(_ds_rets.std(ddof=1) * np.sqrt(365)), 4) if len(_ds_rets) > 1 else None
-
-                # Ulcer Index: RMS of drawdown percentages
-                ulcer_index = round(float(np.sqrt(np.mean(dd_arr ** 2))), 6) if len(dd_arr) > 0 else None
-
-                # Max Daily Loss (percentage)
-                max_daily_loss = round(float(daily_rets.min() * 100), 4) if n_days > 0 else None
-
-                # Normal distribution parameters (for overlay curve in frontend)
-                normal_dist_mean = round(float(mean_ret * 100), 6)
-                normal_dist_std = round(float(std_ret * 100), 6)
-
+                ext = compute_extended_statistics(_daily_rets, dd_arr, mean_ret, std_ret)
+                best_day = ext.get("best_day")
+                worst_day = ext.get("worst_day")
+                positive_days_pct = ext.get("positive_days_pct")
+                skewness = ext.get("skewness")
+                kurtosis_val = ext.get("kurtosis")
+                tail_ratio = ext.get("tail_ratio")
+                stability = ext.get("stability")
+                omega_ratio = ext.get("omega_ratio")
+                var_95 = ext.get("var_95")
+                var_99 = ext.get("var_99")
+                cvar_95 = ext.get("cvar_95")
+                downside_dev = ext.get("downside_dev")
+                ulcer_index = ext.get("ulcer_index")
+                max_daily_loss = ext.get("max_daily_loss")
+                normal_dist_mean = ext.get("normal_dist_mean")
+                normal_dist_std = ext.get("normal_dist_std")
             except Exception:
                 logger.warning("Failed to compute extended statistics (8c)", exc_info=True)
-
     except Exception:
         logger.warning("Failed to recompute risk metrics from equity curve", exc_info=True)
 
@@ -466,41 +356,11 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     per_instrument: dict[str, dict[str, Any]] = {}
     try:
-        from collections import defaultdict
-        inst_positions: dict[str, list] = defaultdict(list)
-        for p in closed_positions:
-            inst_positions[str(p.instrument_id)].append(p)
-
-        for inst_id, pos_list in inst_positions.items():
-            inst_wins = 0
-            inst_losses = 0
-            inst_profit = 0.0
-            inst_loss = 0.0
-            inst_pnls: list[float] = []
-            for p in pos_list:
-                pv = _parse_realized_pnl(p.realized_pnl)
-                inst_pnls.append(pv)
-                if pv > 0:
-                    inst_wins += 1
-                    inst_profit += pv
-                else:
-                    inst_losses += 1
-                    inst_loss += abs(pv)
-            inst_total = inst_wins + inst_losses
-            per_instrument[inst_id] = {
-                "total_trades": inst_total,
-                "winning_trades": inst_wins,
-                "losing_trades": inst_losses,
-                "win_rate": round(inst_wins / inst_total, 4) if inst_total > 0 else 0.0,
-                "total_pnl": round(sum(inst_pnls), 4),
-                "gross_profit": round(inst_profit, 4),
-                "gross_loss": round(inst_loss, 4),
-                "profit_factor": round(inst_profit / inst_loss, 4) if inst_loss > 0 else None,
-                "largest_win": round(max(inst_pnls), 4) if inst_pnls else None,
-                "largest_loss": round(min(inst_pnls), 4) if inst_pnls else None,
-                "avg_pnl": round(sum(inst_pnls) / len(inst_pnls), 4) if inst_pnls else None,
-                "return_pct": round(sum(inst_pnls) / starting_balance * 100, 4) if starting_balance > 0 else 0.0,
-            }
+        trade_records = [
+            {"instrument": str(p.instrument_id), "pnl": _parse_realized_pnl(p.realized_pnl)}
+            for p in closed_positions
+        ]
+        per_instrument = compute_per_instrument_basic(trade_records, starting_balance)
     except Exception:
         logger.warning("Failed to compute per-instrument breakdown", exc_info=True)
 
@@ -629,39 +489,9 @@ def extract_backtest_results(
         # Use equity-curve-derived daily PnL for periodic returns (consistent
         # with portfolio-level metrics, avoids per-trade notional return issue).
         if equity_curve and len(equity_curve) >= 2:
-            from collections import defaultdict as _pr_defaultdict
-
-            monthly_pnl_agg: dict[str, float] = _pr_defaultdict(float)
-            weekly_pnl_agg: dict[str, float] = _pr_defaultdict(float)
-
-            prev_equity = starting_balance
-            for pt in equity_curve:
-                eq = pt["equity"]
-                daily_ret = (eq - prev_equity) / prev_equity if prev_equity > 0 else 0.0
-                month_key = pt["timestamp"][:7]  # "YYYY-MM"
-                monthly_pnl_agg[month_key] += daily_ret
-
-                # ISO week ending date
-                from datetime import datetime as _pr_dt
-                d = _pr_dt.strptime(pt["timestamp"], "%Y-%m-%d")
-                # Use Monday-start week key
-                import calendar as _cal_mod
-                week_start = d - pd.Timedelta(days=d.weekday())
-                week_key = (week_start + pd.Timedelta(days=6)).strftime("%Y-%m-%d")
-                weekly_pnl_agg[week_key] += daily_ret
-
-                prev_equity = eq
-
-            for period in sorted(monthly_pnl_agg.keys()):
-                monthly_returns.append({
-                    "period": period,
-                    "return_pct": round(float(monthly_pnl_agg[period]) * 100, 4),
-                })
-            for period in sorted(weekly_pnl_agg.keys()):
-                weekly_returns.append({
-                    "period": period,
-                    "return_pct": round(float(weekly_pnl_agg[period]) * 100, 4),
-                })
+            monthly_returns, weekly_returns = compute_periodic_returns(
+                equity_curve, starting_balance,
+            )
         elif returns_series is not None and len(returns_series) > 0:
             # Fallback to analyzer returns if equity curve unavailable
             rs = returns_series.copy()
@@ -695,55 +525,7 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     drawdown_periods: list[dict[str, Any]] = []
     try:
-        # Use equity-curve drawdown_pct for consistency with KPI and chart
-        if equity_curve and len(equity_curve) >= 2:
-            from datetime import datetime as _dd_dt
-
-            in_drawdown = False
-            dd_start = None
-            dd_trough = 0.0
-            dd_trough_ts = None
-
-            for pt in equity_curve:
-                dd_val = pt["drawdown_pct"] / 100.0  # convert from pct to fraction
-                ts = _dd_dt.strptime(pt["timestamp"], "%Y-%m-%d")
-
-                if dd_val < -1e-8:
-                    if not in_drawdown:
-                        in_drawdown = True
-                        dd_start = ts
-                        dd_trough = dd_val
-                        dd_trough_ts = ts
-                    elif dd_val < dd_trough:
-                        dd_trough = dd_val
-                        dd_trough_ts = ts
-                else:
-                    if in_drawdown:
-                        drawdown_periods.append({
-                            "start": str(dd_start.date()),
-                            "trough_date": str(dd_trough_ts.date()),
-                            "recovery_date": str(ts.date()),
-                            "max_drawdown_pct": round(float(dd_trough) * 100, 4),
-                            "duration_days": (ts - dd_start).days,
-                            "recovery_days": (ts - dd_trough_ts).days,
-                        })
-                        in_drawdown = False
-
-            # Handle ongoing drawdown at end
-            if in_drawdown and dd_start is not None:
-                last_ts = _dd_dt.strptime(equity_curve[-1]["timestamp"], "%Y-%m-%d")
-                drawdown_periods.append({
-                    "start": str(dd_start.date()),
-                    "trough_date": str(dd_trough_ts.date()),
-                    "recovery_date": None,
-                    "max_drawdown_pct": round(float(dd_trough) * 100, 4),
-                    "duration_days": (last_ts - dd_start).days,
-                    "recovery_days": None,
-                })
-
-            # Sort by severity, keep top 10
-            drawdown_periods.sort(key=lambda x: x["max_drawdown_pct"])
-            drawdown_periods = drawdown_periods[:10]
+        drawdown_periods = compute_drawdown_periods(equity_curve)
     except Exception:
         logger.warning("Failed to compute drawdown periods", exc_info=True)
 
@@ -752,21 +534,7 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     annual_returns: list[dict[str, Any]] = []
     try:
-        if equity_curve and len(equity_curve) >= 2:
-            year_boundaries: dict[int, dict] = {}
-            prev_eq = starting_balance
-            for pt in equity_curve:
-                year = int(pt["timestamp"][:4])
-                eq = pt["equity"]
-                if year not in year_boundaries:
-                    year_boundaries[year] = {"first_eq": prev_eq, "last_eq": eq}
-                else:
-                    year_boundaries[year]["last_eq"] = eq
-                prev_eq = eq
-            for y in sorted(year_boundaries.keys()):
-                b = year_boundaries[y]
-                ret = (b["last_eq"] / b["first_eq"] - 1) * 100 if b["first_eq"] > 0 else 0.0
-                annual_returns.append({"year": y, "return_pct": round(ret, 4)})
+        annual_returns = compute_annual_returns(equity_curve, starting_balance)
     except Exception:
         logger.warning("Failed to compute annual returns", exc_info=True)
 
@@ -789,15 +557,8 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     returns_distribution: list[dict[str, Any]] = []
     try:
-        if _daily_rets is not None and len(_daily_rets) >= 2:
-            dr_pct = _daily_rets * 100
-            counts, bin_edges = np.histogram(dr_pct, bins=40)
-            for j in range(len(counts)):
-                returns_distribution.append({
-                    "bin_start": round(float(bin_edges[j]), 4),
-                    "bin_end": round(float(bin_edges[j + 1]), 4),
-                    "count": int(counts[j]),
-                })
+        if _daily_rets is not None:
+            returns_distribution = compute_returns_distribution(_daily_rets)
     except Exception:
         logger.warning("Failed to compute returns distribution", exc_info=True)
 
@@ -806,30 +567,8 @@ def extract_backtest_results(
     # ------------------------------------------------------------------
     qq_plot_data: list[dict[str, float]] = []
     try:
-        if _daily_rets is not None and len(_daily_rets) >= 2:
-            n = len(_daily_rets)
-            sorted_rets = np.sort(_daily_rets)
-
-            # Theoretical normal quantiles
-            try:
-                from scipy.stats import norm as _norm
-                probs = np.linspace(1 / (n + 1), n / (n + 1), n)
-                theoretical = _norm.ppf(probs)
-            except ImportError:
-                probs = np.linspace(1 / (n + 1), n / (n + 1), n)
-                theoretical = np.array([_norm_ppf(float(p)) for p in probs])
-
-            # Downsample to ~200 points
-            if n > 200:
-                indices = np.linspace(0, n - 1, 200, dtype=int)
-                sorted_rets = sorted_rets[indices]
-                theoretical = theoretical[indices]
-
-            for t, e in zip(theoretical, sorted_rets):
-                qq_plot_data.append({
-                    "theoretical": round(float(t), 6),
-                    "empirical": round(float(e), 6),
-                })
+        if _daily_rets is not None:
+            qq_plot_data = compute_qq_plot_data(_daily_rets)
     except Exception:
         logger.warning("Failed to compute QQ plot data", exc_info=True)
 
@@ -979,22 +718,11 @@ def extract_backtest_results(
     # 11k. Benchmark-relative metrics (Alpha, Beta, R², Information Ratio)
     # ------------------------------------------------------------------
     try:
-        if _daily_rets is not None and benchmark_daily_returns is not None:
-            _bm_min_len = min(len(_daily_rets), len(benchmark_daily_returns))
-            if _bm_min_len >= 30:
-                _sr = _daily_rets[:_bm_min_len]
-                _br = benchmark_daily_returns[:_bm_min_len]
-                _cov_sb = float(np.cov(_sr, _br)[0, 1])
-                _var_b = float(np.var(_br, ddof=1))
-                if _var_b > 1e-12:
-                    beta_val = round(_cov_sb / _var_b, 4)
-                    alpha = round((float(_sr.mean()) - beta_val * float(_br.mean())) * 365, 4)
-                    _corr = float(np.corrcoef(_sr, _br)[0, 1])
-                    r_squared = round(_corr ** 2, 4)
-                    _excess = _sr - _br
-                    _te = float(_excess.std(ddof=1))
-                    if _te > 1e-12:
-                        information_ratio = round(float(_excess.mean()) / _te * np.sqrt(365), 4)
+        bm_metrics = compute_benchmark_relative_metrics(_daily_rets, benchmark_daily_returns)
+        alpha = bm_metrics["alpha"]
+        beta_val = bm_metrics["beta"]
+        r_squared = bm_metrics["r_squared"]
+        information_ratio = bm_metrics["information_ratio"]
     except Exception:
         logger.warning("Failed to compute benchmark-relative metrics", exc_info=True)
 
@@ -1066,8 +794,6 @@ def extract_backtest_results(
     return_by_hour: list[dict[str, Any]] = []
 
     try:
-        from datetime import datetime as _ta_dt, timezone as _ta_tz
-
         pnls = [_parse_realized_pnl(p.realized_pnl) for p in closed_positions]
 
         if pnls:
@@ -1245,97 +971,30 @@ def extract_backtest_results(
 
             # 6. Streak sequence
             try:
-                _streaks: list[dict[str, Any]] = []
-                _cur_type: str | None = None
-                _cur_count = 0
-                _cur_pnl = 0.0
-                for _pv in pnls:
-                    _t = "win" if _pv > 0 else "loss"
-                    if _pv == 0:
-                        _t = "loss"  # breakeven counted as loss streak
-                    if _t == _cur_type:
-                        _cur_count += 1
-                        _cur_pnl += _pv
-                    else:
-                        if _cur_type is not None:
-                            _streaks.append({
-                                "streak_num": len(_streaks) + 1,
-                                "type": _cur_type,
-                                "count": _cur_count,
-                                "total_pnl": round(_cur_pnl, 4),
-                            })
-                        _cur_type = _t
-                        _cur_count = 1
-                        _cur_pnl = _pv
-                if _cur_type is not None:
-                    _streaks.append({
-                        "streak_num": len(_streaks) + 1,
-                        "type": _cur_type,
-                        "count": _cur_count,
-                        "total_pnl": round(_cur_pnl, 4),
-                    })
-                streak_sequence = _streaks
+                streak_sequence = compute_streak_sequence(pnls)
             except Exception:
                 logger.warning("Failed to compute streak sequence", exc_info=True)
 
             # 7. Long vs Short comparison
             try:
-                _long_trades = [p for p in closed_positions if _format_order_side(p.entry) == "BUY"]
-                _short_trades = [p for p in closed_positions if _format_order_side(p.entry) == "SELL"]
-
-                def _side_stats(trades: list) -> dict[str, Any]:
-                    if not trades:
-                        return {"trades": 0, "total_pnl": 0.0, "avg_pnl": 0.0, "win_rate": 0.0}
-                    _pnls_s = [_parse_realized_pnl(t.realized_pnl) for t in trades]
-                    _wins = sum(1 for v in _pnls_s if v > 0)
-                    _total = sum(_pnls_s)
-                    return {
-                        "trades": len(trades),
-                        "total_pnl": round(_total, 4),
-                        "avg_pnl": round(_total / len(trades), 4),
-                        "win_rate": round(_wins / len(trades), 4),
-                    }
-
-                long_vs_short = {
-                    "long": _side_stats(_long_trades),
-                    "short": _side_stats(_short_trades),
-                }
+                trade_sides = [
+                    (_format_order_side(p.entry), _parse_realized_pnl(p.realized_pnl))
+                    for p in closed_positions
+                ]
+                long_vs_short = compute_long_vs_short(trade_sides)
             except Exception:
                 logger.warning("Failed to compute long vs short comparison", exc_info=True)
 
-            # 8. Return by day-of-week
+            # 8/9. Return by day-of-week / hour
             try:
-                _dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-                _dow_map: dict[int, list[float]] = {i: [] for i in range(7)}
-                for p in closed_positions:
-                    _ts_c = getattr(p, "ts_closed", None)
-                    if _ts_c and _ts_c > 0:
-                        _dt_c = _ta_dt.fromtimestamp(int(_ts_c) / 1e9, tz=_ta_tz.utc)
-                        _dow_map[_dt_c.weekday()].append(_parse_realized_pnl(p.realized_pnl))
-                for _dow_i in range(7):
-                    return_by_dow.append({
-                        "dow": _dow_i,
-                        "dow_name": _dow_names[_dow_i],
-                        "values": [round(v, 4) for v in _dow_map[_dow_i]],
-                    })
+                trade_times = [
+                    (getattr(p, "ts_closed", 0) or 0, _parse_realized_pnl(p.realized_pnl))
+                    for p in closed_positions
+                ]
+                return_by_dow = compute_return_by_dow(trade_times)
+                return_by_hour = compute_return_by_hour(trade_times)
             except Exception:
-                logger.warning("Failed to compute return by day-of-week", exc_info=True)
-
-            # 9. Return by hour
-            try:
-                _hour_map: dict[int, list[float]] = {i: [] for i in range(24)}
-                for p in closed_positions:
-                    _ts_c = getattr(p, "ts_closed", None)
-                    if _ts_c and _ts_c > 0:
-                        _dt_c = _ta_dt.fromtimestamp(int(_ts_c) / 1e9, tz=_ta_tz.utc)
-                        _hour_map[_dt_c.hour].append(_parse_realized_pnl(p.realized_pnl))
-                for _h in range(24):
-                    return_by_hour.append({
-                        "hour": _h,
-                        "values": [round(v, 4) for v in _hour_map[_h]],
-                    })
-            except Exception:
-                logger.warning("Failed to compute return by hour", exc_info=True)
+                logger.warning("Failed to compute return by day-of-week/hour", exc_info=True)
 
     except Exception:
         logger.warning("Failed to compute trades analytics (section 12b)", exc_info=True)
