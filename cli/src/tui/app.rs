@@ -604,16 +604,35 @@ impl App {
             } => {
                 let id_short = run_id.get(..8).unwrap_or(&run_id).to_string();
                 let msg = format!("Backtest #{} {}", id_short, &status);
-                let kind = if status == "completed" {
-                    AlertKind::Success
-                } else {
-                    AlertKind::Error
-                };
                 self.push_log("bt.done", msg.clone());
-                self.push_alert(kind, msg);
+                self.push_alert(AlertKind::Success, msg);
                 if let Some(bt) = self.backtests.iter_mut().find(|b| b.run_id == run_id) {
                     bt.status = status;
-                    bt.progress_pct = None; // Clear progress on completion
+                    bt.progress_pct = None;
+                }
+            }
+            WsEvent::BacktestFailed {
+                run_id, status, ..
+            } => {
+                let id_short = run_id.get(..8).unwrap_or(&run_id).to_string();
+                let msg = format!("Backtest #{} {}", id_short, &status);
+                self.push_log("bt.done", msg.clone());
+                self.push_alert(AlertKind::Error, msg);
+                if let Some(bt) = self.backtests.iter_mut().find(|b| b.run_id == run_id) {
+                    bt.status = status.clone();
+                    bt.progress_pct = None;
+                }
+            }
+            WsEvent::BacktestCancelled {
+                run_id, status, ..
+            } => {
+                let id_short = run_id.get(..8).unwrap_or(&run_id).to_string();
+                let msg = format!("Backtest #{} {}", id_short, &status);
+                self.push_log("bt.done", msg.clone());
+                self.push_alert(AlertKind::Warning, msg);
+                if let Some(bt) = self.backtests.iter_mut().find(|b| b.run_id == run_id) {
+                    bt.status = status.clone();
+                    bt.progress_pct = None;
                 }
             }
             WsEvent::NodeHeartbeat { node_type, uptime, trading_state, strategy_states, .. } => {

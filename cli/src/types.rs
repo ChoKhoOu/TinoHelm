@@ -313,6 +313,17 @@ pub enum WsEvent {
         status: String,
         summary: Option<serde_json::Value>,
     },
+    #[serde(rename = "backtest.failed")]
+    BacktestFailed {
+        run_id: String,
+        status: String,
+        error: Option<String>,
+    },
+    #[serde(rename = "backtest.cancelled")]
+    BacktestCancelled {
+        run_id: String,
+        status: String,
+    },
     #[serde(rename = "node.heartbeat")]
     NodeHeartbeat {
         node_type: String,
