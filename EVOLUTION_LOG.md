@@ -250,3 +250,151 @@ CI 会跳过 41 个测试。把真正 NT-free 的逻辑抽出来,可以同时解
 - `_setup_engine` 内联 datetime/字符串/arithmetic 代码从 ~35 行降至 ~5 行
 
 
+## 2026-04-16 (6)
+
+**主题**: 将 `backtest/optimizer.py` 的纯逻辑抽离到新建的 `optimizer_helpers.py`,并建立 NT-/Optuna-free 单元测试层(该模块此前零测试覆盖)
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- `src/tinohelm/backtest/optimizer_helpers.py` — 新建 585 行,收纳 10 个 NT-free + Optuna-free 纯符号
+- `src/tinohelm/backtest/optimizer.py` — 1115 → 808 行(-307 行,-27.5%),pure helper 部分全部下沉,保留 Optuna 编排层、DB 持久化、_PatienceCallback Optuna 适配器、_run_backtest
+- `tests/backtest/test_optimizer_helpers.py` — 新建,79 个 NT-/Optuna-free 测试
+
+**动机**:
+
+上一轮(2026-04-16 (5))按照 `runner_helpers.py` 成功范式把 `runner.py` 的纯逻辑
+下沉后,`backtest/optimizer.py` (1115 行) 成为剩下最大且**测试覆盖度为 0** 的
+子系统 —— `grep -l optimizer tests/` 毫无结果。考虑到 optimizer 的核心职责
+就是科学统计 + 数学推断(walk-forward、DSR、参数敏感性 / 稳定性),
+缺测试是高危信号:
+
+1. **DSR (Deflated Sharpe Ratio)** 按 Bailey & López de Prado (2014) 的
+   Abramowitz-Stegun 逼近实现,13 行嵌套 `math.log / sqrt`,**任何数值错误
+   都会静默产生误导性的 probability**,前端看不出来。
+2. **`_walk_forward_windows`** 有复杂的 clamp + 回退逻辑: `test_ratio <= 0`、
+   `n_folds <= 0`、所有窗口被 clamp 掉之后的 fallback、train 窗口被前端截断
+   等边界情况 —— 全部无测试。
+3. **`_compute_param_sensitivity`** 用 numpy 做分位数 bin 统计,top-K
+   importance 排序 + 2D 网格,嵌套 4 层循环,**40 行代码零测试**。
+4. **`_compute_param_stability`** 的"±threshold 附近的 fitness std"逻辑,
+   `max(abs(bv), 1e-9)` 这种 epsilon floor 在 best_params 为 0 时的行为,
+   也完全无测试。
+5. **`_PatienceCallback` 的线程安全** —— 用 `threading.Lock` 保护计数器,
+   但原始代码把 Optuna Trial 类型耦合进了逻辑,不可能脱离 Optuna 独立测试。
+6. **`_extract_fitness`** 有一个隐藏 latent bug: `stats = result.get("statistics", {})`,
+   当 `result["statistics"] = None` 时 `stats` 也是 None,后面 `stats.get(key)`
+   会抛 AttributeError。是 None 来自真实工况(失败的 backtest runner 会返回
+   `{"statistics": None, ...}`)的罕见路径。
+
+上一轮 evolution log 的 runner_helpers 范式本身就是为了解决这类问题。
+这一轮对 optimizer 做同样的手术,并额外把 `_PatienceCallback` 拆成
+"**PatienceTracker 纯跟踪器(Optuna-free)+ 薄 Optuna 适配器**",让
+早停逻辑的线程安全可以被正式测试。
+
+**要点**:
+
+1. **新建 `optimizer_helpers.py`,10 个导出符号** —
+   - `FITNESS_METRICS` / `FAIL_VALUE` — 提升为公共常量(原 `_FAIL_VALUE` 仍
+     保留为 module-level alias,避免外部调用方隐式破裂)
+   - `split_dates` / `walk_forward_windows` — 日期窗口划分,pure
+   - `extract_fitness` — **修复 None-safety 隐患**: 原 `result.get("statistics", {})`
+     当显式 `statistics=None` 时会抛 `AttributeError`,改为
+     `result.get("statistics") or {}`
+   - `auto_n_trials` / `auto_sampler` / `auto_workers` — smart defaults;
+     `auto_workers(cpu_count=...)` 新增可注入参数以便测试(原本硬编码
+     `os.cpu_count()`,无从测试)
+   - `slim_result` — 用于 IS/OOS 对比图的结果瘦身
+   - `compute_dsr` — **Deflated Sharpe Ratio;新增依赖注入点**
+     `norm_ppf` / `norm_cdf` 作为 keyword-only 参数(默认 None → 懒加载
+     `statistics.py` 的实现),让 DSR 在不需要真实标准正态 CDF/PPF 的
+     测试场景下可以用逻辑恒等函数验证 short-circuit 分支
+   - `compute_param_sensitivity` / `compute_param_stability` — 参数敏感性
+     和稳定性分析,pure (仅 numpy)
+   - `PatienceTracker` — **早停跟踪器的纯形式**;thread-safe via
+     `threading.Lock`,`observe(value) -> bool` 语义,`__slots__` 优化
+
+2. **NT-missing-but-statistics-ok 的 lazy import fallback** —
+   `statistics.py` 本身是 numpy-only,但 `tinohelm.backtest.result/__init__.py`
+   从一开始就 eagerly import `extract.py`(有 NT 依赖),导致
+   `from tinohelm.backtest.result.statistics import _norm_ppf` 也会触发
+   NT 加载。原始 `_compute_dsr` 的 lazy import 路径 `from tinohelm.backtest.result
+   import _norm_ppf, _norm_cdf` 在 NT-missing 环境下会抛 ImportError。
+   新 `_load_norm_functions()`  helper:
+   - 优先走常规 import 路径(生产环境 NT 装好时零开销)
+   - 兜底走 `importlib.util.spec_from_file_location` 直接加载
+     `statistics.py`,并用保存/恢复 `sys.modules` 的方式临时 stub 父包,
+     避免污染全局 module 表
+   - 这样 `compute_dsr` 在 NT-missing 的 CI / dev 机器上也能执行
+
+3. **`_PatienceCallback` 解耦 + 薄化** — 原 `_PatienceCallback`(27 行,
+   含线程锁、best 跟踪、Optuna Study/FrozenTrial 类型硬耦合)拆为两部分:
+   - **`PatienceTracker`(纯 thread-safe tracker,53 行,在 helpers 里)**
+     —— `observe(value) -> bool` 返回"是否应该停止";等值于 best
+     不算 improvement(语义与原代码一致);`None` value 算 no-improvement;
+     `patience=1` 在第一次未改善时即刻触发停止
+   - **`_PatienceCallback`(13 行 Optuna 适配器,留在 optimizer.py)**
+     —— 把 Optuna `(study, trial)` 签名桥接到 `tracker.observe(trial.value)`
+     并在需要停止时调用 `study.stop()`
+   现在早停行为可以在 8 个线程 × 100 操作的并发压力下测试 (
+   `TestPatienceTracker::test_thread_safety`),这在原架构下不可能。
+
+4. **Optimizer.py 的声明式化** —
+   - 顶部从 "11 个散落的常量/函数/类" 变成 "一个大的 helpers import 块"
+   - 保留 `_FAIL_VALUE` / `_split_dates` 等带下划线的**legacy alias**,
+     只是别名到 helpers 的新公共名,方便未来任何外部 importer 不被破坏
+   - `BacktestOptimizer.run()` 内部所有调用改为使用新公共名(非 alias)
+   - 移除冗余的 module-level 注释(`# Main optimizer class` 和
+     `# Robustness helpers` 两个连在一起的无内容 section)
+
+5. **79 个新测试覆盖 10 个 helper**(全部 NT-free + Optuna-free,CI 可独立跑):
+   - `TestConstants` (2): FITNESS_METRICS 内容 / FAIL_VALUE 符号
+   - `TestSplitDates` (6): 80/20 / 50/50 / 0% train / 100% train 退化 /
+     单日 range / 分数 train_pct
+   - `TestWalkForwardWindows` (9): 3-fold 幸福路径 / 零 folds fallback /
+     负 folds fallback / 100% train fallback / 110% train fallback /
+     边界 clamp / 非重叠 test 段 / train < test 保证 / 超短 range fallback
+   - `TestExtractFitness` (11): 四种 objective 幸福路径 / 未知 objective /
+     空 result / **显式 None statistics (regression test)** /
+     缺失 metric / None metric / 字符串转 float / 非数字字符串
+   - `TestAutoNTrials` (4): 空 / 小维度到 floor / 大维度缩放 / boundary
+   - `TestAutoSampler` (6): 低维连续 cmaes / 含 int 强制 tpe / 高维 tpe /
+     两个 dim boundary / 空 ranges
+   - `TestAutoWorkers` (4): 注入 cpu_count / 零 cpu clamp / 上限 4 / 默认 OS
+   - `TestSlimResult` (3): None / 只保留 3 key / 缺失 key 变 None
+   - `TestComputeDsr` (10): 少 trial / 少 obs / None sharpe / 非 COMPLETE
+     过滤 / FAIL_VALUE 过滤 / None value 过滤 / 零方差 short-circuit /
+     幸福路径 / **None skew/kurt 等价 0** / 默认 norm 函数
+   - `TestComputeParamSensitivity` (7): 少 trial / 幸福路径 + 单/网格 /
+     FAIL_VALUE 过滤 / 非 COMPLETE 过滤 / single bin shape / max_pairs cap /
+     importance 排序
+   - `TestComputeParamStability` (8): 空 best / 少 nearby / 幸福路径 /
+     FAIL_VALUE 过滤 / 缺失 param 算远 / zero best epsilon floor /
+     多 param AND 条件 / round 到 4 位
+   - `TestPatienceTracker` (9): 初始状态 / 首次改善 / 无改善累计 /
+     改善重置 / **等值不算改善** / None 算无改善 / patience=1 立即触发 /
+     **10 线程 × 100 操作并发压力** / observe 返回 bool
+
+6. **修复 latent bug** — `extract_fitness({"statistics": None}, "sharpe")`
+   原代码会抛 `AttributeError`,现正确返回 `FAIL_VALUE`。用
+   `test_none_statistics_is_safe` 锁定这一行为。
+
+7. **完整回归**: 288/288 pure tests 全通过(`tests/backtest/test_optimizer_helpers.py`
+   + `test_runner_pure_helpers.py` + `test_sections.py`),469/469 NT-free 测试
+   全通过。零回归。
+
+**验证**:
+- 288/288 纯测试通过(`PYTHONPATH=src python3 -m pytest
+  tests/backtest/test_optimizer_helpers.py tests/backtest/test_runner_pure_helpers.py
+  tests/backtest/test_sections.py`)
+- 469/469 完整 NT-free 测试套件通过(剔除需要 NT wheel 的 portfolio/node/
+  actors/api/strategy 目录,这些在 Python 3.11 CI 环境中无法运行)
+- `optimizer_helpers.py` 在 `sys.meta_path` NT-blocker 下独立导入并执行
+  `compute_dsr` 通过 —— 证实 fallback 路径能在无 NT 环境启动
+- 字节码编译全部通过(`py_compile` on 3 个文件)
+- TODO / FIXME / XXX 注释清零
+- optimizer.py 行数: 1115 → 808(-307 行,-27.5%)
+- 新增 585 行纯 helpers + 586 行 NT-/Optuna-free 测试
+- 修复 1 个 latent `AttributeError`(extract_fitness 对 None statistics)
+- 六次演进累积: 1500 → 1159 → 1055 → 942 (extract.py) + 1244 → 1205
+  (runner.py) + 1115 → 808 (optimizer.py),大型文件代码行累计减少 -865 行
+
+
