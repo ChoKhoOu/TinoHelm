@@ -438,7 +438,7 @@ class BinanceVisionPipeline:
         chunk_objects: list = []
 
         for chunk in reader:
-            if hdr == 0:
+            if hdr is None:
                 chunk.columns = range(len(chunk.columns))
             if not schema_validated:
                 converter.validate_schema(chunk)
@@ -475,7 +475,7 @@ class BinanceVisionPipeline:
         """Read one full CSV, convert, write."""
         try:
             df = pd.read_csv(csv_path, header=hdr)
-            if hdr == 0:
+            if hdr is None:
                 df.columns = range(len(df.columns))
         except Exception:
             logger.warning("Failed to read CSV %s", csv_path, exc_info=True)
