@@ -38,7 +38,7 @@ class AllocationItem(BaseModel):
     side: str
     quantity: str
     avg_px_open: float | None = None
-    unrealized_pnl: str
+    unrealized_pnl: float | None = None
     node_type: str
 
 
