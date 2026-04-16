@@ -918,3 +918,495 @@ class TestBenchmarkDailyReturns:
         ]
         # starting_balance = 0 ⇒ denom has zero ⇒ returns None
         assert _sections.compute_benchmark_daily_returns(curve, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# compute_trade_scalar_metrics
+# ---------------------------------------------------------------------------
+
+class TestTradeScalarMetrics:
+
+    def _call(self, pnls, **kwargs):
+        defaults = dict(
+            n_orders=10,
+            n_filled_orders=10,
+            n_returns_periods=20,
+            total_trades=len(pnls),
+            total_pnl=float(sum(pnls)),
+            max_drawdown=-0.05,
+            starting_balance=10000.0,
+            win_rate=0.6,
+            avg_win=100.0,
+            avg_loss=-50.0,
+            expectancy=25.0,
+        )
+        defaults.update(kwargs)
+        return _sections.compute_trade_scalar_metrics(pnls, **defaults)
+
+    def test_empty_pnls_returns_all_none(self):
+        out = self._call([])
+        assert set(out.keys()) == {
+            "median_trade_pnl", "std_trade_pnl", "fill_rate",
+            "avg_trades_per_day", "recovery_factor", "sqn",
+            "kelly_criterion", "k_ratio", "expectancy_r",
+        }
+        assert all(v is None for v in out.values())
+
+    def test_median_and_std(self):
+        out = self._call([10.0, 20.0, 30.0, -5.0, 15.0])
+        assert out["median_trade_pnl"] == pytest.approx(15.0)
+        assert out["std_trade_pnl"] is not None
+        assert out["std_trade_pnl"] > 0
+
+    def test_std_none_when_single_trade(self):
+        out = self._call([10.0])
+        assert out["median_trade_pnl"] == pytest.approx(10.0)
+        assert out["std_trade_pnl"] is None
+
+    def test_fill_rate_percent(self):
+        out = self._call([10.0], n_orders=20, n_filled_orders=15)
+        assert out["fill_rate"] == pytest.approx(75.0)
+
+    def test_fill_rate_none_when_no_orders(self):
+        out = self._call([10.0], n_orders=0, n_filled_orders=0)
+        assert out["fill_rate"] is None
+
+    def test_avg_trades_per_day(self):
+        out = self._call([10.0] * 10, n_returns_periods=100, total_trades=10)
+        assert out["avg_trades_per_day"] == pytest.approx(0.1)
+
+    def test_avg_trades_per_day_none_when_no_periods(self):
+        out = self._call([10.0], n_returns_periods=0)
+        assert out["avg_trades_per_day"] is None
+
+    def test_recovery_factor(self):
+        # total_pnl=500, starting=10000 → net_return=0.05; dd=-0.05 → recovery=1.0
+        out = self._call(
+            [500.0], total_pnl=500.0, starting_balance=10000.0,
+            max_drawdown=-0.05,
+        )
+        assert out["recovery_factor"] == pytest.approx(1.0)
+
+    def test_recovery_factor_none_when_zero_drawdown(self):
+        out = self._call([500.0], max_drawdown=0.0)
+        assert out["recovery_factor"] is None
+
+    def test_recovery_factor_none_when_none_drawdown(self):
+        out = self._call([500.0], max_drawdown=None)
+        assert out["recovery_factor"] is None
+
+    def test_sqn_positive_for_winning_system(self):
+        # Consistent wins should produce positive SQN
+        out = self._call([10.0, 12.0, 8.0, 11.0, 9.0, 10.5, 11.5, 9.5])
+        assert out["sqn"] is not None
+        assert out["sqn"] > 0
+
+    def test_sqn_none_when_zero_std(self):
+        # All identical PnLs → std=0 → SQN undefined
+        out = self._call([10.0, 10.0, 10.0, 10.0])
+        assert out["sqn"] is None
+
+    def test_kelly_criterion(self):
+        # win_rate=0.6, avg_win=100, avg_loss=-50 → R=2 → kelly=(0.6-0.4/2)*100=40
+        out = self._call([10.0], win_rate=0.6, avg_win=100.0, avg_loss=-50.0)
+        assert out["kelly_criterion"] == pytest.approx(40.0)
+
+    def test_kelly_none_when_no_avg_loss(self):
+        out = self._call([10.0], avg_loss=None)
+        assert out["kelly_criterion"] is None
+
+    def test_kelly_none_when_zero_avg_loss(self):
+        out = self._call([10.0], avg_loss=0.0)
+        assert out["kelly_criterion"] is None
+
+    def test_k_ratio_for_upward_trending_equity(self):
+        # Consistent positive PnLs → strong k-ratio
+        out = self._call([10.0] * 30)
+        # Exactly linear equity → residuals=0 → k_ratio falls back to None (mse<=0)
+        # So we test with slight noise:
+        out = self._call([10.0, 12.0, 9.0, 11.0, 10.5, 10.0, 11.5, 9.5, 10.0, 12.5] * 3)
+        assert out["k_ratio"] is not None
+
+    def test_k_ratio_none_for_degenerate_equity(self):
+        # Large negative PnLs → cum equity goes below zero → log undefined → fallback None
+        out = self._call([-100000.0, 0.0, 0.0], starting_balance=10000.0)
+        assert out["k_ratio"] is None
+
+    def test_expectancy_r(self):
+        # expectancy=25, avg_loss=-50 → expectancy_r = 25/50 = 0.5
+        out = self._call([10.0], expectancy=25.0, avg_loss=-50.0)
+        assert out["expectancy_r"] == pytest.approx(0.5)
+
+    def test_expectancy_r_none_when_no_expectancy(self):
+        out = self._call([10.0], expectancy=None)
+        assert out["expectancy_r"] is None
+
+    def test_values_are_json_safe(self):
+        # Ensure returned floats are never NaN/Inf
+        out = self._call([0.0, 0.0, 0.0, 0.0])
+        import math as _m
+        for v in out.values():
+            if v is not None:
+                assert not (_m.isnan(v) or _m.isinf(v))
+
+
+# ---------------------------------------------------------------------------
+# compute_trade_pnl_distribution
+# ---------------------------------------------------------------------------
+
+class TestTradePnlDistribution:
+
+    def test_empty_returns_empty(self):
+        assert _sections.compute_trade_pnl_distribution([]) == []
+
+    def test_bin_count_respects_min_floor(self):
+        # Small sample (5 trades) → bins = max(10, 5//5) = 10
+        out = _sections.compute_trade_pnl_distribution([1.0, 2.0, 3.0, 4.0, 5.0])
+        assert len(out) == 10
+
+    def test_bin_count_respects_cap(self):
+        # Very large sample → bins capped at 30
+        rng = np.random.default_rng(seed=3)
+        pnls = list(rng.normal(0, 10, size=1000))
+        out = _sections.compute_trade_pnl_distribution(pnls)
+        assert len(out) == 30
+
+    def test_counts_sum_to_total(self):
+        pnls = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0] * 5
+        out = _sections.compute_trade_pnl_distribution(pnls)
+        assert sum(bucket["count"] for bucket in out) == len(pnls)
+
+    def test_bins_are_sorted(self):
+        out = _sections.compute_trade_pnl_distribution([-10.0, -5.0, 0.0, 5.0, 10.0])
+        starts = [b["bin_start"] for b in out]
+        assert starts == sorted(starts)
+
+
+# ---------------------------------------------------------------------------
+# compute_cumulative_trade_pnl
+# ---------------------------------------------------------------------------
+
+class TestCumulativeTradePnl:
+
+    def test_empty_returns_empty(self):
+        assert _sections.compute_cumulative_trade_pnl([]) == []
+
+    def test_one_based_trade_numbering(self):
+        out = _sections.compute_cumulative_trade_pnl([10.0, 20.0])
+        assert out[0]["trade_num"] == 1
+        assert out[1]["trade_num"] == 2
+
+    def test_cumulative_values(self):
+        out = _sections.compute_cumulative_trade_pnl([10.0, -5.0, 20.0, -15.0])
+        assert out[0]["cumulative_pnl"] == pytest.approx(10.0)
+        assert out[1]["cumulative_pnl"] == pytest.approx(5.0)
+        assert out[2]["cumulative_pnl"] == pytest.approx(25.0)
+        assert out[3]["cumulative_pnl"] == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# compute_trade_pnl_scatter
+# ---------------------------------------------------------------------------
+
+class TestTradePnlScatter:
+
+    def test_empty_returns_empty(self):
+        assert _sections.compute_trade_pnl_scatter([]) == []
+
+    def test_timestamp_formatting(self):
+        trades = [
+            {"ts_closed": _ts_ns(2025, 6, 15, 12), "pnl": 50.0,
+             "side": "BUY", "instrument": "BTCUSDT"},
+        ]
+        out = _sections.compute_trade_pnl_scatter(trades)
+        assert out[0]["timestamp"] is not None
+        assert "2025-06-15" in out[0]["timestamp"]
+
+    def test_zero_timestamp_becomes_null(self):
+        trades = [{"ts_closed": 0, "pnl": 10.0, "side": "BUY", "instrument": "ETHUSDT"}]
+        out = _sections.compute_trade_pnl_scatter(trades)
+        assert out[0]["timestamp"] is None
+
+    def test_missing_timestamp_becomes_null(self):
+        trades = [{"ts_closed": None, "pnl": 10.0, "side": "BUY", "instrument": "ETHUSDT"}]
+        out = _sections.compute_trade_pnl_scatter(trades)
+        assert out[0]["timestamp"] is None
+
+    def test_all_fields_preserved(self):
+        trades = [
+            {"ts_closed": _ts_ns(2025, 1, 1), "pnl": 123.456,
+             "side": "SELL", "instrument": "SOLUSDT"},
+        ]
+        out = _sections.compute_trade_pnl_scatter(trades)
+        assert out[0]["pnl"] == pytest.approx(123.456)
+        assert out[0]["side"] == "SELL"
+        assert out[0]["instrument"] == "SOLUSDT"
+
+
+# ---------------------------------------------------------------------------
+# compute_holding_time_distribution
+# ---------------------------------------------------------------------------
+
+class TestHoldingTimeDistribution:
+
+    def test_empty_returns_empty(self):
+        assert _sections.compute_holding_time_distribution([]) == []
+
+    def test_ignores_zero_and_negative(self):
+        # Zero and negative durations are skipped; remaining list is empty → []
+        assert _sections.compute_holding_time_distribution([0, -100, 0]) == []
+
+    def test_ignores_none(self):
+        # None entries are ignored (mirrors ``if d and d > 0``)
+        out = _sections.compute_holding_time_distribution([None, None, None])
+        assert out == []
+
+    def test_converts_ns_to_hours(self):
+        # 3.6e12 ns = 1 hour. A bunch of 1h holds → bins around 1.0
+        durations = [int(3.6e12)] * 15  # 15 one-hour holds
+        out = _sections.compute_holding_time_distribution(durations)
+        assert len(out) == 10  # min bin count floor
+        # All values should fall into a single bin range
+        total = sum(b["count"] for b in out)
+        assert total == 15
+
+    def test_bin_counts_sum_correctly(self):
+        # 20 mixed durations
+        durations = [int(3.6e12 * h) for h in range(1, 21)]
+        out = _sections.compute_holding_time_distribution(durations)
+        assert sum(b["count"] for b in out) == 20
+
+
+# ---------------------------------------------------------------------------
+# compute_mae_mfe
+# ---------------------------------------------------------------------------
+
+class TestMaeMfe:
+
+    def _bars(self, inst, *hl_tuples, base_ts=_ts_ns(2025, 1, 1)):
+        # Produce primitive (ts, high, low) tuples spaced 1h apart
+        return {inst: [(base_ts + i * 3600 * 10**9, h, l)
+                       for i, (h, l) in enumerate(hl_tuples)]}
+
+    def test_empty_positions_returns_empty(self):
+        assert _sections.compute_mae_mfe([], {}) == []
+
+    def test_missing_bars_skipped(self):
+        positions = [{
+            "instrument": "BTCUSDT",
+            "ts_opened": _ts_ns(2025, 1, 1),
+            "ts_closed": _ts_ns(2025, 1, 2),
+            "entry_price": 100.0,
+            "side": "BUY",
+            "pnl": 10.0,
+        }]
+        assert _sections.compute_mae_mfe(positions, {}) == []
+
+    def test_missing_ts_skipped(self):
+        positions = [{
+            "instrument": "BTCUSDT",
+            "ts_opened": 0,
+            "ts_closed": _ts_ns(2025, 1, 2),
+            "entry_price": 100.0,
+            "side": "BUY",
+            "pnl": 10.0,
+        }]
+        bars = self._bars("BTCUSDT", (110, 90))
+        assert _sections.compute_mae_mfe(positions, bars) == []
+
+    def test_buy_mae_mfe(self):
+        # Entry at 100, bars have high=110, low=95 → MAE=5, MFE=10
+        bars = self._bars(
+            "BTCUSDT",
+            (105, 98),   # bar 1
+            (110, 95),   # bar 2 (deepest drawdown & highest point)
+            (108, 99),   # bar 3
+        )
+        pos_open = _ts_ns(2025, 1, 1)
+        pos_close = pos_open + 5 * 3600 * 10**9  # 5 hours later — covers all bars
+        positions = [{
+            "instrument": "BTCUSDT",
+            "ts_opened": pos_open,
+            "ts_closed": pos_close,
+            "entry_price": 100.0,
+            "side": "BUY",
+            "pnl": 8.0,
+        }]
+        out = _sections.compute_mae_mfe(positions, bars)
+        assert len(out) == 1
+        assert out[0]["mae"] == pytest.approx(5.0)   # 100 - 95
+        assert out[0]["mfe"] == pytest.approx(10.0)  # 110 - 100
+        assert out[0]["side"] == "BUY"
+        assert out[0]["pnl"] == pytest.approx(8.0)
+
+    def test_sell_mae_mfe_inverted(self):
+        # Short position: MAE = max_high - entry, MFE = entry - min_low
+        bars = self._bars(
+            "BTCUSDT",
+            (115, 90),
+        )
+        pos_open = _ts_ns(2025, 1, 1)
+        pos_close = pos_open + 3600 * 10**9
+        positions = [{
+            "instrument": "BTCUSDT",
+            "ts_opened": pos_open,
+            "ts_closed": pos_close,
+            "entry_price": 100.0,
+            "side": "SELL",
+            "pnl": -5.0,
+        }]
+        out = _sections.compute_mae_mfe(positions, bars)
+        assert out[0]["mae"] == pytest.approx(15.0)   # 115 - 100
+        assert out[0]["mfe"] == pytest.approx(10.0)   # 100 - 90
+
+    def test_bars_outside_window_ignored(self):
+        # Only bar 2 falls within position window; bars 1 and 3 are outside
+        pos_open = _ts_ns(2025, 1, 1, 12)
+        pos_close = _ts_ns(2025, 1, 1, 14)
+        bars = {
+            "BTCUSDT": [
+                (_ts_ns(2025, 1, 1, 10), 200, 50),   # way before
+                (_ts_ns(2025, 1, 1, 13), 110, 95),   # inside window
+                (_ts_ns(2025, 1, 1, 18), 500, 10),   # way after
+            ],
+        }
+        positions = [{
+            "instrument": "BTCUSDT",
+            "ts_opened": pos_open,
+            "ts_closed": pos_close,
+            "entry_price": 100.0,
+            "side": "BUY",
+            "pnl": 5.0,
+        }]
+        out = _sections.compute_mae_mfe(positions, bars)
+        assert out[0]["mae"] == pytest.approx(5.0)   # 100 - 95
+        assert out[0]["mfe"] == pytest.approx(10.0)  # 110 - 100
+
+    def test_skips_positions_with_no_matching_bar(self):
+        # Position window contains no bars → position omitted entirely
+        pos_open = _ts_ns(2025, 6, 1)
+        pos_close = _ts_ns(2025, 6, 2)
+        bars = {
+            "BTCUSDT": [(_ts_ns(2025, 1, 1), 105, 95)],  # far outside window
+        }
+        positions = [{
+            "instrument": "BTCUSDT",
+            "ts_opened": pos_open,
+            "ts_closed": pos_close,
+            "entry_price": 100.0,
+            "side": "BUY",
+            "pnl": 0.0,
+        }]
+        assert _sections.compute_mae_mfe(positions, bars) == []
+
+    def test_bars_endpoints_included(self):
+        # Endpoints ts_o and ts_c are inclusive
+        pos_open = _ts_ns(2025, 1, 1, 10)
+        pos_close = _ts_ns(2025, 1, 1, 12)
+        bars = {
+            "BTCUSDT": [
+                (pos_open, 105, 95),         # exactly at ts_opened
+                (pos_close, 108, 92),        # exactly at ts_closed
+            ],
+        }
+        positions = [{
+            "instrument": "BTCUSDT",
+            "ts_opened": pos_open,
+            "ts_closed": pos_close,
+            "entry_price": 100.0,
+            "side": "BUY",
+            "pnl": 0.0,
+        }]
+        out = _sections.compute_mae_mfe(positions, bars)
+        # Both bars included → max_high=108, min_low=92
+        assert out[0]["mae"] == pytest.approx(8.0)
+        assert out[0]["mfe"] == pytest.approx(8.0)
+
+
+# ---------------------------------------------------------------------------
+# compute_robustness
+# ---------------------------------------------------------------------------
+
+class TestRobustness:
+
+    def test_always_returns_dict_with_psr_keys(self):
+        out = _sections.compute_robustness(
+            [10.0, -5.0, 20.0, -10.0, 15.0],
+            starting_balance=10000.0,
+            daily_sharpe=0.05,
+            n_days=100,
+            skewness=0.1,
+            kurtosis=0.2,
+        )
+        assert out is not None
+        for key in ("psr", "min_backtest_length_days",
+                    "actual_backtest_length_days",
+                    "backtest_length_sufficient"):
+            assert key in out
+
+    def test_psr_none_when_no_daily_sharpe(self):
+        out = _sections.compute_robustness(
+            [10.0] * 10, starting_balance=10000.0,
+            daily_sharpe=None, n_days=100,
+            skewness=0.0, kurtosis=0.0,
+        )
+        assert out["psr"] is None
+        assert out["min_backtest_length_days"] is None
+
+    def test_backtest_length_sufficient_flag(self):
+        # Positive sharpe, few observations → backtest short → flag False
+        out = _sections.compute_robustness(
+            [10.0, 20.0, 30.0, 40.0, 50.0],
+            starting_balance=10000.0,
+            daily_sharpe=0.001,  # tiny SR → large MBL required
+            n_days=5,
+            skewness=0.0, kurtosis=0.0,
+        )
+        assert out["min_backtest_length_days"] is not None
+        assert out["backtest_length_sufficient"] is False
+
+    def test_backtest_length_sufficient_none_when_mbl_none(self):
+        out = _sections.compute_robustness(
+            [10.0], starting_balance=10000.0,
+            daily_sharpe=-0.1,  # negative SR → MBL undefined
+            n_days=100,
+            skewness=0.0, kurtosis=0.0,
+        )
+        assert out["min_backtest_length_days"] is None
+        assert out["backtest_length_sufficient"] is None
+
+    def test_none_skew_and_kurt_coerced_to_zero(self):
+        # Passing skewness=None / kurtosis=None should not crash
+        out = _sections.compute_robustness(
+            [10.0, -5.0, 15.0, -8.0, 20.0, -3.0],
+            starting_balance=10000.0,
+            daily_sharpe=0.01,
+            n_days=50,
+            skewness=None, kurtosis=None,
+        )
+        assert out is not None
+        assert "psr" in out
+
+    def test_mc_keys_present_when_sufficient_trades(self):
+        # >=2 trades → MC runs
+        out = _sections.compute_robustness(
+            [10.0, -5.0, 20.0, -8.0, 15.0] * 4,
+            starting_balance=10000.0,
+            daily_sharpe=0.02,
+            n_days=50,
+            skewness=0.1, kurtosis=0.2,
+        )
+        assert "mc_equity_cone" in out
+        assert "mc_probability_of_loss" in out
+        assert "mc_num_simulations" in out
+        assert out["mc_num_simulations"] == 1000
+
+    def test_mc_keys_absent_when_single_trade(self):
+        out = _sections.compute_robustness(
+            [10.0], starting_balance=10000.0,
+            daily_sharpe=0.01, n_days=10,
+            skewness=0.0, kurtosis=0.0,
+        )
+        # MC returns None for <2 trades → MC keys absent
+        assert "mc_equity_cone" not in out
+        assert "mc_num_simulations" not in out
