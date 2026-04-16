@@ -721,13 +721,16 @@ class BinanceVisionPipeline:
         """
         category = _WRITE_CATEGORY.get(data_type)
         if category == "bar" and interval:
-            from tinohelm.data.catalog import _make_bar_type, _make_instrument
+            from tinohelm.data.catalog import _make_bar_type, _make_instrument, resolve_catalog_path
             inst = _make_instrument(symbol)
             bar_type = _make_bar_type(inst.id, interval)
-            target_dir = Path(self.catalog_path) / "data" / "bar" / str(bar_type)
+            resolved = resolve_catalog_path(self.catalog_path, data_type)
+            target_dir = Path(resolved) / "data" / "bar" / str(bar_type)
         elif category == "trade_tick":
+            from tinohelm.data.catalog import resolve_catalog_path
             inst = self._get_instrument(symbol)
-            target_dir = Path(self.catalog_path) / "data" / "trade_tick" / str(inst.id)
+            resolved = resolve_catalog_path(self.catalog_path, data_type)
+            target_dir = Path(resolved) / "data" / "trade_tick" / str(inst.id)
         else:
             return  # funding_rate etc. use JSON, no parquet cleanup needed
 
