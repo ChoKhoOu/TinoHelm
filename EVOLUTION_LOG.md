@@ -113,3 +113,140 @@ extract.py 还剩两个内联分析块未处理:
 - section 12b + section 14 在 extract.py 中的内联数学代码从 ~250 行降至 ~130 行
   (全部为 primitive 装配逻辑,零内联数学)
 
+## 2026-04-16 (5)
+
+**主题**: 将 `backtest/runner.py` 中的纯逻辑下沉到新建的 `runner_helpers.py`,并建立可在无 NT 环境下运行的单元测试层
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- `src/tinohelm/backtest/runner_helpers.py` — 新建 245 行,收纳 10 个 NT-free 纯函数/常量
+- `src/tinohelm/backtest/runner.py` — 1244 → 1205 行(-39 行,-3.1%),消除 3 处内联 payload 构造重复和 2 处内联 datetime/字符串装配
+- `tests/backtest/test_runner_pure_helpers.py` — 新建,76 个无 NT 依赖的单元测试(之前 runner 相关 pure 逻辑测试都要 skipif NT)
+
+**动机**:
+
+上一轮(2026-04-16 (4))将 `extract.py` 压缩到 942 行并锁定了 schema 契约。
+按照 `extract.py` 的成功范式,`backtest/runner.py`(1244 行)是本项目
+剩下唯一一个内联纯逻辑密度仍然很高的大文件:
+
+1. **`_setup_engine` (166 行)** 混合了 6 种职责 —— 策略 bundle 归一、
+   warmup 起点回退、引擎/venue 装配、instrument 加载、bar 解析、benchmark 日收盘
+   价计算 + metadata 缓存。其中至少 3 处(warmup 回退、symbols/intervals
+   归一、benchmark daily closes)是纯 primitive 运算,只是因为被埋在 166
+   行内联代码里而无法单测。
+2. **`_resolve_bars`** 内联了两处 NT 字符串装配(候选 source 时间框遍历、
+   composite bar type 字符串模板)。后者尤其危险——一旦 NT 的
+   `LAST-INTERNAL@...-EXTERNAL` 语法改动,全项目没有一处测试能捕获。
+3. **`_ProgressReporter.on_bar` 和 `_report_progress` 构造几乎相同的
+   payload dict**(10 个 key,4 份字面量),
+   但字段集合不完全一致(`message`  只在后者出现),导致前端
+   `NotificationListener` 有时收到不同 shape 的 `backtest.progress`,
+   dedupe/显示逻辑里做了隐式兼容。这是一个典型的"重复 + 漂移"问题。
+4. **`_load_funding_rates` 里的装配循环** 跟 NT 无关,但跟
+   `load_funding_rates` / `fetch_funding_info` 两个真·I/O 函数搅在一块,
+   任何"空 mark_price 跳过"之类的边界逻辑都没有测试保护。
+
+最终,`tests/backtest/test_runner_helpers.py` 里所有现有的纯逻辑测试(41 个)
+全部 gated on `try: import nautilus_trader; _HAS_NT = True` —— 没有 NT 安装时
+CI 会跳过 41 个测试。把真正 NT-free 的逻辑抽出来,可以同时解决"重复/漂移"和
+"测试被 skip"两个问题。
+
+**要点**:
+
+1. **新建 `runner_helpers.py`,10 个导出符号** —— `TIMEFRAME_PRIORITY`
+   (tuple,不可变的单一事实源)+ 9 个纯函数:
+   - `interval_to_minutes(interval)` —— 从 `runner.py` 平移
+   - `compute_warmup_adjusted_start(start, interval, warmup_bars)` ——
+     新抽取;`start is None` / `warmup_bars <= 0` / `mins == 0` 三种
+     no-op 情况都明确返回 `start`  (原代码在 None 时会抛 TypeError)
+   - `resolve_symbols_intervals(bundle_symbols, bundle_interval,
+     current_symbols, current_intervals)` —— 新抽取;
+     runner-level 非空时 win,否则 fallback 到 bundle;始终返回新列表(
+     测试锁定了列表身份独立性,防止调用方 mutate 串流)
+   - `candidate_source_intervals(target, priority=TIMEFRAME_PRIORITY)` ——
+     新抽取;优先级列表可注入,便于测试和将来支持自定义优先级
+   - `build_composite_bar_type_str(nt_symbol, source, target, interval_map)`
+     —— 新抽取;锁定 `{nt_sym}-{target}-LAST-INTERNAL@{source}-EXTERNAL`
+     字符串语法
+   - `extract_benchmark_daily_closes(bars)` —— 新抽取;接受
+     `Iterable[tuple[ts_ns, close]]` primitive 契约(跟 extract.py 的
+     MAE/MFE 一样的契约风格),避免引入 Protocol/abc
+   - `compute_bar_progress_fields(bar_count, total_bars, elapsed)` ——
+     新抽取;封装 10-90 pct 映射、eta、bars_per_sec 计算,
+     负 elapsed 钳到 0、零 total_bars 返回 pct=10 地板
+   - `build_progress_payload(run_id, *, pct, elapsed_secs, eta_secs=None, ...)`
+     —— 新抽取;canonical payload 形状,10 个 key 全部强制存在
+     (弥合了 setup 阶段和 bar 阶段原来不一致的 key 集合)
+   - `assemble_funding_events(rates_by_symbol, nt_symbols_by_symbol,
+     interval_minutes_by_symbol)` —— 新抽取;把原 `_load_funding_rates` 里
+     90 行的"I/O + 装配 + 排序"拆成"I/O → primitive dict → 纯装配",
+     零/None mark_price 丢弃、缺失 interval 默认 480 分钟、缺失 nt_sym 降级
+     都在纯函数里,可单测
+
+2. **`runner.py` 消重** ——
+   - `_ProgressReporter.on_bar` 从 22 行(内含两处独立字段计算 +
+     10-key payload literal)缩为 14 行,改为 `fields = compute_bar_progress_fields(...)`
+     + `build_progress_payload(...)` 的声明式调用
+   - `_report_progress` 从 25 行缩为 18 行,同样使用 `build_progress_payload`
+     ;两个调用点输出 payload 的 shape 现在强一致
+   - `_resolve_bars` 从 30 行缩为 22 行,composite 字符串装配一行完成
+   - `_setup_engine` 从 166 行缩为约 144 行,warmup 分支 + symbols/intervals
+     归一 + benchmark 装配三处各削 6-10 行
+   - `_load_funding_rates` 从 69 行缩为 42 行,装配逻辑完全下沉到 pure helper
+   - `BacktestRunner._TIMEFRAME_PRIORITY` 现在是 `list(TIMEFRAME_PRIORITY)`
+     的单一引用,不再是散落的字面量
+
+3. **`test_runner_pure_helpers.py` —— 76 个 NT-free 测试** 覆盖:
+   - `TestIntervalToMinutes` (6): parametrize 幸福路径 / invalid / case-insensitive
+   - `TestComputeWarmupAdjustedStart` (9): 三种时间单位 / None start / 空 interval
+     / 零 warmup / 负 warmup / None warmup / invalid interval
+   - `TestResolveSymbolsIntervals` (7): 幸福路径 / 四种 fallback 组合 /
+     列表身份独立性(防 mutation 串流)
+   - `TestCandidateSourceIntervals` (8): 各层级 target / 1m 无下限 / 1d 全上限 /
+     unknown / 空 / 次序保留 / 自定义 priority tuple
+   - `TestBuildCompositeBarTypeStr` (5): 两种正常映射 / source 未知回退 /
+     target 未知回退 / 空 map 双回退
+   - `TestExtractBenchmarkDailyCloses` (6): 空 / 单 bar / 同日多 bar 后者赢 /
+     跨月边界 / float 强转 / generator 接受
+   - `TestComputeBarProgressFields` (7): 零 total_bars / 50% 中点 / pct 90 上限 /
+     起点 floor / 零 elapsed 无 bps / 负 elapsed 钳 0 / elapsed 四舍五入
+   - `TestBuildProgressPayload` (4): 最小 shape / 完整 shape / trades 永远 None /
+     两次调用等值
+   - `TestAssembleFundingEvents` (9): 空 / 单 rate / 零 mark_price 丢弃 /
+     多 symbol 时间戳排序 / 每 symbol interval / 默认 480 / 缺失 nt_sym 降级 /
+     timestamp_iso UTC / 单 symbol 空 rates
+
+4. **NT-free 单测层的价值** —— 现有 `test_runner_helpers.py` 里所有 41 个
+   pure 逻辑测试都 gated on `_HAS_NT`;本轮新建的 76 个测试只要 python 3.11+
+   就能跑,不需要 nautilus_trader 轮子。这对构建速度和 CI 资源都是大幅改善
+   (NT wheel ~100MB,冷装 ~30s)。同时 `runner_helpers.py` 模块本身
+   通过 `sys.meta_path` blocker 验证"不依赖 NT"——跑完 `import_without_nt.py`
+   smoke test 全通过。
+
+5. **修复了一个潜在 TypeError** —— 原 `_setup_engine` 的 warmup 回退:
+   ```python
+   if self.warmup_bars and self.warmup_bars > 0 and self.intervals:
+       self.start = self.start - warmup_delta   # ← None 时崩溃
+   ```
+   新版 `compute_warmup_adjusted_start(None, "5m", 10) is None`,
+   对 `self.start=None` 是显式安全的。实际路径里 start 通常不会是 None,
+   但原代码的"假设"应该改为"契约"。
+
+6. **`backtest.progress` payload shape 统一化** —— 前端
+   `NotificationListener`  和 TUI 都依赖这个事件。在这次重构前,
+   setup 阶段和 bar 阶段的两条发布路径字段集合差一个 `message` key,
+   dedupe 逻辑里有隐式兼容。现在 10 个 key 每次都存在,
+   `message` 默认 None,前端可以放心做 `payload.message` 访问。
+
+7. **完整回归**: `.venv/bin/python -m pytest tests/` 从 601 个测试增至 677 个,
+   全部通过(+76 pure helper 测试)。零回归。
+
+**验证**:
+- 677/677 pytest 全通过(`PYTHONPATH=src python3 -m pytest tests/`)
+- 字节码编译检查全部通过(`py_compile` on 修改/新建的 3 个文件)
+- `runner_helpers.py` 在 `sys.meta_path` blocker 下独立导入通过 —— 证实零 NT 依赖
+- 检查 TODO/FIXME/XXX 注释清零
+- runner.py 行数: 1244 → 1205 (-39 行,-3.1%)
+- 新增 245 行纯 helpers + 508 行 NT-free 测试
+- `_setup_engine` 内联 datetime/字符串/arithmetic 代码从 ~35 行降至 ~5 行
+
+

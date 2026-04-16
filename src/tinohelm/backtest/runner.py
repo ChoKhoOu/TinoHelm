@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
-import re as _re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -18,6 +17,18 @@ from nautilus_trader.model import TraderId
 from nautilus_trader.model.enums import AccountType, OmsType
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+from tinohelm.backtest.runner_helpers import (
+    TIMEFRAME_PRIORITY as _TIMEFRAME_PRIORITY_TUPLE,
+    assemble_funding_events,
+    build_composite_bar_type_str,
+    build_progress_payload,
+    candidate_source_intervals,
+    compute_bar_progress_fields,
+    compute_warmup_adjusted_start,
+    extract_benchmark_daily_closes,
+    interval_to_minutes as _interval_to_minutes,
+    resolve_symbols_intervals,
+)
 from tinohelm.strategy.loader import (
     create_strategies,
     create_actors,
@@ -27,23 +38,6 @@ from tinohelm.strategy.loader import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _interval_to_minutes(interval: str) -> int:
-    """Convert an interval string like '5m', '1h', '1d' to minutes."""
-    m = _re.match(r"^(\d+)([smhd])$", interval.lower())
-    if not m:
-        return 0
-    n, unit = int(m.group(1)), m.group(2)
-    if unit == "s":
-        return max(1, n // 60)
-    if unit == "m":
-        return n
-    if unit == "h":
-        return n * 60
-    if unit == "d":
-        return n * 1440
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -85,28 +79,25 @@ class _ProgressReporter(Actor):
             and redis_client is not None
             and total_bars > 0
         ):
-            # Map bar progress to 10-90% range (leaving 0-10 for setup, 90-100 for post)
-            pct = min(int(self._bar_count / total_bars * 80) + 10, 90)
-            elapsed = round(time.monotonic() - self._start_time, 1)
-            eta = round(elapsed * (100 - pct) / pct, 1) if pct > 0 else None
-            bars_per_sec = round(self._bar_count / elapsed, 1) if elapsed > 0 else None
+            elapsed = time.monotonic() - self._start_time
+            fields = compute_bar_progress_fields(
+                self._bar_count, total_bars, elapsed,
+            )
+            payload = build_progress_payload(
+                run_id,
+                pct=fields["pct"],
+                elapsed_secs=fields["elapsed_secs"],
+                eta_secs=fields["eta_secs"],
+                total_bars=total_bars,
+                processed_bars=self._bar_count,
+                bars_per_sec=fields["bars_per_sec"],
+            )
             try:
                 redis_client.setex(
-                    f"tino:backtest:progress:{run_id}", 86400, str(pct),
+                    f"tino:backtest:progress:{run_id}", 86400, str(fields["pct"]),
                 )
-                payload = json.dumps({
-                    "type": "backtest.progress",
-                    "run_id": run_id,
-                    "pct": pct,
-                    "elapsed_secs": elapsed,
-                    "eta_secs": eta,
-                    "total_bars": total_bars,
-                    "processed_bars": self._bar_count,
-                    "bars_per_sec": bars_per_sec,
-                    "trades": None,
-                })
                 redis_client.publish(
-                    f"tino:backtest:progress:{run_id}", payload,
+                    f"tino:backtest:progress:{run_id}", json.dumps(payload),
                 )
             except Exception:
                 pass  # Never let Redis errors crash the backtest
@@ -187,10 +178,9 @@ class BacktestRunner:
         # Strategy bundle (explicit or auto-wrapped from legacy params)
         self._strategy_bundle = strategy_bundle
 
-    # Timeframes ordered from lowest to highest for composite source resolution
-    _TIMEFRAME_PRIORITY: list[str] = [
-        "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d",
-    ]
+    # Timeframes ordered from lowest to highest for composite source resolution.
+    # Sourced from ``runner_helpers.TIMEFRAME_PRIORITY`` (single source of truth).
+    _TIMEFRAME_PRIORITY: list[str] = list(_TIMEFRAME_PRIORITY_TUPLE)
 
     def _try_load_bars(self, bar_type_str: str, source_type: str = "klines") -> list | None:
         """Load bars from the resolved catalog path for a specific source_type.
@@ -250,14 +240,9 @@ class BacktestRunner:
             return bars, bar_type_str, None
 
         # 2. Composite: find lowest available source timeframe
-        try:
-            target_idx = self._TIMEFRAME_PRIORITY.index(ivl)
-        except ValueError:
-            target_idx = 0  # Unknown interval, skip composite search
-
         source_ivl: str | None = None
         source_bars = None
-        for candidate in self._TIMEFRAME_PRIORITY[:target_idx]:
+        for candidate in candidate_source_intervals(ivl):
             candidate_bt = _make_bar_type_str(sym, candidate)
             source_bars = self._try_load_bars(candidate_bt, source_type=self.data_type)
             if source_bars:
@@ -266,10 +251,8 @@ class BacktestRunner:
 
         if source_bars and source_ivl:
             source_bt_str = _make_bar_type_str(sym, source_ivl)
-            source_interval_part = _INTERVAL_MAP.get(source_ivl, "1-MINUTE")
-            target_interval_part = _INTERVAL_MAP.get(ivl, "1-MINUTE")
-            composite_bt_str = (
-                f"{nt_sym}-{target_interval_part}-LAST-INTERNAL@{source_interval_part}-EXTERNAL"
+            composite_bt_str = build_composite_bar_type_str(
+                nt_sym, source_ivl, ivl, _INTERVAL_MAP,
             )
             logger.info(
                 "No %s data for %s, using %s composite aggregation (%d bars): %s",
@@ -638,7 +621,6 @@ class BacktestRunner:
         FundingCostTracker actor.
         """
         import asyncio
-        from datetime import datetime as _dt, timezone
         from tinohelm.data.funding_cache import load_funding_rates
         from tinohelm.data.instruments import fetch_funding_info, strip_to_binance_api_symbol
 
@@ -657,46 +639,32 @@ class BacktestRunner:
         # Load per-symbol funding interval (hours) from Binance
         funding_info = fetch_funding_info()
 
-        all_events: list[dict] = []
-        for sym, nt_sym in zip(self.symbols, nt_symbols):
+        # Gather raw rates + per-symbol interval into primitive dicts, then
+        # hand off to the pure assembler helper.
+        rates_by_symbol: dict[str, list[dict]] = {}
+        nt_symbols_by_symbol: dict[str, str] = dict(zip(self.symbols, nt_symbols))
+        interval_minutes_by_symbol: dict[str, int] = {}
+        for sym in self.symbols:
             api_sym = strip_to_binance_api_symbol(sym)
-            interval_hours = funding_info.get(api_sym, 8)
-            interval_minutes = interval_hours * 60
+            interval_minutes_by_symbol[sym] = funding_info.get(api_sym, 8) * 60
             try:
-                rates = load_funding_rates(
-                    symbol=sym,
-                    start=self.start,
-                    end=self.end,
+                rates_by_symbol[sym] = load_funding_rates(
+                    symbol=sym, start=self.start, end=self.end,
                 )
-                for r in rates:
-                    ts_ms = r["funding_time_ms"]
-                    mark_price = r["mark_price"]
-                    # If mark_price is missing/zero, skip (can't calculate notional)
-                    if not mark_price:
-                        continue
-                    ts_iso = _dt.fromtimestamp(
-                        ts_ms / 1000, tz=timezone.utc,
-                    ).isoformat()
-                    all_events.append({
-                        "timestamp_ns": ts_ms * 1_000_000,  # ms → ns
-                        "timestamp_iso": ts_iso,
-                        "symbol": nt_sym,
-                        "rate": r["funding_rate"],
-                        "mark_price": mark_price,
-                        "funding_interval_minutes": interval_minutes,
-                    })
                 logger.info(
-                    "Loaded %d funding rate events for %s", len(rates), sym,
+                    "Loaded %d funding rate events for %s",
+                    len(rates_by_symbol[sym]), sym,
                 )
             except Exception:
+                rates_by_symbol[sym] = []
                 logger.warning(
                     "Failed to load funding rates for %s, skipping", sym,
                     exc_info=True,
                 )
 
-        # Sort by timestamp for sequential processing in the actor
-        all_events.sort(key=lambda e: e["timestamp_ns"])
-        return all_events
+        return assemble_funding_events(
+            rates_by_symbol, nt_symbols_by_symbol, interval_minutes_by_symbol,
+        )
 
     def _build_strategy_bundle(self):
         """Build a StrategyBundle from legacy constructor params if not provided."""
@@ -729,26 +697,23 @@ class BacktestRunner:
         if not self._redis_client or not self._run_id:
             return
         try:
-            import json as _json, time as _time
-            elapsed = round(_time.monotonic() - self._job_start_time, 1) if self._job_start_time else 0
+            elapsed = (
+                round(time.monotonic() - self._job_start_time, 1)
+                if self._job_start_time else 0
+            )
+            payload = build_progress_payload(
+                self._run_id,
+                pct=pct,
+                elapsed_secs=elapsed,
+                total_bars=total_bars if total_bars > 0 else None,
+                message=message,
+            )
             self._redis_client.setex(
                 f"tino:backtest:progress:{self._run_id}", 86400, str(pct),
             )
-            payload: dict = {
-                "type": "backtest.progress",
-                "run_id": self._run_id,
-                "pct": pct,
-                "elapsed_secs": elapsed,
-                "eta_secs": None,
-                "total_bars": total_bars if total_bars > 0 else None,
-                "processed_bars": None,
-                "bars_per_sec": None,
-                "trades": None,
-                "message": message,
-            }
             self._redis_client.publish(
                 f"tino:backtest:progress:{self._run_id}",
-                _json.dumps(payload),
+                json.dumps(payload),
             )
         except Exception:
             pass
@@ -775,24 +740,25 @@ class BacktestRunner:
         """
         strategy_bundle = self._build_strategy_bundle()
 
-        # Sync symbols/intervals from strategy bundle when not provided
-        if not self.symbols and strategy_bundle.symbols:
-            self.symbols = strategy_bundle.symbols
-            self.symbol = self.symbols[0] if self.symbols else ""
-        if not self.intervals and strategy_bundle.interval:
-            self.intervals = [strategy_bundle.interval]
-            self.interval = strategy_bundle.interval
+        # Sync symbols/intervals from strategy bundle when runner-level lists are empty
+        self.symbols, self.intervals = resolve_symbols_intervals(
+            strategy_bundle.symbols, strategy_bundle.interval,
+            self.symbols, self.intervals,
+        )
+        self.symbol = self.symbols[0] if self.symbols else ""
+        self.interval = self.intervals[0] if self.intervals else ""
 
-        # Extend data loading window for warmup bars
-        if self.warmup_bars and self.warmup_bars > 0 and self.intervals:
-            mins = _interval_to_minutes(self.intervals[0])
-            if mins > 0:
-                warmup_delta = timedelta(minutes=mins * self.warmup_bars)
-                self.start = self.start - warmup_delta
+        # Extend data loading window for warmup bars (no-op when inputs disable it)
+        if self.intervals:
+            adjusted_start = compute_warmup_adjusted_start(
+                self.start, self.intervals[0], self.warmup_bars,
+            )
+            if adjusted_start is not self.start:
                 logger.info(
-                    "Warmup: extended start by %d bars (%s) to %s",
-                    self.warmup_bars, warmup_delta, self.start,
+                    "Warmup: extended start by %d bars to %s",
+                    self.warmup_bars, adjusted_start,
                 )
+                self.start = adjusted_start
 
         # Configure engine
         engine_config = BacktestEngineConfig(
@@ -867,16 +833,11 @@ class BacktestRunner:
                     loaded_bar_type_strs.append(source_bt_str or bt_str)
                     pending_bars.append(bars)
                     all_bar_type_strs.append(bt_str)
-                    # Extract daily close prices for benchmark B&H
+                    # Extract daily close prices for benchmark B&H (NT-free helper)
                     if nt_sym not in benchmark_daily_closes:
-                        from datetime import datetime as _bm_dt, timezone as _bm_tz
-                        daily_closes: dict[str, float] = {}
-                        for bar in bars:
-                            day_key = _bm_dt.fromtimestamp(
-                                int(bar.ts_init) / 1e9, tz=_bm_tz.utc
-                            ).strftime("%Y-%m-%d")
-                            daily_closes[day_key] = float(bar.close)
-                        benchmark_daily_closes[nt_sym] = daily_closes
+                        benchmark_daily_closes[nt_sym] = extract_benchmark_daily_closes(
+                            (int(bar.ts_init), float(bar.close)) for bar in bars
+                        )
                 else:
                     logger.warning("No bar data available for %s at %s", sym, ivl)
 
