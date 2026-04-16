@@ -753,13 +753,29 @@ class BacktestRunner:
         except Exception:
             pass
 
-    def run(self) -> dict[str, Any]:
-        """Execute the backtest and return results dict."""
-        logger.info("Starting backtest: %s on %s", self.strategy_path, self.symbols)
+    # ------------------------------------------------------------------
+    # Shared engine setup (eliminates duplication between run/prepare)
+    # ------------------------------------------------------------------
 
+    def _setup_engine(self) -> tuple["BacktestEngine", Any, float]:
+        """Create and configure the BacktestEngine with all data loaded.
+
+        This is the shared setup logic used by both :meth:`run` (single
+        backtest) and :meth:`prepare_engine` (Optuna optimization).
+        Stores resolved metadata on the instance for downstream use:
+
+        - ``self._nt_symbols``
+        - ``self._all_bar_type_strs``
+        - ``self._loaded_bar_type_strs``
+        - ``self._total_bar_count``
+        - ``self._benchmark_daily_closes``
+
+        Returns:
+            (engine, strategy_bundle, starting_balance)
+        """
         strategy_bundle = self._build_strategy_bundle()
 
-        # Sync symbols/intervals from strategy bundle when not provided by the job
+        # Sync symbols/intervals from strategy bundle when not provided
         if not self.symbols and strategy_bundle.symbols:
             self.symbols = strategy_bundle.symbols
             self.symbol = self.symbols[0] if self.symbols else ""
@@ -783,16 +799,13 @@ class BacktestRunner:
             trader_id=TraderId("BACKTESTER-001"),
             logging=LoggingConfig(log_level="WARNING"),
         )
-
         engine = BacktestEngine(config=engine_config)
         self._engine = engine
 
-        # Build FillModel if config provided
+        # Build fill/latency/fee models
         fill_model_obj: FillModel | None = None
         if self.fill_model_config is not None:
             fill_model_obj = self._build_fill_model(self.fill_model_config)
-
-        # Build LatencyModel — default 30ms base latency for realistic simulation
         latency_config = self.fill_model_config or {}
         latency_model_obj = self._build_latency_model(latency_config)
 
@@ -826,7 +839,7 @@ class BacktestRunner:
 
         # Load instruments for each symbol
         nt_symbols: list[str] = []
-        missing_instrument_syms: list[tuple[str, str]] = []  # (raw_sym, nt_sym)
+        missing_instrument_syms: list[tuple[str, str]] = []
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             nt_symbols.append(nt_sym)
@@ -839,12 +852,10 @@ class BacktestRunner:
 
         # Load bar data for each (symbol, interval) combination
         all_bar_type_strs: list[str] = []
-        loaded_bar_type_strs: list[str] = []  # bar types with actual data (for progress)
+        loaded_bar_type_strs: list[str] = []
         total_bar_count: int = 0
-        # Capture daily close prices from raw bars for benchmark computation
-        # (engine.cache.bars() has limited capacity and evicts old bars)
         benchmark_daily_closes: dict[str, dict[str, float]] = {}
-        pending_bars: list[list] = []  # collect before add_data — instruments must be loaded first
+        pending_bars: list[list] = []
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
@@ -856,7 +867,7 @@ class BacktestRunner:
                     loaded_bar_type_strs.append(source_bt_str or bt_str)
                     pending_bars.append(bars)
                     all_bar_type_strs.append(bt_str)
-                    # Extract daily close prices for benchmark B&H (only first interval per symbol)
+                    # Extract daily close prices for benchmark B&H
                     if nt_sym not in benchmark_daily_closes:
                         from datetime import datetime as _bm_dt, timezone as _bm_tz
                         daily_closes: dict[str, float] = {}
@@ -868,10 +879,8 @@ class BacktestRunner:
                         benchmark_daily_closes[nt_sym] = daily_closes
                 else:
                     logger.warning("No bar data available for %s at %s", sym, ivl)
-        self._benchmark_daily_closes = benchmark_daily_closes
 
         # Re-check instruments that were missing before bar auto-fetch
-        # (must happen BEFORE engine.add_data — NT requires instruments in cache first)
         if missing_instrument_syms:
             from tinohelm.data.catalog import resolve_catalog_path
             for raw_sym, nt_sym in missing_instrument_syms:
@@ -886,22 +895,17 @@ class BacktestRunner:
                         continue
                 except Exception:
                     pass
-                # Also try base catalog (pipeline may have written there)
                 instruments = catalog.instruments(instrument_ids=[nt_sym])
                 if instruments:
                     for inst in instruments:
                         engine.add_instrument(inst)
                     logger.info("Loaded instrument %s from base catalog after auto-fetch", nt_sym)
 
-        # Add all bar data to engine (instruments are now guaranteed loaded)
+        # Add bar data to engine (instruments are now guaranteed loaded)
         for bars in pending_bars:
             engine.add_data(bars, sort=False)
-
-        # Single efficient sort after all data is loaded (avoids O(n*k) re-sorting)
         if all_bar_type_strs:
             engine.sort_data()
-
-        self._report_progress(4, total_bars=total_bar_count)  # K-line data loaded
 
         # Inject NT-format params for strategy config resolution
         self.strategy_params.setdefault("instrument_id", nt_symbols[0] if nt_symbols else "")
@@ -909,9 +913,25 @@ class BacktestRunner:
         self.strategy_params.setdefault("bar_type", all_bar_type_strs[0] if all_bar_type_strs else "")
         self.strategy_params.setdefault("bar_types", all_bar_type_strs)
 
-        # Inject resolved bar types so strategy on_start() uses composite
-        # bar types (e.g. INTERNAL@1-MINUTE-EXTERNAL) instead of plain EXTERNAL.
+        # Inject resolved bar types for strategy on_start()
         strategy_bundle.resolved_bar_types = all_bar_type_strs
+
+        # Store metadata on instance for downstream use
+        self._nt_symbols = nt_symbols
+        self._all_bar_type_strs = all_bar_type_strs
+        self._loaded_bar_type_strs = loaded_bar_type_strs
+        self._total_bar_count = total_bar_count
+        self._benchmark_daily_closes = benchmark_daily_closes
+
+        return engine, strategy_bundle, starting_balance
+
+    def run(self) -> dict[str, Any]:
+        """Execute the backtest and return results dict."""
+        logger.info("Starting backtest: %s on %s", self.strategy_path, self.symbols)
+
+        engine, strategy_bundle, starting_balance = self._setup_engine()
+
+        self._report_progress(4, total_bars=self._total_bar_count)
 
         # Create strategy instances via loader
         strategy_instances = create_strategies(strategy_bundle)
@@ -957,14 +977,14 @@ class BacktestRunner:
         # Add funding cost tracker + inject FundingRateUpdate data for perpetual futures
         self._funding_enabled = False
         if self.symbols and self.start and self.end:
-            funding_events = self._load_funding_rates(nt_symbols)
+            funding_events = self._load_funding_rates(self._nt_symbols)
             if funding_events:
                 from tinohelm.backtest.funding import (
                     _FundingCostTracker,
                     _FundingCostTrackerConfig,
                 )
                 _FundingCostTracker._funding_events = funding_events
-                _FundingCostTracker._bar_type_strs = loaded_bar_type_strs
+                _FundingCostTracker._bar_type_strs = self._loaded_bar_type_strs
                 tracker = _FundingCostTracker(config=_FundingCostTrackerConfig())
                 engine.add_actor(tracker)
                 self._funding_tracker = tracker
@@ -985,22 +1005,22 @@ class BacktestRunner:
 
         # Load mark price and index price data for strategies
         if self.symbols and self.start and self.end:
-            self._load_auxiliary_price_data(engine, nt_symbols)
+            self._load_auxiliary_price_data(engine, self._nt_symbols)
 
         self._report_progress(9)  # Auxiliary price data loaded
 
         # Add progress reporter actor for bar-level progress tracking
-        if self._redis_client and self._run_id and total_bar_count > 0:
+        if self._redis_client and self._run_id and self._total_bar_count > 0:
             reporter = _ProgressReporter(config=_ProgressReporterConfig())
             reporter._redis = self._redis_client
             reporter._run_id = self._run_id
-            reporter._total_bars = total_bar_count
+            reporter._total_bars = self._total_bar_count
             reporter._report_every = 2000
-            reporter._bar_type_strs = loaded_bar_type_strs
+            reporter._bar_type_strs = self._loaded_bar_type_strs
             engine.add_actor(reporter)
             logger.info(
                 "Progress reporter enabled: %d total bars, run_id=%s",
-                total_bar_count, self._run_id[:8],
+                self._total_bar_count, self._run_id[:8],
             )
 
         # Final sort — funding/mark/index data may have been added after initial sort
@@ -1027,7 +1047,7 @@ class BacktestRunner:
         # Export raw reports before dispose (if artifacts_dir is set)
         if self.artifacts_dir is not None:
             self._export_reports(engine)
-            self._generate_tearsheet(engine, loaded_bar_type_strs)
+            self._generate_tearsheet(engine, self._loaded_bar_type_strs)
             from tinohelm.backtest.tearsheet import enhance_tearsheet
             enhance_tearsheet(self.artifacts_dir, results)
 
@@ -1051,129 +1071,11 @@ class BacktestRunner:
         Returns:
             (engine, strategy_bundle, starting_balance)
         """
-        strategy_bundle = self._build_strategy_bundle()
-
-        if not self.symbols and strategy_bundle.symbols:
-            self.symbols = strategy_bundle.symbols
-            self.symbol = self.symbols[0] if self.symbols else ""
-        if not self.intervals and strategy_bundle.interval:
-            self.intervals = [strategy_bundle.interval]
-            self.interval = strategy_bundle.interval
-
-        # Extend data loading window for warmup bars
-        if self.warmup_bars and self.warmup_bars > 0 and self.intervals:
-            mins = _interval_to_minutes(self.intervals[0])
-            if mins > 0:
-                warmup_delta = timedelta(minutes=mins * self.warmup_bars)
-                self.start = self.start - warmup_delta
-                logger.info(
-                    "Warmup (optimize): extended start by %d bars (%s) to %s",
-                    self.warmup_bars, warmup_delta, self.start,
-                )
-
-        engine_config = BacktestEngineConfig(
-            trader_id=TraderId("BACKTESTER-001"),
-            logging=LoggingConfig(log_level="WARNING"),
-        )
-        engine = BacktestEngine(config=engine_config)
-        self._engine = engine
-
-        # Build FillModel / LatencyModel
-        fill_model_obj: FillModel | None = None
-        if self.fill_model_config is not None:
-            fill_model_obj = self._build_fill_model(self.fill_model_config)
-        latency_config = self.fill_model_config or {}
-        latency_model_obj = self._build_latency_model(latency_config)
-
-        from nautilus_trader.model.currencies import USDT
-        from nautilus_trader.model.identifiers import Venue
-        from nautilus_trader.model.objects import Money
-
-        starting_balance = strategy_bundle.account.starting_balance
-        leverage = strategy_bundle.account.leverage
-        venue_kwargs: dict[str, Any] = {
-            "venue": Venue("BINANCE"),
-            "oms_type": OmsType.HEDGING,
-            "account_type": AccountType.MARGIN,
-            "starting_balances": [Money(starting_balance, USDT)],
-            "default_leverage": Decimal(str(leverage)),
-            "bar_execution": True,
-            "trade_execution": True,
-        }
-        if fill_model_obj is not None:
-            venue_kwargs["fill_model"] = fill_model_obj
-        if latency_model_obj is not None:
-            venue_kwargs["latency_model"] = latency_model_obj
-        engine.add_venue(**venue_kwargs)
-
-        # Load instruments + bar data
-        catalog = ParquetDataCatalog(str(self.catalog_path))
-        nt_symbols: list[str] = []
-        missing_instrument_syms: list[tuple[str, str]] = []
-        for sym in self.symbols:
-            nt_sym = _normalize_symbol(sym)
-            nt_symbols.append(nt_sym)
-            instruments = catalog.instruments(instrument_ids=[nt_sym])
-            if instruments:
-                for inst in instruments:
-                    engine.add_instrument(inst)
-            else:
-                missing_instrument_syms.append((sym, nt_sym))
-
-        all_bar_type_strs: list[str] = []
-        pending_bars: list[list] = []
-        for sym in self.symbols:
-            nt_sym = _normalize_symbol(sym)
-            for ivl in self.intervals:
-                bars, bt_str, source_bt_str = self._resolve_bars(
-                    catalog, sym, nt_sym, ivl,
-                )
-                if bars:
-                    pending_bars.append(bars)
-                    all_bar_type_strs.append(bt_str)
-
-        # Re-check instruments after auto-fetch (before add_data)
-        if missing_instrument_syms:
-            from tinohelm.data.catalog import resolve_catalog_path
-            for raw_sym, nt_sym in missing_instrument_syms:
-                resolved = str(resolve_catalog_path(self.catalog_path, self.data_type))
-                try:
-                    resolved_cat = ParquetDataCatalog(resolved)
-                    instruments = resolved_cat.instruments(instrument_ids=[nt_sym])
-                    if instruments:
-                        for inst in instruments:
-                            engine.add_instrument(inst)
-                        continue
-                except Exception:
-                    pass
-                instruments = catalog.instruments(instrument_ids=[nt_sym])
-                if instruments:
-                    for inst in instruments:
-                        engine.add_instrument(inst)
-
-        # Add bar data after instruments are loaded
-        for bars in pending_bars:
-            engine.add_data(bars, sort=False)
-
-        if all_bar_type_strs:
-            engine.sort_data()
-
-        # Store metadata for run_trial()
-        self._nt_symbols = nt_symbols
-        self._all_bar_type_strs = all_bar_type_strs
-
-        # Inject NT-format defaults into strategy_params
-        self.strategy_params.setdefault("instrument_id", nt_symbols[0] if nt_symbols else "")
-        self.strategy_params.setdefault("instrument_ids", nt_symbols)
-        self.strategy_params.setdefault("bar_type", all_bar_type_strs[0] if all_bar_type_strs else "")
-        self.strategy_params.setdefault("bar_types", all_bar_type_strs)
-
-        # Inject resolved bar types for strategy on_start()
-        strategy_bundle.resolved_bar_types = all_bar_type_strs
+        engine, strategy_bundle, starting_balance = self._setup_engine()
 
         logger.info(
             "Engine prepared: %d symbols, %d bar types",
-            len(nt_symbols), len(all_bar_type_strs),
+            len(self._nt_symbols), len(self._all_bar_type_strs),
         )
         return engine, strategy_bundle, starting_balance
 
@@ -1327,283 +1229,6 @@ class BacktestRunner:
             logger.info("Generated tearsheet: %s", output_path)
         except Exception:
             logger.warning("Failed to generate tearsheet", exc_info=True)
-
-    def _enhance_tearsheet_DELETED(self, results: dict[str, Any]) -> None:
-        """Inject per-instrument performance breakdown into the tearsheet HTML.
-
-        Adds a Plotly horizontal bar chart and a detailed summary table
-        showing PnL, return %, win rate, and other per-symbol metrics.
-        Only activates for multi-instrument (portfolio) backtests.
-        """
-        tearsheet_path = self.artifacts_dir / "tearsheet.html"
-        if not tearsheet_path.exists():
-            return
-
-        per_instrument = results.get("per_instrument", {})
-        if len(per_instrument) <= 1:
-            return
-
-        import json
-
-        sorted_items = sorted(
-            per_instrument.items(),
-            key=lambda x: x[1].get("total_pnl", 0),
-            reverse=True,
-        )
-
-        # Plotly data (reversed for bottom-to-top horizontal bar display)
-        symbols = [k.replace(".BINANCE", "") for k, _ in reversed(sorted_items)]
-        pnls = [round(v.get("total_pnl", 0), 2) for _, v in reversed(sorted_items)]
-        colors = ["#00963c" if p >= 0 else "#c62828" for p in pnls]
-        chart_height = max(300, len(sorted_items) * 35 + 100)
-
-        trace = json.dumps([{
-            "type": "bar", "orientation": "h",
-            "y": symbols, "x": pnls,
-            "marker": {"color": colors},
-            "text": [f"{p:+.2f}" for p in pnls],
-            "textposition": "outside",
-            "hovertemplate": "%{y}: %{x:+.2f} USDT<extra></extra>",
-        }])
-        chart_layout = json.dumps({
-            "title": {"text": "PnL by Instrument (USDT)", "font": {"size": 16}},
-            "xaxis": {"title": "PnL", "zeroline": True, "zerolinecolor": "#ddd", "gridcolor": "#eee"},
-            "yaxis": {"automargin": True},
-            "margin": {"l": 130, "r": 80, "t": 50, "b": 40},
-            "template": "plotly_white",
-            "height": chart_height,
-        })
-
-        # Build HTML table rows (extended with Sharpe, MaxDD, Recovery)
-        rows = []
-        for inst_id, data in sorted_items:
-            short = inst_id.replace(".BINANCE", "")
-            pnl = data.get("total_pnl", 0)
-            ret = data.get("return_pct", 0)
-            trades = data.get("total_trades", 0)
-            wr = data.get("win_rate", 0) * 100
-            pf = data.get("profit_factor")
-            lg_w = data.get("largest_win")
-            lg_l = data.get("largest_loss")
-            avg = data.get("avg_pnl")
-            sr = data.get("sharpe_ratio")
-            mdd = data.get("max_drawdown")
-            rf = data.get("recovery_factor")
-
-            pc = "pos" if pnl >= 0 else "neg"
-            rc = "pos" if ret >= 0 else "neg"
-            _d = "\u2013"
-            pf_s = f"{pf:.2f}" if pf is not None else _d
-            lw_s = f"{lg_w:+.2f}" if lg_w is not None else _d
-            ll_s = f"{lg_l:.2f}" if lg_l is not None else _d
-            avg_s = f"{avg:+.2f}" if avg is not None else _d
-            sr_s = f"{sr:.2f}" if sr is not None else _d
-            mdd_s = f"{mdd * 100:.1f}%" if mdd is not None else _d
-            rf_s = f"{rf:.1f}" if rf is not None else _d
-
-            rows.append(
-                f'<tr><td class="sym">{short}</td>'
-                f'<td class="{pc}">{pnl:+.2f}</td>'
-                f'<td class="{rc}">{ret:+.2f}%</td>'
-                f'<td>{trades}</td><td>{wr:.1f}%</td>'
-                f'<td>{pf_s}</td><td>{sr_s}</td>'
-                f'<td>{mdd_s}</td><td>{rf_s}</td>'
-                f'<td class="pos">{lw_s}</td>'
-                f'<td class="neg">{ll_s}</td>'
-                f'<td>{avg_s}</td></tr>'
-            )
-
-        # ── Additional charts ──
-
-        # Chart 2: Cumulative PnL stacked area
-        cum_chart_html = ""
-        cum_pnl_data = results.get("instrument_cumulative_pnl", {})
-        if cum_pnl_data:
-            traces = []
-            for inst_id in sorted(cum_pnl_data.keys()):
-                curve = cum_pnl_data[inst_id]
-                short = inst_id.replace(".BINANCE", "")
-                traces.append({
-                    "type": "scatter", "mode": "lines",
-                    "name": short,
-                    "x": [p["date"] for p in curve],
-                    "y": [p["cum_pnl"] for p in curve],
-                    "stackgroup": "one",
-                    "hovertemplate": f"{short}: %{{y:+.2f}} USDT<extra></extra>",
-                })
-            cum_trace = json.dumps(traces)
-            cum_layout = json.dumps({
-                "title": {"text": "Cumulative PnL by Instrument", "font": {"size": 16}},
-                "xaxis": {"title": "Date"},
-                "yaxis": {"title": "Cumulative PnL (USDT)"},
-                "template": "plotly_white", "height": 400,
-                "margin": {"l": 80, "r": 40, "t": 50, "b": 50},
-            })
-            cum_chart_html = (
-                f'<div id="th-cum-pnl" style="width:100%;height:400px;margin-top:30px"></div>'
-                f'<script>Plotly.newPlot("th-cum-pnl",{cum_trace},{cum_layout},{{responsive:true}})</script>'
-            )
-
-        # Chart 3: Correlation heatmap
-        corr_chart_html = ""
-        corr_data = results.get("instrument_correlation", {})
-        if corr_data and len(corr_data) >= 2:
-            insts = sorted(corr_data.keys())
-            short_names = [i.replace(".BINANCE", "") for i in insts]
-            z, text_m = [], []
-            for inst_i in insts:
-                row, trow = [], []
-                for inst_j in insts:
-                    val = 1.0 if inst_i == inst_j else corr_data.get(inst_i, {}).get(inst_j, 0)
-                    row.append(val)
-                    trow.append(f"{val:.2f}")
-                z.append(row)
-                text_m.append(trow)
-            ch = max(350, len(insts) * 50 + 150)
-            corr_trace = json.dumps([{
-                "type": "heatmap", "z": z, "x": short_names, "y": short_names,
-                "colorscale": "RdBu", "zmid": 0, "zmin": -1, "zmax": 1,
-                "text": text_m, "texttemplate": "%{text}",
-                "colorbar": {"title": "Corr"},
-                "hovertemplate": "%{x} vs %{y}: %{z:.4f}<extra></extra>",
-            }])
-            corr_layout = json.dumps({
-                "title": {"text": "Return Correlation Matrix", "font": {"size": 16}},
-                "template": "plotly_white", "height": ch,
-                "margin": {"l": 130, "r": 60, "t": 50, "b": 100},
-            })
-            corr_chart_html = (
-                f'<div id="th-corr" style="width:100%;height:{ch}px;margin-top:30px"></div>'
-                f'<script>Plotly.newPlot("th-corr",{corr_trace},{corr_layout},{{responsive:true}})</script>'
-            )
-
-        # Chart 4: Monthly PnL heatmap (instrument x month)
-        heat_chart_html = ""
-        heatmap_data = results.get("monthly_pnl_heatmap", [])
-        if heatmap_data:
-            h_insts = sorted({d["instrument"] for d in heatmap_data})
-            h_months = sorted({d["month"] for d in heatmap_data})
-            h_short = [i.replace(".BINANCE", "") for i in h_insts]
-            lookup = {(d["instrument"], d["month"]): d["pnl"] for d in heatmap_data}
-            z, text_m = [], []
-            for inst in h_insts:
-                row, trow = [], []
-                for month in h_months:
-                    val = lookup.get((inst, month), 0)
-                    row.append(val)
-                    trow.append(f"{val:+.0f}")
-                z.append(row)
-                text_m.append(trow)
-            hh = max(300, len(h_insts) * 40 + 150)
-            heat_trace = json.dumps([{
-                "type": "heatmap", "z": z, "x": h_months, "y": h_short,
-                "colorscale": "RdYlGn", "zmid": 0,
-                "text": text_m, "texttemplate": "%{text}",
-                "hovertemplate": "%{y} %{x}: %{z:+.2f} USDT<extra></extra>",
-            }])
-            heat_layout = json.dumps({
-                "title": {"text": "Monthly PnL Heatmap (Instrument \u00d7 Month)", "font": {"size": 16}},
-                "xaxis": {"title": "Month"},
-                "yaxis": {"automargin": True},
-                "template": "plotly_white", "height": hh,
-                "margin": {"l": 130, "r": 60, "t": 50, "b": 60},
-            })
-            heat_chart_html = (
-                f'<div id="th-monthly-heat" style="width:100%;height:{hh}px;margin-top:30px"></div>'
-                f'<script>Plotly.newPlot("th-monthly-heat",{heat_trace},{heat_layout},{{responsive:true}})</script>'
-            )
-
-        # Chart 5: PnL Treemap (proportional boxes by contribution)
-        treemap_html = ""
-        if len(sorted_items) >= 2:
-            tm_labels = [k.replace(".BINANCE", "") for k, _ in sorted_items]
-            tm_pnls = [round(v.get("total_pnl", 0), 2) for _, v in sorted_items]
-            tm_abs = [abs(p) for p in tm_pnls]
-            tm_parents = ["Portfolio"] * len(tm_labels)
-            tm_text = [f"{p:+.2f}" for p in tm_pnls]
-            tm_colors = ["#00963c" if p >= 0 else "#c62828" for p in tm_pnls]
-            treemap_trace = json.dumps([{
-                "type": "treemap",
-                "labels": tm_labels,
-                "parents": tm_parents,
-                "values": tm_abs,
-                "text": tm_text,
-                "texttemplate": "<b>%{label}</b><br>%{text} USDT",
-                "marker": {"colors": tm_colors},
-                "hovertemplate": "%{label}: %{text} USDT<extra></extra>",
-            }])
-            treemap_layout = json.dumps({
-                "title": {"text": "PnL Contribution Treemap", "font": {"size": 16}},
-                "template": "plotly_white", "height": 400,
-                "margin": {"l": 10, "r": 10, "t": 50, "b": 10},
-            })
-            treemap_html = (
-                f'<div id="th-treemap" style="width:100%;height:400px;margin-top:30px"></div>'
-                f'<script>Plotly.newPlot("th-treemap",{treemap_trace},{treemap_layout},{{responsive:true}})</script>'
-            )
-
-        # Portfolio analytics summary
-        pa = results.get("portfolio_analytics", {})
-        analytics_html = ""
-        if pa:
-            dr = pa.get("diversification_ratio")
-            db = pa.get("diversification_benefit_pct")
-            parts = []
-            if dr is not None:
-                parts.append(f"<b>Diversification Ratio:</b> {dr:.2f}")
-            if db is not None:
-                parts.append(f"<b>Diversification Benefit:</b> {db:.1f}%")
-            if parts:
-                analytics_html = (
-                    '<div style="margin-top:20px;padding:16px;background:#f9f9f9;'
-                    'border-radius:8px;font-size:14px;">'
-                    + " &nbsp;\u2502&nbsp; ".join(parts)
-                    + "</div>"
-                )
-
-        section = f"""
-<!-- TinoHelm: Per-Instrument Breakdown -->
-<style>
-.th-inst {{ max-width:1200px; margin:40px auto; padding:0 20px;
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }}
-.th-inst h2 {{ color:#333; border-bottom:3px solid #ffb000; padding-bottom:10px; font-size:20px; }}
-.th-inst h3 {{ color:#555; margin-top:30px; font-size:16px; }}
-.th-inst table {{ width:100%; border-collapse:collapse; margin-top:16px; font-size:13px; }}
-.th-inst th {{ padding:10px 12px; text-align:left; border-bottom:2px solid #ffb000;
-  font-weight:600; color:#555; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }}
-.th-inst td {{ padding:8px 12px; border-bottom:1px solid #eee; }}
-.th-inst tbody tr:hover {{ background:#f7f7f7; }}
-.th-inst .sym {{ font-weight:600; color:#2c6fbb; }}
-.th-inst .pos {{ color:#00963c; font-weight:600; }}
-.th-inst .neg {{ color:#c62828; font-weight:600; }}
-</style>
-<div class="th-inst">
-<h2>Per-Instrument Performance</h2>
-{analytics_html}
-<div id="th-inst-chart" style="width:100%;height:{chart_height}px"></div>
-<script>Plotly.newPlot('th-inst-chart',{trace},{chart_layout},{{responsive:true}})</script>
-<table><thead><tr>
-<th>Symbol</th><th>PnL</th><th>Return</th><th>Trades</th><th>Win Rate</th>
-<th>PF</th><th>Sharpe</th><th>MaxDD</th><th>Recovery</th>
-<th>Best</th><th>Worst</th><th>Avg PnL</th>
-</tr></thead><tbody>{"".join(rows)}</tbody></table>
-{cum_chart_html}
-{treemap_html}
-{corr_chart_html}
-{heat_chart_html}
-</div>
-"""
-        try:
-            html = tearsheet_path.read_text(encoding="utf-8")
-            html = html.replace("</body>", section + "\n</body>")
-            tearsheet_path.write_text(html, encoding="utf-8")
-            logger.info(
-                "Enhanced tearsheet with per-instrument breakdown (%d instruments, %d charts)",
-                len(sorted_items),
-                1 + bool(cum_chart_html) + bool(corr_chart_html) + bool(heat_chart_html),
-            )
-        except Exception:
-            logger.warning("Failed to enhance tearsheet", exc_info=True)
 
     def _extract_results(
         self, engine: BacktestEngine, starting_balance: float = 10000,
