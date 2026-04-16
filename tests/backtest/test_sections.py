@@ -1,15 +1,23 @@
 """Tests for pure-computation section helpers in ``sections.py``.
 
-Loads ``sections.py`` directly by file path (same pattern as
-``test_rolling_metrics.py``) to avoid triggering
-``tinohelm.backtest.result.__init__.py`` which re-exports from ``extract.py``
-(that depends on ``nautilus_trader``, not installed in CI).
+Strategy:
+
+1. **Preferred path** — import ``sections`` normally from the installed
+   package.  This works in CI where ``nautilus_trader`` is installed and
+   ``tinohelm.backtest.result.__init__`` succeeds.
+
+2. **Fallback path** — for local/NT-free dev environments, load ``sections.py``
+   via file path.  We temporarily pre-register ``statistics`` under its
+   dotted name (required by ``sections.py``'s absolute import), load
+   ``sections.py``, then restore the original ``sys.modules`` state so
+   subsequent tests are unaffected.
 """
 from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import date, datetime, timezone
+import types as _types
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -17,35 +25,59 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Module loading
+# Module loading — prefer direct import; fall back to isolated file-path load
 # ---------------------------------------------------------------------------
 
 _RESULT_DIR = Path(__file__).resolve().parents[2] / "src" / "tinohelm" / "backtest" / "result"
 
 
-def _load_from_path(name: str, filename: str):
-    path = _RESULT_DIR / filename
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+def _load_sections_isolated():
+    """Load sections.py via file path without polluting sys.modules."""
+    # Record original state of keys we will temporarily touch.
+    keys = [
+        "tinohelm",
+        "tinohelm.backtest",
+        "tinohelm.backtest.result",
+        "tinohelm.backtest.result.statistics",
+    ]
+    saved: dict[str, object] = {k: sys.modules.get(k, KeyError) for k in keys}
+
+    try:
+        # Install minimal package stubs only when absent so sections.py's
+        # ``from tinohelm.backtest.result.statistics import ...`` resolves.
+        for name in ["tinohelm", "tinohelm.backtest", "tinohelm.backtest.result"]:
+            if name not in sys.modules or sys.modules.get(name) is None:
+                sys.modules[name] = _types.ModuleType(name)
+
+        # Load statistics under its fully qualified name so the import inside
+        # sections.py finds it.
+        stats_spec = importlib.util.spec_from_file_location(
+            "tinohelm.backtest.result.statistics", _RESULT_DIR / "statistics.py",
+        )
+        stats_mod = importlib.util.module_from_spec(stats_spec)
+        sys.modules["tinohelm.backtest.result.statistics"] = stats_mod
+        stats_spec.loader.exec_module(stats_mod)
+
+        sections_spec = importlib.util.spec_from_file_location(
+            "_sections_under_test", _RESULT_DIR / "sections.py",
+        )
+        sections_mod = importlib.util.module_from_spec(sections_spec)
+        sections_spec.loader.exec_module(sections_mod)
+        return sections_mod
+    finally:
+        # Restore sys.modules to exactly its original shape so subsequent
+        # tests see a clean import state.
+        for k, original in saved.items():
+            if original is KeyError:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = original
 
 
-# Pre-load statistics under the fully-qualified name that sections.py expects
-# so its "from tinohelm.backtest.result.statistics import ..." resolves.
-_stats = _load_from_path("tinohelm.backtest.result.statistics", "statistics.py")
-
-# Create stub package nodes so the qualified import works
-import types as _types
-if "tinohelm" not in sys.modules:
-    sys.modules["tinohelm"] = _types.ModuleType("tinohelm")
-if "tinohelm.backtest" not in sys.modules:
-    sys.modules["tinohelm.backtest"] = _types.ModuleType("tinohelm.backtest")
-if "tinohelm.backtest.result" not in sys.modules:
-    sys.modules["tinohelm.backtest.result"] = _types.ModuleType("tinohelm.backtest.result")
-
-_sections = _load_from_path("_sections_under_test", "sections.py")
+try:
+    from tinohelm.backtest.result import sections as _sections  # type: ignore[import]
+except Exception:
+    _sections = _load_sections_isolated()
 
 
 # ---------------------------------------------------------------------------
