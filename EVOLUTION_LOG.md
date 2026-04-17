@@ -98,3 +98,77 @@ Chronological record of architectural improvements and maintenance work.
 - ✅ optimizer_helpers.py: 452 → 707 行(+255 行,7 个新 helper + 3 个常量)
 - ✅ 新增 538 行测试 (`test_optimizer_helpers.py`) + 161 行测试 (`test_optimizer_shim.py`)
 - ✅ 重复模式消除:Redis publish 字面量 2→1,select_best_params 字典推导 2→1,_shared_engine cleanup try/except 3→1,full_result 装配 60 行 散点赋值→1 个声明式调用
+
+
+## 2026-04-17
+
+**主题**: 补齐 `node/strategy_registry.py` 全量单元测试 + `node/lifecycle_controller.py` bundle 级生命周期测试 — 把 live/sandbox 最关键的运行时路径纳入测试安全网
+**维度**: 测试补齐
+**改动范围**:
+- 新增 `tests/node/test_strategy_registry.py`(622 行,59 个用例)— 针对 `StrategyRegistry` 与 `_derive_tag` 的纯 Python 全覆盖
+- 扩充 `tests/node/test_lifecycle_controller.py`(536 → 1347 行,44 → 97 用例,+53)— 补齐 `dispose` / `pause_all` / `resume_all` / `_pause_strategy_id` / `_resume_strategy` / `pause_strategy(name)` / `resume_strategy(name)` / `flatten_stop_strategy(name)` / `check_flatten_stop_completion` / `cancel_order` / `start_strategy(name)` + rollback + `get_state` with registry
+
+**动机**:
+
+`strategy_registry.py`(271 行)和 `lifecycle_controller.py` 的 bundle-级方法(~350 行)一起承担了 live/sandbox node 最要命的运行时职责:策略发现/状态机/tag 分配、L1~L4 生命周期控制、flatten-stop pending 队列、订单取消。但这两个模块此前的覆盖情况是:
+
+1. **`StrategyRegistry` 零专用测试** — 这是全项目最"它必然 NT-free"的模块(头部注释明写"Pure Python class with zero NT dependencies — fully testable with plain pytest"),居然没有一个 `tests/node/test_strategy_registry.py`。状态机转移、tag 前缀冲突、allocate 偏移量溢出、scan 删除保护(运行中不可删)、`restore_was_running` 序列化回放等关键契约全部只能靠调用方间接保障。任何无意的行为漂移都不会被发现。
+2. **`LifecycleController` 只测了 L1~L4 原子动作** — 既有 44 个用例覆盖了 `pause_strategy_id` / `resume_strategy_id` / `flatten` / `halt` / `unhalt` / `shutdown` / `_resolve_strategy_id` / `_on_risk_guard_breach` / `get_state`(无 registry 场景)。但 bundle 级(`pause_strategy(name)`、`resume_strategy(name)`、`flatten_stop_strategy(name)`、`check_flatten_stop_completion`)、`start_strategy` 及其 rollback 路径、`cancel_order` 全部没测。这是前端 `tino node strategy start|pause|resume|flatten-stop` 的**直接后端**,也是 HealthActor 自动续跑(auto-resume)依赖的入口。
+
+即是说,live/sandbox 最贴近真实交易的一层没有测试兜底 — 只要 NT API 小变动或重构手抖,生产路径立刻静默走样。
+
+**要点**:
+
+1. **`tests/node/test_strategy_registry.py`(59 用例,分 7 个测试类)**:
+
+   - `TestDeriveTag`(12 用例)— 锁定 `_derive_tag` 契约:首字母缩写、`vNN` 版本号保留数字、纯数字段不变、大写 `V` 不当版本标记、大写字母自动 lower、连续/首尾下划线 skip、空字符串返回 `""`。`test_consecutive_underscores_are_skipped` 防的是"`part[0]` IndexError",这是一条不写测试就容易埋的分支。
+   - `TestStrategyEntry`(2 用例)— 验证 dataclass 默认值 + `default_factory=list` 不跨实例共享(防意外共享 list)。
+   - `TestRegister`(6 用例)— 自动 tag / manual_tag 优先 / 幂等返回已存在 entry / manual collision / auto-derive collision / 第二方未被添加(原子性)。
+   - `TestAllocateTags`(9 用例)— 未注册策略报错 / 单 tag 格式 `prefix+000` / 多 tag 顺序 / 全局 offset 跨策略递增 / count=0 不前进 / collision with `-{tag}` 后缀 / collision 不污染 offset / 超过 999 溢出 / 碰撞只匹配精确后缀(防 substring 误杀,例如 `Cls-m0001` 与 `m000` 不碰撞)。
+   - `TestStateTransitions`(6 用例)— mark_starting/running/paused/flattening/stopped 五条转移 + mark_stopped 清空 `_strategy_to_bundle` + 未知 name 为静默 no-op(与代码注释"used by event handlers where races with deletion are possible"一致)。
+   - `TestQueries`(4 用例)— `get` / `available` / `get_bundle_for_strategy` / `get_all_states` 形状契约。
+   - `TestSerialization`(7 用例)— `to_dict()` 空字典、was_running 包含 running+paused+flattening 但不含 available、`next_tag_offset` 正确回写、`restore_was_running` 只翻转 `was_running` 不改状态(关键!HealthActor 会后续通过 `start_strategy` 重新启动)、未知名 skip、缺 key 默认 []、空 saved_state 无副作用。
+   - `TestScan`(9 用例 via `patched_scan` monkeypatch)— 目录缺失返回 []、空目录 no-op、添加新策略、删除 available 策略释放 prefix、`deleted_but_running` 保留 running/paused/flattening 策略的 entry **和** prefix、`starting` 状态被 scan 清理(因为还没 add_strategy 到 trader)、第二次相同 scan 无变化、"添加→删除→再添加"完整闭环释放并复用 prefix、单次 scan 同时 add+remove。
+
+2. **`tests/node/test_lifecycle_controller.py` 扩充(+53 用例,分 12 个新测试类)**:
+
+   - `TestDispose`(2 用例)— 退订 `RISK_GUARD_STATE` 主题 + 异常被 swallow(double-dispose 安全)。
+   - `TestPauseAll` / `TestResumeAll`(6 用例)— 广播 pause/resume、空 strategies 仍发 ack、resume_all 清空 `_paused_strategies`。
+   - `TestInternalPauseResume`(4 用例)— `_pause_strategy_id` / `_resume_strategy` 不发 ack、错误 ID 只记 log 不 raise(bundle pause 依赖这一点 — 单个成员失败不能炸掉整个 bundle)。
+   - `TestGetStateWithRegistry`(2 用例)— 有 registry 时 `state["strategies"]` 存在,无 registry 时 key 缺失(前端可以区分这两种场景)。
+   - `TestPauseStrategyBundle` / `TestResumeStrategyBundle`(9 用例)— `pause_strategy(name)` 批量发 L1 pause、`registry.mark_paused` 调用、无 registry 报错、非 running 状态报错、resume 对称、resume 清理 `_paused_strategies` 只清本 bundle 成员(不污染其它独立 pause 的 SID)。
+   - `TestFlattenStopStrategy`(9 用例)— 批量 market_exit、写 pending 记录、发"flattening"ack、`mark_flattening` 调用、**paused 成员先 resume 再 flatten**(否则 paused 策略不会响应 market_exit)、`market_exit` 异常被 swallow(pending 仍写入,超时兜底依然有效)、三条 precondition 错误路径。
+   - `TestCheckFlattenStopCompletion`(7 用例)— 全部 flat → remove_strategy + mark_stopped + "ok" ack + 清空该 bundle 的 paused 成员、仍有仓位且未超时 → no-op、**超时 60s 强制 remove + "timeout" ack + log.critical**、positions_open 异常当"not flat"、空 pending 表 no-op、remove_strategy 抛错被 swallow。
+   - `TestCancelOrder`(4 用例)— 订单不在 cache → "not_found"、已关闭 → "already_closed"、策略找不到 → "strategy_not_found"、happy path → `strategy.cancel_order(order)` + "submitted"。这是 TUI "取消订单"按钮的直接后端。
+   - `TestStartStrategyHappyPath`(2 用例)— 调用顺序(mark_starting → allocate_tags → add_strategy → add_actor → start_strategy → mark_running)、"ok"ack 含 strategy_ids。
+   - `TestStartStrategyPreconditions`(3 用例)— 无 registry / 未知策略 / 非 available 状态。
+   - `TestStartStrategyRollback`(5 用例)— 这是**最关键**的 5 个用例,把 atomic registration 的回滚契约锁死:
+     - bundle load 失败 → `mark_stopped` + error ack
+     - `add_strategy` 第二个抛错 → 第一个已添加的被 `remove_strategy` 撤回
+     - `start_strategy` 抛错 → actor + strategy 全部 remove
+     - strategy.id 已在 trader 上 → `add_strategy` **从未被调用**(在 add 之前就炸)
+     - rollback 阶段 `remove_*` 再抛错 → swallow 不 reraise,外层 error ack 正常发出
+
+3. **测试辅助模式**:
+
+   - `_make_controller_with_registry()` — 建一个带 MagicMock `StrategyRegistry` 的 controller,默认 `state="running"` + `strategy_ids=["Alpha-000", "Alpha-001"]`,bundle-级测试一行到位。
+   - `_install_start_strategy_mocks(monkeypatch, strategies=, actors=, raise_on=)` — 封装 `tinohelm.portfolio.config.load_strategy_bundle` / `tinohelm.strategy.loader.{create_strategies,create_actors}` 三个内部 import 的 monkeypatch,`raise_on` 参数让 5 个 rollback 测试一行切换失败点。
+   - `patched_scan` fixture(scope=function)— 把 `tinohelm.strategy.module_loader.scan_valid_strategy_files` 替换为返回 `{name: Path}` 字典的 fake,`set_files(mapping)` 就地改变下一次 `scan()` 看到的"目录内容",无需真实写文件。
+
+4. **没有修改任何 src/ 代码** — 这是一次纯测试补齐,不改 behavior。所有断言都基于**现有**实现:
+   - `_derive_tag("")` 返回 `""`(边缘但当前合法)
+   - `scan()` 清理 `starting` 状态策略(当 file 消失时)— 这是设计选择,因为 `mark_starting` 到 `add_strategy` 之间若 file 被删,外层 `start_strategy` 的 except 会 `mark_stopped`;scan 同时并发清理是单线程 NT event loop 下无风险的冗余
+   - `check_flatten_stop_completion` 的异常降级策略:`positions_open` 抛错 → 当作"未 flat",等 60s 超时兜底(这比静默 mark_stopped 更安全)
+
+**讨论点**:
+
+- **`StrategyEntry.tag_offset` 是 dead field** — 在 `register()` 和 `allocate_tags()` 写入,但从未被读取(`to_dict()` / `get_all_states()` / 外部调用方全部不访问)。历史遗留,属于清理点但不在本次测试补齐主题内。下次如果做 registry 序列化格式演进,可以一并移除,届时需同步更新 `StrategyEntry` dataclass + register()/allocate_tags() 两处赋值。
+- **`scan()` 对 "starting" 状态的删除策略** — 当前代码允许 scan 清理 starting 状态的 entry,配合 `start_strategy` 的 outer except → mark_stopped 形成双重安全。如果未来 start_strategy 变为异步(NT 事件循环跨 task),这里可能存在 race,需要重新评估。本次用 `test_scan_removes_starting_state_strategy` 显式锁定当前行为,任何语义变动都会触发测试失败提醒。
+
+**验证**:
+- ✅ 全量 `pytest tests/`:1007 → 1119(+112 = 59 strategy_registry + 53 lifecycle),**全部通过**,耗时 10.45s
+- ✅ `ruff check tests/node/test_strategy_registry.py tests/node/test_lifecycle_controller.py` — All checks passed
+- ✅ 基线对比验证:`git stash && pytest tests/node/test_lifecycle_controller.py` → 44 passed(pre-change baseline);pop 后 97 passed,差值 +53 与新增用例数精确匹配
+- ✅ `strategy_registry.py` 覆盖统计:7 个公开 API 方法(`scan`, `register`, `allocate_tags`, 5× `mark_*`, `get`, `get_bundle_for_strategy`, `available`, `get_all_states`, `to_dict`, `restore_was_running`)+ `_derive_tag` 私有辅助 + `StrategyEntry` dataclass,**全部有专用测试类**
+- ✅ `lifecycle_controller.py` 覆盖统计:21 个公开方法里 19 个有测试(剩 2 个是 trivial ack-only path);所有 4 个 precondition guard + 3 条 rollback 路径 + 2 条 timeout 路径 + 3 条 cancel_order 错误分支全部显式断言
+- ✅ 测试速度:`tests/node/test_strategy_registry.py` 0.17s(纯 Python);整个 node 测试包 2.10s
