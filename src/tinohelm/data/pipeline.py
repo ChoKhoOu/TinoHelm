@@ -5,13 +5,18 @@ Three-layer architecture:
 
 Provides both async and sync entry points for use in FastAPI routes
 and BacktestRunner subprocesses respectively.
+
+All NT-/asyncio-/pandas-free pure logic (category resolution, progress
+math, date-boundary conversions, Vision-stem parsing, CSV header sniffing)
+lives in :mod:`tinohelm.data.pipeline_helpers` so it can be unit tested
+without the heavy framework dependencies.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,40 +24,35 @@ import pandas as pd
 
 from tinohelm.data.converters import get_converter
 from tinohelm.data.downloader import VisionDownloader, _KLINES_TYPES
+from tinohelm.data.pipeline_helpers import (
+    DOWNLOAD_PROGRESS_BASE,
+    INTERVAL_CONVENTION,
+    KLINES_REST_FETCH_FN,
+    REST_FALLBACK_TYPES,
+    WRITE_CATEGORY,
+    compute_chunk_subprogress,
+    compute_stage_pct,
+    csv_has_header,
+    date_end_dt,
+    date_end_ns,
+    date_start_dt,
+    date_start_ns,
+    is_rest_fallback_supported,
+    parse_vision_coverage_end,
+    resolve_db_category,
+    resolve_db_interval,
+    resolve_write_category,
+)
 
 logger = logging.getLogger(__name__)
 
-# Data types that support REST API fallback for recent data
-_REST_FALLBACK_TYPES = frozenset({
-    "klines", "markPriceKlines", "indexPriceKlines",
-    "premiumIndexKlines", "aggTrades", "trades",
-})
-
-# Mapping: data_type → catalog write category
-_WRITE_CATEGORY: dict[str, str] = {
-    "klines": "bar",
-    "markPriceKlines": "bar",
-    "indexPriceKlines": "bar",
-    "premiumIndexKlines": "bar",
-    "aggTrades": "trade_tick",
-    "trades": "trade_tick",
-    "bookTicker": "quote_tick",
-    "fundingRate": "funding_rate",
-    "bookDepth": "order_book_delta",
-    "liquidationSnapshot": "liquidation",
-    "metrics": "metrics",
-}
-
-# Mapping: data_type → DataCatalog.interval convention value
-_INTERVAL_CONVENTION: dict[str, str] = {
-    "aggTrades": "tick",
-    "trades": "tick",
-    "bookTicker": "tick",
-    "fundingRate": "8h",
-    "bookDepth": "tick",
-    "liquidationSnapshot": "tick",
-    "metrics": "5m",
-}
+# Backwards-compat aliases (kept so external imports keep working):
+# ``api/routes/data.py`` historically reaches into ``_WRITE_CATEGORY``;
+# the canonical name is now :data:`WRITE_CATEGORY` exported from
+# ``pipeline_helpers``.
+_REST_FALLBACK_TYPES = REST_FALLBACK_TYPES
+_WRITE_CATEGORY = WRITE_CATEGORY
+_INTERVAL_CONVENTION = INTERVAL_CONVENTION
 
 # Default chunk size for large-file converters
 _CHUNK_SIZE = 10_000_000
@@ -177,7 +177,10 @@ class BinanceVisionPipeline:
         n_converters = self._convert_workers
         sem = asyncio.Semaphore(dl_concurrency)
         total_tasks = len(tasks)
-        await _progress(5, f"Downloading {len(tasks)} file(s) (×{dl_concurrency}, convert ×{n_converters})...")
+        await _progress(
+            DOWNLOAD_PROGRESS_BASE,
+            f"Downloading {len(tasks)} file(s) (×{dl_concurrency}, convert ×{n_converters})...",
+        )
 
         csv_queue: asyncio.Queue[Path | None] = asyncio.Queue()
         download_done = 0
@@ -202,7 +205,7 @@ class BinanceVisionPipeline:
                     download_failed += 1
                 download_done += 1
                 await _progress(
-                    5 + round(85 * convert_done / total_tasks),
+                    compute_stage_pct(convert_done, total_tasks),
                     f"下载 {download_done}/{total_tasks}",
                 )
 
@@ -224,11 +227,8 @@ class BinanceVisionPipeline:
                 # Thread-safe chunk callback: interpolates within current file's range
                 _cd = convert_done  # snapshot before executor starts
                 def _chunk_cb(objects_so_far):
-                    base = 5 + round(85 * _cd / total_tasks)
-                    nxt = 5 + round(85 * (_cd + 1) / total_tasks)
                     chunks = max(1, objects_so_far // _CHUNK_SIZE)
-                    sub = base + round((nxt - base) * chunks / (chunks + 2))
-                    sub = min(sub, nxt - 1)
+                    sub = compute_chunk_subprogress(_cd, total_tasks, chunks)
                     asyncio.run_coroutine_threadsafe(
                         _progress(sub, f"转换中 {objects_so_far:,} objects..."),
                         loop,
@@ -248,7 +248,7 @@ class BinanceVisionPipeline:
                     logger.warning("Convert failed for %s", csv_path, exc_info=True)
                 self._cleanup_raw_file(csv_path)
                 convert_done += 1
-                pct = 5 + round(85 * convert_done / total_tasks)
+                pct = compute_stage_pct(convert_done, total_tasks)
                 await _progress(
                     pct,
                     f"已完成 {convert_done}/{total_tasks} ({total_objects:,} objects)",
@@ -269,7 +269,7 @@ class BinanceVisionPipeline:
         rest_fallback_used = False
         rest_fallback_range = None
 
-        if data_type in _REST_FALLBACK_TYPES:
+        if is_rest_fallback_supported(data_type):
             vision_end = self._detect_vision_coverage_end(tasks)
             if vision_end and vision_end < end:
                 rest_start = vision_end + timedelta(days=1)
@@ -335,13 +335,13 @@ class BinanceVisionPipeline:
 
     @staticmethod
     def _detect_header(path: Path) -> int | None:
-        """Return 0 if the CSV has a text header row, else None (no header)."""
+        """Return 0 if the CSV has a text header row, else None (no header).
+
+        Thin I/O wrapper around :func:`pipeline_helpers.csv_has_header`.
+        """
         with open(path) as f:
             first = f.readline()
-        # Binance Vision CSVs with headers start with column names like "open_time"
-        if first and not first[0].isdigit():
-            return 0
-        return None
+        return 0 if csv_has_header(first) else None
 
     def _convert_one_file(
         self, csv_path, converter, instrument, kwargs,
@@ -513,7 +513,7 @@ class BinanceVisionPipeline:
         if not objects:
             return []
 
-        category = _WRITE_CATEGORY.get(data_type, "custom")
+        category = resolve_write_category(data_type)
 
         if category == "bar":
             from tinohelm.data.catalog import write_bars
@@ -571,37 +571,17 @@ class BinanceVisionPipeline:
         self,
         tasks,
     ) -> date | None:
-        """Detect the last date covered by Vision downloads."""
+        """Detect the last date covered by Vision downloads.
+
+        Thin wrapper around :func:`pipeline_helpers.parse_vision_coverage_end`
+        that pulls ``granularity`` and ``stem`` off the last task. Stems look
+        like ``BTCUSDT-klines-1m-2025-03-15`` (daily) or
+        ``BTCUSDT-aggTrades-2025-03`` (monthly).
+        """
         if not tasks:
             return None
-
         last_task = tasks[-1]
-        # Parse date from the task's date string in dest_path stem
-        stem = last_task.dest_path.stem
-        # Stems look like: BTCUSDT-klines-1m-2025-03-15 or BTCUSDT-aggTrades-2025-03
-        parts = stem.split("-")
-
-        # Try daily format (YYYY-MM-DD at the end)
-        if last_task.granularity == "daily" and len(parts) >= 3:
-            try:
-                date_str = "-".join(parts[-3:])
-                return date.fromisoformat(date_str)
-            except ValueError:
-                pass
-
-        # Try monthly format (YYYY-MM at the end)
-        if last_task.granularity == "monthly" and len(parts) >= 2:
-            try:
-                year = int(parts[-2])
-                month = int(parts[-1])
-                # Last day of the month
-                if month == 12:
-                    return date(year + 1, 1, 1) - timedelta(days=1)
-                return date(year, month + 1, 1) - timedelta(days=1)
-            except (ValueError, IndexError):
-                pass
-
-        return None
+        return parse_vision_coverage_end(last_task.granularity, last_task.dest_path.stem)
 
     async def _rest_fallback(
         self,
@@ -613,21 +593,13 @@ class BinanceVisionPipeline:
         instrument,
     ) -> tuple[int, list[str]]:
         """Use REST API to fill the gap between Vision coverage and requested end."""
-        start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
-        end_dt = datetime.combine(
-            end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc,
-        )
+        start_dt = date_start_dt(start)
+        end_dt = date_end_dt(end)
 
         # Klines-family: unified handler with per-type fetch function
-        _klines_fetch_map = {
-            "klines": "fetch_klines",
-            "premiumIndexKlines": "fetch_klines",
-            "markPriceKlines": "fetch_mark_price_klines",
-            "indexPriceKlines": "fetch_index_price_klines",
-        }
-        if data_type in _klines_fetch_map:
+        if data_type in KLINES_REST_FETCH_FN:
             return await self._rest_fallback_klines(
-                fetch_fn_name=_klines_fetch_map[data_type],
+                fetch_fn_name=KLINES_REST_FETCH_FN[data_type],
                 symbol=symbol, data_type=data_type,
                 interval=interval, start_dt=start_dt,
                 end_dt=end_dt, instrument=instrument,
@@ -719,7 +691,7 @@ class BinanceVisionPipeline:
         cannot be determined are deleted conservatively.
         Non-overlapping files from other date ranges are preserved.
         """
-        category = _WRITE_CATEGORY.get(data_type)
+        category = resolve_write_category(data_type)
         if category == "bar" and interval:
             from tinohelm.data.catalog import _make_bar_type, _make_instrument, resolve_catalog_path
             inst = _make_instrument(symbol)
@@ -737,14 +709,8 @@ class BinanceVisionPipeline:
         if not target_dir.exists():
             return
 
-        start_ns = int(
-            datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
-            .timestamp() * 1_000_000_000
-        )
-        end_ns = int(
-            datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
-            .timestamp() * 1_000_000_000
-        )
+        start_ns = date_start_ns(start)
+        end_ns = date_end_ns(end)
 
         deleted = 0
         for fpath in list(target_dir.glob("*.parquet")):
@@ -852,8 +818,8 @@ class BinanceVisionPipeline:
 
         from tinohelm.data.catalog import resolve_catalog_path
 
-        category = _WRITE_CATEGORY.get(data_type, data_type)
-        db_interval = interval if interval else _INTERVAL_CONVENTION.get(data_type, "tick")
+        category = resolve_db_category(data_type)
+        db_interval = resolve_db_interval(data_type, interval)
         effective_path = str(resolve_catalog_path(self.catalog_path, source_type))
 
         factory = get_session_factory()
