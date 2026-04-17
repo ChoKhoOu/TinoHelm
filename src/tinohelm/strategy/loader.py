@@ -1,17 +1,30 @@
 """Strategy loader — creates strategy and actor instances from StrategyBundle.
 
 This is the single entry point for strategy/actor instantiation, shared by
-BacktestRunner, Sandbox node, and Live node.
+BacktestRunner, Sandbox node, and Live node.  Pure logic (symbol parsing,
+module-file resolution, parameter building) lives in
+:mod:`tinohelm.strategy.loader_helpers` so tests can cover it without NT.
 """
 from __future__ import annotations
 
 import inspect
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
 from tinohelm.portfolio.config import StrategyBundle, ActorRef
+from tinohelm.strategy.loader_helpers import (
+    INTERVAL_MAP,
+    UNIT_MAP,
+    build_strategy_params,
+    check_symbol_profiles,
+    make_bar_type_str,
+    normalize_symbol,
+    nt_symbol_to_jesse,
+    parse_interval,
+    resolve_actor_class_path,
+    resolve_module_file,
+)
 from tinohelm.strategy.module_loader import load_module_from_file
 from tinohelm.strategy.utils import get_config_field_names
 
@@ -23,60 +36,42 @@ _DEFAULT_ACTORS_DIR = Path.home() / ".tino" / "actors"
 _BUILTIN_ACTORS_DIR = Path(__file__).resolve().parent.parent / "actors"
 
 
-# --- Public helpers (used by scaffold templates, runner, etc.) ---
+# ---------------------------------------------------------------------------
+# Public helpers re-exported from loader_helpers for import stability.
+# External callers (BacktestRunner, scaffold, api.routes.data) import these
+# names directly from `tinohelm.strategy.loader`, so we keep them here.
+# ---------------------------------------------------------------------------
 
-INTERVAL_MAP = {
-    "1m": "1-MINUTE", "3m": "3-MINUTE", "5m": "5-MINUTE",
-    "15m": "15-MINUTE", "30m": "30-MINUTE",
-    "1h": "1-HOUR", "2h": "2-HOUR", "4h": "4-HOUR",
-    "6h": "6-HOUR", "8h": "8-HOUR", "12h": "12-HOUR",
-    "1d": "1-DAY",
-}
-
-_UNIT_MAP = {"s": "SECOND", "m": "MINUTE", "h": "HOUR", "d": "DAY"}
-
-
-def parse_interval(interval: str) -> str:
-    """Parse interval string to NT format: '5m' -> '5-MINUTE', '2h' -> '2-HOUR'.
-
-    Supports arbitrary positive integers with s/m/h/d units.
-    Falls back to INTERVAL_MAP for known values, then dynamic parsing.
-    """
-    if interval in INTERVAL_MAP:
-        return INTERVAL_MAP[interval]
-    import re
-    m = re.match(r"^(\d+)([smhd])$", interval.lower())
-    if m:
-        return f"{m.group(1)}-{_UNIT_MAP[m.group(2)]}"
-    return "1-MINUTE"
+__all__ = [
+    "INTERVAL_MAP",
+    "create_actors",
+    "create_strategies",
+    "make_bar_type_str",
+    "normalize_symbol",
+    "parse_interval",
+    "scan_actors",
+]
 
 
-def normalize_symbol(symbol: str) -> str:
-    """Normalize symbol to NT format: BTCUSDT-PERP -> BTCUSDT-PERP.BINANCE"""
-    s = symbol.replace(".BINANCE", "")
-    return f"{s}.BINANCE"
-
-
-def make_bar_type_str(symbol: str, interval: str) -> str:
-    """Build NT bar type string: BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-EXTERNAL"""
-    nt_symbol = normalize_symbol(symbol)
-    interval_part = parse_interval(interval)
-    return f"{nt_symbol}-{interval_part}-LAST-EXTERNAL"
-
+# ---------------------------------------------------------------------------
+# Strategy instantiation
+# ---------------------------------------------------------------------------
 
 def create_strategies(
     config: StrategyBundle,
     *,
     order_id_tag: str | None = None,
-    # Backward-compat: accept old list-based signature
     order_id_tags: list[str] | None = None,
 ) -> list[Any]:
-    """Create a single strategy instance from a StrategyBundle.
+    """Create a single strategy instance from a ``StrategyBundle``.
 
-    The strategy receives ``symbols``, ``interval``, and ``resolved_bar_types``
-    in its config. For backward compatibility, if the strategy's config class
-    still declares ``instrument_id`` / ``bar_type`` fields, the first symbol's
-    values are injected.
+    The strategy receives ``symbols``, ``interval``, and
+    ``resolved_bar_types`` in its config.  For backward compatibility, when
+    the strategy's config class still declares ``instrument_id`` /
+    ``bar_type`` fields, the first symbol's values are injected.
+
+    ``order_id_tags`` (plural) is accepted for backward compatibility with
+    the pre-portfolio list-based signature; the first element is used.
 
     Returns a list containing one instantiated Strategy object.
     """
@@ -85,48 +80,18 @@ def create_strategies(
 
     strategy_cls, config_cls = _import_strategy_classes(config)
 
-    # Validate symbols against SYMBOL_PROFILES if the strategy defines them
     _warn_unrecognized_symbols(strategy_cls, config.symbols)
 
-    # Determine accepted config fields
     config_fields = get_config_field_names(config_cls)
 
-    params = dict(config.params)
+    filtered = build_strategy_params(
+        config,
+        config_fields or None,
+        order_id_tag=order_id_tag,
+        order_id_tags=order_id_tags,
+    )
 
-    # New fields: symbols, interval, resolved_bar_types
-    params["symbols"] = config.symbols
-    params["interval"] = config.interval
-    if config.resolved_bar_types:
-        params["resolved_bar_types"] = config.resolved_bar_types
-
-    # Backward compat: inject instrument_id/bar_type for old strategies
-    if config_fields and "instrument_id" in config_fields and config.symbols:
-        params["instrument_id"] = normalize_symbol(config.symbols[0])
-    if config_fields and "bar_type" in config_fields and config.symbols and config.interval:
-        if config.resolved_bar_types:
-            params["bar_type"] = config.resolved_bar_types[0]
-        else:
-            params["bar_type"] = make_bar_type_str(config.symbols[0], config.interval)
-
-    # Tag: prefer explicit arg, then bundle tag, then default
-    effective_tag = order_id_tag
-    if effective_tag is None and order_id_tags:
-        effective_tag = order_id_tags[0]  # backward compat: take first from list
-    if effective_tag is not None:
-        params["order_id_tag"] = effective_tag
-    elif "order_id_tag" not in params:
-        params["order_id_tag"] = config.tag or "000"
-
-    if "manage_stop" not in params:
-        params["manage_stop"] = True
-
-    # Filter to fields the config accepts
-    if config_fields:
-        filtered = {k: v for k, v in params.items() if k in config_fields}
-    else:
-        filtered = params
-
-    # Convert string values to NT types
+    # NT-specific type coercion happens here; everything above is pure.
     if "instrument_id" in filtered and isinstance(filtered["instrument_id"], str):
         filtered["instrument_id"] = InstrumentId.from_str(filtered["instrument_id"])
     if "bar_type" in filtered and isinstance(filtered["bar_type"], str):
@@ -140,6 +105,10 @@ def create_strategies(
     return [strategy_instance]
 
 
+# ---------------------------------------------------------------------------
+# Actor instantiation
+# ---------------------------------------------------------------------------
+
 def create_actors(
     config: StrategyBundle,
     *,
@@ -147,10 +116,12 @@ def create_actors(
     strategy_name: str | None = None,
     strategy_tag_prefix: str | None = None,
 ) -> list[Any]:
-    """Create actor instances from a StrategyBundle's actor references.
+    """Create actor instances from a ``StrategyBundle``'s actor references.
 
-    When ``config.risk_guard`` is set (declarative format), a RiskGuardActor
-    is created automatically.
+    When ``config.risk_guard`` is set (declarative format), a
+    ``RiskGuardActor`` is created automatically and any legacy
+    ``risk_guard`` entry in ``config.actors`` is skipped to avoid a
+    duplicate registration.
 
     Returns a list of instantiated Actor objects.
     """
@@ -160,9 +131,8 @@ def create_actors(
         return []
 
     actors_dir = Path(actors_dir) if actors_dir else _DEFAULT_ACTORS_DIR
-    results = []
+    results: list[Any] = []
 
-    # Declarative risk_guard section takes priority
     if config.risk_guard is not None and config.risk_guard.enabled:
         from tinohelm.actors.risk_guard import RiskGuardActor, RiskGuardConfig
 
@@ -181,11 +151,9 @@ def create_actors(
             currency=config.account.currency,
             starting_balance=config.account.starting_balance,
         )
-        rg_actor = RiskGuardActor(config=rg_config)
-        results.append(rg_actor)
+        results.append(RiskGuardActor(config=rg_config))
         logger.info("Created RiskGuardActor: %s (strategy=%s)", rg_component_id, name)
 
-        # Skip legacy risk_guard in actors list to avoid duplicate
         legacy_actors = [a for a in (config.actors or []) if a.name != "risk_guard"]
     else:
         legacy_actors = list(config.actors or [])
@@ -223,30 +191,10 @@ def _load_single_actor(
         actor_cls, actor_config_cls = _discover_actor_classes(actor_file)
 
     elif ref.class_path:
-        if ref.class_path.startswith("./"):
-            module_part, class_name = ref.class_path.rsplit(":", 1)
-            relative = module_part.removeprefix("./")
-            module_file = (config.source_path / (relative + ".py")).resolve()
-            if not str(module_file).startswith(str(config.source_path.resolve())):
-                raise ValueError(
-                    f"Actor class_path '{ref.class_path}' resolves outside strategy folder"
-                )
-        else:
-            module_part, class_name = ref.class_path.rsplit(":", 1)
-            module_file = Path(module_part + ".py")
-            resolved = module_file.resolve()
-            allowed_dirs = [Path.home() / ".tino"]
-            if config.source_path:
-                allowed_dirs.append(config.source_path.resolve())
-            if not any(resolved.is_relative_to(d) for d in allowed_dirs):
-                raise ValueError(
-                    f"Actor class_path '{ref.class_path}' resolves to {resolved} "
-                    f"which is outside allowed directories"
-                )
-
-        if not module_file.exists():
-            raise FileNotFoundError(f"Actor module not found: {module_file}")
-
+        module_file, class_name = resolve_actor_class_path(
+            ref.class_path,
+            config.source_path,
+        )
         actor_cls, actor_config_cls = _discover_actor_classes(module_file, class_name)
     else:
         raise ValueError("ActorRef must have either 'name' or 'class' set")
@@ -259,10 +207,13 @@ def _load_single_actor(
         ref.params.setdefault("strategy_tag_prefix", strategy_tag_prefix)
         ref.params.setdefault("component_id", f"RiskGuard-{strategy_name}")
 
-    # Instantiate with params
     if actor_config_cls and ref.params:
         config_fields = get_config_field_names(actor_config_cls)
-        filtered_params = {k: v for k, v in ref.params.items() if k in config_fields} if config_fields else ref.params
+        filtered_params = (
+            {k: v for k, v in ref.params.items() if k in config_fields}
+            if config_fields
+            else ref.params
+        )
         actor_config_instance = actor_config_cls(**filtered_params)
         actor_instance = actor_cls(config=actor_config_instance)
     elif actor_config_cls:
@@ -274,8 +225,12 @@ def _load_single_actor(
     return actor_instance
 
 
+# ---------------------------------------------------------------------------
+# Module & class discovery
+# ---------------------------------------------------------------------------
+
 def _import_strategy_classes(config: StrategyBundle) -> tuple[type, type]:
-    """Import strategy class and config class from a StrategyBundle."""
+    """Import strategy class and config class from a ``StrategyBundle``."""
     strategy_module_path, strategy_class_name = config.strategy_class.rsplit(":", 1)
     config_module_path, config_class_name = config.config_class.rsplit(":", 1)
 
@@ -283,42 +238,18 @@ def _import_strategy_classes(config: StrategyBundle) -> tuple[type, type]:
     if source_path is None:
         raise ValueError("StrategyBundle.source_path is required for strategy loading")
 
-    strategy_file = _resolve_module_file(strategy_module_path, source_path)
-
+    strategy_file = resolve_module_file(strategy_module_path, source_path)
     mod = _load_module_from_file(strategy_file, strategy_module_path)
     strategy_cls = getattr(mod, strategy_class_name)
     config_cls = getattr(mod, config_class_name)
-
     return strategy_cls, config_cls
 
 
-def _resolve_module_file(module_path: str, source_path: Path) -> Path:
-    """Resolve a module path string to an actual .py file."""
-    p = Path(module_path)
-    if p.suffix == ".py" and p.exists():
-        return p
-
-    module_file = source_path / f"{module_path}.py"
-    if module_file.exists():
-        return module_file
-
-    if p.is_absolute() and p.exists():
-        return p
-
-    for base in [source_path, Path.cwd(), Path("/app")]:
-        candidate = base / f"{module_path}.py"
-        if candidate.exists():
-            return candidate
-
-    raise FileNotFoundError(
-        f"Cannot find module '{module_path}' in {source_path} or other search paths"
-    )
-
-
 def _load_module_from_file(file_path: Path, module_name: str) -> Any:
-    """Load a Python module from a file path.
+    """Load a Python module from a file path via the unified loader.
 
-    Delegates to the unified module loader.
+    ``module_name`` is accepted for backward-compatible API shape but
+    ignored — :func:`load_module_from_file` derives a unique name.
     """
     return load_module_from_file(file_path)
 
@@ -327,11 +258,11 @@ def _discover_actor_classes(
     file_path: Path,
     class_name: str | None = None,
 ) -> tuple[type, type | None]:
-    """Discover Actor and ActorConfig subclasses from a .py file."""
+    """Discover Actor and ActorConfig subclasses from a ``.py`` file."""
     mod = _load_module_from_file(file_path, file_path.stem)
 
-    actor_cls = None
-    config_cls = None
+    actor_cls: type | None = None
+    config_cls: type | None = None
 
     for name, obj in inspect.getmembers(mod, inspect.isclass):
         if obj.__module__ != mod.__name__:
@@ -363,7 +294,7 @@ def scan_actors(actors_dir: str | Path | None = None) -> list[dict[str, Any]]:
     if not actors_dir.exists():
         return []
 
-    results = []
+    results: list[dict[str, Any]] = []
     for py_file in sorted(actors_dir.glob("*.py")):
         if py_file.name.startswith("_"):
             continue
@@ -382,48 +313,39 @@ def scan_actors(actors_dir: str | Path | None = None) -> list[dict[str, Any]]:
     return results
 
 
+# ---------------------------------------------------------------------------
+# Warnings
+# ---------------------------------------------------------------------------
+
 def _warn_unrecognized_symbols(strategy_cls: type, symbols: list[str]) -> None:
-    """Warn if symbols have no matching SYMBOL_PROFILES entry in the strategy."""
-    mod = sys.modules.get(strategy_cls.__module__)
-    if mod is None:
-        return
+    """Log a warning for each symbol missing/disabled in ``SYMBOL_PROFILES``.
 
-    profiles = getattr(mod, "SYMBOL_PROFILES", None)
-    if profiles is None:
-        return
-
-    for symbol in symbols:
-        jesse_sym = _nt_symbol_to_jesse(symbol)
-        profile = profiles.get(jesse_sym)
-
-        if profile is None:
+    Thin wrapper over :func:`check_symbol_profiles` — the pure check is in
+    ``loader_helpers`` so tests can assert on the raw issue list.
+    """
+    for symbol, jesse_sym, reason in check_symbol_profiles(strategy_cls, symbols):
+        if reason == "missing":
             logger.warning(
                 "Symbol '%s' (jesse: '%s') has no entry in SYMBOL_PROFILES. "
                 "Will use DEFAULT_PROFILE and may not generate trading signals.",
                 symbol, jesse_sym,
             )
-        elif not profile.get("enabled", True):
+        elif reason == "disabled":
             logger.warning(
                 "Symbol '%s' (jesse: '%s') has enabled=False in SYMBOL_PROFILES.",
                 symbol, jesse_sym,
             )
 
 
-def _nt_symbol_to_jesse(symbol: str) -> str:
-    """Convert NT-style symbol to Jesse format: BTCUSDT-PERP -> BTC-USDT."""
-    raw = symbol.replace(".BINANCE", "")
-    for suffix in ("-PERP", "-SWAP", "-SPOT", "-LINEAR"):
-        if raw.endswith(suffix):
-            raw = raw[: -len(suffix)]
-            break
-    for quote in ("USDT", "USDC", "BUSD", "USD", "BTC", "ETH"):
-        if raw.endswith(quote) and len(raw) > len(quote):
-            base = raw[: -len(quote)]
-            return f"{base}-{quote}"
-    return raw
+# ---------------------------------------------------------------------------
+# Backward-compat aliases — kept so existing imports (including tests that
+# use ``_nt_symbol_to_jesse`` / ``_normalize_symbol`` / ``_make_bar_type_str``
+# / ``_INTERVAL_MAP``) continue to work after the helper extraction.
+# ---------------------------------------------------------------------------
 
-
-# Backward-compat aliases for private names
+_nt_symbol_to_jesse = nt_symbol_to_jesse
 _normalize_symbol = normalize_symbol
 _make_bar_type_str = make_bar_type_str
 _INTERVAL_MAP = INTERVAL_MAP
+_UNIT_MAP = UNIT_MAP
+_resolve_module_file = resolve_module_file
