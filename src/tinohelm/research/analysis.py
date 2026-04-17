@@ -162,6 +162,13 @@ def compute_quantile_returns(
     except ValueError:
         return {"avg_returns": {}, "cum_returns": {}, "is_monotonic": False}
 
+    # qcut with duplicates="drop" silently returns NaN labels when the factor
+    # has too few unique values to form n_quantiles bins. Drop those rows so the
+    # downstream `int(q) + 1` doesn't blow up.
+    paired = paired.dropna(subset=["q"])
+    if paired.empty:
+        return {"avg_returns": {}, "cum_returns": {}, "is_monotonic": False}
+
     avg_returns = {}
     cum_returns = {}
 
@@ -233,6 +240,13 @@ def compute_turnover(factor: pd.Series, fwd_ret: pd.Series, n_quantiles: int = 5
     try:
         paired["q"] = pd.qcut(paired["factor"], n_quantiles, labels=False, duplicates="drop")
     except ValueError:
+        return {"daily": 0, "annualized": 0, "fee_drag_monthly": 0}
+
+    # qcut returns NaN when too few unique values exist to form n_quantiles bins.
+    # NaN-vs-NaN comparison below would otherwise be True, falsely reporting
+    # 100% turnover for a degenerate (constant) factor.
+    paired = paired.dropna(subset=["q"])
+    if paired.empty:
         return {"daily": 0, "annualized": 0, "fee_drag_monthly": 0}
 
     # Daily turnover: fraction of positions that change quantile

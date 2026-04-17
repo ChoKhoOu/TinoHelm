@@ -195,14 +195,15 @@ def load_trade_ticks(
     result["price"] = pd.to_numeric(df["price"], errors="coerce")
     result["quantity"] = pd.to_numeric(df["size"], errors="coerce")
 
-    # aggressor_side: NT stores as enum string "BUYER"/"SELLER" or int
+    # aggressor_side: NT stores it as either the AggressorSide enum int (1=BUYER, 2=SELLER)
+    # or the stringified form ("BUYER"/"SELLER"). The previous `side.dtype == object` check
+    # silently broke under pandas 3, which loads string columns as `str` dtype rather than
+    # `object`. Use a unified mapping dict — Series.map only matches keys with a compatible
+    # type, so the irrelevant keys are no-ops in each case.
     if "aggressor_side" in df.columns:
         side = df["aggressor_side"]
-        if side.dtype == object:
-            result["side"] = side.map({"BUYER": 1, "SELLER": -1}).fillna(0).astype(int)
-        else:
-            # NT enum: BUYER=1, SELLER=2
-            result["side"] = side.map({1: 1, 2: -1}).fillna(0).astype(int)
+        side_map = {"BUYER": 1, "SELLER": -1, 1: 1, 2: -1}
+        result["side"] = side.map(side_map).fillna(0).astype(int)
     else:
         result["side"] = 0
 

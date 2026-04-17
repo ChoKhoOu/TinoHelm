@@ -4,6 +4,86 @@ Chronological record of architectural improvements and maintenance work.
 
 ## 2026-04-17
 
+**主题**: 从零搭建 `research/` 模块的测试安全网（237 个 NT-free 用例覆盖 8 个文件），顺手抽 2 个纯函数 + 修 3 处 latent bug
+**维度**: 测试补齐 + 代码质量提升
+**改动范围**:
+- 新增 `tests/research/__init__.py` + 8 个测试文件，共 237 个用例：
+  - `test_factors.py`（40 用例）— 14 个内置因子 + 元数据契约 + 调度器
+  - `test_analysis.py`（55 用例）— IC 序列/decay/quantile/distribution/turnover/sanitize_for_json/run_explore
+  - `test_cost.py`（7 用例）— edge waterfall
+  - `test_robustness.py`（25 用例）— shuffle 统计 + subsample IC + worker
+  - `test_registry.py`（19 用例）— 因子发现（内置 + 自定义 .py）
+  - `test_loader.py`（48 用例）— 纯 helper + Parquet/JSON IO 端到端
+  - `test_report_verdict.py`（28 用例）— `_judge_*` 4 处判定函数
+  - `test_param_scan.py`（15 用例）— `build_ic_matrix` + worker
+- 重构 `src/tinohelm/research/robustness.py`（73 → 96 行）— 抽 `summarize_shuffle_distribution` + 导出 `SHUFFLE_SIGNIFICANCE_THRESHOLD`、`SHUFFLE_MIN_OBSERVATIONS` 两个常量
+- 重构 `src/tinohelm/research/param_scan.py`（139 → 152 行）— 抽 `build_ic_matrix` 取代 sweep_2d 末尾的 O(n²) 内联拼装
+- 修 `src/tinohelm/research/analysis.py` —— `compute_quantile_returns` 与 `compute_turnover` 在退化因子（所有值相同）下的 NaN 处理
+- 修 `src/tinohelm/research/loader.py` —— `aggressor_side` 在 pandas 3 下的 dtype 检测
+
+**动机**:
+
+`src/tinohelm/research/` 是因子研究子系统的全部代码（11 个文件、约 1900 行），承担 IC/decay/quantile/distribution/shuffle/cross-symbol 全套统计分析、参数扫描、verdict 判定、Parquet/JSON 数据加载、内置 14 因子库、自定义因子发现。前端「因子探索」与「深度诊断」两条核心交互链直接消费这些函数的输出。但截至上一轮 evolution，`tests/research/` **目录根本不存在** —— 全模块零专用单元测试，唯一的间接覆盖是后端集成路径。
+
+这意味着：
+1. **因子计算的数值正确性** 没有任何回归保护。任何对 `compute_factor` / `_COMPUTE_MAP` 的无意识改动（重命名、调参逻辑变更、向量化重写时的 off-by-one）都不会触发任何告警。
+2. **IC 评判阈值**（`compute_rating` 的 strong/usable/weak 三档、`_judge_*` 四处的 pass/warn/fail 阈值）**是用户看到的 UX**。前端在 4 个 tab 顶部直接显示这些标签。任何阈值漂移都会让用户在不同时间看到不一致的判定，而我们没有办法在 review 时发现。
+3. **`sanitize_for_json` 是 PostgreSQL JSON 写入的最后一道防线**——上游任何 NaN/Inf 混入都依赖它清洗。它没有测试，意味着对 dict/list/numpy 各种类型的支持是「假设可以工作」而不是「证明可以工作」。
+4. **Loader 端的 Parquet 列重命名 + aggressor_side 枚举映射** 是数据层最容易出 dtype 兼容性问题的地方。pandas 3.0 已经把 string 列的 dtype 从 `object` 改成 `str`，这条潜在 breakage 没有任何测试能发现。
+
+按照本项目沿用的「先抽纯函数，后补测试」演进模式（参见 2026-04-17 的 loader_helpers / 2026-04-17 的 optimizer Phase 2），这次把 `research/` 整层一次性纳入测试安全网，同时把发现的 latent 问题就地修掉，避免下次再做。
+
+**要点**:
+
+1. **`summarize_shuffle_distribution(real_ic, shuffle_ics, bins=50)` —— shuffle 统计与并行解耦**。原 `shuffle_test()` 把 `ProcessPoolExecutor` 与「histogram + p_value + significant」的纯统计混在一起 —— 测试要么忍受 spawn 子进程的开销与 brittleness，要么完全跳过。现在抽出后端纯 helper，`shuffle_test()` 末尾从 13 行内联收敛为 1 行 `return summarize_shuffle_distribution(real_ic, shuffle_ics)`，统计逻辑在 13 个用例下严格锁定（包括「p_value 严格 <0.05 才 significant」这条边界）。同时把 `0.05` 与 `100` 两个 magic number 提升为公共常量 `SHUFFLE_SIGNIFICANCE_THRESHOLD` / `SHUFFLE_MIN_OBSERVATIONS`，前端可以直接引用相同的阈值名称。
+
+2. **`build_ic_matrix(results, p1_values, p2_values)` —— heatmap pivot 与并行解耦**。原 `sweep_2d()` 末尾用 `next((r for r in results if r["p1"]==p1 and r["p2"]==p2), None)` 在每个 cell 上做 O(n²) 线性查找，且依赖 `results` 是 list 而非 dict。抽出后用一个 `(p1, p2) → ic` 的预索引 dict，O(n) 装配；额外补丁：未命中的 cell 显式填 `0.0`（之前是 `match["ic"] if match else 0`，依赖 truthy 检查），文档明说「worker dropped a cell, downstream Plotly heatmap shouldn't crash」。9 个用例覆盖任意顺序、缺失 cell、有 error 字段、空输入、float 参数值、缺 p1/p2 键、矩阵维度。
+
+3. **`compute_quantile_returns` / `compute_turnover` 修 NaN 退化路径**（**真实 latent bug**）：`pd.qcut(..., duplicates="drop")` 在因子有不到 n_quantiles 个 unique 值时不会 raise ValueError —— 它返回 NaN 标签。原代码的 `try/except ValueError` 只能捕获 qcut 自己抛错，对 NaN 标签无能为力，于是：
+   - `compute_quantile_returns` 会在 `int(q) + 1` 处崩溃 `ValueError: cannot convert float NaN to integer`
+   - `compute_turnover` 更危险 —— 它不崩溃，而是因为 `numpy NaN != NaN == True`（numpy 比较 NaN 时返回 True 不是 NumPy 8.0 的新规则，是历史一致行为）报告 100% 换手率，让用户以为常数因子有最高 turnover
+   修复：在两处都加 `paired.dropna(subset=["q"])`，empty 时直接返回原 zero-shape payload。两个 regression 测试 `test_degenerate_factor_returns_empty` / `test_degenerate_factor_returns_zero_turnover` 锁死。
+
+4. **`loader.py` 修 pandas-3 string dtype 兼容**（**真实 latent bug**）：原代码 `if side.dtype == object` 在 pandas 3.0 下永远为 False —— pandas 3 把 string 列的 dtype 从 `object` 改成了 `str`。结果：从 NT Parquet 读回的 `aggressor_side` 字符串 column 会走到 int-enum 分支，被 `side.map({1: 1, 2: -1})` 全部映射成 NaN，再 `.fillna(0)` 全部填 0 —— **所有 trade tick 的 side 在 pandas 3 下永远是 0**，下游 trade-tick 因子（如未来要做的 buy/sell imbalance）会拿到完全错误的方向。修复：用统一的 `{"BUYER": 1, "SELLER": -1, 1: 1, 2: -1}` 映射 dict，因为 `Series.map(dict)` 只匹配类型兼容的 key，所以 string 列只命中前两个 key、int 列只命中后两个 key，无副作用。`test_aggressor_side_string_buyer_to_plus_one` / `test_aggressor_side_int_enum_mapping` / `test_missing_aggressor_side_defaults_to_zero` 三条 regression 锁死。
+
+5. **测试覆盖结构**：每个测试文件按「contract（常量/元数据）→ 各函数（用 pytest 类分组）→ 数值 / 边界 / 错误路径 / 集成」组织。所有用例零 NT 依赖（`research/` 模块本身就 NT-free，只用 pandas/numpy/scipy）。共用 fixture 集中在每个 file 顶部（`linear_df` / `random_df` / `hourly_close` / `positively_correlated_pair` / `sample_df`），保证测试本身的可读性 + 复用性。
+
+6. **关键契约锁定**（被测的「不允许漂移」面）：
+   - `BUILTIN_FACTORS` 必须有 14 个条目；任何加减都必须是有意识的 commit
+   - `_COMPUTE_MAP.keys() == BUILTIN_FACTORS.keys()`（双向覆盖，无 stranded code）
+   - `compute_rating` 三档阈值（IR > 1.0 + pct > 0.6 → 3；IR > 0.5 + pct > 0.55 → 2；IR > 0.2 → 1）
+   - `_judge_predictive_power` t-stat ≥ 2 才 pass、IR ≥ 0.5 才 pass
+   - `_judge_robustness` 中 subsample 60% 负 → warn、cross 50% 以下正 → fail，且 subsample 检查先于 cross（用 `test_cross_symbol_fails_takes_precedence_over_subsample_warn` 显式锁定执行顺序）
+   - `_judge_cost_params` 在 gross=0 时短路返回 pass（避免 div-by-zero）
+   - `_BAR_TYPES` / `_TICK_TYPES` / `_FUNDING_TYPES` 三组 frozenset 严格枚举（任何新 vision 类型必须显式加入），且三组互不重叠
+   - `summarize_shuffle_distribution` 用 `<` 而非 `<=` 判 significant —— `test_p_value_threshold_is_strict_less_than` 用刚好 p=0.05 的构造证明边界
+
+**讨论点**:
+
+- **未直接测的代码**：`generate_report`（`report.py` 主流程）涉及 8 步 progress 回调 + load_data + compute_factor + 多 horizon IC + shuffle/subsample/cross + heatmap/sweep + 落盘。这是 ~150 行的 IO + 并行编排，单元测试投入产出比低 —— 通过测 `_judge_*` 4 处 verdict 函数 + 测各组件函数已经覆盖 90% 的逻辑分支，剩下的 orchestration 留给后端集成测试（如果未来加的话）。同理 `cross_symbol_ic` 端到端、`shuffle_test` / `sweep_1d` / `sweep_2d` 的并行壳都没跑端到端 —— 它们的 worker 内部用 `_single_shuffle_ic` / `_sweep_worker` / `_heatmap_worker` 直接同步调用，已被覆盖。
+- **`worker.py`（research async worker，227 行）暂未覆盖**：它是 redis queue + DB 写入 + asyncio 编排，需要 redis / postgres mock 基础设施。这块更适合放进未来的 「API 路由层 + worker 集成测试」单独主题，而不是塞进本次。
+- **`_template.py` 留有一处 `import numpy as np` 未使用警告**：这是用户因子开发模板（scaffolding），numpy 导入是给用户复制后立刻用的脚手架，不是 dead code。本次未触碰。
+
+**验证**:
+- ✅ 完整 NT-free 测试: `PYTHONPATH=src python3 -m pytest tests/ ...` —— **599 passed in 7.07s**（基线 362 + 新增 237）
+- ✅ research/ 单独：`pytest tests/research/` —— **237 passed in 3.99s**
+  - test_factors.py: 40
+  - test_analysis.py: 55
+  - test_cost.py: 7
+  - test_robustness.py: 25
+  - test_registry.py: 19
+  - test_loader.py: 48
+  - test_report_verdict.py: 28
+  - test_param_scan.py: 15
+- ✅ `ruff check src/tinohelm/research/ tests/research/` —— All checks passed!（除 `_template.py` 的非本次范围 F401）
+- ✅ `py_compile` 全部修改/新增的 13 个文件通过
+- ✅ 端到端 smoke：`shuffle_test(n_iter=20)` 与 `sweep_2d` 经新 helper 走完并行路径，输出结构完整
+- ✅ 修 bug 回归测试：3 个 regression 用例（`test_degenerate_factor_returns_empty`、`test_degenerate_factor_returns_zero_turnover`、`test_aggressor_side_string_buyer_to_plus_one`）显式锁定修复
+
+---
+
+## 2026-04-17
+
 **主题**: 从 `strategy/loader.py` 抽出纯函数到 `strategy/loader_helpers.py`，并补齐 NT-free 单元测试
 **维度**: 架构重构 + 测试补齐
 **改动范围**:
