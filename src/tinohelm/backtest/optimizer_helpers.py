@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from datetime import date, timedelta
 from typing import Any, Sequence
 
@@ -192,6 +193,260 @@ def auto_workers(cpu_count: int | None = None) -> int:
     if cpu_count is None:
         cpu_count = os.cpu_count() or 2
     return min(4, max(1, cpu_count // 2))
+
+
+def auto_patience(n_trials: int) -> int:
+    """Auto early-stopping patience for studies with ``n_trials >= 40``.
+
+    Returns ``0`` (i.e. don't enable early stopping) below the threshold so
+    short studies aren't truncated before the sampler has explored enough.
+    Above the threshold, patience scales with study size: ``max(10, n // 4)``.
+    """
+    if n_trials < 40:
+        return 0
+    return max(10, n_trials // 4)
+
+
+# ---------------------------------------------------------------------------
+# Trial / param helpers (Optuna-adjacent but NT/Optuna-free)
+# ---------------------------------------------------------------------------
+
+def select_best_params(
+    trial_params: dict[str, Any],
+    param_ranges: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Restrict a trial's params dict to keys declared in ``param_ranges``.
+
+    Optuna's nested-suggest API can leak auxiliary keys into ``trial.params``;
+    this filter ensures the persisted "best params" only contain the user-
+    facing parameters.  Used in two places (objective callback + final
+    ``study.best_trial`` reconciliation) — having a single helper kills the
+    drift risk between them.
+    """
+    return {k: v for k, v in trial_params.items() if k in param_ranges}
+
+
+def serialize_trial(trial: Any) -> dict[str, Any]:
+    """Adapt an Optuna ``FrozenTrial`` (or compatible duck-type) to a plain dict.
+
+    Required attributes: ``number`` (int), ``params`` (dict), ``value``
+    (float | None), and either ``state.name`` (Optuna ``TrialState`` enum)
+    or ``state`` already as a string.
+
+    Output shape matches what :func:`filter_completed_trials`,
+    :func:`compute_dsr`, :func:`compute_param_sensitivity`, and
+    :func:`compute_param_stability` consume.
+    """
+    state = getattr(trial, "state", None)
+    state_name = getattr(state, "name", state)
+    return {
+        "number": trial.number,
+        "params": dict(trial.params),
+        "value": trial.value,
+        "state": state_name,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Redis payload assembly (canonical shapes)
+# ---------------------------------------------------------------------------
+
+#: Status values the optimizer publishes on `tino:backtest:optimization:{id}`.
+PROGRESS_STATUS_RUNNING = "running"
+PROGRESS_STATUS_COMPLETED = "completed"
+
+
+def build_progress_payload(
+    *,
+    optimization_id: int,
+    trials_completed: int,
+    total_trials: int,
+    best_value: float,
+    best_params: dict[str, Any],
+    status: str,
+) -> dict[str, Any]:
+    """Canonical payload for ``tino:backtest:optimization:{id}`` Redis publish.
+
+    Both the per-trial "running" event and the final "completed" event ride
+    on the same Redis channel; this helper guarantees they share an identical
+    six-key shape so the frontend ``NotificationListener`` and TUI never see
+    a missing field across event types.
+    """
+    return {
+        "optimization_id": optimization_id,
+        "trials_completed": trials_completed,
+        "total_trials": total_trials,
+        "best_value": best_value,
+        "best_params": dict(best_params),
+        "status": status,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward fold record
+# ---------------------------------------------------------------------------
+
+def build_walk_forward_fold_record(
+    *,
+    fold_idx: int,
+    train_start: date,
+    train_end: date,
+    test_start: date,
+    test_end: date,
+    test_value: float,
+) -> dict[str, Any]:
+    """Build the per-fold record published in ``walk_forward_results``.
+
+    ``fold_idx`` is 0-based for natural enumeration; the persisted ``fold``
+    field is bumped to 1-based so the UI can render "Fold 1 / N" without
+    extra arithmetic.
+    """
+    return {
+        "fold": fold_idx + 1,
+        "train_start": train_start.isoformat(),
+        "train_end": train_end.isoformat(),
+        "test_start": test_start.isoformat(),
+        "test_end": test_end.isoformat(),
+        "test_value": test_value,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Full result assembly — the top-level ``result_json`` schema contract
+# ---------------------------------------------------------------------------
+
+#: 16 top-level keys in every ``result_json`` blob persisted to the DB.
+#: ``walk_forward_results`` is conditional and not in the base set.
+FULL_RESULT_BASE_KEYS: frozenset[str] = frozenset({
+    "best_params",
+    "best_value",
+    "trials",
+    "train_period",
+    "test_period",
+    "validation",
+    "param_importances",
+    "convergence_history",
+    "sampler",
+    "n_workers",
+    "pruning_enabled",
+    "total_pruned",
+    "train_validation",
+    "dsr",
+    "parameter_sensitivity",
+    "parameter_stability_score",
+})
+
+
+def build_full_result(
+    *,
+    best_params: dict[str, Any],
+    best_value: float,
+    trials: list[dict[str, Any]],
+    train_start: date,
+    train_end: date,
+    test_start: date,
+    test_end: date,
+    validation: dict[str, Any] | None,
+    train_validation: dict[str, Any] | None,
+    param_importances: dict[str, float],
+    convergence_history: list[float],
+    sampler: str,
+    n_workers: int,
+    pruning_enabled: bool,
+    total_pruned: int,
+    walk_forward_results: list[dict[str, Any]] | None = None,
+    dsr: float | None = None,
+    parameter_sensitivity: dict[str, Any] | None = None,
+    parameter_stability_score: float | None = None,
+) -> dict[str, Any]:
+    """Assemble the full ``result_json`` blob persisted to the DB.
+
+    The 16 base keys (:data:`FULL_RESULT_BASE_KEYS`) are always present so
+    the optimization detail UI can render unconditionally.
+    ``walk_forward_results`` is included only when walk-forward mode was
+    used (the field is *added*, not set to ``None``, to match the historical
+    serialization the frontend expects).
+
+    Defensive copying is applied so callers can mutate their inputs after
+    construction without corrupting the persisted blob.
+    """
+    full: dict[str, Any] = {
+        "best_params": dict(best_params),
+        "best_value": best_value,
+        "trials": list(trials),
+        "train_period": {
+            "start": train_start.isoformat(),
+            "end": train_end.isoformat(),
+        },
+        "test_period": {
+            "start": test_start.isoformat(),
+            "end": test_end.isoformat(),
+        },
+        "validation": validation,
+        "param_importances": dict(param_importances),
+        "convergence_history": list(convergence_history),
+        "sampler": sampler,
+        "n_workers": n_workers,
+        "pruning_enabled": pruning_enabled,
+        "total_pruned": total_pruned,
+        "train_validation": train_validation,
+        "dsr": dsr,
+        "parameter_sensitivity": parameter_sensitivity,
+        "parameter_stability_score": parameter_stability_score,
+    }
+    if walk_forward_results is not None:
+        full["walk_forward_results"] = list(walk_forward_results)
+    return full
+
+
+# ---------------------------------------------------------------------------
+# Early-stopping state machine
+# ---------------------------------------------------------------------------
+
+class PatienceTracker:
+    """Pure thread-safe "no-improvement counter" for early stopping.
+
+    Decoupled from Optuna types so the state machine can be unit-tested
+    without the optional dependency.  The Optuna callback in
+    :mod:`tinohelm.backtest.optimizer` is a thin shim that calls
+    :meth:`observe` and stops the study when it returns ``True``.
+
+    Invariants:
+
+    - The initial best is ``-inf`` (any finite improvement resets).
+    - ``observe(None)`` (pruned trials) counts as a non-improving step.
+    - Equal-to-best does NOT reset the counter — strictly greater required.
+    """
+
+    def __init__(self, patience: int) -> None:
+        self._patience = patience
+        self._best: float = -math.inf
+        self._no_improve_count: int = 0
+        self._lock = threading.Lock()
+
+    @property
+    def best(self) -> float:
+        """The largest value observed so far (``-inf`` if none)."""
+        return self._best
+
+    @property
+    def no_improve_count(self) -> int:
+        """Consecutive observations that did not improve the best."""
+        return self._no_improve_count
+
+    @property
+    def patience(self) -> int:
+        return self._patience
+
+    def observe(self, value: float | None) -> bool:
+        """Record the latest trial's value; return True if we should stop now."""
+        with self._lock:
+            if value is not None and value > self._best:
+                self._best = value
+                self._no_improve_count = 0
+            else:
+                self._no_improve_count += 1
+            return self._no_improve_count >= self._patience
 
 
 # ---------------------------------------------------------------------------
