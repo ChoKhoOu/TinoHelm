@@ -20,6 +20,57 @@ def _single_shuffle_ic(args: tuple) -> float:
     return float(ic) if np.isfinite(ic) else 0.0
 
 
+# Public threshold for "significant" — p-value strict-less-than this is significant.
+# Exposed so tests + frontend can reference the same constant.
+SHUFFLE_SIGNIFICANCE_THRESHOLD = 0.05
+# Minimum paired observations required to compute a meaningful real IC. Below this
+# we short-circuit to a "no-signal" payload rather than running the (expensive) pool.
+SHUFFLE_MIN_OBSERVATIONS = 100
+
+
+def summarize_shuffle_distribution(
+    real_ic: float,
+    shuffle_ics: list[float] | np.ndarray,
+    bins: int = 50,
+) -> dict:
+    """Aggregate shuffle-test math into the wire-format payload — pure, no IO.
+
+    Splitting this out lets us unit-test the histogram + p-value contract without
+    spinning up a ProcessPoolExecutor (which is slow and brittle in tests).
+
+    Returns the same dict shape as ``shuffle_test``:
+        {real_ic, shuffle_distribution, p_value, significant}
+    """
+    arr = np.asarray(list(shuffle_ics), dtype=float)
+    real_ic = float(real_ic) if np.isfinite(real_ic) else 0.0
+
+    if arr.size == 0:
+        return {
+            "real_ic": round(real_ic, 6),
+            "shuffle_distribution": [],
+            "p_value": 1.0,
+            "significant": False,
+        }
+
+    p_value = float(np.mean(np.abs(arr) >= abs(real_ic)))
+    counts, edges = np.histogram(arr, bins=bins)
+    distribution = [
+        {
+            "bin_start": round(float(edges[i]), 6),
+            "bin_end": round(float(edges[i + 1]), 6),
+            "count": int(counts[i]),
+        }
+        for i in range(len(counts))
+    ]
+
+    return {
+        "real_ic": round(real_ic, 6),
+        "shuffle_distribution": distribution,
+        "p_value": round(p_value, 4),
+        "significant": p_value < SHUFFLE_SIGNIFICANCE_THRESHOLD,
+    }
+
+
 def shuffle_test(
     factor: pd.Series,
     fwd_ret: pd.Series,
@@ -33,7 +84,7 @@ def shuffle_test(
     paired = pd.DataFrame({"f": factor, "r": fwd_ret}).dropna()
     paired = paired[np.isfinite(paired["f"]) & np.isfinite(paired["r"])]
 
-    if len(paired) < 100:
+    if len(paired) < SHUFFLE_MIN_OBSERVATIONS:
         return {"real_ic": 0, "shuffle_distribution": [], "p_value": 1.0, "significant": False}
 
     f_vals = paired["f"].values
@@ -52,24 +103,7 @@ def shuffle_test(
         for fut in as_completed(futures):
             shuffle_ics.append(fut.result())
 
-    shuffle_ics = np.array(shuffle_ics)
-
-    # p-value: fraction of shuffles with |IC| >= |real IC|
-    p_value = float(np.mean(np.abs(shuffle_ics) >= abs(real_ic)))
-
-    # Histogram of shuffle distribution (for visualization)
-    counts, edges = np.histogram(shuffle_ics, bins=50)
-    distribution = [
-        {"bin_start": round(float(edges[i]), 6), "bin_end": round(float(edges[i+1]), 6), "count": int(counts[i])}
-        for i in range(len(counts))
-    ]
-
-    return {
-        "real_ic": round(real_ic, 6),
-        "shuffle_distribution": distribution,
-        "p_value": round(p_value, 4),
-        "significant": p_value < 0.05,
-    }
+    return summarize_shuffle_distribution(real_ic, shuffle_ics)
 
 
 def subsample_ic(

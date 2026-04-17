@@ -94,6 +94,33 @@ def _heatmap_worker(args: tuple) -> dict:
         return {"p1": p1_val, "p2": p2_val, "ic": 0, "error": str(exc)}
 
 
+def build_ic_matrix(
+    results: list[dict],
+    param1_values: list[int | float],
+    param2_values: list[int | float],
+) -> list[list[float]]:
+    """Pivot heatmap worker results into a row-major IC matrix.
+
+    ``results`` may arrive in any order (futures.as_completed). We index by
+    ``(p1, p2)`` and emit a ``len(param1_values) × len(param2_values)`` matrix,
+    filling missing cells with 0.0 so downstream Plotly heatmaps don't choke
+    on holes (a worker may have failed and dropped a cell).
+
+    Pure function; no IO. Lives at module scope so it's testable independently
+    of the ProcessPoolExecutor that produces ``results``.
+    """
+    # O(n) lookup, not O(n²) per cell.
+    by_pair: dict[tuple, float] = {}
+    for r in results:
+        if "p1" in r and "p2" in r:
+            by_pair[(r["p1"], r["p2"])] = float(r.get("ic", 0))
+
+    return [
+        [by_pair.get((p1, p2), 0.0) for p2 in param2_values]
+        for p1 in param1_values
+    ]
+
+
 def sweep_2d(
     factor_name: str,
     df: pd.DataFrame,
@@ -121,19 +148,10 @@ def sweep_2d(
         for fut in as_completed(futures):
             results.append(fut.result())
 
-    # Build IC matrix
-    ic_matrix = []
-    for p1 in param1_values:
-        row = []
-        for p2 in param2_values:
-            match = next((r for r in results if r["p1"] == p1 and r["p2"] == p2), None)
-            row.append(match["ic"] if match else 0)
-        ic_matrix.append(row)
-
     return {
         "param1": param1_name,
         "param2": param2_name,
         "values1": param1_values,
         "values2": param2_values,
-        "ic_matrix": ic_matrix,
+        "ic_matrix": build_ic_matrix(results, param1_values, param2_values),
     }
