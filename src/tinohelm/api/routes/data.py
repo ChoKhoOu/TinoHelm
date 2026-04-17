@@ -643,7 +643,7 @@ async def list_data_types() -> list[dict]:
     """Return supported data types and their availability."""
     from tinohelm.data.downloader import DATA_TYPE_AVAILABILITY
     from tinohelm.data.converters import CONVERTER_REGISTRY
-    from tinohelm.data.pipeline import _WRITE_CATEGORY
+    from tinohelm.data.pipeline_helpers import resolve_db_category
 
     result = []
     for dt, (has_daily, has_monthly) in DATA_TYPE_AVAILABILITY.items():
@@ -668,7 +668,7 @@ async def list_data_types() -> list[dict]:
             "has_daily": has_daily,
             "has_monthly": has_monthly,
             "implemented": implemented,
-            "db_category": _WRITE_CATEGORY.get(dt, dt),
+            "db_category": resolve_db_category(dt),
         })
     return result
 

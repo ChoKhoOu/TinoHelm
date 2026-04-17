@@ -403,4 +403,178 @@ CI 会跳过 41 个测试。把真正 NT-free 的逻辑抽出来,可以同时解
 - 重复的 trial-filter 谓词:3 处 → 1 处(`filter_completed_trials`)
 - `_compute_dsr` 的隐式 NT 依赖:消除
 
+## 2026-04-17
+
+**主题**: 把 `data/pipeline.py` 中的纯逻辑下沉到新建的 `pipeline_helpers.py`,统一三处语义漂移的 `_WRITE_CATEGORY.get()` 兜底,补齐零覆盖的进度数学/日期边界/Vision 文件名解析
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- `src/tinohelm/data/pipeline_helpers.py` — 新建 259 行,导出 9 个纯函数 + 4 个 canonical 映射(用 `MappingProxyType` 锁不可变)+ 2 个进度带常量
+- `src/tinohelm/data/pipeline.py` — 892 → 858 行(-34 行,-3.8%);删除 ~100 行内联逻辑替换为 ~65 行声明式调用;打破对 `datetime`/`timezone` 的直接依赖(下沉到 helpers)
+- `src/tinohelm/api/routes/data.py` — 把 `from tinohelm.data.pipeline import _WRITE_CATEGORY` 改为 `from tinohelm.data.pipeline_helpers import resolve_db_category`,API 端点更新到 canonical 名
+- `tests/data/test_pipeline_helpers.py` — 新建,90 个无 NT/pandas/sqlalchemy/httpx 依赖的单元测试
+
+**动机**:
+
+按照过去三轮 evolution(`runner_helpers`、`optimizer_helpers`、`extract.py` sections)
+的成功范式审视项目剩余未触碰的大文件,`data/pipeline.py`(892 行)是
+**整个 data 子系统的核心枢纽**——FastAPI 路由 + BacktestRunner 子进程 +
+data worker 后台任务三条路径都直接依赖它,但它本身有六个重叠的健康问题:
+
+1. **三处语义漂移的 `_WRITE_CATEGORY.get(data_type, ???)` 兜底**——同一个
+   字典查找在三个调用点用了**三个不同的 default**:
+   - `_write_objects` (line 517): `... "custom"` —— 用作 catalog writer 派发,
+     未知类型回退到 `"custom"` 然后 logger.warning + skip
+   - `_clean_overlapping_parquet` (line 723): `... )` (no default → None)
+     —— 只关心 `"bar"` / `"trade_tick"` 两个分支,其余走 `else: return`
+   - `_update_db_catalog` (line 856): `... data_type` —— 把原 type 名直接
+     塞进 DB 的 `data_type` 列,保持记录可发现
+   - `api/routes/data.py:671`: `... dt` —— 同上,但显式拷了一份
+   四份独立的兜底语义,没有名字、没有测试、注释里也没说明意图。任何一份悄悄
+   漂移都不会有任何 lint/类型/测试报错。这是典型的"用不同 magic value 表达
+   同一组业务规则"。
+
+2. **三处复制粘贴的进度百分比公式**——`5 + round(85 * x / total_tasks)`
+   出现 3 次(`_download_one`/`_chunk_cb`/`_convert_consumer`),
+   `chunks / (chunks + 2)` 内插一次,`78 + int(12 * (csv_idx + 1) / len(csv_paths))`
+   再来一次。`5` 和 `85` 是无名 magic number,为什么取这两个数字、
+   后面的 `92`/`96`/`100` 各自代表什么阶段——全部需要从 caller 上下文反推。
+
+3. **三处复制粘贴的"date → ns UTC 边界"装配**——
+   `int(datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1_000_000_000)`
+   出现两次(`_clean_overlapping_parquet` 起止边界);`datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc)`
+   再出现两次(REST fallback 的 start_dt/end_dt)。"end 是 d+1 天的零点"
+   这种半开区间约定散落在多处,没有一个共享的命名。
+
+4. **零覆盖的 Vision 文件名解析逻辑**——`_detect_vision_coverage_end` 内联了
+   34 行 stem→date 解析(daily 末三段 → ISO date,monthly 末两段 → 当月最后
+   一天,12 月特殊处理跨年减一天),只有 4 个高层 mock 测试覆盖,其中
+   "无效月份"/"零月份"/"非数字"/"empty stem"/"空 granularity" 等边界都没有。
+   一旦 Binance 改命名约定,我们要靠生产爆掉才知道。
+
+5. **顶层 `_klines_fetch_map = {...}` dict literal 在 `_rest_fallback` 函数
+   体内**——每次调用都重新构造一个 dict,合理位置应该是模块级常量。
+
+6. **`_detect_header` 把"判定文本头"和"打开文件读首行"耦合在一起**——
+   核心判定 `not first[0].isdigit()` 一句话,但写在一个 file-I/O 包装里,
+   测试要么 mock 文件要么写真文件,无法直测判定本身。
+
+把这 6 个问题一起做掉,且**只做这一件事**。
+
+**要点**:
+
+1. **新建 `pipeline_helpers.py` —— 13 个导出符号(9 函数 + 4 映射)+ 2 常量**:
+   - `WRITE_CATEGORY` / `INTERVAL_CONVENTION` / `KLINES_REST_FETCH_FN` ——
+     用 `MappingProxyType` 包成不可变映射(测试 pin 了 `TypeError on __setitem__`)
+   - `REST_FALLBACK_TYPES` —— `frozenset`,canonical 单一事实源
+   - `DOWNLOAD_PROGRESS_BASE = 5` / `DOWNLOAD_PROGRESS_SPAN = 85` ——
+     给 magic number 起名字,文档化"剩余 10% 留给 REST fallback + DB catalog"
+   - **`resolve_write_category(dt) -> str`** —— 统一第一种语义,unknown → `"custom"`
+   - **`resolve_db_category(dt) -> str`** —— 统一第二种语义,unknown → 输入本身
+   - **`resolve_db_interval(dt, interval) -> str`** —— 三层优先级(显式 >
+     convention > "tick"),空字符串作"未提供"处理(原代码 `interval if interval`
+     的隐式行为现在显式化)
+   - `is_rest_fallback_supported(dt) -> bool` —— 谓词形式,语义自描述
+   - `compute_stage_pct(done, total, *, base=5, span=85) -> int` —— 单一进度
+     公式;`total <= 0` 返回 base 而不是崩溃;`done` 自动 clamp 到 [0, total]
+   - `compute_chunk_subprogress(stage_done, total, chunks, *, base, span) -> int`
+     —— 把 `chunks/(chunks+2)` 内插封装,保证返回值严格 < 下一个 stage
+   - `date_start_dt(d)` / `date_end_dt(d)` —— `datetime` 边界,end = d+1 天零点
+   - `date_start_ns(d)` / `date_end_ns(d)` —— ns 边界,通过 `*_dt` 复用
+   - `parse_vision_coverage_end(granularity, stem) -> date | None` —— 完全
+     pure,接受 primitive 入参便于测试
+   - `csv_has_header(first_line) -> bool` —— pure 谓词,空字符串/纯空白都
+     正确返回 False(原代码的边界)
+
+2. **`pipeline.py` 减重 3.8%(892 → 858 行)**:
+   - 三处 `5 + round(85 * x / total_tasks)` → `compute_stage_pct(x, total_tasks)`
+   - `_chunk_cb` 内的两条 base/next 行 + 内插 + clamp 共 5 行 → `compute_chunk_subprogress(...)` 一行
+   - `_clean_overlapping_parquet` 的 8 行 datetime 装配 → `date_start_ns` / `date_end_ns` 两行
+   - `_rest_fallback` 的 5 行 dt 装配 + 6 行 `_klines_fetch_map` literal →
+     `date_start_dt` / `date_end_dt` + module 常量 `KLINES_REST_FETCH_FN` 引用
+   - `_detect_header` 从 5 行(打开 + 读 + 字符判定)缩为 3 行,核心判定下沉
+   - `_detect_vision_coverage_end` 从 34 行缩为 5 行,完全委托给 `parse_vision_coverage_end`
+   - `_update_db_catalog` 的两行 `_WRITE_CATEGORY.get(..., data_type)` /
+     `_INTERVAL_CONVENTION.get(..., "tick")` → `resolve_db_category` /
+     `resolve_db_interval` 两个**自描述**的命名调用
+   - 顶部 `_REST_FALLBACK_TYPES = REST_FALLBACK_TYPES` / `_WRITE_CATEGORY = WRITE_CATEGORY` /
+     `_INTERVAL_CONVENTION = INTERVAL_CONVENTION` 三个 backward-compat 别名保留,
+     避免破坏任何外部反射式访问
+
+3. **`api/routes/data.py` 主动迁移到 canonical 名**——把
+   `from tinohelm.data.pipeline import _WRITE_CATEGORY`
+   改为 `from tinohelm.data.pipeline_helpers import resolve_db_category`,
+   `db_category = _WRITE_CATEGORY.get(dt, dt)` 改为 `db_category = resolve_db_category(dt)`。
+   API 端点契约不变(返回 JSON shape 一致),意图更清晰。
+
+4. **`test_pipeline_helpers.py` —— 90 个 NT/pandas/sqlalchemy/httpx-free 测试**:
+   - `TestModuleIsolation` (2): 模块身份 + **源码扫描禁用 import**(防止有人
+     未来把 pandas/NT 加进 helpers 破坏 lean CI 假设)
+   - `TestCanonicalMappings` (8): 三个映射的 `TypeError on __setitem__` + 全部
+     canonical key/value pin + 进度带常量
+   - `TestResolveWriteCategory` (5): 已知/未知/空字符串
+   - `TestResolveDbCategory` (5): 已知/未知/空字符串/**与 write_category 的语义
+     差异显式锁定**(`"exoticType"` 一个 → `"custom"`,另一个 → `"exoticType"`)
+   - `TestResolveDbInterval` (7): 显式优先 / convention 兜底 / "tick" 兜底 /
+     空字符串当 missing / klines 边界
+   - `TestRestFallbackSupport` (13): parametrize 6 supported + 7 unsupported
+   - `TestComputeStagePct` (11): zero done / total≤0 / 完整完成 / 1/2/1/3/1/4
+     边界 / negative clamp / over-total clamp / custom band / 返回 int
+   - `TestComputeChunkSubprogress` (7): 严格小于 next slice / chunks→∞ 渐近
+     next-1 / 0 chunks 等价 1 chunk / 完整完成无内插空间 / total=0 / chunk
+     单调性 / **公式精确 pin**(0,2,1=19, 0,2,2=26, 0,2,4=33,把 banker's
+     rounding 的微妙性钉死)
+   - `TestDateBoundaryHelpers` (8): UTC midnight / next-day / 月边界 / 年边界
+     / 已知 epoch 数值 / start↔end 差恰好 86400s / 返回 int / 闰日支持
+   - `TestParseVisionCoverageEnd` (16): daily aggTrades / daily klines (含
+     interval token)/ 无效日期 / 太少段 / monthly 各月 / 闰年 2 月 / 12 月
+     跨年减一天 / 1 月 / 月份 13 / 月份 0 / 非数字 / 太少段 / 未知 granularity
+     / empty stem / empty granularity
+   - `TestCsvHasHeader` (7): 文本头 / 数字数据 / **负数边界**(`"-1.5"` 当
+     成 header,这是当前规则,显式锁定让任何未来变更都是有意识的)/ 空 /
+     纯空白 / tab 分隔 / 字母列
+   - `TestCrossReferenceWithPipeline` (1): pipeline.py 的 backward-compat
+     别名 `_WRITE_CATEGORY is WRITE_CATEGORY` 等同性
+
+5. **完整回归**: 在无 NT 的 lean CI 镜像下跑
+   `PYTHONPATH=src python3 -m pytest tests/data/test_pipeline*.py` —— 110/110
+   全过(`test_pipeline.py` 20 + `test_pipeline_helpers.py` 90)。
+   全套 `tests/` 跑下来,通过项 +90(就是新加的 helper 测试),
+   失败项数量与改动前完全相同(35 项,均为环境无 NT 导致,与本次改动无关)→
+   **零回归**。
+
+6. **NT/pandas/sqlalchemy/httpx-free 验证** —— 用 `sys.meta_path` blocker
+   屏蔽 nautilus_trader / pandas / sqlalchemy 后,`pipeline_helpers` 仍能
+   完整导入并执行所有函数(已运行 smoke 验证,8 个核心 helper 调用全部通过)。
+   这意味着将来在 lean CI 任务里(只装 pytest)就能跑这 90 个测试,
+   不需要任何重型依赖。
+
+**讨论点**:
+
+- 三个 backward-compat 别名 `_REST_FALLBACK_TYPES = REST_FALLBACK_TYPES` 等
+  目前没有外部消费者(grep 全仓只剩 pipeline.py 自身和 CLAUDE.md 文档引用)。
+  保留是为了避免未来有人引用而不是出于已知需求。下一轮可以考虑 `dep deprecation`
+  注释,再下一轮删除。
+
+- `csv_has_header` 对 `"-1.5"` 返回 `True`(因为 `-` 不是 digit)。这并不是
+  Vision CSV 实际遇到的形态(数据行第一字段都是非负整数 epoch ms),但既然
+  helper 是 pure 的,这个边界值得显式锁定测试。如果未来有 source 用负数开头,
+  helper 需要扩展到 `first_char.isdigit() or first_char in "-+"`。
+
+- `compute_stage_pct(1, 2)` 因 banker's rounding 返回 47 而不是 48。生产
+  路径里 progress 整数显示给用户,46/47/48 之间的视觉差异为零,不影响行为;
+  测试已经把这个隐藏的 Python 行为显式 pin 住,任何切换到 `math.ceil` 或
+  `int(round(...))` 都会被测试检出。
+
+**验证**:
+- `PYTHONPATH=src python3 -m pytest tests/data/test_pipeline.py tests/data/test_pipeline_helpers.py` —— 110/110 全过
+- `PYTHONPATH=src python3 -m pytest tests/ --ignore=tests/actors --ignore=tests/node` —— 通过 +90 全部为新增,失败项与改动前完全一致(35 项均为本机无 NT,改动前后完全相同)
+- 字节码编译检查通过(`py_compile` on 4 个文件)
+- `pipeline_helpers` 在 `sys.meta_path` blocker 下独立导入并执行成功 —— 证实零 NT/pandas/sqlalchemy/httpx 依赖
+- 所有受影响文件 `grep -n 'TODO\|FIXME\|XXX'` 返回空
+- pipeline.py 行数: 892 → 858(-34 行,-3.8%);**内联非声明式代码**从 ~110 行降至 ~10 行(剩下的都是必要的异步编排和 I/O)
+- 新增 259 行纯 helpers + 513 行 NT-free 测试
+- 三处语义漂移的 `_WRITE_CATEGORY.get(..., ???)` 调用 → 三个命名 helper(`resolve_write_category` / `resolve_db_category` / `resolve_db_interval`)
+- 三处重复的进度公式 → 一个 `compute_stage_pct` + 一个 `compute_chunk_subprogress`
+- 三处重复的 date→ns UTC 装配 → 一对 `date_start_ns` / `date_end_ns` + `_dt` 变体
+- 内联 `_klines_fetch_map` dict literal → module 级 canonical `KLINES_REST_FETCH_FN`
 
