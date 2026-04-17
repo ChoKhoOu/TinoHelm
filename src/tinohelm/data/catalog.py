@@ -5,17 +5,50 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from tinohelm.data.catalog_helpers import (
+    CATEGORY_DIR,
+    INTERVAL_MAP,
+    WRITABLE_CATEGORIES,
+    build_validation_issues,
+    classify_status,
+    count_duplicates,
+    dedupe_by_ts,
+    detect_price_jumps,
+    find_gaps,
+    interval_to_nanoseconds,
+    interval_to_step_unit,
+    is_ohlc_valid,
+    merge_bars,
+    ns_to_iso,
+    resolve_catalog_path,
+)
+from tinohelm.data.pipeline_helpers import WRITE_CATEGORY as _PIPELINE_WRITE_CATEGORY
+
 logger = logging.getLogger(__name__)
 
 
-# Interval string to (step, BarAggregation) mapping
-_INTERVAL_MAP: dict[str, tuple[int, str]] = {
-    "1m": (1, "MINUTE"), "3m": (3, "MINUTE"), "5m": (5, "MINUTE"),
-    "15m": (15, "MINUTE"), "30m": (30, "MINUTE"),
-    "1h": (1, "HOUR"), "2h": (2, "HOUR"), "4h": (4, "HOUR"),
-    "6h": (6, "HOUR"), "8h": (8, "HOUR"), "12h": (12, "HOUR"),
-    "1d": (1, "DAY"),
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases — pre-extraction code paths and tests
+# imported these private names directly. They now re-export the helpers so
+# existing callers (and any future ones that landed on historical names)
+# keep working unchanged.
+# ---------------------------------------------------------------------------
+_INTERVAL_MAP = INTERVAL_MAP
+_CATEGORY_DIR = CATEGORY_DIR
+# ``_SOURCE_TO_CATEGORY`` used to be a catalog-local subset of
+# ``pipeline_helpers.WRITE_CATEGORY``. The subset is now derived on the fly
+# in ``resolve_catalog_path`` — the alias below is kept for any external
+# caller that grep-imported the old constant directly.
+_SOURCE_TO_CATEGORY: dict[str, str] = {
+    src: cat
+    for src, cat in _PIPELINE_WRITE_CATEGORY.items()
+    if cat in WRITABLE_CATEGORIES
 }
+
+
+def _interval_to_nanoseconds(interval: str) -> int:
+    """Backward-compatible wrapper around :func:`interval_to_nanoseconds`."""
+    return interval_to_nanoseconds(interval)
 
 
 def _make_instrument(symbol: str):
@@ -33,10 +66,7 @@ def _make_bar_type(instrument_id, interval: str):
     from nautilus_trader.model.data import BarType, BarSpecification
     from nautilus_trader.model.enums import AggregationSource, BarAggregation, PriceType
 
-    if interval not in _INTERVAL_MAP:
-        raise ValueError(f"Unsupported interval '{interval}'. Supported: {list(_INTERVAL_MAP.keys())}")
-
-    step, agg_name = _INTERVAL_MAP[interval]
+    step, agg_name = interval_to_step_unit(interval)
     aggregation = getattr(BarAggregation, agg_name)
 
     return BarType(
@@ -53,54 +83,6 @@ def ensure_catalog_dirs(catalog_path: str | Path) -> Path:
     return path
 
 
-# Map DB category → user-facing directory name under the catalog root.
-_CATEGORY_DIR: dict[str, str] = {
-    "bar": "bar",
-    "trade_tick": "ticks",
-}
-
-# Re-use the pipeline's write-category mapping to resolve source→category.
-_SOURCE_TO_CATEGORY: dict[str, str] = {
-    "klines": "bar",
-    "markPriceKlines": "bar",
-    "indexPriceKlines": "bar",
-    "premiumIndexKlines": "bar",
-    "aggTrades": "trade_tick",
-    "trades": "trade_tick",
-}
-
-
-def resolve_catalog_path(base_path: str | Path, source_type: str | None) -> Path:
-    """Return the effective catalog path for a given source type.
-
-    Structure: ``base_path / {category_dir} / {source_type} /``
-
-    Examples::
-
-        resolve_catalog_path(catalog, "klines")          → catalog/bar/klines/
-        resolve_catalog_path(catalog, "markPriceKlines")  → catalog/bar/markPriceKlines/
-        resolve_catalog_path(catalog, "aggTrades")        → catalog/ticks/aggTrades/
-        resolve_catalog_path(catalog, "trades")           → catalog/ticks/trades/
-
-    Each resolved path is a valid NT ParquetDataCatalog root.
-    """
-    base = Path(base_path)
-    if not source_type:
-        return base
-    category = _SOURCE_TO_CATEGORY.get(source_type)
-    if not category:
-        return base
-    cat_dir = _CATEGORY_DIR[category]
-    return base / cat_dir / source_type
-
-
-def _interval_to_nanoseconds(interval: str) -> int:
-    """Convert an interval string like '5m' or '1h' to nanoseconds."""
-    step, agg_name = _INTERVAL_MAP[interval]
-    multipliers = {"MINUTE": 60, "HOUR": 3600, "DAY": 86400}
-    return step * multipliers[agg_name] * 1_000_000_000
-
-
 def validate_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     """Validate data integrity for a symbol/interval.
 
@@ -114,12 +96,11 @@ def validate_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     - status: "ok" | "warnings" | "errors"
     - issues: list[str] - human-readable issue descriptions
     """
-    from datetime import datetime, timezone
-
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-    if interval not in _INTERVAL_MAP:
-        raise ValueError(f"Unsupported interval '{interval}'. Supported: {list(_INTERVAL_MAP.keys())}")
+    # Validates the interval and reuses the same error message shape the
+    # helper exposes to every caller that does interval-string lookup.
+    expected_step_ns = interval_to_nanoseconds(interval)
 
     catalog_path = Path(catalog_path)
     instrument = _make_instrument(symbol)
@@ -154,91 +135,45 @@ def validate_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     timestamps = sorted(b.ts_event for b in bars)
     total_bars = len(timestamps)
 
-    # Date range
-    def _ns_to_iso(ns: int) -> str:
-        return datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc).isoformat()
+    date_range = {"start": ns_to_iso(timestamps[0]), "end": ns_to_iso(timestamps[-1])}
 
-    date_range = {"start": _ns_to_iso(timestamps[0]), "end": _ns_to_iso(timestamps[-1])}
+    duplicates = count_duplicates(timestamps)
+    sorted_unique = sorted(set(timestamps))
+    gaps = find_gaps(sorted_unique, expected_step_ns)
 
-    issues: list[str] = []
-
-    # Check duplicates
-    unique_ts = set(timestamps)
-    duplicates = total_bars - len(unique_ts)
-    if duplicates > 0:
-        issues.append(f"Found {duplicates} duplicate timestamp(s)")
-
-    # Check gaps (use deduplicated sorted timestamps)
-    sorted_unique = sorted(unique_ts)
-    expected_step_ns = _interval_to_nanoseconds(interval)
-    tolerance_ns = int(expected_step_ns * 1.5)
-    gaps: list[dict] = []
-
-    for i in range(1, len(sorted_unique)):
-        diff = sorted_unique[i] - sorted_unique[i - 1]
-        if diff > tolerance_ns:
-            missing_bars = int(diff / expected_step_ns) - 1
-            gaps.append({
-                "start": _ns_to_iso(sorted_unique[i - 1]),
-                "end": _ns_to_iso(sorted_unique[i]),
-                "missing_bars": missing_bars,
-            })
-
-    if gaps:
-        total_missing = sum(g["missing_bars"] for g in gaps)
-        issues.append(f"Found {len(gaps)} gap(s) with ~{total_missing} missing bar(s)")
-
-    # OHLC relationship validation
+    # OHLC relationship + volume + price-jump scan (single pass)
     ohlc_violations = 0
     zero_volume_bars = 0
-    price_jumps: list[dict] = []
-
-    prev_close: float | None = None
     jump_threshold = 0.10  # 10% price change between consecutive bars
 
+    closes_with_ts: list[tuple[int, float]] = []
     for bar in bars:
         o = float(bar.open)
         h = float(bar.high)
-        l = float(bar.low)  # noqa: E741
+        low = float(bar.low)
         c = float(bar.close)
         v = float(bar.volume)
 
-        # OHLC invariant: high >= max(open, close), low <= min(open, close)
-        if h < max(o, c) - 1e-10 or l > min(o, c) + 1e-10 or h < l:
+        if not is_ohlc_valid(o, h, low, c):
             ohlc_violations += 1
-
-        # Zero volume detection
         if v == 0:
             zero_volume_bars += 1
+        closes_with_ts.append((bar.ts_event, c))
 
-        # Price jump detection (consecutive bars)
-        if prev_close is not None and prev_close > 0:
-            change_pct = abs(c - prev_close) / prev_close
-            if change_pct > jump_threshold:
-                price_jumps.append({
-                    "timestamp": _ns_to_iso(bar.ts_event),
-                    "prev_close": round(prev_close, 4),
-                    "current_close": round(c, 4),
-                    "change_pct": round(change_pct * 100, 2),
-                })
-        prev_close = c
+    price_jumps = detect_price_jumps(closes_with_ts, threshold=jump_threshold)
 
-    if ohlc_violations > 0:
-        issues.append(f"Found {ohlc_violations} bar(s) with invalid OHLC relationship (high < max(O,C) or low > min(O,C))")
-    if zero_volume_bars > 0:
-        issues.append(f"Found {zero_volume_bars} zero-volume bar(s)")
-    if price_jumps:
-        issues.append(f"Found {len(price_jumps)} price jump(s) exceeding {jump_threshold*100:.0f}%")
-
-    # Determine status
-    has_errors = gaps or ohlc_violations > 0
-    has_warnings = duplicates > 0 or zero_volume_bars > 0 or len(price_jumps) > 0
-    if has_errors:
-        status = "errors"
-    elif has_warnings:
-        status = "warnings"
-    else:
-        status = "ok"
+    issues = build_validation_issues(
+        duplicates=duplicates,
+        gaps=gaps,
+        ohlc_violations=ohlc_violations,
+        zero_volume_bars=zero_volume_bars,
+        price_jumps=price_jumps,
+        jump_threshold=jump_threshold,
+    )
+    status = classify_status(
+        has_errors=bool(gaps) or ohlc_violations > 0,
+        has_warnings=duplicates > 0 or zero_volume_bars > 0 or bool(price_jumps),
+    )
 
     return {
         "total_bars": total_bars,
@@ -297,12 +232,10 @@ def write_bars(
                 if bar_dir.exists():
                     existing_files_to_delete = list(bar_dir.glob("*.parquet"))
 
-                seen: dict[int, Any] = {b.ts_event: b for b in existing_bars}
-                for b in bars:
-                    seen[b.ts_event] = b
-                bars = sorted(seen.values(), key=lambda b: b.ts_event)
+                existing_count = len(existing_bars)
+                bars = merge_bars(existing_bars, bars)
                 logger.info("Merged %d existing + %d new bars = %d total",
-                            len(existing_bars), len(bars) - len(existing_bars), len(bars))
+                            existing_count, len(bars) - existing_count, len(bars))
         except Exception:
             logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
 
@@ -377,10 +310,7 @@ def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
         }
 
     # 4. Deduplicate by ts_event (keep last) and sort
-    seen: dict[int, Any] = {}
-    for b in bars:
-        seen[b.ts_event] = b
-    bars = sorted(seen.values(), key=lambda b: b.ts_event)
+    bars = dedupe_by_ts(bars)
     logger.info("Compacting %s %s: %d files -> %d bars (deduped)", symbol, interval, files_before, len(bars))
 
     # 5. Delete all existing parquet files in the bar_type directory
@@ -432,8 +362,7 @@ def agg_trades_to_trade_ticks(
     """
     from nautilus_trader.model.data import TradeTick
     from nautilus_trader.model.enums import AggressorSide
-    from nautilus_trader.model.identifiers import InstrumentId, TradeId
-    from nautilus_trader.model.objects import Price, Quantity
+    from nautilus_trader.model.identifiers import TradeId
 
     from tinohelm.data.instruments import make_instrument
 
