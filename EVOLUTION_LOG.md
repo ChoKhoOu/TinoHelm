@@ -113,6 +113,163 @@ extract.py 还剩两个内联分析块未处理:
 - section 12b + section 14 在 extract.py 中的内联数学代码从 ~250 行降至 ~130 行
   (全部为 primitive 装配逻辑,零内联数学)
 
+## 2026-04-17
+
+**主题**: 从 `backtest/optimizer.py` 抽取纯逻辑至新建的 `optimizer_helpers.py`,建立 optuna-free 的单元测试层,并提取共享 `_math_primitives` 叶子模块以打破 `result/__init__.py` 的 NT/pandas 依赖链
+**维度**: 架构重构 + 测试补齐 + 代码质量
+**改动范围**:
+- `src/tinohelm/backtest/optimizer_helpers.py` — **新建 600 行**,收纳 17 个 optuna-free + NT-free 纯函数/常量
+- `src/tinohelm/backtest/_math_primitives.py` — **新建 40 行**,提供 `norm_cdf`/`norm_ppf` 的单一实现(标准库 only)
+- `src/tinohelm/backtest/optimizer.py` — 1115 → 811 行(**-304 行,-27.3%**),所有 smart defaults/日期窗口/trial 过滤/DSR/灵敏度/稳定性助手下沉到新模块
+- `src/tinohelm/backtest/result/statistics.py` — 将 `_norm_ppf`/`_norm_cdf` 改为 `from tinohelm.backtest._math_primitives import ...` 的 re-export(保持向后兼容,消除重复实现)
+- `tests/backtest/test_optimizer_helpers.py` — **新建 831 行**,87 个 optuna-free 单元测试覆盖 13 个公共 helper + 3 个常量 + 1 个导入隔离契约
+
+**动机**:
+
+1. **optimizer.py 是最后一个未被拆分的大文件**(1115 行)。上两轮(2026-04-16 (4)/(5))
+   把 `extract.py` 压缩到 942 行、`runner.py` 压缩到 1205 行并建立了可在无 NT 环境下
+   运行的 pure helper 测试层。optimizer.py 包含:
+   - **9 个纯函数** (400+ 行):`_split_dates`/`_walk_forward_windows`/
+     `_extract_fitness`/`_auto_n_trials`/`_auto_sampler`/`_auto_workers`/
+     `_slim_result`/`_compute_dsr`/`_compute_param_sensitivity`/
+     `_compute_param_stability` —— 只是因为埋在 1115 行的 Optuna orchestration 里
+     而无法独立测试
+   - **三处重复的"filter valid trials"推导式** —— 在 DSR / sensitivity / stability
+     三个函数中各写了一遍 `[t for t in trials if state == COMPLETE and value != FAIL_VALUE]`,
+     shape/语义完全一致,但没有 single source of truth
+   - **两处 Redis JSON payload 构造字面量** —— `running` 和 `completed` 分支
+     分别写了 6 键字典,字段集合**不完全一致**(`completed` 默认没有显式 `status`
+     默认值,easy 漂移点)
+   - **零单元测试** —— DSR 的 Bailey & López de Prado 公式、参数灵敏度的 2D 分位数
+     分箱、稳定性的 ±threshold 邻域判断,这些数学都没有测试保护,数值回归很容易溜走
+
+2. **`backtest/result/__init__.py` 的 NT/pandas 污染**。`optimizer_helpers` 最初尝试
+   `from tinohelm.backtest.result.statistics import _norm_cdf, _norm_ppf`,
+   但 Python 包语义要求先执行 `result/__init__.py`,而那个文件 eagerly import
+   `extract.py`,而 `extract.py` import `nautilus_trader` 和 `pandas`。
+   这意味着任何 pure helper 要复用 `_norm_cdf`/`_norm_ppf` 都会被迫拉 NT + pandas,
+   完全违背"可在 lean CI 下测试"的初衷。
+
+**要点**:
+
+1. **新建 `_math_primitives.py` 叶子模块** —— 标准库 only,40 行,提供
+   `norm_cdf(x)` 和 `norm_ppf(p)` 两个 Abramowitz & Stegun 近似实现。
+   `statistics.py` 改为从这个叶子模块 re-export 为带下划线的别名
+   (`_norm_cdf`/`_norm_ppf`),维持现有测试和 `sections.py` 的向后兼容。
+   这样新的 `optimizer_helpers.py` 就可以 `from tinohelm.backtest._math_primitives import norm_cdf, norm_ppf`
+   而不触发 `result/__init__.py` 的加载链。
+
+2. **新建 `optimizer_helpers.py`,17 个公共导出符号**:
+   - **常量**: `FAIL_VALUE`、`FITNESS_METRICS`、`DSR_COMPATIBLE_OBJECTIVES`
+     (新增 frozenset,取代之前散落的 `== "sharpe"` 字符串字面量)
+   - **Smart defaults**: `auto_n_trials`/`auto_sampler`/`auto_workers(cpu_count=None)`
+     /`auto_patience(n_trials, min_patience=10, divisor=4)` —— `auto_workers`
+     把之前硬编码的 `os.cpu_count()` 改为可注入参数,单测不再需要 monkeypatch
+   - **日期窗口**: `split_dates`、`walk_forward_windows`(移除前导下划线 publicize,
+     行为严格等价)
+   - **新 helper**: `build_wf_fold_result(fold_index, train_start, ..., test_value)`
+     —— 把 optimizer.py 里 8 行的 "WF fold dict 字面量构造" 抽成一行声明式调用,
+     并锁定 `fold` key 是 1-based(用户可见编号)而内部索引是 0-based
+   - **Metric 提取**: `extract_fitness(result, objective, *, fail_value=FAIL_VALUE)`
+     —— 支持注入 fail_value,None result 和空 statistics 都安全返回 FAIL_VALUE
+   - **Trial 过滤(消重)**: `is_valid_trial(trial)` + `filter_valid_trials(trials)`
+     —— 把三处重复的 `COMPLETE + not None + != FAIL_VALUE` 过滤统一为一处,
+     并开放 `fail_value` 参数便于测试自定义 sentinel
+   - **结果整形**: `slim_result(result)` —— IS 验证 payload 的 3-key 裁剪
+   - **Redis 事件(消重)**: `build_progress_event(optimization_id, *,
+     trials_completed, total_trials, best_value, best_params, status="running")`
+     —— 单一 canonical payload,6 键每次都存在,取代两处散落字面量。
+     同时显式 `dict(best_params)` 拷贝,避免调用方后续 mutate 污染已发布 payload
+   - **DSR**: `compute_dsr(best_sharpe, trials_data, skewness, kurtosis, n_obs, *,
+     fail_value=FAIL_VALUE, trading_days=252)` —— 把 `trading_days=252`
+     提升为参数(文档化假设),使用 Euler-Mascheroni 命名常量而非 magic `0.5772...`
+   - **灵敏度**: `compute_param_sensitivity(trials_data, param_ranges, param_importances,
+     *, n_bins=10, max_pairs=3, min_trials=10, fail_value=FAIL_VALUE)` ——
+     内部拆分为 `_quantile_bin_edges`/`_digitize_inside`/`_bin_mean_histogram`/
+     `_pair_grid` 四个辅助,三处重复的"np.percentile + np.digitize + bin centers"
+     模式统一。`min_trials` 现在可注入,之前硬编码为 `< 10` 的门槛拒绝了很多合理
+     的小搜索空间
+   - **稳定性**: `compute_param_stability(trials_data, best_params, *,
+     threshold=0.20, min_neighbours=3, fail_value=FAIL_VALUE)` ——
+     增加 `min_neighbours` 参数(之前硬编码为 3),并用 `try/except TypeError`
+     gracefully 处理非数值参数(例如 string 参数)而不是崩溃
+
+3. **`optimizer.py` 消重与声明式化** ——
+   - 删除 200+ 行内联 helper 定义(`_split_dates`/`_walk_forward_windows`/
+     `_extract_fitness`/`_slim_result`/`_compute_dsr`/
+     `_compute_param_sensitivity`/`_compute_param_stability` 等)
+   - Redis progress/completion 两处 `json.dumps({...})` 字面量统一为
+     `json.dumps(build_progress_event(...))`,key 集合强一致
+   - WF fold 字典字面量替换为 `build_wf_fold_result(...)`
+   - `_FAIL_VALUE` 全部改为从 helper 导入的 `FAIL_VALUE`(保留 module-level
+     `_FAIL_VALUE = FAIL_VALUE` alias 供外部兼容)
+   - `self.fitness_objective == "sharpe"` 的 DSR 门槛改为
+     `in DSR_COMPATIBLE_OBJECTIVES`,未来扩展到其他 ratio 只改一处常量
+   - `_auto_patience` 的硬编码三元式 `if patience <= 0 and n_trials >= 40:
+     patience = max(10, n_trials // 4)` 改为 `auto_patience(n_trials)` 调用,
+     逻辑从 3 行散落指令压缩为 1 行 + 1 个"0 不改变"哨兵判断
+   - 净变化: 1115 → 811 行(-304 行,**-27.3%**)。nine 演进累积:
+     optimizer 从未被拆分 → 今天首次拆分,是本轮最大的代码质量提升
+
+4. **`test_optimizer_helpers.py` — 87 个 optuna-free 单元测试** 覆盖:
+   - `TestOptimizerHelpersIsolation` (1): 在 `sys.meta_path` 安装 blocker 并
+     `importlib.reload` `optimizer_helpers`,断言 `optuna` 和 `nautilus_trader`
+     都不在 `sys.modules` 中 —— **契约测试**,防止未来意外拉入依赖
+   - `TestConstants` (3): FAIL_VALUE/FITNESS_METRICS/DSR_COMPATIBLE_OBJECTIVES
+   - `TestAutoNTrials` (3): 空 / 低维 floor / 线性 scaling
+   - `TestAutoSampler` (5): cmaes 低维 / int 降级 / 高维降级 / 空空间 / 缺 type key
+   - `TestAutoWorkers` (5): 1 核 / 64 核 / 中等核 / monkeypatch os.cpu_count /
+     None cpu_count 退化
+   - `TestAutoPatience` (3): 阈值下关闭 / 线性 scaling / floor
+   - `TestSplitDates` (4): 80/20 / 50/50 / 0 train pct / tuple shape
+   - `TestWalkForwardWindows` (7): 0 fold 回退 / 100% train 回退 / 5 fold 不重叠 /
+     boundary clamp / train < test / list-of-tuple / 单 fold
+   - `TestBuildWfFoldResult` (3): 完整 shape / 1-based fold / FAIL_VALUE 保留
+   - `TestExtractFitness` (11): 4 objective 幸福路径 / None result / missing
+     statistics / None value / missing key / 非数值 / int 转 float / 自定义
+     fail_value
+   - `TestTrialFiltering` (7): is_valid 5 分支 + filter 2 变体
+   - `TestSlimResult` (3): 3 key 裁剪 / 缺 key 默认 None / None 输入
+   - `TestBuildProgressEvent` (5): running shape / completed shape /
+     key set 一致性 / best_params 拷贝防护(mutate src 后 payload 不变)/
+     默认 status
+   - `TestComputeDsr` (8): <5 trials / <5 obs / None best / 常数 trials 降级为
+     PSR / 有方差 happy path / 忽略 invalid trials / negative denom /
+     4 小数四舍五入
+   - `TestComputeParamSensitivity` (8): too_few / single_param / grid /
+     max_pairs 限制 / 排除 invalid trials / 常数 param dropped / 值四舍五入 /
+     min_trials 可注入
+   - `TestComputeParamStability` (8): 空 best_params / 太少 neighbours /
+     happy path / zero best value / 排除 invalid / threshold 收窄邻域 /
+     缺 param key / 4 小数四舍五入 / 非数值 graceful
+
+5. **完整回归**: NT-free 测试从 360 → 447 个(+87),全部通过。`.venv/bin/python
+   -m pytest tests/backtest/` 核心 pure helper 子集 382 → 469 个,零回归。
+   `test_sections.py`(133 个依赖 statistics.py 隔离加载)和
+   `test_rolling_metrics.py`(35 个依赖 statistics.py 文件路径加载)
+   在 `_math_primitives` 分离后继续全通过 —— 证明 re-export 改动向后兼容。
+
+6. **意外副作用:`auto_patience` 语义微调** —— 原代码在 `n_trials >= 40`
+   时自动设置 patience,< 40 时保持 0(不启用)。新 helper `auto_patience(30) = 0`
+   明确编码这个边界,`auto_patience(40) = 10` 命中 floor。调用点改为
+   `if patience <= 0: auto_p = auto_patience(n_trials); if auto_p > 0: patience = auto_p`,
+   保证与旧行为严格等价(< 40 trials 时不设 patience,保持 0 即禁用)。
+
+**验证**:
+- 447 NT-free pytest 全通过(`PYTHONPATH=src /tmp/venv/bin/python -m pytest tests/backtest/test_optimizer_helpers.py tests/backtest/test_rolling_metrics.py tests/backtest/test_runner_pure_helpers.py tests/backtest/test_sections.py tests/core/ tests/portfolio/test_config.py tests/data/test_converters.py tests/data/test_converter_stubs.py tests/strategy/test_pause_support.py tests/strategy/test_state.py tests/node/test_entry_points.py`)
+- 字节码编译检查全部通过(`py_compile` on 5 个修改/新建文件)
+- `optimizer_helpers.py` 在 `sys.meta_path` blocker(block NT + optuna + pandas)
+  下独立导入通过 —— 证实零重依赖
+- 检查 TODO/FIXME/XXX 注释清零
+- optimizer.py 行数: 1115 → 811 行(**-304 行,-27.3%**)
+- 新增: 600 行纯 helpers + 40 行 math 叶子 + 831 行 optuna-free 测试
+- 消除 2 处 Redis JSON payload 字面量重复(progress + completion 现在共享 shape)
+- 消除 3 处 "filter valid trials" 推导式重复(DSR / sensitivity / stability)
+- 消除 3 处 `_norm_ppf`/`_norm_cdf` 的实现(现在单一 source of truth 在
+  `_math_primitives.py`,statistics.py 和 optimizer_helpers.py 都 re-export)
+- optuna/numpy/NT blocker 契约测试 — future proof
+
+
 ## 2026-04-16 (5)
 
 **主题**: 将 `backtest/runner.py` 中的纯逻辑下沉到新建的 `runner_helpers.py`,并建立可在无 NT 环境下运行的单元测试层
