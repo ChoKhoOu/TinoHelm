@@ -4,7 +4,8 @@ Supports walk-forward analysis, parallel trials, pruning, sampler selection,
 convergence-based early stopping, and parameter importance analysis.
 
 Pure logic (date math, smart defaults, robustness statistics, the trial
-filter predicate, sentinel/objective constants) lives in
+filter predicate, sentinel/objective constants, payload assembly, the
+no-improve state machine, the result schema contract) lives in
 :mod:`tinohelm.backtest.optimizer_helpers` so it can be unit-tested in
 NT/optuna-free environments.
 """
@@ -12,8 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
-import threading
 from datetime import datetime, date
 from typing import Any
 
@@ -27,13 +26,22 @@ logger = logging.getLogger(__name__)
 from tinohelm.backtest.optimizer_helpers import (
     FAIL_VALUE,
     FITNESS_METRICS,
+    PROGRESS_STATUS_COMPLETED,
+    PROGRESS_STATUS_RUNNING,
+    PatienceTracker,
     auto_n_trials,
+    auto_patience,
     auto_sampler,
     auto_workers,
+    build_full_result,
+    build_progress_payload,
+    build_walk_forward_fold_record,
     compute_dsr,
     compute_param_sensitivity,
     compute_param_stability,
     extract_fitness,
+    select_best_params,
+    serialize_trial,
     slim_result,
     split_dates,
     walk_forward_windows,
@@ -73,37 +81,33 @@ def _create_sampler(name: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Early-stopping callback
+# Early-stopping callback (thin shim over PatienceTracker)
 # ---------------------------------------------------------------------------
 
 class _PatienceCallback:
     """Optuna callback that stops the study after *patience* trials with no
-    improvement to the best value."""
+    improvement to the best value.
+
+    All non-trivial state lives in :class:`PatienceTracker`; this class is
+    a thin adapter that bridges the Optuna callback signature to the
+    NT/optuna-free state machine so the latter can be unit-tested.
+    """
 
     def __init__(self, patience: int) -> None:
+        self._tracker = PatienceTracker(patience)
         self._patience = patience
-        self._best: float = -math.inf
-        self._no_improve_count: int = 0
-        self._lock = threading.Lock()
 
     def __call__(
         self,
         study: optuna.Study,
         trial: optuna.trial.FrozenTrial,
     ) -> None:
-        with self._lock:
-            if trial.value is not None and trial.value > self._best:
-                self._best = trial.value
-                self._no_improve_count = 0
-            else:
-                self._no_improve_count += 1
-
-            if self._no_improve_count >= self._patience:
-                logger.info(
-                    "Early stopping: no improvement for %d consecutive trials",
-                    self._patience,
-                )
-                study.stop()
+        if self._tracker.observe(trial.value):
+            logger.info(
+                "Early stopping: no improvement for %d consecutive trials",
+                self._patience,
+            )
+            study.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -337,18 +341,22 @@ class BacktestOptimizer:
             self._fail("optuna is not installed")
             return
 
-        # Smart defaults
+        # Smart defaults (delegated to pure helpers)
         if self.n_trials <= 0:
             self.n_trials = auto_n_trials(self.param_ranges)
-            logger.info("Auto n_trials=%d (based on %d params)", self.n_trials, len(self.param_ranges))
+            logger.info(
+                "Auto n_trials=%d (based on %d params)",
+                self.n_trials, len(self.param_ranges),
+            )
 
         if self.sampler == "auto":
             self.sampler = auto_sampler(self.param_ranges)
             logger.info("Auto sampler=%s", self.sampler)
 
-        if self.patience <= 0 and self.n_trials >= 40:
-            self.patience = max(10, self.n_trials // 4)
-            logger.info("Auto patience=%d", self.patience)
+        if self.patience <= 0:
+            self.patience = auto_patience(self.n_trials)
+            if self.patience > 0:
+                logger.info("Auto patience=%d", self.patience)
 
         if self.n_workers <= 0:
             self.n_workers = auto_workers()
@@ -453,11 +461,9 @@ class BacktestOptimizer:
             # tracks its own best internally) ---
             if fitness > best_value:
                 best_value = fitness
-                best_params = {
-                    k: v
-                    for k, v in self._suggest_params_from_trial(trial).items()
-                    if k in self.param_ranges
-                }
+                best_params = select_best_params(
+                    dict(trial.params), self.param_ranges,
+                )
 
             convergence_history.append(best_value)
 
@@ -466,14 +472,14 @@ class BacktestOptimizer:
             try:
                 r.publish(
                     f"tino:backtest:optimization:{self.optimization_id}",
-                    json.dumps({
-                        "optimization_id": self.optimization_id,
-                        "trials_completed": trials_done,
-                        "total_trials": self.n_trials,
-                        "best_value": best_value,
-                        "best_params": best_params,
-                        "status": "running",
-                    }),
+                    json.dumps(build_progress_payload(
+                        optimization_id=self.optimization_id,
+                        trials_completed=trials_done,
+                        total_trials=self.n_trials,
+                        best_value=best_value,
+                        best_params=best_params,
+                        status=PROGRESS_STATUS_RUNNING,
+                    )),
                 )
             except Exception:
                 logger.debug("Redis publish failed (non-fatal)")
@@ -498,11 +504,7 @@ class BacktestOptimizer:
             )
         except Exception as exc:
             self._fail(str(exc))
-            if self._shared_engine is not None:
-                try:
-                    self._shared_engine.dispose()
-                except Exception:
-                    pass
+            self._cleanup_shared_engine()
             r.close()
             return
 
@@ -510,6 +512,7 @@ class BacktestOptimizer:
         if r.get(cancel_key):
             r.delete(cancel_key)
             self._fail("Cancelled by user")
+            self._cleanup_shared_engine()
             r.close()
             logger.info("Optimization %d cancelled", self.optimization_id)
             return
@@ -518,10 +521,9 @@ class BacktestOptimizer:
         try:
             best_trial = study.best_trial
             best_value = best_trial.value if best_trial.value is not None else FAIL_VALUE
-            best_params = {
-                k: v for k, v in best_trial.params.items()
-                if k in self.param_ranges
-            }
+            best_params = select_best_params(
+                dict(best_trial.params), self.param_ranges,
+            )
         except ValueError:
             # No completed trials
             pass
@@ -541,15 +543,12 @@ class BacktestOptimizer:
                     fold_value = extract_fitness(fold_result, self.fitness_objective)
                 except Exception as exc:
                     logger.warning("WF fold %d detail run failed: %s", fold_idx, exc)
-
-                wf_fold_results.append({
-                    "fold": fold_idx + 1,
-                    "train_start": tr_s.isoformat(),
-                    "train_end": tr_e.isoformat(),
-                    "test_start": te_s.isoformat(),
-                    "test_end": te_e.isoformat(),
-                    "test_value": fold_value,
-                })
+                wf_fold_results.append(build_walk_forward_fold_record(
+                    fold_idx=fold_idx,
+                    train_start=tr_s, train_end=tr_e,
+                    test_start=te_s, test_end=te_e,
+                    test_value=fold_value,
+                ))
 
         # --- Validation backtest on held-out test period ---
         validation_result: dict[str, Any] | None = None
@@ -593,45 +592,10 @@ class BacktestOptimizer:
         ])
 
         # --- Trial history ---
-        trials_data = []
-        for t in study.trials:
-            trials_data.append({
-                "number": t.number,
-                "params": t.params,
-                "value": t.value,
-                "state": t.state.name,
-            })
-
-        # --- Build full result ---
-        full_result: dict[str, Any] = {
-            "best_params": best_params,
-            "best_value": best_value,
-            "trials": trials_data,
-            "train_period": {
-                "start": train_start.isoformat(),
-                "end": train_end.isoformat(),
-            },
-            "test_period": {
-                "start": test_start.isoformat(),
-                "end": test_end.isoformat(),
-            },
-            "validation": validation_result,
-            "param_importances": param_importances,
-            "convergence_history": convergence_history,
-            "sampler": self.sampler,
-            "n_workers": self.n_workers,
-            "pruning_enabled": self.pruning,
-            "total_pruned": total_pruned,
-        }
-
-        if use_walk_forward:
-            full_result["walk_forward_results"] = wf_fold_results
-
-        # --- Layer 2: IS validation (slimmed) ---
-        full_result["train_validation"] = slim_result(train_validation_result)
+        trials_data = [serialize_trial(t) for t in study.trials]
 
         # --- Layer 3: DSR (only for Sharpe objective) ---
-        dsr_value = None
+        dsr_value: float | None = None
         if self.fitness_objective == "sharpe" and validation_result:
             try:
                 val_stats = validation_result.get("statistics", {})
@@ -644,24 +608,42 @@ class BacktestOptimizer:
                 )
             except Exception:
                 logger.debug("DSR computation failed", exc_info=True)
-        full_result["dsr"] = dsr_value
 
         # --- Layer 3: Parameter sensitivity & stability ---
         try:
-            full_result["parameter_sensitivity"] = compute_param_sensitivity(
+            sensitivity = compute_param_sensitivity(
                 trials_data, self.param_ranges, param_importances,
             )
         except Exception:
             logger.debug("Parameter sensitivity computation failed", exc_info=True)
-            full_result["parameter_sensitivity"] = None
+            sensitivity = None
 
         try:
-            full_result["parameter_stability_score"] = compute_param_stability(
-                trials_data, best_params,
-            )
+            stability = compute_param_stability(trials_data, best_params)
         except Exception:
             logger.debug("Parameter stability computation failed", exc_info=True)
-            full_result["parameter_stability_score"] = None
+            stability = None
+
+        # --- Build full result via the canonical helper (locks the schema) ---
+        full_result = build_full_result(
+            best_params=best_params,
+            best_value=best_value,
+            trials=trials_data,
+            train_start=train_start, train_end=train_end,
+            test_start=test_start, test_end=test_end,
+            validation=validation_result,
+            train_validation=slim_result(train_validation_result),
+            param_importances=param_importances,
+            convergence_history=convergence_history,
+            sampler=self.sampler,
+            n_workers=self.n_workers,
+            pruning_enabled=self.pruning,
+            total_pruned=total_pruned,
+            walk_forward_results=wf_fold_results if use_walk_forward else None,
+            dsr=dsr_value,
+            parameter_sensitivity=sensitivity,
+            parameter_stability_score=stability,
+        )
 
         # --- Persist to DB ---
         self._complete(
@@ -672,27 +654,19 @@ class BacktestOptimizer:
         try:
             r.publish(
                 f"tino:backtest:optimization:{self.optimization_id}",
-                json.dumps({
-                    "optimization_id": self.optimization_id,
-                    "status": "completed",
-                    "trials_completed": len(study.trials),
-                    "total_trials": self.n_trials,
-                    "best_value": best_value,
-                    "best_params": best_params,
-                }),
+                json.dumps(build_progress_payload(
+                    optimization_id=self.optimization_id,
+                    trials_completed=len(study.trials),
+                    total_trials=self.n_trials,
+                    best_value=best_value,
+                    best_params=best_params,
+                    status=PROGRESS_STATUS_COMPLETED,
+                )),
             )
         except Exception:
             logger.debug("Redis publish failed (non-fatal)")
 
-        # --- Cleanup shared engine ---
-        if self._shared_engine is not None:
-            try:
-                self._shared_engine.dispose()
-            except Exception:
-                pass
-            self._shared_engine = None
-            self._shared_runner = None
-
+        self._cleanup_shared_engine()
         r.close()
         logger.info("Optimization %d completed", self.optimization_id)
 
@@ -700,13 +674,20 @@ class BacktestOptimizer:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _suggest_params_from_trial(trial: optuna.Trial) -> dict[str, Any]:
-        """Return the params dict that was suggested for *trial*.
+    def _cleanup_shared_engine(self) -> None:
+        """Dispose of the shared simple-mode engine if one was prepared.
 
-        Works for both ``Trial`` (in-progress) and ``FrozenTrial`` objects.
+        Idempotent — safe to call from both the success and exception paths
+        in :meth:`run` so we don't leak NT engine resources.
         """
-        return dict(trial.params)
+        if self._shared_engine is None:
+            return
+        try:
+            self._shared_engine.dispose()
+        except Exception:
+            pass
+        self._shared_engine = None
+        self._shared_runner = None
 
     # ------------------------------------------------------------------
     # DB helpers (sync, same pattern as worker.py)

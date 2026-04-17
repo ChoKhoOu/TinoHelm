@@ -24,17 +24,27 @@ import pytest
 from tinohelm.backtest.optimizer_helpers import (
     FAIL_VALUE,
     FITNESS_METRICS,
+    FULL_RESULT_BASE_KEYS,
+    PROGRESS_STATUS_COMPLETED,
+    PROGRESS_STATUS_RUNNING,
     TRADING_DAYS_PER_YEAR,
+    PatienceTracker,
     _norm_cdf,
     _norm_ppf,
     auto_n_trials,
+    auto_patience,
     auto_sampler,
     auto_workers,
+    build_full_result,
+    build_progress_payload,
+    build_walk_forward_fold_record,
     compute_dsr,
     compute_param_sensitivity,
     compute_param_stability,
     extract_fitness,
     filter_completed_trials,
+    select_best_params,
+    serialize_trial,
     slim_result,
     split_dates,
     walk_forward_windows,
@@ -680,3 +690,531 @@ class TestComputeParamStability:
         trials = [_make_complete_trial(1.0, {"x": 0.0 + i * 1e-12}) for i in range(5)]
         out = compute_param_stability(trials, {"x": 0.0}, threshold=0.20)
         assert out is not None  # Doesn't crash; nearby check uses eps.
+
+
+# ────────────────────────────────────────────────────────────────────
+# auto_patience — early-stopping heuristic
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestAutoPatience:
+    """Pin the threshold-and-floor heuristic shared by API + worker."""
+
+    @pytest.mark.parametrize("n", [0, 1, 10, 39])
+    def test_below_threshold_disabled(self, n):
+        # Short studies: don't enable early stopping at all.
+        assert auto_patience(n) == 0
+
+    def test_at_threshold_uses_floor(self):
+        # 40 trials: max(10, 40//4) = 10 (floor wins).
+        assert auto_patience(40) == 10
+
+    def test_above_threshold_uses_ratio(self):
+        # 200 trials: max(10, 200//4) = 50 (quarter wins).
+        assert auto_patience(200) == 50
+
+    def test_floor_wins_for_small_above_threshold(self):
+        # 41 trials: max(10, 41//4=10) = 10.
+        assert auto_patience(41) == 10
+
+    def test_large_n_scales_linearly(self):
+        # 1000 trials: 250.  Heuristic is O(n).
+        assert auto_patience(1000) == 250
+
+
+# ────────────────────────────────────────────────────────────────────
+# select_best_params
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestSelectBestParams:
+    """The "filter trial.params to declared param_ranges keys" pattern."""
+
+    def test_keeps_declared_drops_others(self):
+        out = select_best_params(
+            {"x": 1.0, "y": 2.0, "_aux": 99.0},
+            {"x": {"type": "float"}, "y": {"type": "float"}},
+        )
+        assert out == {"x": 1.0, "y": 2.0}
+
+    def test_empty_param_ranges_yields_empty(self):
+        assert select_best_params({"x": 1.0, "y": 2.0}, {}) == {}
+
+    def test_empty_trial_params_yields_empty(self):
+        assert select_best_params({}, {"x": {"type": "float"}}) == {}
+
+    def test_missing_params_silently_omitted(self):
+        # Optuna may not have suggested every declared param yet.
+        out = select_best_params({"x": 1.0}, {"x": {}, "y": {}, "z": {}})
+        assert out == {"x": 1.0}
+
+    def test_does_not_mutate_inputs(self):
+        trial = {"x": 1.0, "_aux": 9.0}
+        ranges = {"x": {"type": "float"}}
+        select_best_params(trial, ranges)
+        assert trial == {"x": 1.0, "_aux": 9.0}
+        assert ranges == {"x": {"type": "float"}}
+
+
+# ────────────────────────────────────────────────────────────────────
+# serialize_trial — Optuna FrozenTrial → dict adapter
+# ────────────────────────────────────────────────────────────────────
+
+
+class _FakeState:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeTrial:
+    def __init__(self, number, params, value, state):
+        self.number = number
+        self.params = params
+        self.value = value
+        self.state = state
+
+
+class TestSerializeTrial:
+    """Adapter shape MUST match what filter_completed_trials expects."""
+
+    def test_basic_complete_trial(self):
+        t = _FakeTrial(0, {"x": 1.0}, 2.5, _FakeState("COMPLETE"))
+        assert serialize_trial(t) == {
+            "number": 0,
+            "params": {"x": 1.0},
+            "value": 2.5,
+            "state": "COMPLETE",
+        }
+
+    def test_pruned_trial_value_none(self):
+        t = _FakeTrial(7, {"x": 0.5}, None, _FakeState("PRUNED"))
+        out = serialize_trial(t)
+        assert out["value"] is None
+        assert out["state"] == "PRUNED"
+
+    def test_state_already_string(self):
+        # Some duck-typed trials may pre-stringify the state.
+        t = _FakeTrial(3, {"x": 1.0}, 1.0, "FAIL")
+        assert serialize_trial(t)["state"] == "FAIL"
+
+    def test_state_none_returns_none(self):
+        # Defensive: missing state gets propagated, not exception'd.
+        t = _FakeTrial(3, {"x": 1.0}, 1.0, None)
+        assert serialize_trial(t)["state"] is None
+
+    def test_params_are_copied_not_aliased(self):
+        # If the caller mutates trial.params later, our snapshot must not change.
+        params = {"x": 1.0}
+        t = _FakeTrial(0, params, 1.0, _FakeState("COMPLETE"))
+        snap = serialize_trial(t)
+        params["y"] = 2.0
+        assert "y" not in snap["params"]
+
+    def test_filter_completed_trials_round_trip(self):
+        # serialize_trial output must be filter_completed_trials-compatible.
+        ts = [
+            _FakeTrial(0, {"x": 1.0}, 1.5, _FakeState("COMPLETE")),
+            _FakeTrial(1, {"x": 0.5}, FAIL_VALUE, _FakeState("COMPLETE")),
+            _FakeTrial(2, {"x": 0.0}, None, _FakeState("PRUNED")),
+        ]
+        serialized = [serialize_trial(t) for t in ts]
+        kept = filter_completed_trials(serialized)
+        assert len(kept) == 1
+        assert kept[0]["value"] == 1.5
+
+
+# ────────────────────────────────────────────────────────────────────
+# build_progress_payload — Redis publish canonical shape
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestBuildProgressPayload:
+    """Both running and completed events must share an identical 6-key shape."""
+
+    def test_running_payload_shape(self):
+        out = build_progress_payload(
+            optimization_id=42,
+            trials_completed=7,
+            total_trials=100,
+            best_value=1.5,
+            best_params={"x": 1.0},
+            status=PROGRESS_STATUS_RUNNING,
+        )
+        assert set(out.keys()) == {
+            "optimization_id", "trials_completed", "total_trials",
+            "best_value", "best_params", "status",
+        }
+        assert out["status"] == "running"
+
+    def test_completed_payload_same_shape(self):
+        # The same key-set, just status="completed".  Drift between
+        # running/completed is what this helper exists to prevent.
+        running = build_progress_payload(
+            optimization_id=1, trials_completed=10, total_trials=10,
+            best_value=2.0, best_params={"x": 1.0},
+            status=PROGRESS_STATUS_RUNNING,
+        )
+        completed = build_progress_payload(
+            optimization_id=1, trials_completed=10, total_trials=10,
+            best_value=2.0, best_params={"x": 1.0},
+            status=PROGRESS_STATUS_COMPLETED,
+        )
+        assert set(running.keys()) == set(completed.keys())
+        assert running["status"] != completed["status"]
+
+    def test_best_params_is_defensively_copied(self):
+        params = {"x": 1.0}
+        out = build_progress_payload(
+            optimization_id=1, trials_completed=1, total_trials=1,
+            best_value=1.0, best_params=params, status="running",
+        )
+        params["y"] = 2.0
+        assert "y" not in out["best_params"]
+
+    def test_zero_trials_payload(self):
+        # Edge case: 0/0 happens transiently.
+        out = build_progress_payload(
+            optimization_id=1, trials_completed=0, total_trials=0,
+            best_value=FAIL_VALUE, best_params={}, status="running",
+        )
+        assert out["trials_completed"] == 0
+        assert out["total_trials"] == 0
+        assert out["best_value"] == FAIL_VALUE
+        assert out["best_params"] == {}
+
+    def test_status_constants_match_published_strings(self):
+        # The two constants ARE the wire-format strings.
+        assert PROGRESS_STATUS_RUNNING == "running"
+        assert PROGRESS_STATUS_COMPLETED == "completed"
+
+
+# ────────────────────────────────────────────────────────────────────
+# build_walk_forward_fold_record
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestBuildWalkForwardFoldRecord:
+    """Per-fold record consumed by the walk-forward UI panel."""
+
+    def test_basic_record_shape(self):
+        out = build_walk_forward_fold_record(
+            fold_idx=0,
+            train_start=date(2024, 1, 1), train_end=date(2024, 6, 30),
+            test_start=date(2024, 7, 1), test_end=date(2024, 12, 31),
+            test_value=1.25,
+        )
+        assert out == {
+            "fold": 1,  # 0-based -> 1-based
+            "train_start": "2024-01-01",
+            "train_end": "2024-06-30",
+            "test_start": "2024-07-01",
+            "test_end": "2024-12-31",
+            "test_value": 1.25,
+        }
+
+    def test_dates_are_iso_formatted(self):
+        out = build_walk_forward_fold_record(
+            fold_idx=2,
+            train_start=date(2024, 3, 5), train_end=date(2024, 6, 10),
+            test_start=date(2024, 6, 11), test_end=date(2024, 9, 15),
+            test_value=0.0,
+        )
+        assert out["train_start"] == "2024-03-05"
+        assert out["test_end"] == "2024-09-15"
+
+    def test_fail_value_test_value_propagates(self):
+        # When a fold's backtest crashes, the optimizer passes FAIL_VALUE.
+        out = build_walk_forward_fold_record(
+            fold_idx=0,
+            train_start=date(2024, 1, 1), train_end=date(2024, 6, 30),
+            test_start=date(2024, 7, 1), test_end=date(2024, 12, 31),
+            test_value=FAIL_VALUE,
+        )
+        assert out["test_value"] == FAIL_VALUE
+
+    def test_fold_indexing_is_one_based(self):
+        # fold_idx=N -> persisted "fold" = N+1, regardless of N.
+        for idx in (0, 1, 2, 9, 99):
+            out = build_walk_forward_fold_record(
+                fold_idx=idx,
+                train_start=date(2024, 1, 1), train_end=date(2024, 1, 2),
+                test_start=date(2024, 1, 3), test_end=date(2024, 1, 4),
+                test_value=0.0,
+            )
+            assert out["fold"] == idx + 1
+
+
+# ────────────────────────────────────────────────────────────────────
+# build_full_result — top-level result_json schema contract
+# ────────────────────────────────────────────────────────────────────
+
+
+def _minimal_full_result_kwargs():
+    """Minimal valid kwargs for build_full_result, used as a base for tweaks."""
+    return dict(
+        best_params={"x": 1.0},
+        best_value=2.5,
+        trials=[],
+        train_start=date(2024, 1, 1), train_end=date(2024, 6, 30),
+        test_start=date(2024, 7, 1), test_end=date(2024, 12, 31),
+        validation=None,
+        train_validation=None,
+        param_importances={},
+        convergence_history=[],
+        sampler="tpe",
+        n_workers=2,
+        pruning_enabled=True,
+        total_pruned=0,
+    )
+
+
+class TestBuildFullResult:
+    """Lock the 16 base keys + walk-forward conditional + types."""
+
+    def test_base_keys_strictly_match(self):
+        out = build_full_result(**_minimal_full_result_kwargs())
+        assert frozenset(out.keys()) == FULL_RESULT_BASE_KEYS
+
+    def test_walk_forward_omitted_when_none(self):
+        # walk_forward_results=None -> key NOT added (preserves historical
+        # serialization the frontend expects).
+        out = build_full_result(**_minimal_full_result_kwargs())
+        assert "walk_forward_results" not in out
+
+    def test_walk_forward_added_when_provided(self):
+        out = build_full_result(
+            walk_forward_results=[{"fold": 1}, {"fold": 2}],
+            **_minimal_full_result_kwargs(),
+        )
+        assert "walk_forward_results" in out
+        assert len(out["walk_forward_results"]) == 2
+
+    def test_walk_forward_empty_list_still_adds_key(self):
+        # Empty != None: empty list means walk-forward mode WAS used,
+        # just produced no fold records.  The key must be present.
+        out = build_full_result(
+            walk_forward_results=[],
+            **_minimal_full_result_kwargs(),
+        )
+        assert out["walk_forward_results"] == []
+
+    def test_period_iso_format(self):
+        out = build_full_result(**_minimal_full_result_kwargs())
+        assert out["train_period"] == {
+            "start": "2024-01-01", "end": "2024-06-30",
+        }
+        assert out["test_period"] == {
+            "start": "2024-07-01", "end": "2024-12-31",
+        }
+
+    def test_dsr_passthrough(self):
+        out = build_full_result(dsr=0.85, **_minimal_full_result_kwargs())
+        assert out["dsr"] == 0.85
+
+    def test_dsr_default_is_none(self):
+        out = build_full_result(**_minimal_full_result_kwargs())
+        assert out["dsr"] is None
+
+    def test_sensitivity_and_stability_default_none(self):
+        out = build_full_result(**_minimal_full_result_kwargs())
+        assert out["parameter_sensitivity"] is None
+        assert out["parameter_stability_score"] is None
+
+    def test_best_params_defensive_copy(self):
+        # Mutating the source dict after construction must not corrupt the result.
+        kwargs = _minimal_full_result_kwargs()
+        params = kwargs["best_params"]
+        out = build_full_result(**kwargs)
+        params["y"] = 999.0
+        assert "y" not in out["best_params"]
+
+    def test_trials_list_defensive_copy(self):
+        kwargs = _minimal_full_result_kwargs()
+        trials = []
+        kwargs["trials"] = trials
+        out = build_full_result(**kwargs)
+        trials.append({"injected": True})
+        assert out["trials"] == []
+
+    def test_convergence_history_defensive_copy(self):
+        kwargs = _minimal_full_result_kwargs()
+        history = [1.0, 2.0]
+        kwargs["convergence_history"] = history
+        out = build_full_result(**kwargs)
+        history.append(99.0)
+        assert out["convergence_history"] == [1.0, 2.0]
+
+    def test_param_importances_defensive_copy(self):
+        kwargs = _minimal_full_result_kwargs()
+        imp = {"x": 0.5}
+        kwargs["param_importances"] = imp
+        out = build_full_result(**kwargs)
+        imp["y"] = 0.9
+        assert "y" not in out["param_importances"]
+
+    def test_walk_forward_results_defensive_copy(self):
+        kwargs = _minimal_full_result_kwargs()
+        wf = [{"fold": 1}]
+        out = build_full_result(walk_forward_results=wf, **kwargs)
+        wf.append({"fold": 2})
+        assert len(out["walk_forward_results"]) == 1
+
+    def test_complete_result_with_all_optional_fields(self):
+        kwargs = _minimal_full_result_kwargs()
+        out = build_full_result(
+            walk_forward_results=[{"fold": 1, "test_value": 1.0}],
+            dsr=0.92,
+            parameter_sensitivity={"single_param": {}, "grid": {}},
+            parameter_stability_score=0.05,
+            **kwargs,
+        )
+        # 16 base keys + walk_forward_results = 17
+        assert len(out) == 17
+        assert out["walk_forward_results"] == [{"fold": 1, "test_value": 1.0}]
+        assert out["dsr"] == 0.92
+        assert out["parameter_sensitivity"] == {"single_param": {}, "grid": {}}
+        assert out["parameter_stability_score"] == 0.05
+
+    def test_top_level_value_types(self):
+        # The frontend BacktestResult-style contract expects specific types.
+        out = build_full_result(**_minimal_full_result_kwargs())
+        assert isinstance(out["best_params"], dict)
+        assert isinstance(out["trials"], list)
+        assert isinstance(out["train_period"], dict)
+        assert isinstance(out["test_period"], dict)
+        assert isinstance(out["param_importances"], dict)
+        assert isinstance(out["convergence_history"], list)
+        assert isinstance(out["sampler"], str)
+        assert isinstance(out["n_workers"], int)
+        assert isinstance(out["pruning_enabled"], bool)
+        assert isinstance(out["total_pruned"], int)
+
+
+class TestFullResultBaseKeys:
+    """The frozenset is part of the public contract — pin its size and members."""
+
+    def test_size(self):
+        # Exactly 16 base keys.  Any addition needs an evolution log entry.
+        assert len(FULL_RESULT_BASE_KEYS) == 16
+
+    def test_critical_keys_present(self):
+        # Spot-check the keys the optimization detail UI absolutely needs.
+        for k in (
+            "best_params", "best_value", "trials",
+            "train_period", "test_period",
+            "validation", "train_validation",
+            "convergence_history", "param_importances",
+            "dsr", "parameter_sensitivity", "parameter_stability_score",
+        ):
+            assert k in FULL_RESULT_BASE_KEYS
+
+    def test_walk_forward_results_NOT_in_base(self):
+        # walk_forward_results is conditional, NOT base.  Codifies the rule.
+        assert "walk_forward_results" not in FULL_RESULT_BASE_KEYS
+
+
+# ────────────────────────────────────────────────────────────────────
+# PatienceTracker — pure no-improve state machine
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestPatienceTracker:
+    """The state machine that decides when to stop the Optuna study."""
+
+    def test_initial_state(self):
+        t = PatienceTracker(patience=3)
+        assert t.best == -math.inf
+        assert t.no_improve_count == 0
+        assert t.patience == 3
+
+    def test_first_observation_is_improvement(self):
+        # Any finite value > -inf, so the first observe always resets.
+        t = PatienceTracker(patience=3)
+        stop = t.observe(0.5)
+        assert stop is False
+        assert t.best == 0.5
+        assert t.no_improve_count == 0
+
+    def test_strict_greater_required_to_improve(self):
+        # Equality does NOT reset the counter.
+        t = PatienceTracker(patience=3)
+        t.observe(1.0)
+        t.observe(1.0)  # equal — counts as no-improve
+        assert t.no_improve_count == 1
+
+    def test_improvement_resets_counter(self):
+        t = PatienceTracker(patience=5)
+        t.observe(1.0)
+        t.observe(0.5)  # no improve
+        t.observe(0.7)  # no improve (still below 1.0)
+        assert t.no_improve_count == 2
+        t.observe(1.5)  # improve!
+        assert t.no_improve_count == 0
+        assert t.best == 1.5
+
+    def test_consecutive_no_improve_triggers_stop(self):
+        t = PatienceTracker(patience=2)
+        assert t.observe(1.0) is False  # first, sets best
+        assert t.observe(0.5) is False  # 1 no-improve
+        assert t.observe(0.5) is True   # 2 no-improve — STOP
+        assert t.no_improve_count == 2
+
+    def test_none_value_counts_as_no_improve(self):
+        # Pruned trials report value=None; tracker must not crash and must
+        # increment the counter (else early stopping never fires when most
+        # trials get pruned).
+        t = PatienceTracker(patience=3)
+        t.observe(1.0)
+        t.observe(None)
+        t.observe(None)
+        assert t.no_improve_count == 2
+        assert t.best == 1.0  # unchanged
+
+    def test_negative_then_positive(self):
+        # First observation -10 still resets best to -10 (because > -inf).
+        t = PatienceTracker(patience=3)
+        t.observe(-10.0)
+        assert t.best == -10.0
+        t.observe(-5.0)  # > -10, improve
+        assert t.best == -5.0
+        assert t.no_improve_count == 0
+
+    def test_stop_remains_true_after_threshold(self):
+        # Once we've hit threshold, every subsequent observe still returns
+        # True (callback won't be invoked again, but defensive correctness).
+        t = PatienceTracker(patience=2)
+        t.observe(1.0)
+        t.observe(0.5)
+        assert t.observe(0.5) is True
+        assert t.observe(0.5) is True
+
+    def test_patience_one_stops_immediately_after_one_no_improve(self):
+        t = PatienceTracker(patience=1)
+        t.observe(1.0)
+        assert t.observe(0.5) is True
+
+    def test_thread_safety_smoke(self):
+        # Concurrent observes must produce a consistent final state.
+        import threading as _th
+        t = PatienceTracker(patience=10_000)  # never stops in this test
+        results = []
+
+        def worker(values):
+            for v in values:
+                results.append(t.observe(v))
+
+        threads = [
+            _th.Thread(target=worker, args=([1.0, 0.5] * 25,))
+            for _ in range(4)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        # 4 threads × 50 observations = 200 total.
+        assert len(results) == 200
+        # First worker's first observe set best=1.0; everything after that
+        # is either equal (0.5/1.0 < 1.0 or 1.0 == 1.0) so no further
+        # improvements except possibly equal-to-1.0 reads.  The point: we
+        # don't crash and don't lose updates.
+        assert t.best == 1.0
