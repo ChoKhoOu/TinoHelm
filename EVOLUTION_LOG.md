@@ -249,4 +249,158 @@ CI 会跳过 41 个测试。把真正 NT-free 的逻辑抽出来,可以同时解
 - 新增 245 行纯 helpers + 508 行 NT-free 测试
 - `_setup_engine` 内联 datetime/字符串/arithmetic 代码从 ~35 行降至 ~5 行
 
+## 2026-04-16 (6)
+
+**主题**: 把 `backtest/optimizer.py` 中所有纯逻辑下沉到新建的 `optimizer_helpers.py`,消除三处重复的 trial-filter 谓词,并补齐零覆盖的 Layer-2/3 robustness 数学
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- `src/tinohelm/backtest/optimizer_helpers.py` — 新建 452 行,收纳 11 个 NT/optuna-free 纯函数 + 3 个 canonical 常量
+- `src/tinohelm/backtest/optimizer.py` — 1115 → 811 行(-304 行,-27.3%);所有纯逻辑(date 数学、smart defaults、DSR、sensitivity、stability)迁出;保留 `_run_backtest`/`_create_sampler`/`_PatienceCallback`/`BacktestOptimizer` 等真·有依赖的代码;module-level 暴露 11 个 `_xxx` 别名维持向后兼容
+- `src/tinohelm/api/routes/optimize.py` — 把 `from tinohelm.backtest.optimizer import _auto_n_trials, _auto_workers` 改为从 helper 模块导入 canonical 名(`auto_n_trials`/`auto_workers`)
+- `tests/backtest/test_optimizer_helpers.py` — 新建,84 个无 NT/optuna 依赖的单元测试
+
+**动机**:
+
+上一轮(2026-04-16 (5))把 `runner.py` 压到 1205 行并建立了 76 个 NT-free 测试。
+按同一范式审视项目剩余的大型文件,`backtest/optimizer.py`(1115 行)是
+唯一一个在过去几轮 evolution 中**完全没有被触碰过**且**测试覆盖率为零**的核心
+模块——`grep -rn 'optimizer\|optuna\|FAIL_VALUE' tests/` 返回空。
+
+具体看 optimizer.py,有四个独立但相互勾连的健康问题:
+
+1. **三处复制粘贴的 trial-filter 谓词** —— `_compute_dsr`、
+   `_compute_param_sensitivity`、`_compute_param_stability` 各自维护了一份
+   完全相同的 7 行过滤逻辑:
+   ```python
+   valid = [t for t in trials_data
+            if t.get("state") == "COMPLETE"
+            and t.get("value") is not None
+            and t["value"] != _FAIL_VALUE]
+   ```
+   三份独立定义 = 三个可以悄悄漂移的地方。如果有人在某天给 robustness 计算
+   加上一个新的 trial 状态(比如 `WAITING`),需要同时改三处,哪怕忘改一处
+   也不会有任何编译/测试报错——因为整个 robustness 就没有测试。
+
+2. **零覆盖的 ~250 行复杂数学** —— DSR 用了 Bailey-López de Prado (2014)
+   的多重检验扩散公式(嵌套 _norm_ppf/_norm_cdf 调用 + Euler-Mascheroni
+   常数 + Sharpe 反年化),sensitivity 用了 numpy quantile binning + 2D
+   网格交叉,stability 用了带 ε-保护的相对距离阈值。任何一个边界条件出 bug
+   都会被外层 `try/except logger.debug(...)` 静默吞掉,前端显示一个 `null`
+   了事——operator 完全察觉不到。
+
+3. **零覆盖的 smart-defaults 启发式** —— `_auto_n_trials`、`_auto_sampler`、
+   `_auto_workers` 是用户输入 0 时的兜底,直接影响 UX(用户填的就是 0,
+   实际跑了多少 trial 全凭这三个函数说了算)。`_auto_workers` 还硬调
+   `os.cpu_count()`,在测试里没法注入。
+
+4. **`_compute_dsr` 触发隐式 NT 导入** —— 函数内 `from tinohelm.backtest.result
+   import _norm_ppf, _norm_cdf` 表面上只要 pure-python,但
+   `result/__init__.py` 在顶部就 `from .extract import extract_backtest_results`,
+   而 extract 依赖 NT + pandas。结果是 DSR 这个**纯数学函数**实际上必须有
+   NT 才能调用——隐藏的耦合,潜在的 ImportError boom。
+
+把这些一起做掉,且只做这一件事。
+
+**要点**:
+
+1. **`optimizer_helpers.py` —— 11 个导出符号 + 3 个 canonical 常量**:
+   - `FAIL_VALUE` (float) —— 把原 `_FAIL_VALUE = -999.0` 提为公开常量,
+     route + optimizer + 测试都引用同一处
+   - `FITNESS_METRICS` (dict) —— canonical 4 项 objective→stat-key 映射
+   - `TRADING_DAYS_PER_YEAR` (int=252) —— 命名常量替代 DSR 里散落的
+     `math.sqrt(252)` 字面量
+   - `split_dates(start, end, train_pct)` —— 70/30 切分等核心 date 逻辑
+   - `walk_forward_windows(start, end, train_pct, n_folds)` —— 滚动 WF
+     窗口;`train_pct == 100` / `n_folds <= 0` 退化为单 split,clamp 到
+     数据边界
+   - `extract_fitness(result, objective)` —— unknown objective / missing
+     stat / None / non-float 全部走 `FAIL_VALUE` 同一通路
+   - **`filter_completed_trials(trials_data)` —— 单一事实源谓词**
+     (本次 refactor 的核心收益):COMPLETE + 非 None + 非 FAIL_VALUE,
+     DSR/sensitivity/stability 三处全部改为调用它,以后只能在一处改
+   - `auto_n_trials(param_ranges)` —— `max(50, n_dims*20)`
+   - `auto_sampler(param_ranges)` —— ≤3 dims 且全连续 → cmaes,否则 tpe
+   - `auto_workers(cpu_count=None)` —— **关键修正**:接受 `cpu_count` 参数
+     注入,默认才走 `os.cpu_count()`,从而支持确定性测试
+   - `slim_result(result)` —— 三字段投影(statistics + equity_curve +
+     monthly_returns),`None → None` 让它跟可选回测组合
+   - `_norm_ppf` / `_norm_cdf` —— 从 `result/statistics.py` **inline 复制**
+     A&S 26.2.23 近似公式(打破对 `result/__init__.py` 的隐式 NT 依赖);
+     测试里 pin 了 `_norm_ppf(0.975) ≈ 1.96`、`_norm_cdf(2σ) ≈ 0.9772`
+     等教科书参考值确保两份实现不漂
+   - `compute_dsr(...)` —— 第一次调用 `filter_completed_trials`;
+     其余数学保持原样
+   - `compute_param_sensitivity(...)` / `compute_param_stability(...)`
+     —— 同样改为调用 `filter_completed_trials`
+
+2. **`optimizer.py` 减重 27.3%(1115 → 811 行)**:
+   - 删除整个 `_split_dates` / `_walk_forward_windows` / `_extract_fitness` /
+     `_auto_*` / `_slim_result` / `_compute_dsr` / `_compute_param_sensitivity`
+     / `_compute_param_stability` 函数体(共 ~310 行)
+   - 11 个 module-level 别名(`_FAIL_VALUE = FAIL_VALUE` 等)保留,**外部
+     调用方一行不用改**(`api/routes/optimize.py` 主动迁移到 canonical 名,
+     是出于代码审美而非破坏性变更)
+   - `BacktestOptimizer.run()` / `_objective_simple` / `_objective_walk_forward`
+     内部全部改用 canonical 名,跟外部别名解耦,可读性提升
+
+3. **`test_optimizer_helpers.py` —— 84 个 NT/optuna-free 测试** 覆盖:
+   - `TestConstants` (3): pin FAIL_VALUE / FITNESS_METRICS 4 项 / 252
+   - `TestSplitDates` (5): 70/30 / 50/50 / 0% train / 100% train /
+     train-test 间隔正好 1 天
+   - `TestWalkForwardWindows` (8): 3 折计数 / test 段不重叠 / train<test /
+     100% 退化 / 0 fold 退化 / 负 fold 退化 / 数据边界 clamp /
+     最后一折 test_end 对齐
+   - `TestExtractFitness` (8): sharpe 幸福路径 / 4 个 objective parametrize /
+     unknown / missing stats / missing key / None / non-numeric / int→float
+   - `TestFilterCompletedTrials` (7): 空 / 全保留 / 丢 PRUNED / 丢 FAIL /
+     丢 None value / 丢 FAIL_VALUE 哨兵 / 丢缺 state key
+   - `TestAutoNTrials` (4): 空 floor=50 / 1 dim floor / 3 dim 60 / 10 dim 200
+   - `TestAutoSampler` (4): 低维连续 cmaes / 含 int → tpe / 高维 tpe / 空 cmaes
+   - `TestAutoWorkers` (6): cpu=8/4/2/1/128 显式注入 + os.cpu_count() 默认 range
+   - `TestSlimResult` (3): None / 三字段保留 / 缺字段→None
+   - `TestNormalApproximations` (12): _norm_ppf 五个参考点 + 域外保护 +
+     _norm_cdf 五个参考点 + 极值 + 对称性
+   - `TestComputeDSR` (7): too few trials / too few obs / None best /
+     零 variance gracefully / 幸福路径 ∈ (0,1) / **filter helper 用法**
+     (混入 PRUNED/None/FAIL_VALUE 不应改变结果) / 负 denom → None
+   - `TestComputeParamSensitivity` (6): too few trials / 单 param bins /
+     top pairs grid / grid 形状契约 / 样本数不足 param 跳过 /
+     **filter 隔离脏数据**(poison value 不进 bin)
+   - `TestComputeParamStability` (8): 空 best_params / nearby 太少 / 全相同
+     std=0 / 异质 std>0 / threshold 排除远点 / **filter 隔离脏数据** /
+     缺 param 不算 nearby / best=0 触发 ε guard
+
+4. **完整回归**: `PYTHONPATH=src python3 -m pytest tests/` 从 677 个测试
+   增至 761 个,全部通过(+84 helper 测试)。零回归。
+
+5. **NT/optuna-free 验证** —— 用 `sys.meta_path` blocker 屏蔽 optuna /
+   nautilus_trader / redis / sqlalchemy 后,`optimizer_helpers` 仍能完整
+   导入并执行,证实模块零框架依赖。这意味着将来在 lean CI 任务里(只装
+   numpy + pytest)就能跑这 84 个测试,不需要 NT wheel(~100MB,冷装 ~30s)。
+
+6. **打破 `result/__init__.py` 的隐式 NT 耦合** —— 原 `_compute_dsr` 内
+   `from tinohelm.backtest.result import _norm_ppf, _norm_cdf` 表面上是
+   pure-python 调用,实际触发 NT 加载;现在 helper 模块自带 inline 副本,
+   DSR 计算彻底脱离 NT。两份实现的等价性靠 `TestNormalApproximations` 的
+   12 个教科书参考点测试钉住。
+
+**讨论点**:
+
+- `_norm_ppf` / `_norm_cdf` 现在有两份(`result/statistics.py` + `optimizer_helpers.py`)。
+  评估过抽到 `tinohelm/common/math.py` 的方案,但需要修改至少 3 个调用方,
+  还要解决 `result/__init__.py` 的循环导入历史包袱;短期收益 < 改动面。
+  当前两份各 8 行,被两套测试独立 pin,漂移风险可控——后续如果再出现
+  第三个调用方,再考虑统一。
+
+**验证**:
+- 761/761 pytest 全通过(`PYTHONPATH=src python3 -m pytest tests/`)
+- 字节码编译检查通过(`py_compile` on 4 个文件)
+- helper 模块在 `sys.meta_path` blocker 下独立导入通过 —— 证实零 NT/optuna 依赖
+- 11 个 backward-compat 别名通过 `is` 同一性检查(`_FAIL_VALUE is FAIL_VALUE` 等)
+- 检查 TODO/FIXME/XXX 注释清零
+- optimizer.py 行数: 1115 → 811(-304 行,-27.3%)
+- 新增 452 行纯 helpers + 682 行 NT-free 测试
+- 重复的 trial-filter 谓词:3 处 → 1 处(`filter_completed_trials`)
+- `_compute_dsr` 的隐式 NT 依赖:消除
+
 
