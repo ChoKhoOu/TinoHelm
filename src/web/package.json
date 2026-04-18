@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:fonts": "vitest run tests/fonts --reporter=verbose",
+    "check:grep:fonts": "bash scripts/check-grep-fonts.sh",
+    "verify:build:fonts": "node scripts/verify-build-fonts.mjs",
+    "verify:fonts:all": "npm run test:fonts && npm run check:grep:fonts && npm run build && npm run verify:build:fonts"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
@@ -39,7 +43,9 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
+    "postcss": "^8.4.49",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.0.0"
   }
 }
