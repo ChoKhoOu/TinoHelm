@@ -138,6 +138,6 @@ Adding new toast events: add entry to `ROUTING_TABLE` in `notification-router.ts
   - Page-level references: `qds-backtest-integrated.html`, `qds-data-catalog.html`, `qds-trading-terminal.html`, `qds-strategies.html`, `qds-missing-pages.html`
   - System-level: `qds-warm-v2.html` (master), `qds-patterns.html` (reusable patterns), `qds-empty-states.html`, `qds-app-shell.html`
   - Specs: `qds-design-spec.md`, `qds-notification-spec.md`, `qds-trading-terminal-spec.md`, `qds-patterns-spec.md`
-- **Fonts**: IBM Plex Sans (`font-sans` / `var(--font-u)`) for UI, IBM Plex Mono (`font-mono` / `var(--font-d)`) for data values.
+- **Fonts**: Inter (`font-sans` / alias `var(--font-u)`) for UI, JetBrains Mono (`font-mono` / alias `var(--font-d)`) for data values. Loaded via `next/font/google` in `layout.tsx` (self-hosted via `.next/static/media/`, not CDN). Inter OpenType features `cv11`/`ss01`/`ss03` enabled globally on `body`. Legacy aliases `--font-u`/`--font-d` re-point to `--font-sans`/`--font-mono` for backward compatibility.
 - **shadcn Tooltip API**: Uses `@base-ui/react`, not Radix. `TooltipProvider` takes `delay` (not `delayDuration`), `TooltipTrigger` has no `asChild` prop.
 - **Static export**: No `getServerSideProps`, no API routes. All data fetching is client-side via `useEffect` + `apiGet`.

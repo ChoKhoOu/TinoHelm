@@ -265,7 +265,7 @@ All API calls use a `DataCmd` channel pattern: `fire_load_*()` spawns `tokio::sp
 ### Stack
 - **Next.js 16** (App Router, static export) + **React 19** + **Tailwind CSS v4** + **shadcn/ui v4** (`@base-ui/react` primitives)
 - **Recharts** for charts, **framer-motion** for animations, **lightweight-charts** for candlestick
-- **Font**: IBM Plex Sans (`font-sans`) for UI, IBM Plex Mono (`font-mono`) for data
+- **Font**: Inter (`font-sans`) for UI, JetBrains Mono (`font-mono`) for data values; loaded via `next/font/google` (self-hosted) with Inter OpenType features `cv11`/`ss01`/`ss03` enabled on `body`. Legacy QDS aliases `var(--font-u)`/`var(--font-d)` alias to the new tokens.
 
 ### QDS Warm Design System
 **MUST**: All frontend development MUST strictly follow the design references in `docs/ui/`. These are the single source of truth for UI/UX, layout, spacing, color, typography, and animation. Pixel-perfect replication is expected — do not simplify, approximate, or deviate from the design mockups.
