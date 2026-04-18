@@ -248,8 +248,8 @@ export function OverviewTab({ nodeType, positions, fills, loading, onSelectStrat
                       </linearGradient>
                     </defs>
                     <CartesianGrid stroke="rgba(255,255,255,.05)" strokeDasharray="none" />
-                    <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} tickFormatter={(v) => fmtTime(v, rangeHours)} minTickGap={60} />
-                    <YAxis tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} tickFormatter={fmtEquity} width={56} />
+                    <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} tickFormatter={(v) => fmtTime(v, rangeHours)} minTickGap={60} />
+                    <YAxis tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} tickFormatter={fmtEquity} width={56} />
                     <RechartsTooltip {...CHART_TOOLTIP_PROPS} labelFormatter={(v) => fmtTime(v as string, rangeHours)} formatter={(v: unknown) => [fmtEquity(v as number), "权益"]} />
                     {startEquity != null && <ReferenceLine y={startEquity} stroke="var(--warn)" strokeDasharray="4 4" strokeOpacity={0.4} />}
                     <Area type="monotone" dataKey="equity" stroke="#36884B" strokeWidth={1.5} fill="url(#eqGrad)" animationDuration={800} animationEasing="ease-out" dot={false} />
@@ -287,8 +287,8 @@ export function OverviewTab({ nodeType, positions, fills, loading, onSelectStrat
                       </linearGradient>
                     </defs>
                     <CartesianGrid stroke="rgba(255,255,255,.05)" strokeDasharray="none" />
-                    <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} tickFormatter={(v) => fmtTime(v, 24)} minTickGap={60} />
-                    <YAxis tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} width={40} />
+                    <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} tickFormatter={(v) => fmtTime(v, 24)} minTickGap={60} />
+                    <YAxis tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} width={40} />
                     <RechartsTooltip {...CHART_TOOLTIP_PROPS} />
                     <Area
                       type="monotone"

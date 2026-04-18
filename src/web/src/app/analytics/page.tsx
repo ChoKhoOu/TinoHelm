@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { Fragment, useState, useEffect, useMemo } from "react";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import {
   AreaChart,
@@ -334,7 +334,7 @@ export default function AnalyticsPage() {
                     <Legend
                       iconType="circle"
                       iconSize={8}
-                      wrapperStyle={{ fontSize: 10, fontFamily: "IBM Plex Mono" }}
+                      wrapperStyle={{ fontSize: 10, fontFamily: "var(--font-mono)" }}
                     />
                     {cumReturns.strategies.map((s, i) => (
                       <Area
@@ -424,7 +424,7 @@ export default function AnalyticsPage() {
                     <PolarGrid stroke="var(--bd)" />
                     <PolarAngleAxis
                       dataKey="factor"
-                      tick={{ fontSize: 10, fill: "var(--t2)", fontFamily: "IBM Plex Mono" }}
+                      tick={{ fontSize: 10, fill: "var(--t2)", fontFamily: "var(--font-mono)" }}
                     />
                     <PolarRadiusAxis
                       angle={90}
