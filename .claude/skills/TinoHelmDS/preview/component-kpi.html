@@ -1,0 +1,26 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../colors_and_type.css"><link rel="stylesheet" href="_split.css">
+<style>
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.k{background:var(--bg-p);border:1px solid var(--bd);border-radius:var(--r);padding:12px;display:flex;flex-direction:column;gap:6px}
+.top{display:flex;justify-content:space-between;align-items:center}
+.icon{width:24px;height:24px;border-radius:7px;background:var(--bg-in);display:flex;align-items:center;justify-content:center;color:var(--t2);font-family:var(--font-d);font-size:.75rem}
+.sub{font-family:var(--font-d);font-size:.58rem}
+</style>
+</head><body>
+<div class="split">
+  <div class="pane theme-light" data-label="LIGHT"><div class="pane-inner">
+    <div class="grid">
+      <div class="k"><div class="top"><span class="section-label" style="margin:0">EQUITY</span><div class="icon">$</div></div><span class="data-value" style="font-size:1.1rem">$1,284,502</span><span class="sub muted">总权益</span></div>
+      <div class="k"><div class="top"><span class="section-label" style="margin:0">PNL</span><div class="icon">↗</div></div><span class="data-value fg-pos" style="font-size:1.1rem">+$12,043</span><span class="sub fg-pos">今日</span></div>
+      <div class="k"><div class="top"><span class="section-label" style="margin:0">SHARPE</span><div class="icon">σ</div></div><span class="data-value" style="font-size:1.1rem">1.82</span><span class="sub fg-pos">30d</span></div>
+    </div>
+  </div></div>
+  <div class="pane theme-dark" data-label="DARK"><div class="pane-inner">
+    <div class="grid">
+      <div class="k"><div class="top"><span class="section-label" style="margin:0">EQUITY</span><div class="icon">$</div></div><span class="data-value" style="font-size:1.1rem">$1,284,502</span><span class="sub muted">总权益</span></div>
+      <div class="k"><div class="top"><span class="section-label" style="margin:0">PNL</span><div class="icon">↗</div></div><span class="data-value fg-pos" style="font-size:1.1rem">+$12,043</span><span class="sub fg-pos">今日</span></div>
+      <div class="k"><div class="top"><span class="section-label" style="margin:0">SHARPE</span><div class="icon">σ</div></div><span class="data-value" style="font-size:1.1rem">1.82</span><span class="sub fg-pos">30d</span></div>
+    </div>
+  </div></div>
+</div>
+</body></html>

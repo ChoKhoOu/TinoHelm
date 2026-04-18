@@ -1,0 +1,24 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../colors_and_type.css"><link rel="stylesheet" href="_split.css">
+<style>
+.tabs{display:inline-flex;background:var(--bg-in);border-radius:var(--rs);padding:3px;gap:2px}
+.t{font-family:var(--font-d);font-size:.66rem;padding:.35rem .7rem;border-radius:4px;border:none;background:transparent;color:var(--t2);cursor:pointer}
+.t.a{background:var(--bg-t);color:var(--t0);box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.underline{display:flex;gap:0;border-bottom:1px solid var(--bd)}
+.u{font-family:var(--font-d);font-size:.68rem;padding:.5rem .75rem;color:var(--t2);position:relative;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+.u.a{color:var(--acc)}
+.u.a::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:2px;background:var(--acc);border-radius:2px}
+.cnt{font-size:.52rem;padding:1px 5px;border-radius:100px;background:var(--bg-t);color:var(--t2)}
+.u.a .cnt{background:var(--acc-d);color:var(--acc)}
+</style>
+</head><body>
+<div class="split">
+  <div class="pane theme-light" data-label="LIGHT"><div class="pane-inner" style="gap:20px">
+    <div class="tabs"><button class="t a">概览</button><button class="t">持仓</button><button class="t">订单</button><button class="t">风控</button></div>
+    <div class="underline"><span class="u a">概览</span><span class="u">持仓 <span class="cnt">3</span></span><span class="u">订单 <span class="cnt">12</span></span><span class="u">策略</span><span class="u">日志</span></div>
+  </div></div>
+  <div class="pane theme-dark" data-label="DARK"><div class="pane-inner" style="gap:20px">
+    <div class="tabs"><button class="t a">概览</button><button class="t">持仓</button><button class="t">订单</button><button class="t">风控</button></div>
+    <div class="underline"><span class="u a">概览</span><span class="u">持仓 <span class="cnt">3</span></span><span class="u">订单 <span class="cnt">12</span></span><span class="u">策略</span><span class="u">日志</span></div>
+  </div></div>
+</div>
+</body></html>

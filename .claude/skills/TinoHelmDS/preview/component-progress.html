@@ -1,0 +1,26 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../colors_and_type.css"><link rel="stylesheet" href="_split.css">
+<style>
+.bar{width:100%;height:6px;background:var(--bg-t);border-radius:3px;overflow:hidden;position:relative}
+.fill{height:100%;background:var(--acc);border-radius:3px;position:relative}
+.fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.35) 40%,transparent 100%);animation:sh 2.5s ease-in-out infinite}
+@keyframes sh{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+.pulse{display:inline-flex;align-items:center;gap:.4rem;font-family:var(--font-d);font-size:.65rem;color:var(--acc)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--acc);position:relative}
+.dot::after{content:'';position:absolute;inset:-3px;border:1.5px solid var(--acc);border-radius:50%;animation:pr 2s cubic-bezier(.16,1,.3,1) infinite}
+@keyframes pr{0%{transform:scale(.8);opacity:.7}100%{transform:scale(2.2);opacity:0}}
+.sp{font-family:var(--font-d);font-size:.56rem;color:var(--t3)}
+</style>
+</head><body>
+<div class="split">
+  <div class="pane theme-light" data-label="LIGHT"><div class="pane-inner" style="gap:14px">
+    <div><div class="sp">progress · shimmer 62%</div><div class="bar"><div class="fill" style="width:62%"></div></div></div>
+    <div><div class="sp">progress · done 100%</div><div class="bar"><div class="fill" style="width:100%;background:var(--suc)"></div></div></div>
+    <div class="pulse"><span class="dot"></span><span>Streaming · BTCUSDT · 180ms</span></div>
+  </div></div>
+  <div class="pane theme-dark" data-label="DARK"><div class="pane-inner" style="gap:14px">
+    <div><div class="sp">progress · shimmer 62%</div><div class="bar"><div class="fill" style="width:62%"></div></div></div>
+    <div><div class="sp">progress · done 100%</div><div class="bar"><div class="fill" style="width:100%;background:var(--suc)"></div></div></div>
+    <div class="pulse"><span class="dot"></span><span>Streaming · BTCUSDT · 180ms</span></div>
+  </div></div>
+</div>
+</body></html>
