@@ -122,10 +122,9 @@ function DialogTitle({ className, ...props }: DialogPrimitive.Title.Props) {
     <DialogPrimitive.Title
       data-slot="dialog-title"
       className={cn(
-        "font-heading leading-none",
+        "font-heading leading-none text-[1rem] font-semibold",
         className
       )}
-      style={{ fontSize: "1rem", fontWeight: 600 }}
       {...props}
     />
   )
@@ -139,10 +138,9 @@ function DialogDescription({
     <DialogPrimitive.Description
       data-slot="dialog-description"
       className={cn(
-        "*:[a]:underline *:[a]:underline-offset-3 *:[a]:hover:text-foreground",
+        "*:[a]:underline *:[a]:underline-offset-3 *:[a]:hover:text-foreground text-[.75rem] text-muted-foreground",
         className
       )}
-      style={{ fontSize: ".75rem", color: "var(--t2)" }}
       {...props}
     />
   )

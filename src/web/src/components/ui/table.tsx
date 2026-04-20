@@ -87,8 +87,7 @@ function TableCaption({
   return (
     <caption
       data-slot="table-caption"
-      style={{ fontSize: ".68rem", color: "var(--t2)" }}
-      className={cn(className)}
+      className={cn("text-[.68rem] text-muted-foreground", className)}
       {...props}
     />
   )

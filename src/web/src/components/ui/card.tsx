@@ -38,8 +38,8 @@ function CardTitle({ className, style, ...props }: React.ComponentProps<"div">) 
   return (
     <div
       data-slot="card-title"
-      className={cn("leading-snug", className)}
-      style={{ fontSize: ".8rem", fontWeight: 600, ...style }}
+      className={cn("leading-snug text-[.8rem] font-semibold", className)}
+      style={style}
       {...props}
     />
   )
@@ -49,8 +49,8 @@ function CardDescription({ className, style, ...props }: React.ComponentProps<"d
   return (
     <div
       data-slot="card-description"
-      className={cn(className)}
-      style={{ fontSize: ".68rem", color: "var(--t2)", ...style }}
+      className={cn("text-[.68rem] text-muted-foreground", className)}
+      style={style}
       {...props}
     />
   )
