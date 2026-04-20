@@ -268,26 +268,26 @@ All API calls use a `DataCmd` channel pattern: `fire_load_*()` spawns `tokio::sp
 - **Font**: Inter (`font-sans`) for UI, JetBrains Mono (`font-mono`) for data values; loaded via `next/font/google` (self-hosted) with Inter OpenType features `cv11`/`ss01`/`ss03` enabled on `body`. Legacy QDS aliases `var(--font-u)`/`var(--font-d)` alias to the new tokens.
 
 ### QDS Warm Design System
-**MUST**: All frontend development MUST strictly follow the design references in `docs/ui/`. These are the single source of truth for UI/UX, layout, spacing, color, typography, and animation. Pixel-perfect replication is expected — do not simplify, approximate, or deviate from the design mockups.
+**MUST**: All frontend development MUST strictly follow the design references in `.claude/skills/TinoHelmDS/`. These are the single source of truth for UI/UX, layout, spacing, color, typography, and animation. Pixel-perfect replication is expected — do not simplify, approximate, or deviate from the design mockups. The `docs/` UI directory referenced in older docs does not exist — all design references live in `.claude/skills/TinoHelmDS/`.
 
-**Design reference files** (`docs/ui/`):
+**Design reference files** (`.claude/skills/TinoHelmDS/`):
 | File | Scope |
 |------|-------|
-| `qds-warm-v2.html` | Master design system: tokens, components, patterns |
-| `qds-warm-theme.css` | CSS variable definitions (tokens) |
-| `qds-design-spec.md` | Design principles and token architecture |
-| `qds-patterns-spec.md` + `qds-patterns.html` | Reusable UI patterns |
-| `qds-backtest-integrated.html` | Backtest page reference |
-| `qds-data-catalog.html` | Data catalog page reference |
-| `qds-trading-terminal-spec.md` + `qds-trading-terminal.html` | Trading terminal reference |
-| `qds-strategies.html` | Strategies page reference |
-| `qds-app-shell.html` | App shell (sidebar, topbar, statusbar) |
-| `qds-empty-states-spec.md` + `qds-empty-states.html` | Empty state patterns |
-| `qds-notification-spec.md` | 4-layer notification architecture |
-| `qds-missing-pages-spec.md` + `qds-missing-pages.html` | Analytics, orders, watchlist, optimization |
-| `qds-shadcn-architecture.md` | shadcn integration strategy |
+| `Web UI Kit.html` | Master design system: full dashboard frame, tokens, components |
+| `Charts Spec.html` | Recharts chart theme, tooltip/grid/legend/label patterns |
+| `QDS Pitch Deck.html` | Design principles and token architecture overview |
+| `preview/component-row.html` | Row layout with 3px accent stripe (backtest list) |
+| `preview/component-kpi.html` | KPI stat card patterns |
+| `preview/component-badges.html` | 7-color semantic badges |
+| `preview/component-tabs.html` | Filter tabs, TabNav patterns |
+| `preview/component-progress.html` | Coverage bar, shimmer progress |
+| `preview/component-buttons.html` | Button variants |
+| `preview/color-semantic.html` | Semantic color usage rules |
+| `preview/type-section-label.html` | Section label typography |
+| `preview/type-data.html` | Data value mono typography |
+| `colors_and_type.css` | Token reference CSS |
 
-**Workflow**: Before implementing any frontend page/component, ALWAYS read the corresponding `qds-*.html` reference first. Replicate its structure, spacing, colors, and animations exactly.
+**Workflow**: Before implementing any frontend page/component, ALWAYS read the corresponding preview card or `Web UI Kit.html` reference first. Replicate its structure, spacing, colors, and animations exactly.
 
 **Token architecture** (two layers in `globals.css`):
 1. QDS short tokens in `:root` (`--bg-p`, `--acc`, `--suc`, etc.) — source of truth
@@ -310,10 +310,10 @@ All API calls use a `DataCmd` channel pattern: `fire_load_*()` spawns `tokio::sp
 
 **Chart theme** (`lib/chartTheme.ts`): Use `CHART_TOOLTIP_PROPS` spread on Recharts tooltips, `CHART_GRID_STYLE` for grids. Recharts props use `var()` directly (correct — don't convert to Tailwind).
 
-**QDS CSS classes** (`qds-input`, `qds-card`, `qds-table`, `bt-*`, `dc-*`) exist in globals.css with `!important` for pixel-perfect replication of design mockups. Shared primitives: `.btn`/`.btn-p`/`.btn-o`/`.btn-d`, `.sc`/`.sc-l`/`.sc-v`, `.fl`/`.fi`/`.fsel`, `.list`, `.empty`. Data catalog: `dc-filter-*`, `dc-qrow-*`, `dc-dtbl`, `dc-type-*`, `dc-cov-*`, `dc-pager-*`, `dc-chip-*`. New code should prefer Tailwind classes and QDS components.
+**QDS CSS classes** (`qds-input`, `qds-card`, `qds-table` etc.) exist in globals.css for QDS business components. **`bt-*/dc-*/cg/ca/cr/ci/dim/mono` and factor-research primitives (`.sc/.sc-l/.fl/.fi/.fsel/.ctbl/...`) have been deleted from globals.css as of 2026-04-19 DS standardization.** New code must use Tailwind semantic classes and `components/qds/` components — see `src/web/CLAUDE.md` §标准化后的约束 for the full prohibition list and migration table.
 
 ### 4-Layer Notification System
-Spec: `docs/ui/qds-notification-spec.md`. Implementation:
+Spec: `.claude/skills/TinoHelmDS/` (see `src/web/CLAUDE.md` for detailed 4-layer spec). Implementation:
 - **Layer 1 (Silent/Ticker)**: High-frequency WS events (fill, order, position, progress) → data flows into UI components. `FillTicker` in StatusBar shows latest fill with fade transition.
 - **Layer 2 (Inline)**: User-triggered API calls → `useAction` hook (`hooks/use-action.ts`) manages button state (idle→loading→success/error). `InlineError` component for error display. **API errors NEVER use toast.**
 - **Layer 3 (Toast)**: Async background events (backtest complete, data fetch complete, connection degraded) → `NotificationListener` component routes WS events through `lib/notification-router.ts` to Sonner toast. Dedupe by event ID, max 3 on screen, 5s auto-dismiss.
