@@ -81,3 +81,29 @@ export const CHART_ANIMATION = {
   duration: 800,
   easing: "ease-out" as const,
 };
+
+/* === Legend Style === */
+/** Spread on Recharts <Legend wrapperStyle={…} /> */
+export const CHART_LEGEND_STYLE: React.CSSProperties = {
+  fontSize: ".62rem",
+  fontFamily: "var(--font-d)",
+  color: "var(--t1)",
+};
+
+/* === Label Style === */
+/**
+ * Spread on Recharts <ReferenceLine label={{ ...CHART_LABEL_STYLE, value: "..." }}>.
+ *
+ * Note 1: Recharts label prop accepts SVGProps + extra fields (value, position, offset).
+ *   The type is kept narrow (fontSize/fill) so consumers can safely spread and add their
+ *   own value/fill overrides without hitting CSSProperties vs SVGProps conflicts.
+ * Note 2: fontFamily intentionally omitted to preserve the current Recharts default font
+ *   rendering for ReferenceLine labels. fontSize standardized to 10.
+ */
+export const CHART_LABEL_STYLE: {
+  fontSize: number;
+  fill: string;
+} = {
+  fontSize: 10,
+  fill: "var(--t2)",
+};
