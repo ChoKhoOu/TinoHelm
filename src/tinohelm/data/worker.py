@@ -4,64 +4,62 @@ Runs inside the API process (data fetching is I/O-bound, no need for
 subprocess isolation like backtest workers). On API startup the lifespan
 handler calls ``start_data_worker()`` which spawns the consumer loop and
 recovers any interrupted jobs from the DB.
+
+The generic queue-worker primitives live in
+``tinohelm.core.async_queue_worker``; this module is only the data-fetch
+specific job body plus the module-level singleton handle.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import time
 from datetime import datetime
 
 import redis.asyncio as aioredis
 from sqlalchemy import select, update
 
+from tinohelm.core.async_queue_worker import (
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    TimeThrottle,
+    WorkerHandle,
+    consumer_loop,
+    enqueue_job as _shared_enqueue_job,
+    requeue_running_jobs,
+)
 from tinohelm.db.models import DataFetchJob
 from tinohelm.db.session import get_session_factory
 
 logger = logging.getLogger(__name__)
 
 QUEUE_KEY = "tino:data:queue"
-_worker_task: asyncio.Task | None = None
+PROGRESS_THROTTLE_INTERVAL = 2.0
+
+_handle: WorkerHandle = WorkerHandle(name="data-fetch-worker")
 
 
 async def enqueue_job(rds: aioredis.Redis, job_id: str) -> None:
-    """Push a job_id onto the Redis data-fetch queue."""
-    await rds.lpush(QUEUE_KEY, job_id)
+    """Push a ``job_id`` onto the Redis data-fetch queue."""
+    await _shared_enqueue_job(rds, QUEUE_KEY, job_id)
 
 
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     """Re-queue jobs that were running or queued when the API last stopped.
 
-    Called once during startup. Returns the number of recovered jobs.
+    Called once during startup. ``reset_queue=True`` clears Redis before the
+    re-push so we can't double-enqueue anything still living in the list from
+    before the restart. Returns the number of rows flipped running → queued.
     """
-    factory = get_session_factory()
-    recovered = 0
-    async with factory() as db:
-        # Mark running → queued (they were interrupted mid-flight)
-        stmt = (
-            update(DataFetchJob)
-            .where(DataFetchJob.status == "running")
-            .values(status="queued", progress=0, message="Recovered after restart")
-        )
-        result = await db.execute(stmt)
-        recovered += result.rowcount  # type: ignore[assignment]
-
-        # Re-queue all queued jobs — clear the Redis queue first to prevent
-        # duplicate entries if the API restarted while jobs were already queued.
-        rows = (await db.execute(
-            select(DataFetchJob.job_id).where(DataFetchJob.status == "queued")
-        )).scalars().all()
-        if rows:
-            await rds.delete(QUEUE_KEY)
-            for job_id in rows:
-                await rds.lpush(QUEUE_KEY, job_id)
-
-        await db.commit()
-
-    if recovered:
-        logger.info("Recovered %d interrupted data-fetch job(s)", recovered)
-    return recovered
+    return await requeue_running_jobs(
+        get_session_factory(),
+        DataFetchJob,
+        rds,
+        QUEUE_KEY,
+        reset_queue=True,
+    )
 
 
 async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
@@ -82,12 +80,12 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 logger.warning("Data-fetch job %s not found in DB, skipping", job_id)
                 return
 
-            if job.status == "cancelled":
+            if job.status == STATUS_CANCELLED:
                 logger.info("Data-fetch job %s was cancelled, skipping", job_id)
                 return
 
             # Mark running
-            job.status = "running"
+            job.status = STATUS_RUNNING
             job.progress = 0
             job.message = "Starting..."
             await db.commit()
@@ -100,11 +98,10 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             end_date = job.end_date
             asset_class = job.asset_class
 
-        # Progress callback — updates DB + publishes to Redis
-        _last_db_write = 0.0
+        # Progress callback — publishes to Redis + throttled DB write
+        throttle = TimeThrottle(interval=PROGRESS_THROTTLE_INTERVAL)
 
         async def _progress(pct: int, msg: str):
-            nonlocal _last_db_write
             payload = {
                 "type": "data.fetch.progress",
                 "job_id": job_id, "symbol": symbol, "data_type": data_type,
@@ -113,10 +110,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             if interval:
                 payload["interval"] = interval
             await rds.publish(progress_channel, json.dumps(payload))
-            # Time-based DB throttle: at most once per 2s, always at start/end
-            now = time.monotonic()
-            if pct == 0 or pct >= 100 or (now - _last_db_write) >= 2.0:
-                _last_db_write = now
+            if throttle.should_write(pct):
                 async with factory() as db2:
                     await db2.execute(
                         update(DataFetchJob)
@@ -145,7 +139,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 update(DataFetchJob)
                 .where(DataFetchJob.job_id == job_id)
                 .values(
-                    status="completed",
+                    status=STATUS_COMPLETED,
                     progress=100,
                     message=f"Done: {result.objects_count} objects",
                     completed_at=datetime.utcnow(),
@@ -175,7 +169,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     update(DataFetchJob)
                     .where(DataFetchJob.job_id == job_id)
                     .values(
-                        status="failed",
+                        status=STATUS_FAILED,
                         error=str(exc)[:2000],
                         completed_at=datetime.utcnow(),
                     )
@@ -195,39 +189,21 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
         await rds.close()
 
 
-async def _consumer_loop(redis_url: str, catalog_path: str) -> None:
-    """Infinite loop: pop job_ids from Redis queue and process them."""
-    rds = aioredis.from_url(redis_url, decode_responses=True)
-    logger.info("Data-fetch worker started (queue=%s)", QUEUE_KEY)
-
-    try:
-        while True:
-            # BRPOP blocks up to 5s, returns (key, value) or None
-            result = await rds.brpop(QUEUE_KEY, timeout=5)
-            if result is None:
-                continue
-            _, job_id = result
-            logger.info("Data-fetch worker picked up job %s", job_id)
-            await _process_job(job_id, redis_url, catalog_path)
-    except asyncio.CancelledError:
-        logger.info("Data-fetch worker shutting down")
-    finally:
-        await rds.close()
-
-
 def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
     """Start the data-fetch consumer as a background asyncio task."""
-    global _worker_task
-    _worker_task = asyncio.create_task(
-        _consumer_loop(redis_url, catalog_path),
-        name="data-fetch-worker",
+    async def _process(job_id: str) -> None:
+        await _process_job(job_id, redis_url, catalog_path)
+
+    return _handle.start(
+        lambda: consumer_loop(
+            redis_url,
+            QUEUE_KEY,
+            _process,
+            worker_label="Data-fetch worker",
+        )
     )
-    return _worker_task
 
 
 def stop_data_worker() -> None:
     """Cancel the data-fetch worker task."""
-    global _worker_task
-    if _worker_task and not _worker_task.done():
-        _worker_task.cancel()
-        _worker_task = None
+    _handle.stop()

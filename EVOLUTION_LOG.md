@@ -2,6 +2,96 @@
 
 Chronological record of architectural improvements and maintenance work.
 
+## 2026-04-20
+
+**主题**: 合并 `research/worker.py` 与 `data/worker.py` 的重复 async queue worker 骨架，抽到 `core/async_queue_worker.py`，并把两个 worker + 新 helper 模块一起纳入 NT-free 测试安全网
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- 新增 `src/tinohelm/core/async_queue_worker.py`（286 行）— 5 个可共用原语 + 5 个 status 常量
+- 重构 `src/tinohelm/data/worker.py`（234 → 209 行）— 所有公共 API 保留，内部委托到 shared helpers
+- 重构 `src/tinohelm/research/worker.py`（227 → 221 行）— 同上
+- 新增 `tests/core/test_async_queue_worker.py`（678 行，71 用例）
+- 新增 `tests/data/test_worker.py`（451 行，18 用例）
+- 新增 `tests/research/test_worker.py`（389 行，17 用例）
+
+**动机**:
+
+`src/tinohelm/research/worker.py` 和 `src/tinohelm/data/worker.py` 是**两个几乎一模一样**的 227/234 行 async worker 实现，从队列 fan-in → 启动 recovery → 消费者循环 → 任务句柄 singleton，到 DB 写入 + Redis publish 的 try/except/finally 结构，都是同一套代码复制了两份。更严重的是：
+
+1. **两处独立的 `_consumer_loop` 实现** —— BRPOP 循环完全相同（`redis_url` / `queue_key` / `timeout=5` / `CancelledError` 出口 / `finally: await rds.close()`），两处同时维护会漂移。
+2. **两处 `start_*_worker` / `stop_*_worker` 各自用 module-level `_worker_task: asyncio.Task | None`** —— singleton 语义一样但实现散落两处，冷启动状态无法测试，热重启逻辑（"already running" 保护）只在 research 有、data 没有（但真遇上并发 start 都会悄悄覆盖）。
+3. **`enqueue_job(rds, job_id)` 和 `recover_interrupted_jobs(rds)` 两处签名几乎一致** —— 后者内部的 `update().where(status=running).values(status=queued)` + `select(queued)` + `lpush` 循环是同一套 SQL + Redis 操作；只是 data 多了 `await rds.delete(QUEUE_KEY)` 防重入而 research 没有（并且 **research 这个差异实际上是一个 latent bug**：研究 worker 在 API 崩溃重启时如果 Redis 里还有残留的 queued 项，会变成 2 倍 enqueue）。
+4. **上一轮 evolution（2026-04-17 research/ 测试套件）已经明确把 `worker.py` 标记为"暂未覆盖"** —— 是已知的测试盲区，也在 CLAUDE.md 项目流程里被列为高风险路径（redis queue → DB write → asyncio 编排），但真正需要 mock 的基础设施一直没搭。这次把两个 worker 一起纳入测试安全网是最经济的时机。
+
+外加发现：
+
+- **两个 worker 的 progress throttle 策略本质都是"在特定条件下才写 DB"**，但用了两套完全不同的实现：data 用 `time.monotonic()` 维护 `_last_db_write` 闭包变量 + 2s 窗口；research 用 `pct % 10 == 0` 散点检查。两处都是 inline 的、无法独立测试的状态机。
+
+**要点**:
+
+1. **`core/async_queue_worker.py` — 5 个可共用原语**（零 NT 依赖，纯 Python + redis.asyncio + sqlalchemy）：
+   - `enqueue_job(rds, queue_key, job_id)` — 参数化队列名的单行 LPUSH 包装（以前每个 worker 自己一个 `enqueue_job(rds, job_id)`）
+   - `requeue_running_jobs(factory, model_cls, rds, queue_key, *, reset_queue=False, recovery_message=...)` — 泛化的 "flip running→queued + re-LPUSH" 恢复流程，`reset_queue` 参数显式保留 data/research 的行为差异（data=True 清空再 push，research=False 不清空），而不是藏在两份源码里
+   - `consumer_loop(redis_url, queue_key, process_job, *, pop_timeout=5.0, worker_label="queue-worker")` — 泛化 BRPOP 无限循环，callable `process_job` 是 `(job_id) -> Awaitable[None]`，CancelledError 静默出、finally 关连接
+   - `WorkerHandle(name)` — `start(factory)` / `stop()` / `is_running()` / `task` / `name`，单实例语义由类封装而非 module-level global。加了"already running raise RuntimeError"保护，data worker 第一次有了这层防御
+   - `PercentStepThrottle(step=10)` + `TimeThrottle(interval=2.0, now_fn=None)` — 两个互斥的 progress-to-DB 节流器，覆盖 research（"每 10%"）和 data（"至多每 2s"）原有策略。都在 pct≤0 / pct≥100 无条件返回 True（保证边界一定写入 DB）。`now_fn` 让 TimeThrottle 在单元测试里可以喂假时钟而不需要 mock `time.monotonic`
+
+2. **5 个 status 常量**（`STATUS_QUEUED` / `STATUS_RUNNING` / `STATUS_COMPLETED` / `STATUS_FAILED` / `STATUS_CANCELLED`）—— 之前每个 worker 里散点 magic string `"running"` / `"queued"` / `"cancelled"`。集中定义意味着任何 DB 表新加 status 都有唯一写入点。
+
+3. **`data/worker.py` 收敛**:
+   - `enqueue_job(rds, job_id)` 公共签名不变 → 内部一行 `await _shared_enqueue_job(rds, QUEUE_KEY, job_id)`
+   - `recover_interrupted_jobs(rds)` 公共签名不变 → 内部一行委托 `requeue_running_jobs(..., reset_queue=True)`
+   - `_consumer_loop` 删除（-13 行），`start_data_worker` 改为 `_handle.start(lambda: consumer_loop(...))`
+   - `stop_data_worker` 改为 `_handle.stop()`
+   - progress 回调里的 `_last_db_write` 闭包变量 + 内联 `if pct == 0 or pct >= 100 or (now - _last_db_write) >= 2.0` 收敛为 `throttle = TimeThrottle(interval=2.0); if throttle.should_write(pct): ...`
+   - `PROGRESS_THROTTLE_INTERVAL = 2.0` 常量导出，把以前的 magic `2.0` 显式化，便于测试断言不漂移
+
+4. **`research/worker.py` 收敛**: 同构改造。`throttle = PercentStepThrottle(step=PROGRESS_DB_STEP)` 替代 `if pct % 10 == 0 or pct >= 100`。`PROGRESS_DB_STEP = 10` 常量导出。
+
+5. **向后兼容**: 两个 worker 的所有**公共符号**（`enqueue_job` / `recover_interrupted_jobs` / `start_*_worker` / `stop_*_worker` / `QUEUE_KEY`）签名、语义、导出位置全部不变。`src/tinohelm/api/app.py:24-29` 和 `src/tinohelm/api/routes/{data,research}.py` 的 4 处 `from … import …` 零修改。
+
+6. **`tests/core/test_async_queue_worker.py`（71 用例，分 6 个测试类）**:
+   - `TestStatusConstants`（2）— 精确字符串值 + 互不相等
+   - `TestEnqueueJob`（3）— `lpush` 调用参数 + 多次调用独立 + 返回 None
+   - `TestRequeueRunningJobs`（11）— 用 `sqlalchemy.orm.declarative_base()` 搭一个 `_FakeModel(__tablename__="fake_jobs")`，因为 SQLAlchemy `update()` 需要真实 Table 对象。覆盖：正常 running→queued flip + re-LPUSH、`reset_queue=True/False` 的 delete 行为、空 queued ID 列表不触发 LPUSH/DELETE、空 running flip 仍返回正确 count、`rowcount=None` → 0 的防御、commit 恰一次、默认与自定义 `recovery_message` 嵌入 UPDATE SQL（通过 `stmt.compile(compile_kwargs={"literal_binds": True})` 断言字面量 inline 后的内容）、recovered==0 时不打日志 / recovered>0 时打 info 日志（用 `caplog` 验证）
+   - `TestConsumerLoop`（7）— 用 `_FakeAsyncRedis(items)` 驱动 `brpop`，monkey-patch `aioredis.from_url`。覆盖：正常 pop + process、`None` timeout continue、外层 CancelledError 静默出、`process_job` 抛 RuntimeError 时 `rds.close()` 仍执行、`pop_timeout` 透传到 brpop、`worker_label` 出现在 start/shutdown 日志行里、3 个 job 连续处理
+   - `TestWorkerHandle`（9）— 初始状态、start/stop 生命周期、double-start raise、stop 后 task 被 cancel 且引用清零、未启动 stop 幂等、stop×3 幂等、stop 后可重启、自然完成后 is_running False、自然完成后可再 start
+   - `TestPercentStepThrottle`（11）— `step<=0` raise、boundary (0/100/>100/<0) 恒 True、每 step 倍数为 True parametrized 9 点、非 step 倍数为 False parametrized 8 点、`step=25` / `step=1` 特例、无状态（重复调用结果一致）
+   - `TestTimeThrottle`（10）— `interval<=0` raise、boundary True 不前进 last_write、interval 内 middle pct 为 False、elapsed ≥ interval 为 True 且前进、默认 `now_fn=monotonic`、pct=100 在 interval 未到时仍 True（boundary 优先于 interval gate）、两个独立实例不共享 state
+
+7. **`tests/data/test_worker.py`（18 用例，分 5 个测试类）**:
+   - `TestModuleSurface`（5）— QUEUE_KEY 值、`PROGRESS_THROTTLE_INTERVAL==2.0` 常量锁定、`_handle` 是 `WorkerHandle("data-fetch-worker")`、初始 not running、4 个公共符号 callable（拒绝误删）
+   - `TestEnqueueJob`（2）— 正确 queue key + 多次独立
+   - `TestRecoverInterruptedJobs`（1）— monkey-patch `requeue_running_jobs`，断言传入的 model 是 `DataFetchJob`、queue_key 正确、**`reset_queue=True`**
+   - `TestProcessJob`（6）— 用 `_make_session_factory(initial_job=...)` + `_FakeSessionCtx` 模拟 async-with DB、`AsyncMock` 模拟 `aioredis.from_url`、`_FakePipeline` 模拟 `BinanceVisionPipeline.ingest()`。覆盖：job 不存在 → 立即返回不触 pipeline 不 publish 完成事件、cancelled → 同上、happy path → pipeline.ingest 被调用 + progress cb 发 3 次 + `tino:data:events` completion 事件最后、pipeline 抛 RuntimeError → `tino:data:events` 发 `data.fetch.failed` 带 error 前 200 字符、progress 回调 payload shape（有 interval 时含 interval key，None 时 key 缺失，刻意保持不加空值以免前端误判）
+   - `TestWorkerLifecycle`（4）— monkey-patch `consumer_loop` 验证 `start_data_worker` 传递正确的 redis_url/queue_key/worker_label；stop 取消 task；未启动 stop 幂等；start 构造的 `_process` 闭包正确把 job_id/redis_url/catalog_path 透传到 `_process_job`
+
+8. **`tests/research/test_worker.py`（17 用例）**: 结构与 data 镜像，差异只在：
+   - 主题检查 `PROGRESS_DB_STEP==10`（而非 TimeThrottle 的 2.0）
+   - `_handle.name == "research-worker"`
+   - `recover_interrupted_jobs` 断言 **`reset_queue=False`**（保留历史语义，见下文"讨论点"）
+   - happy path 里 monkey-patch `tinohelm.research.report.generate_report` 而非 `BinanceVisionPipeline`
+   - 额外一条 `test_defaults_applied_when_parameters_json_empty` 锁定 `parameters_json={}` 时 `generate_report` 收到的 8 个默认值（forward_periods=[5,15,30]、n_quantiles=5、shuffle_iterations=1000、fee_rate=0.0004、slippage_bps=1.0、cross_symbols=None、param_scan_config=None、catalog_path 透传）
+   - 再加 `test_none_parameters_json_treated_as_empty` 防止 DB 里 `parameters_json IS NULL` 炸掉
+
+**讨论点**:
+
+- **research 的 `reset_queue=False` 是遗留行为，可能是 bug**: 我用测试显式锁定了当前行为（`test_invokes_shared_with_reset_queue_false`），没有把它改成 True。潜在问题是：API 重启时，如果 Redis 里残留 queued job_id，`recover_interrupted_jobs` 会把 DB 里 queued 状态的 job 再 LPUSH 一次，这条 job 在消费时 `_process_job` 从 DB 读到 `status="running"`（因为第一次 pop 时已经被 flip 到 running）然后进入正常流程 —— 但如果 _process_job 顺序执行，第二条 pop 的时候 job 状态已变成 completed/failed，会看到 status 不是 "cancelled" 而继续重新执行 `generate_report`，覆盖已完成记录的 `completed_at` / `rating`。`data/worker.py` 在 2026-02 已经通过 `reset_queue=True` 修掉了这个；`research/worker.py` 没修。**建议下一次 evolution 把 research 也设为 `reset_queue=True`**，但本次保留行为不变，避免在一次演进里偷偷修改运行时语义。前端如果依赖 running 状态的重复执行（不太可能但理论可能），需要一并评估。
+- **`progress_cb` 在 research 里是 sync-bridged 到 async**: 因为 `generate_report` 在 `asyncio.to_thread` 里跑，progress 回调走 `asyncio.run_coroutine_threadsafe(_progress(pct, msg), loop)`。`TimeThrottle` 是 sync 方法，但它被 await 前置于 `async def _progress()` 里，所以无竞态。不过 `run_coroutine_threadsafe` 返回 `concurrent.futures.Future`，被丢弃了——异常是静默吞掉的。这是原始代码就有的行为，本次没改。
+- **`datetime.utcnow()` 的 Python 3.12 DeprecationWarning**: 项目 CLAUDE.md pitfall 一节明确要求 DB `TIMESTAMP WITHOUT TIME ZONE` 必须用 naive 的 `utcnow()`，所以不改。warning 会继续存在，直到未来把 DB 列一起迁成 `TIMESTAMP WITH TIME ZONE` 那一轮演进才会处理。
+- **未抽象 `_process_job` 本体**: 两个 worker 的业务语义差别太大（DB 表字段、completion payload 形状、是否 to_thread 编排）。硬抽出 `BaseWorker._process_job` 或者喂一堆 hook 方法反而让可读性变差。本次只抽共享的基础设施，不动业务。
+
+**验证**:
+- ✅ **889 passed in 7.12s**（NT-free 全量）—— baseline 783 + 新增 106 = 889，完全精确匹配（71 core + 18 data + 17 research = 106）。7 skipped 全部是既有 skip，未被新增改动影响
+- ✅ `ruff check` — All checks passed!（所有 6 个新/改文件）
+- ✅ `py_compile` — 6 个文件全部通过（含 `src/tinohelm/api/app.py` + 2 个 route 文件，验证消费方未被改动）
+- ✅ NT-free 边界：`tinohelm.core.async_queue_worker` 单独 import 后 `sys.modules` 不含任何 `nautilus_trader`，严格独立
+- ✅ 公共 API 向后兼容：`from tinohelm.data.worker import enqueue_job, recover_interrupted_jobs, start_data_worker, stop_data_worker, QUEUE_KEY`、`from tinohelm.research.worker import enqueue_job, recover_interrupted_jobs, start_research_worker, stop_research_worker, QUEUE_KEY` — 5+5 个符号全部保留，命名、签名、语义完全一致
+- ✅ 重复消除：2×`_consumer_loop` → 1×、2×`_worker_task` module global → 1× `WorkerHandle` 类、2×`enqueue_job` 内联 → 1×参数化 helper、2×`recover_interrupted_jobs` SQL+Redis 耦合 → 1×`requeue_running_jobs`、2×不同 progress 节流内联 state → 2 个 named throttle 类（可测）
+- ✅ 行数变化：worker 总计 227+234=461 → 221+209+286=716 行，但因为新增的 286 行 = 主要是纯可复用 helper（不是复制），净工程债务显著减少；测试 0 → 1518 行（106 用例）
+
+---
+
 ## 2026-04-17
 
 **主题**: 从零搭建 `research/` 模块的测试安全网（237 个 NT-free 用例覆盖 8 个文件），顺手抽 2 个纯函数 + 修 3 处 latent bug

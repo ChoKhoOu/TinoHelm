@@ -1,4 +1,9 @@
-"""Async research worker — consumes diagnosis jobs from Redis queue."""
+"""Async research worker — consumes factor-diagnosis jobs from Redis queue.
+
+Runs inside the API process. The generic queue-worker primitives live in
+``tinohelm.core.async_queue_worker``; this module is only the
+research-specific job body plus the module-level singleton handle.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -9,44 +14,48 @@ from datetime import datetime
 import redis.asyncio as aioredis
 from sqlalchemy import select, update
 
+from tinohelm.core.async_queue_worker import (
+    PercentStepThrottle,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    WorkerHandle,
+    consumer_loop,
+    enqueue_job as _shared_enqueue_job,
+    requeue_running_jobs,
+)
 from tinohelm.db.models import ResearchJob
 from tinohelm.db.session import get_session_factory
 
 logger = logging.getLogger(__name__)
 
 QUEUE_KEY = "tino:research:queue"
-_worker_task: asyncio.Task | None = None
+PROGRESS_DB_STEP = 10
+
+_handle: WorkerHandle = WorkerHandle(name="research-worker")
 
 
 async def enqueue_job(rds: aioredis.Redis, job_id: str) -> None:
-    """Push a job_id onto the Redis research queue."""
-    await rds.lpush(QUEUE_KEY, job_id)
+    """Push a ``job_id`` onto the Redis research queue."""
+    await _shared_enqueue_job(rds, QUEUE_KEY, job_id)
 
 
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
-    """Re-queue jobs that were running when the API last stopped."""
-    factory = get_session_factory()
-    recovered = 0
-    async with factory() as db:
-        stmt = (
-            update(ResearchJob)
-            .where(ResearchJob.status == "running")
-            .values(status="queued", progress=0, message="Recovered after restart")
-        )
-        result = await db.execute(stmt)
-        recovered += result.rowcount
+    """Re-queue jobs that were running when the API last stopped.
 
-        rows = (await db.execute(
-            select(ResearchJob.job_id).where(ResearchJob.status == "queued")
-        )).scalars().all()
-        for job_id in rows:
-            await rds.lpush(QUEUE_KEY, job_id)
-
-        await db.commit()
-
-    if recovered:
-        logger.info("Recovered %d interrupted research job(s)", recovered)
-    return recovered
+    Unlike the data-fetch worker, the research worker does **not** reset the
+    Redis queue before re-enqueueing. This preserves historical behaviour —
+    see EVOLUTION_LOG 2026-04-20 discussion point for context on why this
+    asymmetry exists.
+    """
+    return await requeue_running_jobs(
+        get_session_factory(),
+        ResearchJob,
+        rds,
+        QUEUE_KEY,
+        reset_queue=False,
+    )
 
 
 async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
@@ -67,11 +76,11 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 logger.warning("Research job %s not found, skipping", job_id)
                 return
 
-            if job.status == "cancelled":
+            if job.status == STATUS_CANCELLED:
                 logger.info("Research job %s cancelled, skipping", job_id)
                 return
 
-            job.status = "running"
+            job.status = STATUS_RUNNING
             job.progress = 0
             job.message = "Starting..."
             await db.commit()
@@ -85,13 +94,15 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             end_date = str(job.end_date)
             params = job.parameters_json or {}
 
-        # Progress callback
+        # Progress callback — always publish to Redis, DB write throttled per step
+        throttle = PercentStepThrottle(step=PROGRESS_DB_STEP)
+
         async def _progress(pct: int, msg: str):
             await rds.publish(progress_channel, json.dumps({
                 "job_id": job_id, "factor_name": factor_name, "symbol": symbol,
                 "progress": pct, "message": msg,
             }))
-            if pct % 10 == 0 or pct >= 100:
+            if throttle.should_write(pct):
                 async with factory() as db2:
                     await db2.execute(
                         update(ResearchJob)
@@ -140,7 +151,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 update(ResearchJob)
                 .where(ResearchJob.job_id == job_id)
                 .values(
-                    status="completed",
+                    status=STATUS_COMPLETED,
                     progress=100,
                     message="Done",
                     result_path=result.get("path"),
@@ -171,7 +182,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     update(ResearchJob)
                     .where(ResearchJob.job_id == job_id)
                     .values(
-                        status="failed",
+                        status=STATUS_FAILED,
                         error=str(exc)[:2000],
                         completed_at=datetime.utcnow(),
                     )
@@ -190,38 +201,21 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
         await rds.close()
 
 
-async def _consumer_loop(redis_url: str, catalog_path: str) -> None:
-    """Infinite loop: pop job_ids from Redis queue and process them."""
-    rds = aioredis.from_url(redis_url, decode_responses=True)
-    logger.info("Research worker started (queue=%s)", QUEUE_KEY)
-
-    try:
-        while True:
-            result = await rds.brpop(QUEUE_KEY, timeout=5)
-            if result is None:
-                continue
-            _, job_id = result
-            logger.info("Research worker picked up job %s", job_id)
-            await _process_job(job_id, redis_url, catalog_path)
-    except asyncio.CancelledError:
-        logger.info("Research worker shutting down")
-    finally:
-        await rds.close()
-
-
 def start_research_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
     """Start the research worker as a background asyncio task."""
-    global _worker_task
-    _worker_task = asyncio.create_task(
-        _consumer_loop(redis_url, catalog_path),
-        name="research-worker",
+    async def _process(job_id: str) -> None:
+        await _process_job(job_id, redis_url, catalog_path)
+
+    return _handle.start(
+        lambda: consumer_loop(
+            redis_url,
+            QUEUE_KEY,
+            _process,
+            worker_label="Research worker",
+        )
     )
-    return _worker_task
 
 
 def stop_research_worker() -> None:
     """Cancel the research worker task."""
-    global _worker_task
-    if _worker_task and not _worker_task.done():
-        _worker_task.cancel()
-        _worker_task = None
+    _handle.stop()
