@@ -1,0 +1,143 @@
+{
+  "id": "2026-04-19-frontend-ds-standardization",
+  "title": "frontend-ds-standardization",
+  "status": "active",
+  "current_phase": "verify",
+  "created": "2026-04-19T13:50:57Z",
+  "subtasks": [
+    {
+      "id": "s1",
+      "title": "chartTheme 常量补全（CHART_LEGEND_STYLE / CHART_LABEL_STYLE；Round 3: 类型沿用 React.CSSProperties 与既有 CHART_TOOLTIP_STYLE 一致；Note 3/4 补 position prop TS 兼容性说明）",
+      "depends_on": [],
+      "status": "done"
+    },
+    {
+      "id": "s2",
+      "title": "新建合规扫描脚本 verify-ds-compliance.sh（R1-R14 + PCRE2 + --selftest 覆盖 R4/R6/R7/R8/R9 多行/R10/R12/R13 含 11 variant/R14 R4-风格前后向断言 + --preflight-before-css-delete 扩展至 R14）",
+      "depends_on": [],
+      "status": "done"
+    },
+    {
+      "id": "s3",
+      "title": "src/web/CLAUDE.md 改写既有 QDS CSS Classes 章节 + 替换 docs/ui 引用 + 追加「标准化后的约束」草稿（9 项含 Historical Notes）",
+      "depends_on": [],
+      "status": "done"
+    },
+    {
+      "id": "s4",
+      "title": "迁移 /backtest 路由（page 1754 行 + 8 子组件含 PerformanceTab 拆分；Round 3 计数：276 处 bt-* + 11 处 sc-l（OverviewGreyTab 4 + TradesTab 3 + PerformanceTab 2 + TearsheetTab 2）+ 5 处 hm-* 内联迁移（OverviewTab L190-206，不依赖 s6）= 16 处 factor-research 散落 + ReferenceLine label 2 处含多行）",
+      "depends_on": [
+        "s1",
+        "s2"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "s5",
+      "title": "迁移 /data-catalog 路由（page + 5 子组件 + types.ts，Round 2：dc-* 65 处含 TYPE_BADGE_CLS 12 处字典 + page L240-243 4 张 KPI 迁移 StatCard + FetchDialog 3 处 fsel + page L252 1 处 fsel + JobQueue 4 处 bt-status 预留 s11）",
+      "depends_on": [
+        "s1",
+        "s2"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "s6",
+      "title": "迁移 /research + /research/report（factor-research 85 顶层 class 全量迁移 + 6 子组件拆分；Round 2：ReportClient 移除 ReportHeader，硬约束 4h 后若未完成 3 子组件则拆 s6b；Round 3 确认：research 下 hm-* 调用点 0，不新建 MonthlyHeatmap 共享组件）",
+      "depends_on": [
+        "s1",
+        "s2"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "s7",
+      "title": "迁移 /trading 路由（page + 8 components + 5 tabs，无 bt-*，重点清理 --accent-* 未定义变量 40 行/51 次调用跨 11 variant 含 TabNav.tsx 1 行；Round 3 锁定：purple → text-primary，purple-20 → bg-qds-accent-dim，无 case-by-case 评估）",
+      "depends_on": [
+        "s1",
+        "s2"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "s8",
+      "title": "迁移 /analytics + /optimization + /orders + /watchlist（optimization 豁免拆分）",
+      "depends_on": [
+        "s1",
+        "s2"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "s9",
+      "title": "查缺补漏 / + /strategies + /strategies/[name] + /settings（EditorClient 15 行/16 次调用 --accent-* 按 11 variant 映射）",
+      "depends_on": [
+        "s1",
+        "s2"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "s10",
+      "title": "删除 globals.css 遗留定义（.bt-* + .dc-* + L1856 单行 + factor-research 98 selector/85 顶层 class，前置 --preflight-before-css-delete 含 R14；Round 2 新增 preflight 失败回退 target 映射）",
+      "depends_on": [
+        "s4",
+        "s5",
+        "s6",
+        "s7",
+        "s8",
+        "s9"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "s11",
+      "title": "全仓扫描补漏 + StatusBadge 扩展（QDS Status union 支持 7 状态 + locale + barrel re-export + JobQueue 4 处 bt-status 迁移；Round 3 删除视觉差异目测步骤，subtask AC 仅自动化判定；视觉差异由 verify phase 用户验收，fallback 由主 agent post-task 回迁）",
+      "depends_on": [
+        "s4",
+        "s5",
+        "s6",
+        "s7",
+        "s8",
+        "s9"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "s12",
+      "title": "dark / light 双主题验证（subtask AC 仅自动化 R1-R14 + build + lint；视觉对照 / 双主题 / StatusBadge 视觉差异降级为 verify phase 的 User Acceptance Checklist）+ CLAUDE.md 章节定稿（Historical Notes + 视觉参考源 + shadcn 豁免）",
+      "depends_on": [
+        "s10",
+        "s11"
+      ],
+      "status": "done"
+    }
+  ],
+  "parallel_groups": [
+    [
+      "s1",
+      "s2",
+      "s3"
+    ],
+    [
+      "s4",
+      "s5",
+      "s6",
+      "s7",
+      "s8",
+      "s9"
+    ],
+    [
+      "s10",
+      "s11"
+    ],
+    [
+      "s12"
+    ]
+  ],
+  "review": {
+    "round": 4,
+    "architect_verdict": "approve",
+    "critic_verdict": "approve"
+  }
+}

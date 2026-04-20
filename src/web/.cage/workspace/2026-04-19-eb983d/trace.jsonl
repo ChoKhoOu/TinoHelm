@@ -1,0 +1,9 @@
+{"ts":"2026-04-19T16:40:34.353971Z","type":"subtask","id":"s9","detail":"subtask started","meta":{"task":"frontend-ds-standardization"}}
+{"ts":"2026-04-19T16:44:05.859561Z","type":"subtask","id":"s9","detail":"subtask completed","meta":{"status":"done","task":"frontend-ds-standardization"}}
+{"ts":"2026-04-19T16:44:05.862954Z","type":"subtask","id":"s10","detail":"subtask started","meta":{"task":"frontend-ds-standardization"}}
+{"ts":"2026-04-19T16:44:05.865966Z","type":"subtask","id":"s11","detail":"subtask started","meta":{"task":"frontend-ds-standardization"}}
+{"ts":"2026-04-19T16:51:54.907364Z","type":"subtask","id":"s11","detail":"subtask completed","meta":{"status":"done","task":"frontend-ds-standardization"}}
+{"ts":"2026-04-19T16:59:17.303389Z","type":"subtask","id":"s10","detail":"subtask completed","meta":{"status":"done","task":"frontend-ds-standardization"}}
+{"ts":"2026-04-19T16:59:17.306914Z","type":"subtask","id":"s12","detail":"subtask started","meta":{"task":"frontend-ds-standardization"}}
+{"ts":"2026-04-19T17:06:55.384794Z","type":"subtask","id":"s12","detail":"subtask completed","meta":{"status":"done","task":"frontend-ds-standardization"}}
+{"ts":"2026-04-19T17:06:55.388233Z","type":"phase","detail":"execution completed","meta":{"task":"frontend-ds-standardization"}}
