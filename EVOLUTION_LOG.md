@@ -174,6 +174,109 @@ Chronological record of architectural improvements and maintenance work.
 
 ## 2026-04-17
 
+**主题**: 从 `data/catalog.py` 抽出纯函数到 `data/catalog_helpers.py`，补齐 NT-free 单元测试并消除与 `pipeline_helpers.WRITE_CATEGORY` 的重复表
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- 新增 `src/tinohelm/data/catalog_helpers.py`（392 行，14 个公开 helper + 3 个常量）
+- 重构 `src/tinohelm/data/catalog.py`（490 → 419 行，-71 行；`validate_bars` 主干从 152 行缩至 105 行，`write_bars`/`compact_bars` 去除重复的 dedupe-by-ts 模式）
+- 新增 `tests/data/test_catalog_helpers.py`（696 行，116 个用例，分 12 个测试类）
+
+**动机**:
+
+`data/catalog.py` 是全项目"写入 Parquet 目录"的唯一入口，被 `BacktestRunner`、`BinanceVisionPipeline`、`api/routes/data.py` 三处主流程反复调用（`resolve_catalog_path` 5 处、`write_bars` 3 处、`compact_bars` 1 处、`validate_bars` 1 处、`_make_bar_type` 2 处、`_make_instrument` 3 处）。但它长期**零专用测试**——`tests/data/` 有 `test_downloader.py`、`test_instruments.py`、`test_pipeline*.py`、`test_converters.py`，唯独没有 `test_catalog*.py`。
+
+具体问题：
+
+1. **验证逻辑全部内联在 NT 依赖的 `validate_bars` 里** —— 152 行函数里有 90 行是纯算法（时间戳去重/gap 检测/OHLC 不变式/价格跳跃/issues 拼装/status 分类），因为和 `ParquetDataCatalog.bars()` 调用交织在一起，只能端到端测试（需要真实 NT 安装 + Parquet 文件）。任何 `int(diff / step_ns) - 1` 的边界 bug、tolerance 的 1.5× 阈值、`has_errors = gaps or ohlc_violations > 0` 的 truthy 语义全部没有测试兜底。
+
+2. **`_SOURCE_TO_CATEGORY` 与 `pipeline_helpers.WRITE_CATEGORY` 构成重复表** —— catalog 维护自己的 `{"klines": "bar", "aggTrades": "trade_tick", ...}`（6 条），pipeline_helpers 维护更完整的（11 条）。一旦未来 pipeline 加了新类型（如 `bookDepth`），catalog 不会跟进，`resolve_catalog_path("bookDepth")` 会静默返回 base path 而不是预期的子目录——和 pipeline 的写入意图漂移，且漂移不会被任何测试发现。这是典型的 "parallel constants drift" 反模式，与上一轮 `runner.py` 提取 `build_progress_payload` 前的 "两处字面量 dict" 问题同构。
+
+3. **`write_bars` 和 `compact_bars` 两处重复的 "dedupe-by-ts" 模式** —— 每处都写 `seen: dict[int, Any] = {}; for b in bars: seen[b.ts_event] = b; bars = sorted(seen.values(), key=lambda b: b.ts_event)`。8 行字面量×2，彼此独立维护。如果未来需要改为 "keep first" 或加入容差合并，两处要同步改。
+
+4. **`_interval_to_nanoseconds` 的实现有 magic number** —— `multipliers = {"MINUTE": 60, "HOUR": 3600, "DAY": 86400}` 是函数内字面量，不支持 SECOND（即便 `INTERVAL_MAP` 将来要加秒级），且错误路径（未知 interval）会 KeyError 而不是 ValueError，与 loader_helpers/runner_helpers 的风格不一致。
+
+5. **private 命名 `_INTERVAL_MAP` / `_CATEGORY_DIR` / `_SOURCE_TO_CATEGORY` / `_interval_to_nanoseconds`** —— 内部使用但本质是 pure helpers，应当公开以便单测直接引用（与 `pipeline_helpers` / `loader_helpers` / `runner_helpers` 统一风格）。
+
+**要点**:
+
+1. **`catalog_helpers.py` 集中 14 个 NT-free helper + 3 个不可变映射**:
+
+   **常量（`MappingProxyType` / `frozenset`）**:
+   - `INTERVAL_MAP: Mapping[str, tuple[int, str]]` —— `{"5m": (5, "MINUTE"), ...}`，共 12 条，不可变。
+   - `CATEGORY_DIR: Mapping[str, str]` —— `{"bar": "bar", "trade_tick": "ticks"}`，写入分类→物理子目录映射。
+   - `WRITABLE_CATEGORIES: frozenset[str]` —— 从 `CATEGORY_DIR.keys()` 派生，定义 catalog 可写入的分类白名单（`bar`、`trade_tick`）。
+
+   **Interval 解析**:
+   - `interval_to_step_unit(interval) -> tuple[int, str]` —— 统一查找点，未知 token 抛 ValueError 并把支持列表写进错误消息（CLI/UI 可直接展示，无需重复维护列表）。
+   - `interval_to_nanoseconds(interval)` —— 通过 `interval_to_step_unit` + 私有 `_AGGREGATION_SECONDS`（支持 SECOND/MINUTE/HOUR/DAY）计算。
+
+   **路径解析（消除重复表）**:
+   - `resolve_catalog_path(base, source_type)` —— **不再维护独立的 `_SOURCE_TO_CATEGORY`**，改为委托给 `pipeline_helpers.WRITE_CATEGORY` 查分类，再用 `WRITABLE_CATEGORIES` 白名单过滤：不在白名单的分类（如 `quote_tick`、`funding_rate`、`order_book_delta`）fallthrough 到 base path。行为与原 catalog 完全一致——`klines`/`markPriceKlines`/`indexPriceKlines`/`premiumIndexKlines`/`aggTrades`/`trades` 返回子路径，`fundingRate`/`bookTicker`/`bookDepth`/`metrics`/None/空串/未知 返回 base——但**维护点从 2 处缩到 1 处**，未来 pipeline 加新类型不会再漂移。
+
+   **时间戳 helpers**:
+   - `ns_to_iso(ns)` —— 纳秒 → ISO-8601 UTC 字符串，带 `+00:00` 后缀保证可往返。
+   - `count_duplicates(timestamps)` —— 通用 `len(ts) - len(set(ts))`，接受任意 iterable（generator 友好）。
+   - `find_gaps(sorted_unique_ts, step_ns, *, tolerance_mult=1.5)` —— 返回 `[{"start": iso, "end": iso, "missing_bars": N}, ...]`；`step_ns <= 0` 主动 raise。
+
+   **OHLCV 完整性**:
+   - `is_ohlc_valid(o, h, l, c, *, tol=1e-10)` —— 三条不变式（`h >= max(o,c)`、`l <= min(o,c)`、`h >= l`）带浮点容差。
+   - `compute_change_pct(prev, curr)` —— `None`/0/负数 → 返回 None（而非 ZeroDivisionError），否则返回 `abs((curr-prev)/prev)`。
+   - `detect_price_jumps(closes_with_ts, *, threshold=0.10)` —— 接受 `[(ts_ns, close), ...]` tuples（不接受 NT Bar 对象，保持 NT-free），返回 `{timestamp, prev_close, current_close, change_pct}` 列表。严格 `>` 比较（等值不算 jump）。
+
+   **报告装配**:
+   - `classify_status(*, has_errors, has_warnings)` —— keyword-only，errors 压倒 warnings。
+   - `build_validation_issues(*, duplicates, gaps, ohlc_violations, zero_volume_bars, price_jumps, jump_threshold)` —— 全 keyword-only，返回顺序稳定的 issues 字符串列表（duplicates → gaps → ohlc → zero_volume → jumps），空类别不产生 issue。`gaps` 里缺 `missing_bars` 的 entry 兜底计 0（防御性）。
+
+   **Bar 合并（消除重复模式）**:
+   - `dedupe_by_ts(items)` —— 通用 `ts_event` 属性去重，keep-last，按 ts 升序。
+   - `merge_bars(existing, new)` —— 调用 dedupe 的 union 特化，"new wins on collision" 语义（与原 `write_bars` 合并语义一致）。
+
+2. **`catalog.py` 重构** —— 保持所有公开 API 签名不变：
+   - `validate_bars` 从 152 行缩至 105 行：三处自定义算法（`_ns_to_iso` 闭包、inline gap detection、inline price-jump detection、inline OHLC check、inline status 分支、inline issues 列表构造）全部替换为 helper 调用。OHLC/volume/jumps 从两次遍历合并为单次遍历（原先 OHLC + jumps 共用一次 `for bar in bars`，这里保留，只是改用 `closes_with_ts` 列表喂给 `detect_price_jumps` 以复用通用 helper）。
+   - `write_bars` 里的 dict-推导 + sort 装配替换为 `merge_bars(existing_bars, bars)`。log 消息里的 `len(bars) - existing_count` 语义（"去重后的净增量"）显式保留。
+   - `compact_bars` 里同样的 dict-推导替换为 `dedupe_by_ts(bars)`。
+   - `_make_bar_type` 改用 `interval_to_step_unit` —— 未知 interval 现在抛 ValueError（语义等价，错误消息更完整）。
+   - 向后兼容别名：`_INTERVAL_MAP is INTERVAL_MAP`、`_CATEGORY_DIR is CATEGORY_DIR`、`_SOURCE_TO_CATEGORY` 从 `WRITE_CATEGORY` 派生保持相同键值（`is` 检查可能不成立但 `==` 语义相同）、`_interval_to_nanoseconds` 作为 `interval_to_nanoseconds` 的 thin wrapper 保留。
+   - 顺手修掉 `agg_trades_to_trade_ticks` 里 3 个 ruff 早就指出的未使用 import（`InstrumentId` / `Price` / `Quantity`）——pre-existing lint 债务。
+
+3. **`tests/data/test_catalog_helpers.py` 116 个用例分 12 个测试类**:
+   - `TestIntervalMap` 3 —— immutability（`MappingProxyType` 写入必须 raise）、sample 条目、aggregation name 合法性
+   - `TestCategoryDir` 3 —— 内容 / immutability / `WRITABLE_CATEGORIES` 从 keys 派生
+   - `TestIntervalToStepUnit` 15 —— 12 个 parametrize 全部 token + 未知 token 错误消息含支持列表 + 空串 + 大小写敏感
+   - `TestIntervalToNanoseconds` 7 —— 6 个 parametrize + 未知
+   - `TestResolveCatalogPath` 14 —— 每个 writable 源类型独立用例 + 5 个 fallthrough 用例（None/""/unknown/fundingRate/bookTicker）+ Path 输入 + 相对路径；其中 `test_funding_rate_returns_base` 和 `test_book_ticker_returns_base` **同时断言** `WRITE_CATEGORY[src] not in WRITABLE_CATEGORIES`——这是防漂移关键：如果未来 catalog 学会写 `quote_tick` 但忘了更新 `WRITABLE_CATEGORIES`，测试立刻失败；或者相反，`WRITABLE_CATEGORIES` 意外扩张时这两个测试会失败提醒需要同步写入逻辑。
+   - `TestNsToIso` 3 —— epoch、已知时间戳、tz suffix 断言
+   - `TestCountDuplicates` 5 —— empty/no dup/all dup/mixed/generator 输入
+   - `TestFindGaps` 9 —— empty/single ts/no gap/single gap/tolerance 吸收 1.4×/custom tolerance/多 gap/step_ns 校验/ISO 输出
+   - `TestIsOhlcValid` 10 —— 所有 3 条不变式各 1-2 个用例 + 浮点容差 + custom tol
+   - `TestComputeChangePct` 7 —— 涨/跌/零变动/prev=0/prev<0/prev=None/abs 非负
+   - `TestDetectPriceJumps` 9 —— empty/single/无跳/命中/custom threshold/多跳/prev=0 跳过/iso timestamp/严格 `>` 边界（等于阈值不算）
+   - `TestClassifyStatus` 3 —— errors 压倒 / warnings / ok
+   - `TestBuildValidationIssues` 9 —— 空 / 单独每类别 / threshold 25% 渲染 / 全类别顺序稳定 / `missing_bars` 缺 key 兜底
+   - `TestDedupeByTs` 5 —— empty/single/排序/keep-last 冲突/generator
+   - `TestMergeBars` 6 —— 双空/仅 existing/仅 new/无冲突/冲突 new wins/混合冲突
+   - `TestCatalogBackwardCompat` 7 —— `_INTERVAL_MAP is INTERVAL_MAP`（`is` 同一对象）、`_CATEGORY_DIR is CATEGORY_DIR`、`_SOURCE_TO_CATEGORY` 值全部来自 `WRITE_CATEGORY` 且分类都在 `WRITABLE_CATEGORIES` 中、fundingRate/bookTicker 必须不在 `_SOURCE_TO_CATEGORY` 中、`catalog.resolve_catalog_path is resolve_catalog_path`（helper 公开 re-export）、`_interval_to_nanoseconds` wrapper 行为等价、wrapper 在未知 interval 时 raise ValueError（**新语义**，比原先的 KeyError 更信息丰富——测试作为锁）
+
+4. **NT-free 验证**：用 `sys.meta_path` 阻断 `nautilus_trader` / `optuna` / `sqlalchemy` / `redis` / `httpx` 后导入 `catalog_helpers`，`sys.modules` 不含任何被阻断的包。证实 helpers 完全可在 lean CI 镜像下运行。
+
+**讨论点**:
+
+- **`_SOURCE_TO_CATEGORY` 不再是同一对象（`is` 不成立）但键值等价** —— 原先是 module-level 字面量，现在是从 `WRITE_CATEGORY` 派生的 dict。如果真有外部 caller 做 `catalog._SOURCE_TO_CATEGORY is ...` 这样的奇怪检查会失败——grep 全项目零结果，没有这种用法。测试 `test_source_to_category_is_subset_of_write_category` 锁定内容等价性足够。
+- **`_interval_to_nanoseconds` 未知 interval 从 KeyError 变为 ValueError** —— 语义严格更好（与 `parse_interval` / `interval_to_step_unit` / `runner_helpers.parse_interval` 统一），但**是行为变化**。如果有调用方 catch `KeyError` 会失效——grep 确认无此类 caller（两处使用都是信任 input 已被 `_make_bar_type` / `interval_to_step_unit` 预先校验）。测试 `test_interval_to_nanoseconds_wrapper_rejects_unknown` 把这条锁住。
+- **`validate_bars` 的 OHLC/volume/jumps 改为两次遍历（原一次）vs 保持一次** —— 评估后**保持一次**。`closes_with_ts` 列表只是 `(ts_event, close)` tuples，内存占用与原 `prev_close` 状态机近似（单精度 float + int）。收益是 `detect_price_jumps` 可作为独立 helper 被单独测试，成本可忽略。
+
+**验证**:
+- ✅ 全量 `pytest tests/`：1119 → 1235（+116），**全部通过**，耗时 10.99s
+- ✅ `ruff check src/tinohelm/data/catalog.py src/tinohelm/data/catalog_helpers.py tests/data/test_catalog_helpers.py` —— All checks passed（同时修掉了 3 个 pre-existing 未使用 import 债务）
+- ✅ 字节码编译检查通过（`py_compile` on 3 个修改/新建文件）
+- ✅ NT-free blocker 验证：`catalog_helpers.py` 在 `sys.meta_path` 阻断 `nautilus_trader` / `optuna` / `sqlalchemy` / `redis` / `httpx` 后仍可导入；导入后 `sys.modules` 不含任何被阻断的包
+- ✅ 基线对比：`git stash && pytest` → 1119 passed（pre-change）；pop 后 1235 passed，差值 +116 与新增用例数精确匹配
+- ✅ 行数变化：`catalog.py` 490 → 419（-71），`catalog_helpers.py` 0 → 392，`test_catalog_helpers.py` 0 → 696
+- ✅ 向后兼容：`catalog._INTERVAL_MAP is INTERVAL_MAP` 为 True，`catalog._CATEGORY_DIR is CATEGORY_DIR` 为 True，`catalog.resolve_catalog_path` 仍可导入，全部 7 个既有 caller（`backtest/runner.py` 2、`data/pipeline.py` 6、`api/routes/data.py` 3）零修改
+
+
+## 2026-04-17
+
 **主题**: 从 `strategy/loader.py` 抽出纯函数到 `strategy/loader_helpers.py`，并补齐 NT-free 单元测试
 **维度**: 架构重构 + 测试补齐
 **改动范围**:
