@@ -1,8 +1,8 @@
 {
   "id": "2026-04-19-frontend-ds-standardization",
   "title": "frontend-ds-standardization",
-  "status": "active",
-  "current_phase": "verify",
+  "status": "done",
+  "current_phase": "idle",
   "created": "2026-04-19T13:50:57Z",
   "subtasks": [
     {
