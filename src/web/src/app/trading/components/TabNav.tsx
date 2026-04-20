@@ -41,7 +41,7 @@ export function TabNav({ activeTab, onTabChange, nodeType }: Props) {
             <motion.div
               layoutId="tab-indicator"
               className="absolute bottom-0 left-2 right-2 h-0.5 rounded-full"
-              style={{ backgroundColor: "var(--accent-blue)" }}
+              style={{ backgroundColor: "var(--info)" }}
               transition={{ type: "spring", stiffness: 400, damping: 35 }}
             />
           )}

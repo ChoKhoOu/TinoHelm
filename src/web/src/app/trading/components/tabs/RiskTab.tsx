@@ -15,7 +15,7 @@ import {
   Cell,
 } from "recharts";
 import { apiGet } from "@/lib/api";
-import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
+import { CHART_TOOLTIP_PROPS, CHART_LABEL_STYLE, CHART_GRID_STYLE } from "@/lib/chartTheme";
 import { useWsEvent } from "@/providers/WebSocketProvider";
 import { FadeIn } from "@/components/motion/FadeIn";
 
@@ -179,12 +179,12 @@ export function RiskTab({ nodeType }: Props) {
                       <stop offset="95%" stopColor="var(--dan)" stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+                  <CartesianGrid {...CHART_GRID_STYLE} />
                   <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => { try { return new Date(v).toLocaleDateString("zh-CN", { month: "short", day: "numeric" }); } catch { return v; } }} />
                   <YAxis tick={{ fill: "var(--t3)", fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => `${v.toFixed(1)}%`} width={48} />
                   <RechartsTooltip {...CHART_TOOLTIP_PROPS} formatter={(v: unknown) => [`${(v as number).toFixed(2)}%`, "回撤"]} />
                   {metrics.drawdown_threshold != null && (
-                    <ReferenceLine y={-Math.abs(metrics.drawdown_threshold)} stroke="var(--warn)" strokeDasharray="4 4" strokeOpacity={0.5} label={{ value: "阈值", fill: "var(--warn)", fontSize: 9 }} />
+                    <ReferenceLine y={-Math.abs(metrics.drawdown_threshold)} stroke="var(--warn)" strokeDasharray="4 4" strokeOpacity={0.5} label={{ ...CHART_LABEL_STYLE, value: "阈值", position: "insideTopRight", fill: "var(--warn)" }} />
                   )}
                   <Area type="monotone" dataKey="drawdown" stroke="var(--dan)" strokeWidth={1.5} fill="url(#ddGrad)" animationDuration={1500} animationEasing="ease-out" />
                 </AreaChart>
@@ -203,7 +203,7 @@ export function RiskTab({ nodeType }: Props) {
               {exposureEntries.length > 0 ? (
                 <ResponsiveContainer width="100%" height={180}>
                   <BarChart data={exposureEntries} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" horizontal={false} />
+                    <CartesianGrid {...CHART_GRID_STYLE} horizontal={false} />
                     <XAxis type="number" tick={{ fill: "var(--t3)", fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : String(v)} />
                     <YAxis type="category" dataKey="instrument" tick={{ fill: "var(--t2)", fontSize: 9 }} axisLine={false} tickLine={false} width={80} tickFormatter={(v: string) => v.replace(".BINANCE", "").replace("-PERP", "")} />
                     <RechartsTooltip {...CHART_TOOLTIP_PROPS} formatter={(v: unknown) => [fmtDollar(v as number), "敞口"]} />

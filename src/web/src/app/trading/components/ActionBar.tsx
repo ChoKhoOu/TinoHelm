@@ -65,10 +65,10 @@ export function ActionBar({ nodeType, riskMetrics }: Props) {
   const wsStatus = reconnecting ? "重连中" : connected ? "已连接" : "未连接";
   const WsIcon = connected ? Wifi : WifiOff;
   const wsColor = reconnecting
-    ? "var(--accent-amber)"
+    ? "var(--warn)"
     : connected
-    ? "var(--accent-green)"
-    : "var(--accent-red)";
+    ? "var(--suc)"
+    : "var(--dan)";
 
   return (
     <>
@@ -85,7 +85,7 @@ export function ActionBar({ nodeType, riskMetrics }: Props) {
           <RiskMetric
             label="保证金"
             value={`${margin.toFixed(1)}%`}
-            valueColor={marginHigh ? "var(--accent-red)" : undefined}
+            valueColor={marginHigh ? "var(--dan)" : undefined}
           />
           <Separator orientation="vertical" className="h-5" />
           <RiskMetric label="杠杆" value={`${leverage.toFixed(2)}x`} />
@@ -195,7 +195,7 @@ function RiskMetric({
       </span>
       <span
         className="text-[11px] font-mono font-semibold"
-        style={{ color: valueColor ?? "var(--accent-amber)" }}
+        style={{ color: valueColor ?? "var(--warn)" }}
       >
         {value}
       </span>
@@ -227,7 +227,7 @@ function ActionButton({
       disabled={loading}
       className={
         isDestructiveOutline
-          ? "text-[var(--accent-red)] border-[var(--accent-red)] text-[10px] font-bold tracking-wide whitespace-nowrap"
+          ? "text-destructive border-destructive text-[10px] font-bold tracking-wide whitespace-nowrap"
           : "text-[10px] font-bold tracking-wide whitespace-nowrap"
       }
     >

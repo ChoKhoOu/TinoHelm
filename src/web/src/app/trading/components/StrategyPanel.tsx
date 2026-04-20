@@ -30,17 +30,17 @@ const STRATEGY_STATE_LABELS: Record<string, string> = {
 
 const STRATEGY_STATE_COLORS: Record<string, string> = {
   available: "var(--muted-foreground)",
-  starting: "var(--accent-blue)",
-  running: "var(--accent-green)",
-  paused: "var(--accent-amber)",
-  flattening: "var(--accent-red)",
+  starting: "var(--info)",
+  running: "var(--suc)",
+  paused: "var(--warn)",
+  flattening: "var(--dan)",
 };
 
 const STRATEGY_STATUS_COLORS: Record<string, string> = {
-  running: "var(--accent-green)",
-  paused: "var(--accent-amber)",
+  running: "var(--suc)",
+  paused: "var(--warn)",
   stopped: "var(--muted-foreground)",
-  error: "var(--accent-red)",
+  error: "var(--dan)",
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -240,7 +240,7 @@ export function StrategyPanel({ nodeType }: Props) {
                         label="启动"
                         loading={actionLoading === `${p.name}:start`}
                         onClick={() => handleStrategyAction(p.name, "start")}
-                        color="var(--accent-green)"
+                        color="var(--suc)"
                       />
                     )}
                     {isRunning && (
@@ -249,7 +249,7 @@ export function StrategyPanel({ nodeType }: Props) {
                         label="暂停"
                         loading={actionLoading === `${p.name}:pause`}
                         onClick={() => handleStrategyAction(p.name, "pause")}
-                        color="var(--accent-amber)"
+                        color="var(--warn)"
                       />
                     )}
                     {isPaused && (
@@ -258,7 +258,7 @@ export function StrategyPanel({ nodeType }: Props) {
                         label="恢复"
                         loading={actionLoading === `${p.name}:resume`}
                         onClick={() => handleStrategyAction(p.name, "resume")}
-                        color="var(--accent-blue)"
+                        color="var(--info)"
                       />
                     )}
                     {(isRunning || isPaused) && (
@@ -267,7 +267,7 @@ export function StrategyPanel({ nodeType }: Props) {
                         label="平仓停止"
                         loading={actionLoading === `${p.name}:flatten-stop`}
                         onClick={() => handleStrategyAction(p.name, "flatten-stop")}
-                        color="var(--accent-red)"
+                        color="var(--dan)"
                       />
                     )}
                     {isTransitioning && (

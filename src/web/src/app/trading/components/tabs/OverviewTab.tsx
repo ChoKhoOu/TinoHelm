@@ -13,7 +13,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import { apiGet } from "@/lib/api";
-import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
+import { CHART_TOOLTIP_PROPS, CHART_GRID_STYLE } from "@/lib/chartTheme";
 import { useWsEvent } from "@/providers/WebSocketProvider";
 import { TickFlash } from "@/components/TickFlash";
 import { EmptyState } from "@/components/EmptyState";
@@ -247,7 +247,7 @@ export function OverviewTab({ nodeType, positions, fills, loading, onSelectStrat
                         <stop offset="95%" stopColor="#36884B" stopOpacity={0} />
                       </linearGradient>
                     </defs>
-                    <CartesianGrid stroke="rgba(255,255,255,.05)" strokeDasharray="none" />
+                    <CartesianGrid {...CHART_GRID_STYLE} />
                     <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} tickFormatter={(v) => fmtTime(v, rangeHours)} minTickGap={60} />
                     <YAxis tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} tickFormatter={fmtEquity} width={56} />
                     <RechartsTooltip {...CHART_TOOLTIP_PROPS} labelFormatter={(v) => fmtTime(v as string, rangeHours)} formatter={(v: unknown) => [fmtEquity(v as number), "权益"]} />
@@ -286,7 +286,7 @@ export function OverviewTab({ nodeType, positions, fills, loading, onSelectStrat
                         <stop offset="95%" stopColor={totalRealizedPnl + totalUnrealizedPnl >= 0 ? "#36884B" : "#FE8181"} stopOpacity={0} />
                       </linearGradient>
                     </defs>
-                    <CartesianGrid stroke="rgba(255,255,255,.05)" strokeDasharray="none" />
+                    <CartesianGrid {...CHART_GRID_STYLE} />
                     <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} tickFormatter={(v) => fmtTime(v, 24)} minTickGap={60} />
                     <YAxis tick={{ fill: "var(--t3)", fontSize: 9, fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} width={40} />
                     <RechartsTooltip {...CHART_TOOLTIP_PROPS} />

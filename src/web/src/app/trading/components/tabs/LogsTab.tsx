@@ -78,9 +78,9 @@ function LevelChip({ level, active, onClick }: { level: LogLevel; active: boolea
 }
 
 function TimelineIcon({ type }: { type: TimelineEvent["type"] }) {
-  if (type === "fill") return <TrendingUp className="size-3 text-[var(--suc)]" />;
-  if (type === "position") return <Activity className="size-3 text-[var(--info)]" />;
-  return <FileText className="size-3 text-[var(--warn)]" />;
+  if (type === "fill") return <TrendingUp className="size-3 text-qds-success" />;
+  if (type === "position") return <Activity className="size-3 text-qds-info" />;
+  return <FileText className="size-3 text-qds-warning" />;
 }
 
 export function LogsTab({ nodeType }: Props) {
@@ -201,12 +201,12 @@ export function LogsTab({ nodeType }: Props) {
     <div className="flex flex-col gap-3 p-5 h-full min-h-0">
       {/* Log stream -- 70% height */}
       <FadeIn className="flex flex-col min-h-0 [flex:7_1_0]">
-        <div className="rounded-[var(--r)] border border-[var(--bd)] bg-[var(--bg-in)] flex flex-col h-full min-h-0 overflow-hidden">
+        <div className="rounded-lg border bg-input flex flex-col h-full min-h-0 overflow-hidden">
           {/* Header with filters */}
           <div className="qds-card-header shrink-0">
             <div className="flex items-center gap-2">
               <span className="qds-section-label">日志流</span>
-              <span className="text-[0.56rem] font-mono text-[var(--t3)] ml-1">{filteredLogs.length}/{MAX_LOGS}</span>
+              <span className="text-[0.56rem] font-mono text-qds-t3 ml-1">{filteredLogs.length}/{MAX_LOGS}</span>
             </div>
             <div className="flex items-center gap-1.5">
               {(["ERROR", "WARNING", "INFO", "DEBUG"] as LogLevel[]).map((level) => (
@@ -222,15 +222,15 @@ export function LogsTab({ nodeType }: Props) {
             className="flex-1 overflow-y-auto min-h-0 font-mono text-[0.68rem] leading-[1.8]"
           >
             {filteredLogs.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-[var(--t3)] text-[0.72rem]">等待日志...</div>
+              <div className="flex items-center justify-center h-full text-qds-t3 text-[0.72rem]">等待日志...</div>
             ) : (
               filteredLogs.map((entry, i) => (
                 <div
                   key={entry.id}
-                  className="flex items-start gap-2 px-4 py-0.5 hover:bg-[var(--bg-t)] transition-colors"
+                  className="flex items-start gap-2 px-4 py-0.5 hover:bg-secondary transition-colors"
                   style={{ background: i % 2 === 1 ? "var(--bg-t)" : LEVEL_BG[entry.level] }}
                 >
-                  <span className="text-[var(--t3)] shrink-0 tabular-nums">{fmtTs(entry.ts)}</span>
+                  <span className="text-qds-t3 shrink-0 tabular-nums">{fmtTs(entry.ts)}</span>
                   <span
                     className="shrink-0 font-bold text-[0.56rem] tracking-[1px] uppercase w-14 text-right"
                     style={{ color: LEVEL_COLORS[entry.level] }}
@@ -238,7 +238,7 @@ export function LogsTab({ nodeType }: Props) {
                     {entry.level}
                   </span>
                   {entry.logger && (
-                    <span className="shrink-0 text-[var(--t3)] text-[0.62rem] max-w-[120px] truncate">{entry.logger}:</span>
+                    <span className="shrink-0 text-qds-t3 text-[0.62rem] max-w-[120px] truncate">{entry.logger}:</span>
                   )}
                   <span className="flex-1 break-all" style={{ color: LEVEL_COLORS[entry.level] }}>{entry.message}</span>
                 </div>
@@ -249,10 +249,10 @@ export function LogsTab({ nodeType }: Props) {
 
           {/* Scroll-to-bottom */}
           {!autoScroll && (
-            <div className="shrink-0 flex justify-center py-2 border-t border-[var(--bd)]">
+            <div className="shrink-0 flex justify-center py-2 border-t">
               <button
                 onClick={scrollToBottom}
-                className="flex items-center gap-1.5 px-3 py-1 rounded-[var(--rs)] text-[0.62rem] font-semibold text-[var(--info)] bg-[var(--info-d)] hover:brightness-110 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 rounded text-[0.62rem] font-semibold text-qds-info bg-qds-info-dim hover:brightness-110 transition-colors"
               >
                 <ArrowDown className="size-3" />
                 滚动到底部
@@ -264,20 +264,20 @@ export function LogsTab({ nodeType }: Props) {
 
       {/* Event timeline -- 30% height */}
       <FadeIn delay={0.1} className="flex flex-col min-h-0 [flex:3_1_0]">
-        <div className="rounded-[var(--r)] border border-[var(--bd)] bg-[var(--bg-p)] flex flex-col h-full min-h-0 overflow-hidden">
+        <div className="rounded-lg border bg-card flex flex-col h-full min-h-0 overflow-hidden">
           <div className="qds-card-header shrink-0">
             <span className="qds-section-label">事件时间线</span>
           </div>
           <div className="flex-1 overflow-y-auto min-h-0">
             {timeline.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-[var(--t3)] text-[0.72rem]">等待事件...</div>
+              <div className="flex items-center justify-center h-full text-qds-t3 text-[0.72rem]">等待事件...</div>
             ) : (
               <div className="divide-y divide-[var(--bd)]">
                 {timeline.map((evt) => (
-                  <div key={evt.id} className="flex items-center gap-3 px-4 py-2 hover:bg-[var(--bg-t)] transition-colors">
+                  <div key={evt.id} className="flex items-center gap-3 px-4 py-2 hover:bg-secondary transition-colors">
                     <div className="shrink-0"><TimelineIcon type={evt.type} /></div>
-                    <span className="flex-1 text-[0.68rem] text-[var(--t1)]">{evt.description}</span>
-                    <span className="shrink-0 text-[0.56rem] font-mono text-[var(--t3)]">{fmtTs(evt.ts)}</span>
+                    <span className="flex-1 text-[0.68rem] text-qds-t1">{evt.description}</span>
+                    <span className="shrink-0 text-[0.56rem] font-mono text-qds-t3">{fmtTs(evt.ts)}</span>
                   </div>
                 ))}
               </div>

@@ -181,11 +181,14 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
         {phase === "form" ? (
           <>
             {/* Modal header */}
-            <div className="modal-head" style={{ padding: "1rem 1.25rem .75rem", display: "flex", alignItems: "flex-start", gap: ".75rem" }}>
-              <div className="dc-modal-icon" style={{ background: "var(--suc-d)", color: "var(--suc)" }}>↓</div>
+            <div style={{ padding: "1rem 1.25rem .75rem", display: "flex", alignItems: "flex-start", gap: ".75rem" }}>
+              <div
+                className="w-9 h-9 rounded-[10px] flex items-center justify-center flex-shrink-0 text-base"
+                style={{ background: "var(--suc-d)", color: "var(--suc)" }}
+              >↓</div>
               <div>
-                <div style={{ fontSize: ".9rem", fontWeight: 600, marginBottom: ".15rem" }}>拉取数据</div>
-                <div style={{ fontSize: ".75rem", color: "var(--t2)", lineHeight: 1.5 }}>从 Binance 拉取历史数据到本地 ParquetDataCatalog</div>
+                <div className="text-[.9rem] font-semibold mb-[.15rem]">拉取数据</div>
+                <div className="text-[.75rem] text-muted-foreground leading-relaxed">从 Binance 拉取历史数据到本地 ParquetDataCatalog</div>
               </div>
             </div>
 
@@ -194,9 +197,9 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
               {/* Data type + Asset class — 2-column row */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".75rem", marginBottom: ".85rem" }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: ".3rem" }}>
-                  <div className="fl">数据类型 <span className="req" style={{ color: "var(--dan)" }}>*</span></div>
+                  <div className="font-mono text-[.62rem] text-muted-foreground">数据类型 <span className="text-destructive">*</span></div>
                   <select
-                    className="fsel"
+                    className="qds-select"
                     value={dataType}
                     onChange={(e) => setDataType(e.target.value)}
                   >
@@ -210,9 +213,9 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
                   </select>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: ".3rem" }}>
-                  <div className="fl">资产类别</div>
+                  <div className="font-mono text-[.62rem] text-muted-foreground">资产类别</div>
                   <select
-                    className="fsel"
+                    className="qds-select"
                     value={assetClass}
                     onChange={(e) => setAssetClass(e.target.value)}
                   >
@@ -225,9 +228,9 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
               {/* Interval — only for bar types */}
               {showInterval && (
                 <div style={{ display: "flex", flexDirection: "column", gap: ".3rem", marginBottom: ".85rem" }}>
-                  <div className="fl">周期 <span className="req" style={{ color: "var(--dan)" }}>*</span></div>
+                  <div className="font-mono text-[.62rem] text-muted-foreground">周期 <span className="text-destructive">*</span></div>
                   <select
-                    className="fsel"
+                    className="qds-select"
                     value={interval}
                     onChange={(e) => setInterval(e.target.value)}
                   >
@@ -240,27 +243,27 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
 
               {/* Symbol — chip multi-select */}
               <div style={{ display: "flex", flexDirection: "column", gap: ".3rem", marginBottom: ".85rem" }}>
-                <div className="fl">
-                  品种 <span className="req" style={{ color: "var(--dan)" }}>*</span>
-                  <span style={{ fontWeight: 400, color: "var(--t3)" }}>· 可多选</span>
+                <div className="font-mono text-[.62rem] text-muted-foreground">
+                  品种 <span className="text-destructive">*</span>
+                  <span className="font-normal text-qds-t3">· 可多选</span>
                 </div>
                 <div style={{ position: "relative" }}>
                   <div
-                    className="dc-chip-wrap"
+                    className="flex flex-wrap gap-1.5 p-[.35rem_.5rem] min-h-9 bg-input border border-border rounded-[var(--rs)] cursor-text transition-colors duration-200 focus-within:border-primary focus-within:shadow-[0_0_0_3px_var(--acc-d)]"
                     onClick={() => chipInputRef.current?.focus()}
                   >
                     {selectedSymbols.map((sym) => (
-                      <span key={sym} className="dc-chip">
+                      <span key={sym} className="inline-flex items-center gap-1 font-mono text-[.68rem] px-[.4rem] py-[.15rem] bg-secondary rounded text-foreground whitespace-nowrap">
                         {sym}
                         <span
-                          className="dc-chip-x"
+                          className="cursor-pointer text-qds-t3 text-[.6rem] hover:text-destructive transition-colors duration-150"
                           onClick={(e) => { e.stopPropagation(); removeSymbol(sym); }}
                         >×</span>
                       </span>
                     ))}
                     <input
                       ref={chipInputRef}
-                      className="dc-chip-input"
+                      className="border-0 bg-transparent outline-none font-mono text-[.68rem] text-foreground flex-1 min-w-20 py-[.1rem] placeholder:text-qds-t3"
                       placeholder="搜索品种..."
                       value={symbolSearch}
                       onChange={(e) => {
@@ -272,18 +275,18 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
                     />
                   </div>
                   {symbolDropdownOpen && filteredSymbols.length > 0 && (
-                    <div className="dc-chip-dropdown" style={{ display: "block" }}>
+                    <div className="absolute top-full left-0 right-0 bg-card border border-border rounded-[var(--rs)] max-h-[180px] overflow-y-auto z-10 shadow-[0_8px_24px_rgba(0,0,0,.2)]">
                       {filteredSymbols.map((s) => (
                         <div
                           key={s.symbol}
-                          className="dc-chip-opt"
+                          className="px-[.65rem] py-[.4rem] font-mono text-[.7rem] cursor-pointer hover:bg-secondary transition-colors duration-150"
                           onMouseDown={(e) => {
                             e.preventDefault();
                             addSymbol(s.symbol);
                           }}
                         >
-                          <span style={{ fontFamily: "var(--font-d)" }}>{s.symbol}</span>
-                          <span style={{ fontSize: ".62rem", color: "var(--t3)", marginLeft: ".5rem" }}>{s.base}/{s.quote}</span>
+                          <span className="font-mono">{s.symbol}</span>
+                          <span className="text-[.62rem] text-qds-t3 ml-2">{s.base}/{s.quote}</span>
                         </div>
                       ))}
                     </div>
@@ -294,18 +297,18 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
               {/* Date range — 2-column row */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".75rem", marginBottom: ".85rem" }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: ".3rem" }}>
-                  <div className="fl">开始日期 <span className="req" style={{ color: "var(--dan)" }}>*</span></div>
+                  <div className="font-mono text-[.62rem] text-muted-foreground">开始日期 <span className="text-destructive">*</span></div>
                   <input
-                    className="fi"
+                    className="qds-input"
                     type="date"
                     value={startDate}
                     onChange={(e) => setStartDate(e.target.value)}
                   />
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: ".3rem" }}>
-                  <div className="fl">结束日期 <span className="req" style={{ color: "var(--dan)" }}>*</span></div>
+                  <div className="font-mono text-[.62rem] text-muted-foreground">结束日期 <span className="text-destructive">*</span></div>
                   <input
-                    className="fi"
+                    className="qds-input"
                     type="date"
                     value={endDate}
                     onChange={(e) => setEndDate(e.target.value)}
@@ -314,7 +317,7 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
               </div>
 
               {displayError && (
-                <div style={{ fontSize: ".62rem", color: "var(--dan)", marginTop: ".1rem" }}>{displayError}</div>
+                <div className="text-[.62rem] text-destructive mt-[.1rem]">{displayError}</div>
               )}
             </div>
 
@@ -356,16 +359,19 @@ export function FetchDialog({ open, onClose, onSuccess }: FetchDialogProps) {
           <>
             {/* Progress phase header */}
             <div style={{ padding: "1rem 1.25rem .75rem", display: "flex", alignItems: "flex-start", gap: ".75rem" }}>
-              <div className="dc-modal-icon" style={{ background: "var(--suc-d)", color: "var(--suc)" }}>✓</div>
+              <div
+                className="w-9 h-9 rounded-[10px] flex items-center justify-center flex-shrink-0 text-base"
+                style={{ background: "var(--suc-d)", color: "var(--suc)" }}
+              >✓</div>
               <div>
-                <div style={{ fontSize: ".9rem", fontWeight: 600, marginBottom: ".15rem", color: "var(--suc)" }}>任务已提交</div>
-                <div style={{ fontSize: ".75rem", color: "var(--t2)", lineHeight: 1.5 }}>拉取任务已加入队列，可在后台运行</div>
+                <div className="text-[.9rem] font-semibold mb-[.15rem] text-qds-success">任务已提交</div>
+                <div className="text-[.75rem] text-muted-foreground leading-relaxed">拉取任务已加入队列，可在后台运行</div>
               </div>
             </div>
 
             <div style={{ padding: "0 1.25rem 1rem" }}>
-              <p style={{ fontSize: ".8rem", color: "var(--t1)", marginBottom: ".5rem" }}>{progressMsg}</p>
-              <p style={{ fontSize: ".68rem", color: "var(--t3)", fontFamily: "var(--font-d)" }}>
+              <p className="text-[.8rem] text-qds-t1 mb-2">{progressMsg}</p>
+              <p className="font-mono text-[.68rem] text-qds-t3">
                 共 {jobCount} 个拉取任务已加入队列，可在后台运行。关闭此对话框不影响任务执行。
               </p>
             </div>

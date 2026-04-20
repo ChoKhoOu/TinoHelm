@@ -19,7 +19,7 @@ const codeLines = [
       { text: "from", color: "text-destructive" },
       { text: " nautilus_trader.trading ", color: "text-foreground" },
       { text: "import", color: "text-destructive" },
-      { text: " Strategy", color: "text-[var(--accent-green)]" },
+      { text: " Strategy", color: "text-qds-success" },
     ],
   },
   {
@@ -28,7 +28,7 @@ const codeLines = [
       { text: "from", color: "text-destructive" },
       { text: " nautilus_trader.config ", color: "text-foreground" },
       { text: "import", color: "text-destructive" },
-      { text: " StrategyConfig", color: "text-[var(--accent-green)]" },
+      { text: " StrategyConfig", color: "text-qds-success" },
     ],
   },
   { text: "", color: "" },
@@ -38,7 +38,7 @@ const codeLines = [
       { text: "class", color: "text-destructive" },
       { text: " EmaCrossConfig", color: "text-primary" },
       { text: "(", color: "text-foreground" },
-      { text: "StrategyConfig", color: "text-[var(--accent-green)]" },
+      { text: "StrategyConfig", color: "text-qds-success" },
       { text: "):", color: "text-foreground" },
     ],
   },
@@ -47,7 +47,7 @@ const codeLines = [
     parts: [
       { text: "    instrument_id", color: "text-foreground" },
       { text: ": ", color: "text-muted-foreground" },
-      { text: "str", color: "text-[var(--accent-orange)]" },
+      { text: "str", color: "text-primary" },
     ],
   },
   {
@@ -55,9 +55,9 @@ const codeLines = [
     parts: [
       { text: "    fast_ema", color: "text-foreground" },
       { text: ": ", color: "text-muted-foreground" },
-      { text: "int", color: "text-[var(--accent-orange)]" },
+      { text: "int", color: "text-primary" },
       { text: " = ", color: "text-muted-foreground" },
-      { text: "10", color: "text-[var(--accent-green)]" },
+      { text: "10", color: "text-qds-success" },
     ],
   },
   {
@@ -65,9 +65,9 @@ const codeLines = [
     parts: [
       { text: "    slow_ema", color: "text-foreground" },
       { text: ": ", color: "text-muted-foreground" },
-      { text: "int", color: "text-[var(--accent-orange)]" },
+      { text: "int", color: "text-primary" },
       { text: " = ", color: "text-muted-foreground" },
-      { text: "21", color: "text-[var(--accent-green)]" },
+      { text: "21", color: "text-qds-success" },
     ],
   },
   { text: "", color: "" },
@@ -77,7 +77,7 @@ const codeLines = [
       { text: "class", color: "text-destructive" },
       { text: " EmaCrossDemo", color: "text-primary" },
       { text: "(", color: "text-foreground" },
-      { text: "Strategy", color: "text-[var(--accent-green)]" },
+      { text: "Strategy", color: "text-qds-success" },
       { text: "):", color: "text-foreground" },
     ],
   },
@@ -88,7 +88,7 @@ const codeLines = [
       { text: "def", color: "text-destructive" },
       { text: " on_start", color: "text-primary" },
       { text: "(", color: "text-foreground" },
-      { text: "self", color: "text-[var(--accent-orange)]" },
+      { text: "self", color: "text-primary" },
       { text: "):", color: "text-foreground" },
     ],
   },
@@ -96,11 +96,11 @@ const codeLines = [
 ];
 
 const terminalLines = [
-  { text: "$ python -m nautilus_trader.backtest ema_cross_demo", color: "text-[var(--accent-green)]" },
+  { text: "$ python -m nautilus_trader.backtest ema_cross_demo", color: "text-qds-success" },
   { text: "[INFO] Loading strategy: EmaCrossDemo", color: "text-muted-foreground" },
   { text: "[INFO] Instrument: ETHUSDT-PERP.BINANCE", color: "text-muted-foreground" },
   { text: "[INFO] Fast EMA: 10 | Slow EMA: 21", color: "text-muted-foreground" },
-  { text: "[OK] Strategy compiled successfully.", color: "text-[var(--accent-green)]" },
+  { text: "[OK] Strategy compiled successfully.", color: "text-qds-success" },
 ];
 
 export default function EditorClient() {
@@ -110,7 +110,7 @@ export default function EditorClient() {
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between bg-card border-b border-border p-[12px] px-5">
         <div className="flex items-center gap-3">
-          <Code className="w-4 h-4 text-[var(--accent-green)]" />
+          <Code className="w-4 h-4 text-qds-success" />
           <span className="font-heading text-[18px] font-bold text-foreground">
             STRATEGY EDITOR
           </span>
@@ -123,7 +123,7 @@ export default function EditorClient() {
             <Save className="w-3 h-3" />
             SAVE
           </Button>
-          <Button className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-green)] text-primary-foreground px-5 py-[10px] text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150">
+          <Button className="inline-flex items-center gap-1.5 rounded-lg bg-qds-success text-primary-foreground px-5 py-[10px] text-[11px] font-bold tracking-wide hover:opacity-90 transition-all duration-150">
             <Rocket className="w-3 h-3" />
             DEPLOY
           </Button>
@@ -143,7 +143,7 @@ export default function EditorClient() {
                 onClick={() => setActiveFile(f.name)}
                 className={`w-full justify-start h-auto flex items-center gap-2 px-4 py-[8px] text-[11px] font-medium transition-colors duration-150 ${
                   activeFile === f.name
-                    ? "bg-[var(--accent-green-10)] text-[var(--accent-green)]"
+                    ? "bg-qds-success-dim text-qds-success"
                     : "text-muted-foreground hover:bg-muted"
                 }`}
               >
@@ -155,7 +155,7 @@ export default function EditorClient() {
         </div>
 
         <div className="flex-1 flex flex-col min-h-0">
-          <div className="flex-1 bg-[#0D0D14] p-4 overflow-auto">
+          <div className="flex-1 bg-input p-4 overflow-auto">
             <pre className="text-[12px] leading-[22px]">
               {codeLines.map((line, i) => (
                 <div key={i} className="flex">

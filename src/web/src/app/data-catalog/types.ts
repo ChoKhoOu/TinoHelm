@@ -66,20 +66,20 @@ export const FILTER_GROUPS: Record<string, FilterGroup> = {
   fundingRate: { label: "Funding", dot: "var(--suc)",   types: ["funding_rate"] },
 };
 
-/** Type badge CSS class mapping (vision data_type → dc-type-* class) */
+/** Type badge CSS class mapping (vision data_type → Tailwind classes) */
 export const TYPE_BADGE_CLS: Record<string, string> = {
-  klines: "dc-type-kl",
-  indexPriceKlines: "dc-type-ipk",
-  markPriceKlines: "dc-type-mpk",
-  premiumIndexKlines: "dc-type-pik",
-  aggTrades: "dc-type-at",
-  trades: "dc-type-tr",
-  fundingRate: "dc-type-fr",
+  klines: "bg-qds-info-dim text-qds-info",
+  indexPriceKlines: "bg-muted text-muted-foreground",
+  markPriceKlines: "bg-muted text-muted-foreground",
+  premiumIndexKlines: "bg-qds-warning-dim text-qds-warning",
+  aggTrades: "bg-qds-success-dim text-qds-success",
+  trades: "bg-qds-warning-dim text-qds-warning",
+  fundingRate: "bg-qds-accent-dim text-primary",
   // DB categories (from catalog)
-  bar: "dc-type-kl",
-  trade_tick: "dc-type-at",
-  quote_tick: "dc-type-ipk",
-  funding_rate: "dc-type-fr",
+  bar: "bg-qds-info-dim text-qds-info",
+  trade_tick: "bg-qds-success-dim text-qds-success",
+  quote_tick: "bg-muted text-muted-foreground",
+  funding_rate: "bg-qds-accent-dim text-primary",
 };
 
 /** Source type label (what to show in type badge for DB categories) */

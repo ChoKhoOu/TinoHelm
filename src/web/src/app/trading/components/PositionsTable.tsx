@@ -76,7 +76,7 @@ export function PositionsTable({ positions }: Props) {
         return (
           <span
             className="inline-flex items-center gap-1 text-[11px] font-bold"
-            style={{ color: isLong ? "var(--accent-green)" : "var(--accent-red)" }}
+            style={{ color: isLong ? "var(--suc)" : "var(--dan)" }}
           >
             {isLong ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
             {isLong ? "多" : "空"}
@@ -108,7 +108,7 @@ export function PositionsTable({ positions }: Props) {
         return (
           <span
             className="text-[11px] font-mono font-semibold"
-            style={{ color: isPos ? "var(--accent-green)" : "var(--accent-red)" }}
+            style={{ color: isPos ? "var(--suc)" : "var(--dan)" }}
           >
             {isPos ? "+" : ""}{info.getValue()}
           </span>
@@ -143,8 +143,8 @@ export function PositionsTable({ positions }: Props) {
           <span
             className="px-1.5 py-0.5 rounded text-[9px] font-bold"
             style={{
-              color: "var(--accent-blue)",
-              backgroundColor: "var(--accent-blue-20)",
+              color: "var(--info)",
+              backgroundColor: "var(--info-d)",
             }}
           >
             {positions.length}

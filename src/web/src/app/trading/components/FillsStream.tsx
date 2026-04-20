@@ -31,8 +31,8 @@ export function FillsStream({ fills }: Props) {
           <span
             className="px-1.5 py-0.5 rounded text-[9px] font-bold"
             style={{
-              color: "var(--accent-purple)",
-              backgroundColor: "var(--accent-purple-20)",
+              color: "var(--t1)",
+              backgroundColor: "var(--acc-d)",
             }}
           >
             {fills.length}
@@ -65,8 +65,8 @@ export function FillsStream({ fills }: Props) {
                     <span
                       className="shrink-0 w-5 h-5 rounded flex items-center justify-center"
                       style={{
-                        color: isBuy ? "var(--accent-green)" : "var(--accent-red)",
-                        backgroundColor: isBuy ? "var(--accent-green-10)" : "var(--accent-red-20)",
+                        color: isBuy ? "var(--suc)" : "var(--dan)",
+                        backgroundColor: isBuy ? "var(--suc-d)" : "var(--dan-d)",
                       }}
                     >
                       {isBuy ? (
@@ -89,7 +89,7 @@ export function FillsStream({ fills }: Props) {
                       <div className="flex items-center gap-2 mt-0.5">
                         <span
                           className="text-[10px] font-bold"
-                          style={{ color: isBuy ? "var(--accent-green)" : "var(--accent-red)" }}
+                          style={{ color: isBuy ? "var(--suc)" : "var(--dan)" }}
                         >
                           {isBuy ? "买入" : "卖出"}
                         </span>

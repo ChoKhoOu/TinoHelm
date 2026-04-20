@@ -16,7 +16,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { TrendingUp, Activity, BarChart3, Wallet, Server } from "lucide-react";
-import { CHART_AXIS_STYLE, CHART_TOOLTIP_STYLE, CHART_GRID_STYLE, CHART_COLORS } from "@/lib/chartTheme";
+import { CHART_AXIS_STYLE, CHART_TOOLTIP_PROPS, CHART_GRID_STYLE, CHART_COLORS } from "@/lib/chartTheme";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -443,7 +443,7 @@ export default function DashboardPage() {
                       width={64}
                     />
                     <RechartsTooltip
-                      contentStyle={CHART_TOOLTIP_STYLE}
+                      {...CHART_TOOLTIP_PROPS}
                       formatter={(value: number | undefined) => [`$${Number(value ?? 0).toLocaleString()}`, "权益"]}
                     />
                     <Area

@@ -27,8 +27,9 @@ import { EmptyState } from "@/components/EmptyState";
 import { Pagination } from "@/components/Pagination";
 import {
   CHART_AXIS_STYLE as AXIS_STYLE,
-  CHART_TOOLTIP_STYLE as TOOLTIP_STYLE,
+  CHART_TOOLTIP_PROPS,
   CHART_GRID_STYLE,
+  CHART_LEGEND_STYLE,
 } from "@/lib/chartTheme";
 
 /* ── Types ──────────────────────────────────────────────── */
@@ -330,11 +331,11 @@ export default function AnalyticsPage() {
                       width={42}
                       tickFormatter={(v: number) => `${v.toFixed(1)}%`}
                     />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    <Tooltip {...CHART_TOOLTIP_PROPS} />
                     <Legend
                       iconType="circle"
                       iconSize={8}
-                      wrapperStyle={{ fontSize: 10, fontFamily: "var(--font-mono)" }}
+                      wrapperStyle={CHART_LEGEND_STYLE}
                     />
                     {cumReturns.strategies.map((s, i) => (
                       <Area
@@ -438,7 +439,7 @@ export default function AnalyticsPage() {
                       fillOpacity={0.2}
                       strokeWidth={2}
                     />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    <Tooltip {...CHART_TOOLTIP_PROPS} />
                   </RadarChart>
                 </ResponsiveContainer>
               )}
@@ -463,7 +464,7 @@ export default function AnalyticsPage() {
                     <CartesianGrid {...CHART_GRID_STYLE} vertical={false} />
                     <XAxis dataKey="range" tick={AXIS_STYLE} tickLine={false} axisLine={false} />
                     <YAxis tick={AXIS_STYLE} tickLine={false} axisLine={false} width={32} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    <Tooltip {...CHART_TOOLTIP_PROPS} />
                     <Bar dataKey="count" fill="var(--info)" radius={[3, 3, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>

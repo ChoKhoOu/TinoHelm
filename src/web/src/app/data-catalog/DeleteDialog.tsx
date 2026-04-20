@@ -29,7 +29,7 @@ export function DeleteDialog({ entry, open, onClose, onDeleted }: DeleteDialogPr
     { label: "品种", value: entry.symbol },
     { label: "类型", value: typeLabel },
     { label: "记录数", value: entry.record_count != null ? `${(entry.record_count / 1_000_000).toFixed(2)}M` : "—" },
-    { label: "释放空间", value: formatBytes(entry.size_bytes), cls: "cg" },
+    { label: "释放空间", value: formatBytes(entry.size_bytes), cls: "text-qds-success" },
   ] : [];
 
   return (
@@ -37,12 +37,15 @@ export function DeleteDialog({ entry, open, onClose, onDeleted }: DeleteDialogPr
       <DialogContent className="bg-card border sm:max-w-[420px] p-0 overflow-hidden">
         {/* Header */}
         <div style={{ padding: "1rem 1.25rem .75rem", display: "flex", alignItems: "flex-start", gap: ".75rem" }}>
-          <div className="dc-modal-icon" style={{ background: "var(--dan-d)", color: "var(--dan)" }}>✕</div>
+          <div
+            className="w-9 h-9 rounded-[10px] flex items-center justify-center flex-shrink-0 text-base"
+            style={{ background: "var(--dan-d)", color: "var(--dan)" }}
+          >✕</div>
           <div>
-            <div style={{ fontSize: ".9rem", fontWeight: 600, marginBottom: ".15rem" }}>
+            <div className="text-[.9rem] font-semibold mb-[.15rem]">
               删除 {entry?.symbol} {typeLabel}?
             </div>
-            <div style={{ fontSize: ".75rem", color: "var(--t2)", lineHeight: 1.5 }}>
+            <div className="text-[.75rem] text-muted-foreground leading-relaxed">
               此操作将删除 DB 记录和磁盘文件，不可恢复。
             </div>
           </div>
@@ -54,14 +57,13 @@ export function DeleteDialog({ entry, open, onClose, onDeleted }: DeleteDialogPr
             <div key={r.label} style={{
               display: "flex", justifyContent: "space-between",
               padding: ".35rem .5rem", background: "var(--bg-in)", borderRadius: "4px",
-              fontFamily: "var(--font-d)", fontSize: ".72rem",
-            }}>
-              <span className="dim">{r.label}</span>
+            }} className="font-mono text-[.72rem]">
+              <span className="text-muted-foreground">{r.label}</span>
               <span className={r.cls ?? ""}>{r.value}</span>
             </div>
           ))}
           {deleteAction.state === "error" && deleteAction.error && (
-            <div style={{ fontSize: ".72rem", color: "var(--dan)", marginTop: ".25rem" }}>✕ {deleteAction.error}</div>
+            <div className="text-[.72rem] text-destructive mt-1">✕ {deleteAction.error}</div>
           )}
         </div>
 

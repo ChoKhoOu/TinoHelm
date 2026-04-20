@@ -84,7 +84,7 @@ export function OrdersTab({ nodeType, orders, fills, onRefresh }: Props) {
           { label: "平均延迟", value: "—", color: "var(--t2)" },
         ].map((kpi, i) => (
           <FadeIn key={kpi.label} delay={i * 0.05}>
-            <div className="rounded-[var(--r)] border border-[var(--bd)] bg-[var(--bg-p)] p-3 hover:bg-[var(--bg-t)] transition-colors" style={{ transitionDuration: "var(--dur)" }}>
+            <div className="rounded-lg border bg-card p-3 hover:bg-secondary transition-colors" style={{ transitionDuration: "var(--dur)" }}>
               <div className="qds-stat-label">{kpi.label}</div>
               <div className="text-[1.1rem] font-bold font-mono" style={{ color: kpi.color }}>{kpi.value}</div>
             </div>
@@ -94,12 +94,12 @@ export function OrdersTab({ nodeType, orders, fills, onRefresh }: Props) {
 
       {/* Active Orders */}
       <FadeIn delay={0.2}>
-        <div className="rounded-[var(--r)] border border-[var(--bd)] bg-[var(--bg-p)] overflow-hidden">
+        <div className="rounded-lg border bg-card overflow-hidden">
           <div className="qds-card-header">
             <div className="flex items-center gap-2">
               <span className="qds-section-label">活跃订单</span>
               {orders.length > 0 && (
-                <span className="px-1.5 py-0.5 rounded text-[0.56rem] font-bold bg-[var(--warn-d)] text-[var(--warn)]">{orders.length}</span>
+                <span className="px-1.5 py-0.5 rounded text-[0.56rem] font-bold bg-qds-warning-dim text-qds-warning">{orders.length}</span>
               )}
             </div>
           </div>
@@ -127,7 +127,7 @@ export function OrdersTab({ nodeType, orders, fills, onRefresh }: Props) {
                         <TableCell className="font-mono font-semibold whitespace-nowrap">{order.instrument_id}</TableCell>
                         <TableCell className="font-bold whitespace-nowrap" style={{ color: isBuy ? "var(--suc)" : "var(--dan)" }}>{isBuy ? "买" : "卖"}</TableCell>
                         <TableCell className="whitespace-nowrap">
-                          <span className="px-1.5 py-0.5 rounded-[var(--rs)] text-[0.56rem] font-bold bg-[var(--bg-t)] text-[var(--t1)]">{order.type}</span>
+                          <span className="px-1.5 py-0.5 rounded text-[0.56rem] font-bold bg-secondary text-qds-t1">{order.type}</span>
                         </TableCell>
                         <TableCell className="font-mono whitespace-nowrap">{order.quantity}</TableCell>
                         <TableCell className="font-mono whitespace-nowrap">{order.price ?? "市价"}</TableCell>
@@ -138,7 +138,7 @@ export function OrdersTab({ nodeType, orders, fills, onRefresh }: Props) {
                           <button
                             onClick={() => handleCancel(order.client_order_id)}
                             disabled={isCancelling}
-                            className="size-6 flex items-center justify-center rounded transition-colors hover:bg-[var(--dan-d)] text-[var(--t3)] hover:text-[var(--dan)] disabled:opacity-30"
+                            className="size-6 flex items-center justify-center rounded transition-colors hover:bg-qds-danger-dim text-qds-t3 hover:text-destructive disabled:opacity-30"
                             title="撤单"
                           >
                             {isCancelling ? <Loader2 className="size-3 animate-spin" /> : <X className="size-3" />}
@@ -156,17 +156,17 @@ export function OrdersTab({ nodeType, orders, fills, onRefresh }: Props) {
 
       {/* Trade History */}
       <FadeIn delay={0.3}>
-        <div className="rounded-[var(--r)] border border-[var(--bd)] bg-[var(--bg-p)] overflow-hidden">
+        <div className="rounded-lg border bg-card overflow-hidden">
           <div className="qds-card-header">
             <div className="flex items-center gap-2">
               <span className="qds-section-label">成交记录</span>
-              <span className="px-1.5 py-0.5 rounded text-[0.56rem] font-bold bg-[var(--info-d)] text-[var(--info)]">{filteredFills.length}</span>
+              <span className="px-1.5 py-0.5 rounded text-[0.56rem] font-bold bg-qds-info-dim text-qds-info">{filteredFills.length}</span>
             </div>
             {strategyTags.length > 0 && (
               <select
                 value={strategyFilter}
                 onChange={(e) => setStrategyFilter(e.target.value)}
-                className="bg-[var(--bg-in)] border border-[var(--bd)] rounded-[var(--rs)] px-2 py-1 text-[0.68rem] text-[var(--t1)] focus:outline-none focus:border-[var(--acc)] transition-colors"
+                className="bg-input border rounded px-2 py-1 text-[0.68rem] text-qds-t1 focus:outline-none focus:border-primary transition-colors"
               >
                 <option value="all">全部策略</option>
                 {strategyTags.map((tag) => (

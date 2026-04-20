@@ -66,7 +66,7 @@ export function TopBar({ nodeType, onNodeTypeChange, activeTab, onTabChange }: P
     await executeAction(action);
   }, [confirmAction, executeAction]);
 
-  const wsColor = reconnecting ? "var(--accent-amber)" : connected ? "var(--accent-green)" : "var(--accent-red)";
+  const wsColor = reconnecting ? "var(--warn)" : connected ? "var(--suc)" : "var(--dan)";
   const WsIcon = connected ? Wifi : WifiOff;
 
   return (
@@ -81,7 +81,7 @@ export function TopBar({ nodeType, onNodeTypeChange, activeTab, onTabChange }: P
             className="relative px-3 py-2 text-[11px] font-bold tracking-wide uppercase transition-colors h-11 rounded-none"
             style={{
               color: nodeType === mode
-                ? mode === "live" ? "var(--accent-green)" : "var(--accent-amber)"
+                ? mode === "live" ? "var(--suc)" : "var(--warn)"
                 : "var(--muted-foreground)",
             }}
           >
@@ -90,7 +90,7 @@ export function TopBar({ nodeType, onNodeTypeChange, activeTab, onTabChange }: P
               <motion.div
                 layoutId="mode-underline"
                 className="absolute bottom-0 left-0 right-0 h-0.5"
-                style={{ backgroundColor: mode === "live" ? "var(--accent-green)" : "var(--accent-amber)" }}
+                style={{ backgroundColor: mode === "live" ? "var(--suc)" : "var(--warn)" }}
                 transition={{ type: "spring", stiffness: 400, damping: 35 }}
               />
             )}
@@ -115,7 +115,7 @@ export function TopBar({ nodeType, onNodeTypeChange, activeTab, onTabChange }: P
                 <motion.div
                   layoutId="tab-indicator"
                   className="absolute bottom-0 left-2 right-2 h-0.5 rounded-full"
-                  style={{ backgroundColor: "var(--accent-blue)" }}
+                  style={{ backgroundColor: "var(--info)" }}
                   transition={{ type: "spring", stiffness: 400, damping: 35 }}
                 />
               )}

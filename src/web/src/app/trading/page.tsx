@@ -288,7 +288,7 @@ export default function TradingPage() {
         style={{ background: envBg, color: envColor, padding: ".5rem 1.25rem" }}
       >
         <div className="flex items-center gap-4">
-          <span style={{ fontFamily: "var(--font-d)", fontSize: ".68rem", fontWeight: 600, letterSpacing: ".1em", textTransform: "uppercase" as const }}>
+          <span className="font-mono text-[.68rem] font-semibold tracking-[.1em] uppercase">
             {envIsSandbox ? "SANDBOX" : "LIVE"}
           </span>
           <div className="flex rounded-sm p-[2px] gap-[2px] bg-input">
@@ -296,8 +296,8 @@ export default function TradingPage() {
               <button
                 key={mode}
                 onClick={() => handleNodeChange(mode)}
+                className="font-mono"
                 style={{
-                  fontFamily: "var(--font-d)",
                   fontSize: ".68rem",
                   padding: ".25rem .7rem",
                   borderRadius: "4px",
@@ -320,7 +320,7 @@ export default function TradingPage() {
             ))}
           </div>
         </div>
-        <span style={{ fontFamily: "var(--font-d)", fontSize: ".68rem" }}>
+        <span className="font-mono text-[.68rem]">
           {envIsSandbox ? "模拟环境 · 不会产生真实交易" : "真实交易环境 · 所有操作将产生实际损益"}
         </span>
       </div>
@@ -344,8 +344,8 @@ export default function TradingPage() {
           <span className="font-mono text-[.7rem] text-muted-foreground">{clock}</span>
           <button
             onClick={() => executeAction("pause")}
-            className="ab-btn"
-            style={{ fontFamily: "var(--font-d)", fontSize: ".7rem", padding: ".35rem .7rem", borderRadius: "var(--rs)", border: "1px solid var(--bd)", background: "none", color: "var(--t1)", cursor: "pointer", transition: "all 150ms" }}
+            className="ab-btn font-mono text-[.7rem]"
+            style={{ padding: ".35rem .7rem", borderRadius: "var(--rs)", border: "1px solid var(--bd)", background: "none", color: "var(--t1)", cursor: "pointer", transition: "all 150ms" }}
             onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--bdh)"; e.currentTarget.style.color = "var(--t0)"; e.currentTarget.style.background = "var(--bg-t)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--bd)"; e.currentTarget.style.color = "var(--t1)"; e.currentTarget.style.background = "none"; }}
           >
@@ -353,7 +353,8 @@ export default function TradingPage() {
           </button>
           <button
             onClick={() => setConfirmFlatten(true)}
-            style={{ fontFamily: "var(--font-d)", fontSize: ".7rem", padding: ".35rem .7rem", borderRadius: "var(--rs)", border: "1px solid var(--warn)", background: "none", color: "var(--warn)", cursor: "pointer", transition: "all 150ms" }}
+            className="font-mono text-[.7rem]"
+            style={{ padding: ".35rem .7rem", borderRadius: "var(--rs)", border: "1px solid var(--warn)", background: "none", color: "var(--warn)", cursor: "pointer", transition: "all 150ms" }}
             onMouseEnter={(e) => { e.currentTarget.style.background = "var(--warn)"; e.currentTarget.style.color = "#141413"; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--warn)"; }}
           >
@@ -361,7 +362,8 @@ export default function TradingPage() {
           </button>
           <button
             onClick={() => setConfirmStop(true)}
-            style={{ fontFamily: "var(--font-d)", fontSize: ".7rem", padding: ".35rem .7rem", borderRadius: "var(--rs)", border: "1px solid var(--dan)", background: "none", color: "var(--dan)", cursor: "pointer", transition: "all 150ms" }}
+            className="font-mono text-[.7rem]"
+            style={{ padding: ".35rem .7rem", borderRadius: "var(--rs)", border: "1px solid var(--dan)", background: "none", color: "var(--dan)", cursor: "pointer", transition: "all 150ms" }}
             onMouseEnter={(e) => { e.currentTarget.style.background = "var(--dan)"; e.currentTarget.style.color = "#fff"; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--dan)"; }}
           >

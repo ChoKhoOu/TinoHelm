@@ -32,34 +32,45 @@ export function FilterTabs({
 
   return (
     <>
-      <div className="dc-filter-strip">
+      <div className="flex flex-wrap gap-5 mb-2 font-mono text-[.72rem]">
         {Object.entries(FILTER_GROUPS).map(([key, group]) => {
           const count = getGroupCount(key, totalCount, typeCounts);
           const isActive = activeGroup === key;
           return (
             <div
               key={key}
-              className={`dc-filter-item${isActive ? " active" : ""}`}
+              className={`flex items-center gap-1.5 cursor-pointer py-1.5 border-b-2 transition-all duration-150 ${
+                isActive
+                  ? "text-foreground border-primary"
+                  : "text-muted-foreground border-transparent hover:text-foreground"
+              }`}
               onClick={() => {
                 onGroupChange(key);
                 onSubChange(null);
               }}
             >
               <span
-                className="dc-filter-dot"
+                className="w-2 h-2 rounded-full flex-shrink-0"
                 style={{ background: group.dot }}
               />
               {group.label}
-              <span className="dc-filter-count">{count}</span>
+              <span className={`text-[.62rem] ${isActive ? "text-primary" : "text-qds-t3"}`}>{count}</span>
             </div>
           );
         })}
       </div>
 
       {showSubFilter && (
-        <div className="dc-sub-filter">
+        <div
+          className="flex gap-4 mb-5 font-mono text-[.68rem] pl-4 border-l-2 border-border ml-1"
+          style={{ animation: "none" }}
+        >
           <div
-            className={`dc-sub-item${activeSub === null ? " active" : ""}`}
+            className={`cursor-pointer py-1 px-2 rounded transition-all duration-150 ${
+              activeSub === null
+                ? "text-primary bg-qds-accent-dim"
+                : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+            }`}
             onClick={() => onSubChange(null)}
           >
             全部
@@ -67,7 +78,11 @@ export function FilterTabs({
           {subTypes.map((type) => (
             <div
               key={type}
-              className={`dc-sub-item${activeSub === type ? " active" : ""}`}
+              className={`cursor-pointer py-1 px-2 rounded transition-all duration-150 ${
+                activeSub === type
+                  ? "text-primary bg-qds-accent-dim"
+                  : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+              }`}
               onClick={() => onSubChange(type)}
             >
               {type}

@@ -14,7 +14,7 @@ import {
 } from "recharts";
 import { apiGet, apiPost } from "@/lib/api";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
+import { CHART_TOOLTIP_PROPS, CHART_GRID_STYLE } from "@/lib/chartTheme";
 import { useWsEvent } from "@/providers/WebSocketProvider";
 import { TickFlash } from "@/components/TickFlash";
 import { EmptyState } from "@/components/EmptyState";
@@ -229,7 +229,7 @@ export function StrategyDetailPanel({ strategyId, nodeType, positions, fills, on
             <button
               onClick={handleFlattenStop}
               disabled={actionLoading}
-              className="rounded-[var(--rs)] border text-[0.72rem] px-3 py-1.5 hover:bg-[var(--dan)]/10 transition-colors disabled:opacity-50"
+              className="rounded border text-[0.72rem] px-3 py-1.5 hover:bg-qds-danger-dim transition-colors disabled:opacity-50"
               style={{
                 borderColor: "var(--dan)",
                 color: "var(--dan)",
@@ -274,7 +274,7 @@ export function StrategyDetailPanel({ strategyId, nodeType, positions, fills, on
                     <stop offset="95%" stopColor="var(--info)" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+                <CartesianGrid {...CHART_GRID_STYLE} />
                 <XAxis dataKey="ts" tick={{ fill: "var(--t3)", fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => fmtTime(v)} minTickGap={60} />
                 <YAxis tick={{ fill: "var(--t3)", fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={fmtEquity} width={56} />
                 <RechartsTooltip {...CHART_TOOLTIP_PROPS} formatter={(v: unknown) => [fmtEquity(v as number), "权益"]} />

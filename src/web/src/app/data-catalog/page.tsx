@@ -3,7 +3,8 @@
 import { Fragment, useState, useEffect, useMemo } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 import { useAction } from "@/hooks/use-action";
-import { InlineError } from "@/components/qds";
+import { InlineError, StatCard, SectionLabel } from "@/components/qds";
+import { Badge } from "@/components/ui/badge";
 
 import {
   CatalogEntry, SortKey, SortDir, formatBytes,
@@ -23,14 +24,14 @@ function fmtRecords(n: number | null | undefined): string {
   return String(n);
 }
 
-function staleness(dateStr: string | null): { label: string; cls: string } {
-  if (!dateStr) return { label: "—", cls: "" };
+function staleness(dateStr: string | null): { label: string; cls: string; trend: "up" | "down" | "neutral" } {
+  if (!dateStr) return { label: "—", cls: "", trend: "neutral" };
   const d = new Date(dateStr);
   const days = Math.floor((Date.now() - d.getTime()) / 86400000);
-  if (days <= 1) return { label: days === 0 ? "今天" : "昨天", cls: "cg" };
-  if (days <= 7) return { label: `${days}天前`, cls: "" };
-  if (days <= 30) return { label: `${days}天前`, cls: "ca" };
-  return { label: `${days}天前`, cls: "cr" };
+  if (days <= 1) return { label: days === 0 ? "今天" : "昨天", cls: "text-qds-success", trend: "up" };
+  if (days <= 7) return { label: `${days}天前`, cls: "", trend: "neutral" };
+  if (days <= 30) return { label: `${days}天前`, cls: "text-qds-warning", trend: "neutral" };
+  return { label: `${days}天前`, cls: "text-destructive", trend: "down" };
 }
 
 /* ── Page ────────────────────────────────────────────────────────── */
@@ -163,8 +164,11 @@ export default function DataCatalogPage() {
     const isSorted = sortKey === col;
     const icon = isSorted ? (sortDir === "asc" ? "▲" : "▼") : "▽";
     return (
-      <th className={`${right ? "dc-tr " : ""}${isSorted ? "dc-sorted" : ""}`} onClick={() => handleSort(col)}>
-        {label} <span className="dc-sort-icon">{icon}</span>
+      <th
+        className={`px-[.65rem] py-2 font-normal text-[.58rem] tracking-[.06em] uppercase whitespace-nowrap cursor-pointer select-none border-b border-border transition-colors duration-150 hover:text-qds-t1 ${right ? "text-right" : "text-left"} ${isSorted ? "text-foreground" : "text-qds-t3"}`}
+        onClick={() => handleSort(col)}
+      >
+        {label} <span className={`inline-block ml-[.2rem] text-[.5rem] ${isSorted ? "text-primary" : "text-qds-t3"}`}>{icon}</span>
       </th>
     );
   }
@@ -179,14 +183,23 @@ export default function DataCatalogPage() {
     const pE = Math.min(totalPages, pS + maxBtns - 1);
     if (pE - pS < maxBtns - 1) pS = Math.max(1, pE - maxBtns + 1);
     const btns: React.ReactNode[] = [];
-    btns.push(<button key="f" className="dc-pager-btn" disabled={safePage <= 1} onClick={() => setPage(1)}>«</button>);
-    btns.push(<button key="p" className="dc-pager-btn" disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>‹</button>);
-    if (pS > 1) { btns.push(<button key="p1" className="dc-pager-btn" onClick={() => setPage(1)}>1</button>); if (pS > 2) btns.push(<span key="d1" className="dc-pager-dots">…</span>); }
-    for (let i = pS; i <= pE; i++) btns.push(<button key={i} className={`dc-pager-btn${i === safePage ? " active" : ""}`} onClick={() => setPage(i)}>{i}</button>);
-    if (pE < totalPages) { if (pE < totalPages - 1) btns.push(<span key="d2" className="dc-pager-dots">…</span>); btns.push(<button key="pl" className="dc-pager-btn" onClick={() => setPage(totalPages)}>{totalPages}</button>); }
-    btns.push(<button key="n" className="dc-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>›</button>);
-    btns.push(<button key="l" className="dc-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(totalPages)}>»</button>);
-    return <div className="dc-pager"><span>{start}–{end} / {sorted.length}</span><div className="dc-pager-nav">{btns}</div></div>;
+
+    const pagerBtnCls = "w-[26px] h-6 inline-flex items-center justify-center border border-border rounded-[var(--rs)] bg-transparent text-muted-foreground cursor-pointer transition-all duration-150 font-mono text-[.65rem] hover:border-qds-border-hover hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:cursor-default disabled:pointer-events-none";
+    const pagerBtnActiveCls = "w-[26px] h-6 inline-flex items-center justify-center border rounded-[var(--rs)] font-mono text-[.65rem] bg-qds-accent-dim border-primary text-primary";
+
+    btns.push(<button key="f" className={pagerBtnCls} disabled={safePage <= 1} onClick={() => setPage(1)}>«</button>);
+    btns.push(<button key="p" className={pagerBtnCls} disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>‹</button>);
+    if (pS > 1) { btns.push(<button key="p1" className={pagerBtnCls} onClick={() => setPage(1)}>1</button>); if (pS > 2) btns.push(<span key="d1" className="w-4 text-center text-qds-t3 text-[.65rem]">…</span>); }
+    for (let i = pS; i <= pE; i++) btns.push(<button key={i} className={i === safePage ? pagerBtnActiveCls : pagerBtnCls} onClick={() => setPage(i)}>{i}</button>);
+    if (pE < totalPages) { if (pE < totalPages - 1) btns.push(<span key="d2" className="w-4 text-center text-qds-t3 text-[.65rem]">…</span>); btns.push(<button key="pl" className={pagerBtnCls} onClick={() => setPage(totalPages)}>{totalPages}</button>); }
+    btns.push(<button key="n" className={pagerBtnCls} disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>›</button>);
+    btns.push(<button key="l" className={pagerBtnCls} disabled={safePage >= totalPages} onClick={() => setPage(totalPages)}>»</button>);
+    return (
+      <div className="flex items-center justify-between py-[.55rem] font-mono text-[.68rem] text-muted-foreground mt-2">
+        <span>{start}–{end} / {sorted.length}</span>
+        <div className="flex items-center gap-0.5">{btns}</div>
+      </div>
+    );
   }
 
   /* ── render ────────────────────────────────────────────────────── */
@@ -196,8 +209,8 @@ export default function DataCatalogPage() {
         {/* 1. Page header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1.5rem" }}>
           <div>
-            <div style={{ fontSize: "1.1rem", fontWeight: 700, marginBottom: ".2rem" }}>数据目录</div>
-            <div style={{ fontSize: ".72rem", color: "var(--t2)", fontFamily: "var(--font-d)" }}>// 本地 ParquetDataCatalog</div>
+            <div className="text-[1.1rem] font-bold mb-[.2rem]">数据目录</div>
+            <div className="font-mono text-[.72rem] text-muted-foreground">// 本地 ParquetDataCatalog</div>
           </div>
           <div style={{ display: "flex", gap: ".4rem", alignItems: "flex-start" }}>
             <button className="btn btn-p" onClick={() => setFetchOpen(true)}>↓ 拉取数据</button>
@@ -236,11 +249,25 @@ export default function DataCatalogPage() {
         />
 
         {/* 3. Stats cards */}
-        <div className="g g4" style={{ marginBottom: "1.5rem" }}>
-          <div className="sc"><div className="sc-l">数据集</div><div className="sc-v">{filtered.length}</div></div>
-          <div className="sc"><div className="sc-l">总记录数</div><div className="sc-v">{totalRecords >= 1_000_000 ? `${(totalRecords / 1_000_000).toFixed(1)}M` : totalRecords > 0 ? totalRecords.toLocaleString() : "—"}</div></div>
-          <div className="sc"><div className="sc-l">最新数据</div><div className={`sc-v ${stale.cls}`}>{latestDate ?? "—"}</div>{latestDate && <div className={`sc-sub ${stale.cls}`}>{stale.label}</div>}</div>
-          <div className="sc"><div className="sc-l">磁盘占用</div><div className="sc-v">{formatBytes(totalSize)}</div></div>
+        <div className="grid grid-cols-4 gap-4" style={{ marginBottom: "1.5rem" }}>
+          <StatCard
+            label="数据集"
+            value={String(filtered.length)}
+          />
+          <StatCard
+            label="总记录数"
+            value={totalRecords >= 1_000_000 ? `${(totalRecords / 1_000_000).toFixed(1)}M` : totalRecords > 0 ? totalRecords.toLocaleString() : "—"}
+          />
+          <StatCard
+            label="最新数据"
+            value={latestDate ?? "—"}
+            sub={latestDate ? stale.label : undefined}
+            trend={stale.trend}
+          />
+          <StatCard
+            label="磁盘占用"
+            value={formatBytes(totalSize)}
+          />
         </div>
 
         {/* 4. Queue */}
@@ -248,29 +275,36 @@ export default function DataCatalogPage() {
 
         {/* 5. Data table header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: ".65rem" }}>
-          <div className="dc-sl" style={{ marginBottom: 0 }}>数据集</div>
-          <div style={{ fontFamily: "var(--font-d)", fontSize: ".65rem" }}><select className="fsel" style={{ padding: ".22rem .45rem", fontSize: ".65rem", paddingRight: "1.6rem" }} value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
-            <option value={10}>10 条/页</option>
-            <option value={20}>20 条/页</option>
-            <option value={50}>50 条/页</option>
-          </select></div>
+          <SectionLabel>数据集</SectionLabel>
+          <div className="font-mono text-[.65rem]">
+            <select
+              className="qds-select"
+              style={{ padding: ".22rem .45rem", paddingRight: "1.6rem" }}
+              value={pageSize}
+              onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+            >
+              <option value={10}>10 条/页</option>
+              <option value={20}>20 条/页</option>
+              <option value={50}>50 条/页</option>
+            </select>
+          </div>
         </div>
 
         {loading ? (
-          <div className="list" style={{ padding: "2rem", textAlign: "center" }}>
-            <div style={{ color: "var(--t3)", fontSize: ".75rem" }}>加载中...</div>
+          <div className="bg-card border border-border rounded-lg" style={{ padding: "2rem", textAlign: "center" }}>
+            <div className="text-qds-t3 text-[.75rem]">加载中...</div>
           </div>
         ) : filtered.length === 0 ? (
-          <div className="list">
-            <div className="empty">
-              <div className="empty-icon">⊞</div>
-              <div className="empty-text">{activeGroup !== "all" ? "该类型暂无数据集" : "暂无数据集，请先拉取数据"}</div>
+          <div className="bg-card border border-border rounded-lg overflow-hidden">
+            <div className="flex flex-col items-center justify-center py-16 px-8 text-center">
+              <div className="text-[2rem] mb-4 text-qds-t3">⊞</div>
+              <div className="text-[.75rem] text-muted-foreground">{activeGroup !== "all" ? "该类型暂无数据集" : "暂无数据集，请先拉取数据"}</div>
             </div>
           </div>
         ) : (
           <>
-            <div className="list">
-              <table className="dc-dtbl">
+            <div className="bg-card border border-border rounded-lg overflow-hidden">
+              <table className="w-full border-collapse font-mono text-[.72rem]">
                 <thead>
                   <tr>
                     <TH col="symbol" label="品种" />
@@ -284,30 +318,43 @@ export default function DataCatalogPage() {
                 </thead>
                 <tbody>
                   {slice.map((ds) => {
-                    const typeCls = TYPE_BADGE_CLS[ds.source_type || ds.data_type] ?? "dc-type-kl";
+                    const typeCls = TYPE_BADGE_CLS[ds.source_type || ds.data_type] ?? "bg-qds-info-dim text-qds-info";
                     const typeLabel = SOURCE_TYPE_LABELS[ds.source_type || ds.data_type] ?? (ds.source_type || ds.data_type);
                     return (
                       <Fragment key={ds.id}>
-                        <tr>
-                          <td><span className="dc-sym-link" onClick={() => toggleCoverage(ds.id, ds.symbol)}>{ds.symbol}</span></td>
-                          {showType && <td><span className={`dc-type ${typeCls}`}>{typeLabel}</span></td>}
-                          {showInterval && <td className="dim">{ds.interval}</td>}
-                          <td className="dc-tr">{fmtRecords(ds.record_count)}</td>
-                          <td className="dim">{ds.start_date && ds.end_date ? `${ds.start_date} → ${ds.end_date}` : "—"}</td>
-                          <td className="dc-tr">{formatBytes(ds.size_bytes)}</td>
-                          <td><button className="dc-del-btn" onClick={() => setDeleteEntry(ds)}>删除</button></td>
+                        <tr className="border-b border-border last:border-b-0 hover:bg-secondary transition-colors duration-150">
+                          <td className="px-[.65rem] py-2 whitespace-nowrap">
+                            <span
+                              className="text-foreground cursor-pointer transition-colors duration-150 border-b border-dashed border-transparent hover:text-primary hover:border-primary"
+                              onClick={() => toggleCoverage(ds.id, ds.symbol)}
+                            >{ds.symbol}</span>
+                          </td>
+                          {showType && <td className="px-[.65rem] py-2 whitespace-nowrap"><Badge className={`text-[.58rem] px-[.35rem] py-[.1rem] rounded-[3px] font-mono ${typeCls}`}>{typeLabel}</Badge></td>}
+                          {showInterval && <td className="px-[.65rem] py-2 whitespace-nowrap text-muted-foreground">{ds.interval}</td>}
+                          <td className="px-[.65rem] py-2 whitespace-nowrap text-right">{fmtRecords(ds.record_count)}</td>
+                          <td className="px-[.65rem] py-2 whitespace-nowrap text-muted-foreground">{ds.start_date && ds.end_date ? `${ds.start_date} → ${ds.end_date}` : "—"}</td>
+                          <td className="px-[.65rem] py-2 whitespace-nowrap text-right">{formatBytes(ds.size_bytes)}</td>
+                          <td className="px-[.65rem] py-2 whitespace-nowrap">
+                            <button
+                              className="font-mono text-[.58rem] px-[.35rem] py-[.15rem] rounded-[3px] border border-transparent bg-transparent text-qds-t3 cursor-pointer transition-all duration-150 hover:border-destructive hover:text-destructive hover:bg-qds-danger-dim"
+                              onClick={() => setDeleteEntry(ds)}
+                            >删除</button>
+                          </td>
                         </tr>
                         <tr><td colSpan={visColCount} style={{ padding: 0 }}>
-                          <div className={`dc-cov-panel${covId === ds.id ? " open" : ""}`}>
+                          <div
+                            className="overflow-hidden transition-[max-height] duration-[400ms] ease-out bg-input"
+                            style={{ maxHeight: covId === ds.id ? "300px" : "0" }}
+                          >
                             {covId === ds.id && (
-                              <div className="dc-cov-inner">
-                                <div style={{ fontFamily: "var(--font-d)", fontSize: ".72rem", fontWeight: 600, marginBottom: ".5rem" }}>{ds.symbol} — 数据覆盖</div>
+                              <div className="p-[.75rem_.85rem]">
+                                <div className="font-mono text-[.72rem] font-semibold mb-2">{ds.symbol} — 数据覆盖</div>
                                 {covRows.map((r, i) => (
-                                  <div key={`${r.id}-${i}`} className="dc-cov-row">
-                                    <span className={`dc-type ${TYPE_BADGE_CLS[r.source_type || r.data_type] ?? "dc-type-kl"}`}>{SOURCE_TYPE_LABELS[r.source_type || r.data_type] ?? (r.source_type || r.data_type)}</span>
-                                    <span className="dim">{r.interval}</span>
-                                    <div className="dc-cov-bar-wrap"><div className="dc-cov-bar-fill" style={{ width: "60%" }} /></div>
-                                    <span className="dim">{r.start_date}</span>
+                                  <div key={`${r.id}-${i}`} className="grid items-center gap-2 py-[.3rem] font-mono text-[.68rem] border-b border-border last:border-b-0" style={{ gridTemplateColumns: "100px 80px 1fr 60px" }}>
+                                    <Badge className={`text-[.58rem] px-[.35rem] py-[.1rem] rounded-[3px] font-mono ${TYPE_BADGE_CLS[r.source_type || r.data_type] ?? "bg-qds-info-dim text-qds-info"}`}>{SOURCE_TYPE_LABELS[r.source_type || r.data_type] ?? (r.source_type || r.data_type)}</Badge>
+                                    <span className="text-muted-foreground">{r.interval}</span>
+                                    <div className="h-1.5 bg-secondary rounded-sm overflow-hidden"><div className="h-full rounded-sm bg-qds-success" style={{ width: "60%" }} /></div>
+                                    <span className="text-muted-foreground">{r.start_date}</span>
                                   </div>
                                 ))}
                               </div>

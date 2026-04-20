@@ -21,11 +21,11 @@ interface Props {
 }
 
 const ORDER_STATUS_COLORS: Record<string, string> = {
-  ACCEPTED: "var(--accent-blue)",
-  SUBMITTED: "var(--accent-blue)",
-  PARTIALLY_FILLED: "var(--accent-amber)",
-  PENDING_UPDATE: "var(--accent-amber)",
-  PENDING_CANCEL: "var(--accent-amber)",
+  ACCEPTED: "var(--info)",
+  SUBMITTED: "var(--info)",
+  PARTIALLY_FILLED: "var(--warn)",
+  PENDING_UPDATE: "var(--warn)",
+  PENDING_CANCEL: "var(--warn)",
 };
 
 const ORDER_STATUS_LABELS: Record<string, string> = {
@@ -73,8 +73,8 @@ export function OrdersPanel({ orders, nodeType, onOrderCancelled }: Props) {
           <span
             className="px-1.5 py-0.5 rounded text-[9px] font-bold"
             style={{
-              color: "var(--accent-amber)",
-              backgroundColor: "var(--accent-amber-20)",
+              color: "var(--warn)",
+              backgroundColor: "var(--warn-d)",
             }}
           >
             {orders.length}
@@ -124,7 +124,7 @@ export function OrdersPanel({ orders, nodeType, onOrderCancelled }: Props) {
                       <span
                         className="text-[10px] font-bold"
                         style={{
-                          color: isBuy ? "var(--accent-green)" : "var(--accent-red)",
+                          color: isBuy ? "var(--suc)" : "var(--dan)",
                         }}
                       >
                         {isBuy ? "买" : "卖"}
@@ -142,7 +142,7 @@ export function OrdersPanel({ orders, nodeType, onOrderCancelled }: Props) {
                   <button
                     onClick={() => handleCancel(order.client_order_id)}
                     disabled={isCancelling}
-                    className="shrink-0 w-6 h-6 flex items-center justify-center rounded transition-colors hover:bg-[var(--accent-red-20)] text-muted-foreground hover:text-destructive disabled:opacity-40"
+                    className="shrink-0 w-6 h-6 flex items-center justify-center rounded transition-colors hover:bg-qds-danger-dim text-muted-foreground hover:text-destructive disabled:opacity-40"
                     title="撤单"
                   >
                     {isCancelling ? (

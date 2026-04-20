@@ -236,13 +236,13 @@ export function StrategiesTab({ nodeType }: Props) {
   return (
     <div className="p-5 min-h-0">
       <FadeIn>
-        <div className="rounded-[var(--r)] border border-[var(--bd)] bg-[var(--bg-p)] overflow-hidden">
+        <div className="rounded-lg border bg-card overflow-hidden">
           {loading ? (
             <div className="p-4 space-y-2">
               {[1, 2, 3].map((i) => (
                 <div
                   key={i}
-                  className="h-[58px] rounded bg-[var(--bg-t)] animate-pulse"
+                  className="h-[58px] rounded bg-secondary animate-pulse"
                 />
               ))}
             </div>
@@ -278,7 +278,7 @@ export function StrategiesTab({ nodeType }: Props) {
                 return (
                   <div
                     key={entry.name}
-                    className="flex items-center gap-3.5 px-5 py-3.5 hover:bg-[var(--bg-t)] transition-colors"
+                    className="flex items-center gap-3.5 px-5 py-3.5 hover:bg-secondary transition-colors"
                     style={{ transitionDuration: "var(--dur)" }}
                     onMouseEnter={() => setHoveredEntry(entry.name)}
                     onMouseLeave={() => setHoveredEntry(null)}
@@ -300,14 +300,12 @@ export function StrategiesTab({ nodeType }: Props) {
                     {/* Name + Details */}
                     <div className="flex-1 min-w-0">
                       <div
-                        className="font-semibold truncate"
-                        style={{ fontSize: "0.78rem" }}
+                        className="font-semibold truncate text-[0.78rem]"
                       >
                         {entry.name}
                       </div>
                       <div
-                        className="text-[var(--t2)] truncate mt-0.5"
-                        style={{ fontSize: "0.68rem" }}
+                        className="text-muted-foreground truncate mt-0.5 text-[0.68rem]"
                       >
                         {exchange}
                         {symbolDisplay !== "—" && (
