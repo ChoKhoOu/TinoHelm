@@ -18,8 +18,12 @@ import {
 import { HelpCircle, Check, X as XIcon, AlertTriangle } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { API_BASE } from "@/lib/api";
-import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
+import { CHART_TOOLTIP_PROPS, CHART_GRID_STYLE, CHART_LABEL_STYLE } from "@/lib/chartTheme";
 import type { BacktestResult, RobustnessMetrics } from "../types";
+
+const CARD_CLS = "bg-card border border-border rounded-[10px] overflow-hidden";
+const CARD_HEADER_CLS = "flex items-center justify-between px-4 py-2.5 border-b border-border text-[0.75rem] font-semibold text-qds-t1";
+const CARD_BODY_CLS = "p-3.5";
 
 /* ------------------------------------------------------------------ */
 /*  Shared UI Primitives                                               */
@@ -92,9 +96,9 @@ function StatisticalTestsSection({ r }: { r: RobustnessMetrics }) {
 
   return (
     <div {...cardAnim(0)}>
-      <div className="bt-cd">
-        <div className="bt-cd-header">Statistical Tests</div>
-        <div className="bt-cd-body">
+      <div className={CARD_CLS}>
+        <div className={CARD_HEADER_CLS}>Statistical Tests</div>
+        <div className={CARD_BODY_CLS}>
         <div className="space-y-0">
           <MetricRow
             label="PSR"
@@ -165,10 +169,10 @@ function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
 
   return (
     <div {...cardAnim(0.07)}>
-      <div className="bt-cd">
-        <div className="bt-cd-header">Monte Carlo Equity Cone
+      <div className={CARD_CLS}>
+        <div className={CARD_HEADER_CLS}>Monte Carlo Equity Cone
           <HelpTip text={`随机打乱 ${r.mc_num_simulations ?? 1000} 次交易顺序后的权益曲线分布。阴影区域为 5%/95% 和 25%/75% 置信带。白线为实际结果。`} /></div>
-        <div className="bt-cd-body">
+        <div className={CARD_BODY_CLS}>
         <div className="h-[300px]">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
@@ -182,7 +186,7 @@ function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
                   <stop offset="100%" stopColor="var(--info)" stopOpacity={0.05} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+              <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" />
               <XAxis
                 dataKey="x"
                 tick={{ fontSize: 9, fill: "var(--t2)" }}
@@ -228,9 +232,9 @@ function McSummarySection({ r }: { r: RobustnessMetrics }) {
 
   return (
     <div {...cardAnim(0.14)}>
-      <div className="bt-cd">
-        <div className="bt-cd-header">Monte Carlo Summary</div>
-        <div className="bt-cd-body">
+      <div className={CARD_CLS}>
+        <div className={CARD_HEADER_CLS}>Monte Carlo Summary</div>
+        <div className={CARD_BODY_CLS}>
         <div className="flex items-center gap-6 flex-wrap">
           <div className="flex items-center gap-2">
             <span className="text-[9px] font-semibold tracking-[1px] uppercase text-qds-t3">亏损概率</span>
@@ -325,15 +329,15 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
 
   return (
     <div {...cardAnim(0.21)}>
-      <div className="bt-cd">
-        <div className="bt-cd-header">IS vs OOS 对比
+      <div className={CARD_CLS}>
+        <div className={CARD_HEADER_CLS}>IS vs OOS 对比
           <HelpTip text="样本内（训练期）与样本外（测试期）的权益曲线和核心指标对比。衰减越小，策略过拟合风险越低。" />
           {opt.dsr != null && (
             <span className="ml-3 text-[10px] font-mono text-muted-foreground">
               DSR: {(opt.dsr * 100).toFixed(1)}%
             </span>
           )}</div>
-        <div className="bt-cd-body">
+        <div className={CARD_BODY_CLS}>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Equity overlay */}
@@ -345,12 +349,12 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
               <div className="h-[200px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={equityData} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+                    <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" />
                     <XAxis dataKey="idx" tick={{ fontSize: 9, fill: "var(--t2)" }} tickLine={false} />
                     <YAxis tick={{ fontSize: 9, fill: "var(--t2)" }} tickLine={false} tickFormatter={(v: number) => `${(v / 1000).toFixed(0)}k`} />
                     <RechartsTooltip {...CHART_TOOLTIP_PROPS} />
                     {isEq.length > 0 && (
-                      <ReferenceLine x={isEq.length - 1} stroke="var(--warn)" strokeDasharray="4 3" strokeOpacity={0.5} label={{ value: "Split", fontSize: 9, fill: "var(--warn)" }} />
+                      <ReferenceLine x={isEq.length - 1} stroke="var(--warn)" strokeDasharray="4 3" strokeOpacity={0.5} label={{ ...CHART_LABEL_STYLE, value: "Split", fill: "var(--warn)" }} />
                     )}
                     <Area type="monotone" dataKey="is" stroke="var(--info)" strokeWidth={1.5} fill="none" name="IS" dot={false} connectNulls={false} />
                     <Area type="monotone" dataKey="oos" stroke="var(--info)" strokeWidth={1.5} fill="none" name="OOS" dot={false} connectNulls={false} />
@@ -368,7 +372,7 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
             <div className="h-[200px]">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={compData} layout="vertical" margin={{ top: 5, right: 40, left: 50, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" horizontal={false} />
+                  <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" horizontal={false} />
                   <XAxis type="number" tick={{ fontSize: 9, fill: "var(--t2)" }} tickLine={false} />
                   <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "var(--t2)" }} tickLine={false} axisLine={false} width={45} />
                   <RechartsTooltip {...CHART_TOOLTIP_PROPS} />
@@ -416,15 +420,15 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
 
   return (
     <div {...cardAnim(0.28)}>
-      <div className="bt-cd">
-        <div className="bt-cd-header">Parameter Analysis
+      <div className={CARD_CLS}>
+        <div className={CARD_HEADER_CLS}>Parameter Analysis
           {stability != null && (
             <span className="ml-3 text-[10px] font-mono text-muted-foreground">
               稳定性: {stability.toFixed(4)}
               <HelpTip text="最优参数附近 (±20%) 的 fitness 标准差。越低越稳定。" />
             </span>
           )}</div>
-        <div className="bt-cd-body">
+        <div className={CARD_BODY_CLS}>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Sensitivity: single param line charts */}
@@ -440,7 +444,7 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
                     <div className="h-[100px]">
                       <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={data.bins.map((b, i) => ({ x: b, fitness: data.values[i] }))} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" />
+                          <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" />
                           <XAxis dataKey="x" tick={{ fontSize: 8, fill: "var(--t2)" }} tickLine={false} />
                           <YAxis tick={{ fontSize: 8, fill: "var(--t2)" }} tickLine={false} />
                           <Line type="monotone" dataKey="fitness" stroke="var(--info)" strokeWidth={1.5} dot={{ fill: "var(--info)", r: 2 }} />
@@ -462,7 +466,7 @@ function ParamAnalysisSection({ sensitivity, stability, wfResults }: {
               <div className="h-[200px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={wfResults} layout="vertical" margin={{ top: 5, right: 10, left: 40, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--bd)" horizontal={false} />
+                    <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 9, fill: "var(--t2)" }} tickLine={false} />
                     <YAxis type="category" dataKey="fold" tick={{ fontSize: 10, fill: "var(--t2)" }} tickLine={false} axisLine={false} tickFormatter={(v: number) => `Fold ${v}`} width={45} />
                     <RechartsTooltip {...CHART_TOOLTIP_PROPS} />

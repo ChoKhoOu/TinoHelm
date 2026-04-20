@@ -20,8 +20,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { API_BASE } from "@/lib/api";
 import { useCountUp } from "@/hooks/useCountUp";
-import { CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
+import { CHART_TOOLTIP_PROPS, CHART_GRID_STYLE } from "@/lib/chartTheme";
 import type { BacktestResult } from "../types";
+
+const CARD_CLS = "bg-card border border-border rounded-[10px] overflow-hidden";
+const CARD_HEADER_CLS = "flex items-center justify-between px-4 py-2.5 border-b border-border text-[0.75rem] font-semibold text-qds-t1";
+const CARD_BODY_CLS = "p-3.5";
+const STAT_LABEL_CLS = "inline-flex items-center font-mono text-[0.55rem] tracking-widest uppercase text-primary";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -81,7 +86,7 @@ function HeroBanner({
       <div className="relative flex items-end justify-between">
         {/* Left: Total Return */}
         <div className="flex flex-col gap-1.5">
-          <span className="sc-l inline-flex items-center">
+          <span className={STAT_LABEL_CLS}>
             总收益率
             <HelpTip text="回测期间的总投资回报百分比，即 (最终权益 - 初始资金) / 初始资金" />
           </span>
@@ -131,7 +136,7 @@ function HeroBanner({
         {/* Right: Final Equity */}
         {finalEquity !== null && (
           <div className="flex flex-col items-end gap-1.5">
-            <span className="sc-l inline-flex items-center">
+            <span className={STAT_LABEL_CLS}>
               最终权益
               <HelpTip text="回测结束时的账户总价值，包含初始资金和所有已实现盈亏" />
             </span>
@@ -217,7 +222,7 @@ function MetricCard({
         }}
       />
 
-      <span className="sc-l inline-flex items-center">
+      <span className={STAT_LABEL_CLS}>
         {label}
         {tooltip && <HelpTip text={tooltip} />}
       </span>
@@ -267,11 +272,11 @@ function PerformanceRadar({ s }: { s: BacktestResult["statistics"] }) {
   return (
     <div
     >
-      <div className="bt-cd h-full">
-        <div className="bt-cd-header">
+      <div className={`${CARD_CLS} h-full`}>
+        <div className={CARD_HEADER_CLS}>
           <span className="inline-flex items-center gap-1">绩效画像<HelpTip text="将多个关键指标归一化到 0-100 分制，直观展示策略的综合表现维度" /></span>
         </div>
-        <div className="bt-cd-body flex-1 min-h-0 flex flex-col">
+        <div className={`${CARD_BODY_CLS} flex-1 min-h-0 flex flex-col`}>
           <ResponsiveContainer width="100%" height={240}>
             <RadarChart data={data} cx="50%" cy="50%" outerRadius="72%">
               <defs>
@@ -361,9 +366,9 @@ function EquityDrawdownChart({
   return (
     <div
     >
-      <div className="bt-cd">
-        <div className="bt-cd-header">权益曲线</div>
-        <div className="bt-cd-body flex flex-col gap-3">
+      <div className={CARD_CLS}>
+        <div className={CARD_HEADER_CLS}>权益曲线</div>
+        <div className={`${CARD_BODY_CLS} flex flex-col gap-3`}>
         <ResponsiveContainer width="100%" height={210}>
           <AreaChart
             data={chartData}
@@ -381,10 +386,7 @@ function EquityDrawdownChart({
                 <feGaussianBlur in="SourceGraphic" stdDeviation="4" />
               </filter>
             </defs>
-            <CartesianGrid
-              strokeDasharray="3 3"
-              stroke="rgba(255,255,255,0.04)"
-            />
+            <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" />
             <XAxis
               dataKey="t"
               tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
@@ -455,7 +457,7 @@ function EquityDrawdownChart({
         </ResponsiveContainer>
 
         {/* Drawdown underwater chart */}
-        <span className="sc-l mt-1">
+        <span className={`${STAT_LABEL_CLS} mt-1`}>
           回撤曲线
         </span>
         <ResponsiveContainer width="100%" height={80}>
@@ -469,10 +471,7 @@ function EquityDrawdownChart({
                 <stop offset="100%" stopColor="#EF5350" stopOpacity={0.02} />
               </linearGradient>
             </defs>
-            <CartesianGrid
-              strokeDasharray="3 3"
-              stroke="rgba(255,255,255,0.04)"
-            />
+            <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" />
             <XAxis dataKey="t" hide />
             <YAxis
               tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 9 }}
