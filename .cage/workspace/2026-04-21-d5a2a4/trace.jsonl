@@ -1,0 +1,45 @@
+{"ts":"2026-04-20T16:46:35.226738Z","type":"phase","detail":"execution started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:46:48.048049Z","type":"subtask","id":"S1","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:48:03.97155Z","type":"subtask","id":"S1","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:48:10.233237Z","type":"subtask","id":"S2","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:50:53.902198Z","type":"subtask","id":"S2","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:51:01.235447Z","type":"subtask","id":"S3","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:51:01.240335Z","type":"subtask","id":"S6","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:51:01.244395Z","type":"subtask","id":"S10","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:51:01.248467Z","type":"subtask","id":"S11","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:57:02.888501Z","type":"subtask","id":"S3","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:57:02.893117Z","type":"subtask","id":"S6","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:57:02.89706Z","type":"subtask","id":"S10","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:57:02.900818Z","type":"subtask","id":"S11","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:57:19.66232Z","type":"subtask","id":"S4","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:57:19.667453Z","type":"subtask","id":"S7","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:57:19.671767Z","type":"subtask","id":"S8","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T16:57:19.676412Z","type":"subtask","id":"S12","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:02:07.339405Z","type":"subtask","id":"S4","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:02:07.343901Z","type":"subtask","id":"S7","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:02:07.347739Z","type":"subtask","id":"S8","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:02:07.351471Z","type":"subtask","id":"S12","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:02:21.079787Z","type":"subtask","id":"S5","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:02:21.084821Z","type":"subtask","id":"S9","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:02:21.089323Z","type":"subtask","id":"S14","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:06:37.565806Z","type":"subtask","id":"S5","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:06:37.569596Z","type":"subtask","id":"S9","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:06:37.573165Z","type":"subtask","id":"S14","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:06:43.402288Z","type":"subtask","id":"S13","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:08:41.990409Z","type":"subtask","id":"S13","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:08:43.124304Z","type":"subtask","id":"S15","detail":"subtask started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:45:52.544296Z","type":"subtask","id":"S15","detail":"subtask completed","meta":{"status":"done","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:45:53.753011Z","type":"phase","detail":"execution completed","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:47:17.238169Z","type":"phase","detail":"verification started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T17:47:43.561213Z","type":"verify","detail":"quality gates pass","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T18:03:03.957749Z","type":"verify","detail":"perspective verifier FAIL","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T18:03:03.961911Z","type":"verify","detail":"perspective code-reviewer FAIL","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T18:03:06.184631Z","type":"phase","detail":"verification completed","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T18:05:20.765881Z","type":"phase","detail":"kickback r1 execution started","meta":{"kickback":1,"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T18:15:59.406201Z","type":"phase","detail":"kickback r1 execution completed","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T19:00:48.556481Z","type":"phase","detail":"kickback r1 execution completed","meta":{"result":"success","task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T19:02:29.677604Z","type":"phase","detail":"verification r2 started","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T19:03:19.196272Z","type":"verify","detail":"r2 quality gates pass","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T19:14:58.183643Z","type":"verify","detail":"r2 perspective verifier FAIL","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T19:14:58.188087Z","type":"verify","detail":"r2 perspective code-reviewer FAIL","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
+{"ts":"2026-04-20T19:14:58.191236Z","type":"phase","detail":"verification r2 completed","meta":{"task":"2026-04-20-backtest-page-visual-refactor"}}
