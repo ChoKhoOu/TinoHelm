@@ -6,7 +6,6 @@ import json
 import logging
 import re
 from datetime import date
-from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +15,14 @@ from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as aioredis
 
+from tinohelm.api._utils import (
+    HEX_PREFIX_RE,
+    MIN_PREFIX_LEN,
+    UUID_RE,
+    fetch_redis_progress,
+    fetch_redis_progress_batch,
+    resolve_artifact_path,
+)
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
 from tinohelm.core.audit import log_audit
 from tinohelm.core.config import Settings
@@ -161,12 +168,14 @@ _BARS_PER_DAY_KNOWN: dict[str, int] = {
 _BARS_PER_SEC = 50_000
 
 
+_INTERVAL_RE = re.compile(r"^(\d+)([smhd])$")
+
+
 def _calc_bars_per_day(interval: str) -> int:
     """Calculate bars per day for any interval string (e.g. '2m', '3h', '1d')."""
     if interval in _BARS_PER_DAY_KNOWN:
         return _BARS_PER_DAY_KNOWN[interval]
-    import re
-    m = re.match(r"^(\d+)([smhd])$", interval.lower())
+    m = _INTERVAL_RE.match(interval.lower())
     if not m:
         return 0
     n = int(m.group(1))
@@ -192,9 +201,6 @@ def _format_estimated_label(seconds: int) -> str:
     hours = seconds / 3600
     return f"~{hours:.1f} 小时"
 
-
-_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-_HEX_RE = re.compile(r'^[0-9a-f]+$')
 
 _ARTIFACT_WHITELIST = {
     "tearsheet.html",
@@ -222,14 +228,14 @@ async def resolve_run_id(prefix: str, db: AsyncSession) -> str:
     prefix = prefix.strip().lower()
 
     # Full UUID — skip prefix search
-    if _UUID_RE.match(prefix):
+    if UUID_RE.match(prefix):
         return prefix
 
     # Must be hex-only to prevent injection via LIKE wildcards
-    if not _HEX_RE.match(prefix) or len(prefix) < 4:
+    if not HEX_PREFIX_RE.match(prefix) or len(prefix) < MIN_PREFIX_LEN:
         raise HTTPException(
             status_code=400,
-            detail="run_id prefix must be at least 4 hex characters",
+            detail=f"run_id prefix must be at least {MIN_PREFIX_LEN} hex characters",
         )
 
     stmt = (
@@ -382,22 +388,15 @@ async def list_backtest_runs(
     rows = (await db.execute(base_stmt)).scalars().all()
 
     # Fetch progress from Redis for running/queued backtests
-    progress_map: dict[str, int] = {}
     running_ids = [
         r.run_id for r in rows
         if r.status in (RunStatus.running, RunStatus.queued)
     ]
-    if running_ids:
-        pipe = rds.pipeline()
-        for rid in running_ids:
-            pipe.get(f"tino:backtest:progress:{rid}")
-        progress_values = await pipe.execute()
-        for rid, raw in zip(running_ids, progress_values):
-            if raw is not None:
-                try:
-                    progress_map[rid] = int(raw)
-                except (ValueError, TypeError):
-                    pass
+    progress_keys = [f"tino:backtest:progress:{rid}" for rid in running_ids]
+    progress_values = await fetch_redis_progress_batch(rds, progress_keys)
+    progress_map: dict[str, int] = {
+        rid: val for rid, val in zip(running_ids, progress_values) if val is not None
+    }
 
     runs = [
         BacktestRunItem(
@@ -434,27 +433,23 @@ async def get_backtest_status(
         raise HTTPException(status_code=404, detail="Backtest run not found")
 
     # Read progress percentage from Redis
-    progress_pct: int | None = None
-    progress_raw = await rds.get(f"tino:backtest:progress:{run_id}")
-    if progress_raw is not None:
-        try:
-            progress_pct = int(progress_raw)
-        except (ValueError, TypeError):
-            pass
+    progress_pct = await fetch_redis_progress(rds, f"tino:backtest:progress:{run_id}")
 
     # Include result when completed
     result: dict | None = None
-    if run.status == RunStatus.completed:
-        # Validate run_id format to prevent path traversal
-        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
-            artifact_path = (Path(settings.paths.artifacts) / run_id / "results.json").resolve()
-            artifacts_root = Path(settings.paths.artifacts).resolve()
-            if str(artifact_path).startswith(str(artifacts_root)) and artifact_path.exists():
-                try:
-                    content = await asyncio.to_thread(artifact_path.read_text)
-                    result = json.loads(content)
-                except Exception:
-                    logger.warning("Failed to load artifact for run %s", run_id, exc_info=True)
+    if run.status == RunStatus.completed and UUID_RE.match(run_id):
+        try:
+            artifact_path = resolve_artifact_path(
+                settings.paths.artifacts, run_id, "results.json"
+            )
+        except HTTPException:
+            artifact_path = None
+        if artifact_path is not None and artifact_path.exists():
+            try:
+                content = await asyncio.to_thread(artifact_path.read_text)
+                result = json.loads(content)
+            except Exception:
+                logger.warning("Failed to load artifact for run %s", run_id, exc_info=True)
 
     return BacktestRunStatus(
         run_id=run.run_id,
@@ -479,11 +474,9 @@ async def get_backtest_result(
     if run is None:
         raise HTTPException(status_code=404, detail="Backtest run not found")
 
-    artifact_path = (Path(settings.paths.artifacts) / run_id / "results.json").resolve()
-    artifacts_root = Path(settings.paths.artifacts).resolve()
-    if not str(artifact_path).startswith(str(artifacts_root)):
-        raise HTTPException(status_code=400, detail="Invalid path")
-
+    artifact_path = resolve_artifact_path(
+        settings.paths.artifacts, run_id, "results.json"
+    )
     if not artifact_path.exists():
         raise HTTPException(status_code=404, detail="Artifact file not found (run may still be in progress)")
 
@@ -538,12 +531,15 @@ async def delete_backtest_run(
             detail=f"Cannot delete run in '{run.status.value}' state — cancel it first",
         )
 
-    # Delete artifacts folder
-    if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
-        artifact_dir = (Path(settings.paths.artifacts) / run_id).resolve()
-        artifacts_root = Path(settings.paths.artifacts).resolve()
-        if str(artifact_dir).startswith(str(artifacts_root)) and artifact_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, artifact_dir)
+    # Delete artifacts folder — run_id is already UUID-validated by resolve_run_id
+    # above (full UUIDs pass through unchanged), but resolve_artifact_path
+    # re-validates and raises 400 on tampered input.
+    try:
+        artifact_dir = resolve_artifact_path(settings.paths.artifacts, run_id)
+    except HTTPException:
+        artifact_dir = None
+    if artifact_dir is not None and artifact_dir.exists():
+        await asyncio.to_thread(shutil.rmtree, artifact_dir)
 
     # Delete DB record
     await db.delete(run)
@@ -576,9 +572,13 @@ async def backtest_compare(
     backtest_data = None
     warning = None
     if run:
-        artifacts_dir = Path(settings.paths.artifacts) / str(run.run_id)
-        results_file = artifacts_dir / "results.json"
-        if results_file.exists():
+        try:
+            results_file = resolve_artifact_path(
+                settings.paths.artifacts, str(run.run_id), "results.json"
+            )
+        except HTTPException:
+            results_file = None
+        if results_file is not None and results_file.exists():
             try:
                 raw = json.loads(await asyncio.to_thread(results_file.read_text))
                 backtest_data = {
@@ -645,14 +645,7 @@ async def list_artifacts(
     if run is None:
         raise HTTPException(status_code=404, detail="Backtest run not found")
 
-    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
-        raise HTTPException(status_code=400, detail="Invalid run_id format")
-
-    artifacts_dir = (Path(settings.paths.artifacts) / run_id).resolve()
-    artifacts_root = Path(settings.paths.artifacts).resolve()
-    if not str(artifacts_dir).startswith(str(artifacts_root)):
-        raise HTTPException(status_code=400, detail="Invalid path")
-
+    artifacts_dir = resolve_artifact_path(settings.paths.artifacts, run_id)
     if not artifacts_dir.exists():
         return []
 
@@ -687,14 +680,7 @@ async def get_artifact(
     if run is None:
         raise HTTPException(status_code=404, detail="Backtest run not found")
 
-    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
-        raise HTTPException(status_code=400, detail="Invalid run_id format")
-
-    artifact_path = (Path(settings.paths.artifacts) / run_id / filename).resolve()
-    artifacts_root = Path(settings.paths.artifacts).resolve()
-    if not str(artifact_path).startswith(str(artifacts_root)):
-        raise HTTPException(status_code=400, detail="Invalid path")
-
+    artifact_path = resolve_artifact_path(settings.paths.artifacts, run_id, filename)
     if not artifact_path.exists():
         raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found")
 

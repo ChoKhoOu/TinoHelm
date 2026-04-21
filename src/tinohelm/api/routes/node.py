@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import yaml
 
+from tinohelm.api._utils import load_redis_json
 from tinohelm.api.deps import get_db, get_process_manager, get_redis, get_settings_dep
 from tinohelm.core.config import get_settings, Settings
 from tinohelm.core.process_manager import ProcessManager
@@ -88,12 +89,11 @@ async def lifecycle_state(
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Return lifecycle state (trading_state, strategy_states, paused list)."""
-    raw = await rds.get(f"tino:{mode}:lifecycle_state")
-    if raw:
-        if isinstance(raw, bytes):
-            raw = raw.decode()
-        return json.loads(raw)
-    return {"trading_state": "unknown", "strategy_states": {}, "paused": []}
+    return await load_redis_json(
+        rds,
+        f"tino:{mode}:lifecycle_state",
+        {"trading_state": "unknown", "strategy_states": {}, "paused": []},
+    )
 
 
 def _enrich_strategy_meta(strategies: dict, settings: Settings) -> dict:
@@ -123,19 +123,13 @@ async def list_strategies(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Return all strategies with their state and portfolio metadata."""
-    raw = await rds.get(f"tino:{mode}:strategy_registry")
-    if raw:
-        if isinstance(raw, bytes):
-            raw = raw.decode()
-        data = json.loads(raw)
+    data = await load_redis_json(rds, f"tino:{mode}:strategy_registry")
+    if data:
         strategies = data.get("strategies", {})
         return {"strategies": _enrich_strategy_meta(strategies, settings)}
     # Fallback: try heartbeat
-    hb_raw = await rds.get(f"tino:heartbeat:{mode}")
-    if hb_raw:
-        if isinstance(hb_raw, bytes):
-            hb_raw = hb_raw.decode()
-        hb = json.loads(hb_raw)
+    hb = await load_redis_json(rds, f"tino:heartbeat:{mode}")
+    if hb:
         strategies = hb.get("strategies", {})
         return {"strategies": _enrich_strategy_meta(strategies, settings)}
     return {"strategies": {}}
@@ -219,12 +213,9 @@ async def data_status(
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Return data feed health status derived from heartbeat."""
-    raw = await rds.get(f"tino:heartbeat:{mode}")
-    if not raw:
+    hb = await load_redis_json(rds, f"tino:heartbeat:{mode}")
+    if not hb:
         return {"status": "offline", "last_seen": None, "bar_types": [], "strategies": 0, "positions": 0}
-    if isinstance(raw, bytes):
-        raw = raw.decode()
-    hb = json.loads(raw)
     # Derive strategy count from strategy_states (more reliable than cache count)
     strategy_states = hb.get("strategy_states", {})
     strategy_count = len(strategy_states) if strategy_states else hb.get("strategies", 0)
@@ -245,13 +236,9 @@ async def subscriptions(
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Return active data subscriptions from heartbeat and portfolio registry."""
-    # Try heartbeat first
-    raw = await rds.get(f"tino:heartbeat:{mode}")
-    if not raw:
+    hb = await load_redis_json(rds, f"tino:heartbeat:{mode}")
+    if not hb:
         return {"bar_types": [], "instruments": []}
-    if isinstance(raw, bytes):
-        raw = raw.decode()
-    hb = json.loads(raw)
     bar_types = hb.get("bar_types", [])
     # Derive instruments from bar type strings (format: "BTCUSDT-PERP.BINANCE-5-MINUTE-...")
     instruments = sorted({bt.split(".")[0] for bt in bar_types if "." in bt})
@@ -302,23 +289,23 @@ class PaperConfigUpdate(BaseModel):
     latency_ms: int | None = None
 
 
+_PAPER_CONFIG_DEFAULT: dict = {
+    "starting_capital": 10000.0,
+    "fee_rate": 0.0004,
+    "slippage_model": "binance-default",
+    "latency_ms": 0,
+}
+
+
 @router.get("/paper-config")
 async def get_paper_config(
     mode: Literal["sandbox", "live"] = "sandbox",
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Return current paper trading configuration."""
-    raw = await rds.get(f"tino:{mode}:paper_config")
-    if raw:
-        if isinstance(raw, bytes):
-            raw = raw.decode()
-        return json.loads(raw)
-    return {
-        "starting_capital": 10000.0,
-        "fee_rate": 0.0004,
-        "slippage_model": "binance-default",
-        "latency_ms": 0,
-    }
+    return await load_redis_json(
+        rds, f"tino:{mode}:paper_config", dict(_PAPER_CONFIG_DEFAULT)
+    )
 
 
 @router.put("/paper-config")
@@ -328,12 +315,7 @@ async def update_paper_config(
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Update paper trading configuration. Takes effect on next node restart."""
-    raw = await rds.get(f"tino:{mode}:paper_config")
-    config: dict = {}
-    if raw:
-        if isinstance(raw, bytes):
-            raw = raw.decode()
-        config = json.loads(raw)
+    config = await load_redis_json(rds, f"tino:{mode}:paper_config", {})
     updates = body.model_dump(exclude_none=True)
     config.update(updates)
     await rds.set(f"tino:{mode}:paper_config", json.dumps(config))

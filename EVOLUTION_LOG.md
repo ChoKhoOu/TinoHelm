@@ -2,6 +2,122 @@
 
 Chronological record of architectural improvements and maintenance work.
 
+## 2026-04-21
+
+**主题**: 从零搭建 `api/` 模块的测试安全网（192 个 NT-free 用例覆盖 9 个 route 文件 + 新 `_utils` 模块），同时消灭 3 组跨路由重复模式（UUID 路径穿越校验、Redis JSON-or-default、Redis 进度拉取）
+**维度**: 测试补齐 + 架构重构
+**改动范围**:
+- 新增 `src/tinohelm/api/_utils.py`（199 行）—— 8 个共用原语 + 3 个 regex/长度常量
+- 重构 `src/tinohelm/api/routes/backtest.py`（712 → 698 行，-14）
+  - 5 处"UUID regex + `.resolve()` + `startswith(root)` 边界检查"内联代码 → 单一 `resolve_artifact_path()` 调用
+  - 2 处"`rds.get` + `int()` 裸 try/except"内联代码 → `fetch_redis_progress` / `fetch_redis_progress_batch`
+  - `resolve_run_id` 的 `_UUID_RE` / `_HEX_RE` / `MIN_PREFIX_LEN` 常量从 module-level 下沉到 `_utils`
+  - 额外消化 `backtest_compare` 里未做边界检查的内联 `Path(...) / run.run_id / "results.json"`（潜在 path-traversal 如果 DB 里的 run_id 被污染 —— defense-in-depth，实际入口其实安全但统一行为更好）
+- 重构 `src/tinohelm/api/routes/node.py`（396 → 378 行，-18）
+  - 6 处"`raw = await rds.get(key); if raw: decode; json.loads(raw) else default`"内联代码 → 单一 `load_redis_json(rds, key, default)`
+  - 覆盖：`lifecycle_state` / `list_strategies` (strategy_registry + heartbeat 双源) / `data_status` / `subscriptions` / `get_paper_config` / `update_paper_config`
+  - 抽出 `_PAPER_CONFIG_DEFAULT` 常量（之前是方法内 inline dict）
+- 重构 `src/tinohelm/api/routes/trading.py`（353 → 352 行，-1，顺带删除未使用的 `datetime` 导入）
+  - 1 处 `risk-metrics` 内联 `rds.get + json.loads + default` → `load_redis_json`
+  - 抽出 `_RISK_METRICS_DEFAULT` 模块级常量（之前 9 键 inline）
+- 新增 `tests/api/test_utils.py`（338 行，51 用例）
+- 新增 `tests/api/test_backtest_helpers.py`（182 行，44 用例）
+- 新增 `tests/api/test_data_helpers.py`（251 行，43 用例）
+- 新增 `tests/api/test_strategy_helpers.py`（71 行，16 用例）
+- 新增 `tests/api/test_trading_helpers.py`（211 行，11 用例）
+- 新增 `tests/api/test_node_helpers.py`（121 行，10 用例）
+- 新增 `tests/api/test_settings_helpers.py`（44 行，6 用例）
+- 新增 `tests/api/test_dashboard_helpers.py`（34 行，3 用例）
+
+**动机**:
+
+`src/tinohelm/api/` 整个模块是 FastAPI 后端的外部契约入口：10 个 route 文件共 4198 行代码，对接前端 Next.js、Rust CLI/TUI、外部 HTTP 客户端。但在本次演进之前，整个目录下**只有 1 个测试文件 8 个用例**（`test_resolve_run_id.py`），覆盖的仅仅是 `backtest.py` 里一个辅助函数的 prefix 解析逻辑。其他 ~95% 的路由纯函数、私有助手、数据格式化器（`_position_to_item` / `_fill_to_item` / `_enrich_strategy_meta` / `_interval_to_timeframe` / `_mask_key` / `_calc_bars_per_day` / ...）以及 3 组"同一套代码复制了多份"的安全敏感代码，完全处于测试盲区。
+
+更严重的是跨文件的 3 组重复模式，其中两组直接关联**正确性和安全性**，不是风格问题：
+
+1. **Path-traversal 检查 × 5 份同构代码（backtest.py）** —— 当前 `status` / `result` / `delete` / `list_artifacts` / `get_artifact` 路由各自有一段完全相同的守卫代码：
+   ```python
+   if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', run_id):
+       raise HTTPException(status_code=400, detail="Invalid run_id format")
+   artifact_path = (Path(settings.paths.artifacts) / run_id / filename).resolve()
+   artifacts_root = Path(settings.paths.artifacts).resolve()
+   if not str(artifact_path).startswith(str(artifacts_root)):
+       raise HTTPException(status_code=400, detail="Invalid path")
+   ```
+   5 份复制本身就是安全漏洞放大器：任何一次需要修 UUID 格式或边界检查的变更都有 80% 概率漏改某一份；而且 `str(a).startswith(str(b))` 在 trailing separator 边缘情况（尤其 symlink escape 场景）不可靠，`Path.relative_to()` 才是正确的做法 —— 本次改成 `relative_to` 顺带修掉了这个潜在隐患（测试 `test_symlink_escape_is_resolved` 直接验证）。
+
+2. **Redis JSON-or-default × 7 份同构代码（node.py + trading.py）** —— 完全同构的 `await rds.get(key); if isinstance(raw, bytes): raw = raw.decode(); return json.loads(raw) if raw else default`，每一份都没有 UTF-8 容错，也没有 JSON 解析失败降级，换句话说：**Redis 里的脏数据会让接口抛 500 而不是优雅回落到 default**。统一走 `load_redis_json` 后（带 UnicodeDecodeError / JSONDecodeError 双重降级 + 日志），接口对 Redis 里的坏数据从"崩"变成"记一条 warning 继续返回 default"。前端看不到 500 了。
+
+3. **Redis 进度拉取 × 2 份同构代码（backtest.py）** —— 单 key 版在 `get_backtest_status`，pipeline 批量版在 `list_backtest_runs`，两处都自己写 `try: int(raw) except (ValueError, TypeError): pass`。集中到 `fetch_redis_progress[_batch]` 后，零分支减到单行，pipeline 版本对空 list 也做了早退优化（之前每次 `list_backtest_runs` 即使一条 running 都没有也会 `rds.pipeline()`）。
+
+外加发现：
+
+- `_calc_bars_per_day` 内部竟然有 `import re` —— Python 里 shadow-import 是 legal 但属于 code smell。外加 module 顶层同时有 `import re` 和内部 `import re`。我把正则抽到 module-level `_INTERVAL_RE = re.compile(r"^(\d+)([smhd])$")`，内部不再做 inline import。
+- `trading.py` 有一个未使用的 `from datetime import datetime`，我触到这个文件就顺手删了（看到了就顺手改掉）。
+- `get_backtest_status` 的"已完成才尝试读 results.json"分支里，原来的 try/except 吞掉了所有异常（包括 `HTTPException`），如果 `resolve_artifact_path` 抛 400 会被当成"读取失败记 warning 继续"而不是真的 400 —— 本次重构里我改成明确 `try: ... except HTTPException: artifact_path = None`，行为一致但意图显式化。
+- `backtest_compare` 的 `results_file = Path(settings.paths.artifacts) / str(run.run_id) / "results.json"` 原先没做边界检查。虽然 `run.run_id` 来自 DB（由 `uuid4()` 创建）实际安全，但 DB 列只是 `String(100)`，理论上可以被污染（SQL 注入 / manual insert），统一用 `resolve_artifact_path` 做了 defense-in-depth。
+
+**要点**:
+
+1. **`api/_utils.py` —— 8 个共用原语** (NT-free，纯 `fastapi.HTTPException` + `re` + `json` + `pathlib`)：
+   - `UUID_RE` / `HEX_PREFIX_RE` / `MIN_PREFIX_LEN` —— 3 个 module-level 常量，之前在 backtest.py 被分别定义两次
+   - `is_full_uuid(value) -> bool` —— 纯判断，无副作用
+   - `validate_uuid_or_400(run_id) -> str` —— 白盒化一个 "strip+lower+UUID_RE check → raise 400 or return normalised"
+   - `resolve_artifact_path(artifacts_root, run_id, *segments) -> Path` —— 原子合一的 UUID 校验 + 边界检查 + 路径拼接。**使用 `Path.relative_to()` 而不是脆弱的 `str(a).startswith(str(b))`**。返回时 `.exists()` 由调用方自己判断（因为 404 vs 正常返回需要不同语义）
+   - `decode_redis_str(raw) -> str | None` —— bytes/str/int 归一到 str 或 None，处理 UnicodeDecodeError
+   - `load_redis_json(rds, key, default=None) -> Any` —— GET + decode + json.loads；所有错误路径（missing / bad utf-8 / bad json）统一返回 default
+   - `fetch_redis_progress(rds, key) -> int | None` —— GET + int()，容错
+   - `fetch_redis_progress_batch(rds, keys) -> list[int | None]` —— pipeline 版本，空 list 早退不开 pipeline
+
+2. **向后兼容 100%**：
+   - `backtest.py` 的 `resolve_run_id` 仍然是 `async def resolve_run_id(prefix, db) -> str` 签名完全一致，其内部 `_UUID_RE` / `_HEX_RE` 变成共享常量但 `match()` 接口相同
+   - `test_resolve_run_id.py` 的 8 个原有用例**零修改**通过
+   - 所有路由的 HTTP 行为等价：相同的 400 code 和相同的 detail 文案（"Invalid run_id format" / "Invalid path"）
+   - `node.py` 的 `_enrich_strategy_meta` 公有签名未变
+   - `trading.py` 的 `_position_to_item` / `_fill_to_item` 未动
+
+3. **测试矩阵**（192 用例，按文件组织）：
+   - **`test_utils.py`（51）** —— 6 类
+     - `TestUuidRegex`（6）+ `TestHexPrefixRegex`（4）—— 正则合法性 + 边界（大写、缺连字符、段长异常、非 hex、前后空格）
+     - `TestIsFullUuid`（3）—— 快速判断的三路
+     - `TestValidateUuidOr400`（5）—— strip/lower 归一、raise 400、空串、prefix 都拒绝
+     - `TestResolveArtifactPath`（10）—— 重点：`../../etc/passwd` 被拒（dotdot 逃逸）、绝对路径段 `/etc/passwd` 被拒、**symlink escape** 的真实场景测试（创建 `root/<uuid>` 符号链接到 `root/../outside`，确认 `.resolve()` 后 `relative_to` 抛错）
+     - `TestDecodeRedisStr`（5）—— None / bytes / str / invalid UTF-8 / int
+     - `TestLoadRedisJson`（7）—— happy path / missing / bad JSON / bytes / list / bad UTF-8 / default=None
+     - `TestFetchRedisProgress`（6）—— int / bytes / None / 非数字 / 负数透传 / 浮点字符串拒绝
+     - `TestFetchRedisProgressBatch`（5）—— 空 keys 不开 pipeline、有序返回、None slot、非数字 slot、单 key 仍走 pipeline
+   - **`test_backtest_helpers.py`（44）** —— 锁 `_BARS_PER_DAY_KNOWN` / `_BARS_PER_SEC` / `_INTERVAL_RE` / `_ARTIFACT_WHITELIST` 所有模块常量；`_calc_bars_per_day` 覆盖 5 个 fast-path + 7 个 computed + 7 个无效输入 + 边界（0m / 25h / 7d 都 clamp 到 1）；`_format_estimated_label` 覆盖 0/1/59/60/90/120/3599/3600/5400/36000 + 2 个边界；4 个 import 断言确认 route 文件**引用的是共享 _utils 符号**而不是重新定义
+   - **`test_data_helpers.py`（43）** —— `_interval_to_nt` / `_nt_to_interval` 正反转换 + 12 个 round-trip + `ValueError` 消息含输入；`_parquet_size_for` 真正写 parquet 文件到 tmp_path 验证求和（忽略非 parquet 文件）；`_delete_storage_files` 覆盖 4 个 data_type 分支（bar / trade_tick / funding_rate / quote_tick / unknown）+ 空目录 noop + 目录清空后自动 rmdir + **非 parquet 文件共存时目录保留**
+   - **`test_strategy_helpers.py`（16）** —— `_interval_to_timeframe` 9 个已知映射 + 未知 passthrough；`_build_subscriptions` 覆盖空列表 / 单 / 多 / `.BINANCE` suffix 剥离 / interval=None / 未知 interval passthrough
+   - **`test_trading_helpers.py`（11）** —— `_RISK_METRICS_DEFAULT` 9 键锁定；用 `SimpleNamespace` 做 Position/Fill 的 row stand-in（ORM 映射只读属性不需要真 Session），覆盖完整字段、datetime isoformat、None passthrough、closed vs open 两种分支
+   - **`test_node_helpers.py`（10）** —— `_PAPER_CONFIG_DEFAULT` 锁定；`_enrich_strategy_meta` 覆盖无 yaml、有完整 yaml、malformed yaml、空 yaml、只有 symbols、多 strategy 独立、空字典、setdefault 不覆盖、yaml 覆盖现有
+   - **`test_settings_helpers.py`（6）** —— `_mask_key` 覆盖 ≤8 chars 全掩、>8 chars 显示首尾 4 + 中间 `****`、parametrized boundary（9/11 chars）+ 防中间 leak 断言；`EXCHANGE_PING_URLS` 锁定
+   - **`test_dashboard_helpers.py`（3）** —— `_completed_runs_stmt` 编译后 SQL 含 `completed` + 可 chain `.where().limit()`
+
+4. **安全性强化（测试驱动）**：
+   - 之前 5 处 `str(a).startswith(str(b))` 不可靠 —— `test_symlink_escape_is_resolved` 证明新的 `Path.relative_to()` 实现能拦截 symlink escape
+   - 之前 Redis 返回脏 JSON 会 500 —— `TestLoadRedisJson::test_returns_default_on_invalid_json` 证明现在返回 default + warning
+
+**讨论点**:
+
+- **dashboard.py 的 `Position.is_open == True` (E712) 我没改**：SQLAlchemy 里 `.where(Position.is_open)` 与 `.where(Position.is_open == True)` 在大多数情况下等价，但对 nullable boolean 列、或者方言差异下，行为**可能**不完全一致。这种改动需要跑真实 PostgreSQL 集成测试验证，不是静态能验的。我留给下一轮 evolution 处理（若决定处理，建议加一条 ruff per-file-ignore 把 `dashboard.py:74` 豁免，而不是改代码）。
+- **`optimize.py` / `settings.py` / `strategy.py` 的 F401 warnings 我也没改**：不在本次主题内（我没有因为 api 测试补齐而需要 import 那些文件）。是已知噪音但是每一个都可能暗示"这个 import 以前用到，现在已经被重构掉了，import 是忘了删" —— 值得下一轮专门的 API lint 演进去处理。
+- **`backtest_compare` 的 artifact 路径校验**我做了加固但**没有加 404 分支**：原先行为是"目录/文件不存在就把 `warning` 字段填上"，我保留这个行为。换句话说，现在 400 的路径（污染的 run_id）仍然会走 `except HTTPException` → `results_file=None` → warning="Backtest artifacts not found"。理论上污染的 run_id 应该返回 400，但改这个会对前端展示有行为差异（从"看到 warning 字符串"变成"整个请求 400"），需要和前端对齐才能改。**建议下一次 evolution 把 `run.run_id` 污染的场景拉出来单独处理成 500 / 422，因为这理论上是 DB 被污染的信号**。
+- **未覆盖的 route 代码**：我只抽了路由文件里的**纯 helper**，FastAPI route handler 本身（带 `Depends` 注入 + DB session + 复杂业务流）的**集成测试**没有加。那是完全不同类型的测试（需要 `httpx.AsyncClient(app=app)` + in-memory SQLite fixture + fake Redis），应该是**单独的演进主题**（"API 集成测试基础设施"），不适合塞在本次"helper 抽取 + 单元测试"里。本次把基础设施建好了 —— `_utils.py` 的所有原语已经 100% 单元覆盖，任何未来的集成测试可以 `mock.patch("tinohelm.api._utils.load_redis_json")` 一键 stub Redis。
+
+**验证**:
+- ✅ **934 passed in 7.49s**（NT-free 全量）—— baseline 750 + 新增 184 = 934，完全精确匹配（51 + 44 + 43 + 16 + 11 + 10 + 6 + 3 = 184）
+- ✅ `ruff check` 全部 4 个新/改文件 + 8 个测试文件 —— All checks passed!
+- ✅ `py_compile` 5 个路由源文件 + 8 个测试文件 —— 全部通过
+- ✅ 全部 11 个 api route 模块 import 成功（含未触动的 7 个：data / research / optimize / strategy / settings / dashboard / watchlist）
+- ✅ NT-free 边界：`tinohelm.api._utils` 单独 import 后 `sys.modules` 不含任何 `nautilus_trader`，严格独立
+- ✅ 向后兼容：`from tinohelm.api.routes.backtest import resolve_run_id` / `from tinohelm.api.routes.node import _enrich_strategy_meta` / `from tinohelm.api.routes.trading import _position_to_item, _fill_to_item` —— 所有既有导入点零修改
+- ✅ 重复消除：5×UUID+path inline → 1×`resolve_artifact_path` / 2×Redis progress inline → 2×named helper（单+批）/ 7×Redis JSON inline → 1×`load_redis_json` / 3×定义两次的 UUID regex → 1×共享
+- ✅ 行数变化：`backtest.py` 712→698 (-14)、`node.py` 396→378 (-18)、`trading.py` 353→352 (-1)、新增 `_utils.py` 199 —— route 文件总 -33，新基础设施 +199，净 +166 但**每一行 `_utils.py` 都有单元测试**而此前**没有一行有覆盖**
+- ✅ 安全性：新的 `resolve_artifact_path` 用 `Path.relative_to()` 替代 5 份 `str(a).startswith(str(b))`，通过了 symlink-escape 单元测试（之前 5 处各自都存在同样的潜在不可靠点）
+
+---
+
 ## 2026-04-20
 
 **主题**: 合并 `research/worker.py` 与 `data/worker.py` 的重复 async queue worker 骨架，抽到 `core/async_queue_worker.py`，并把两个 worker + 新 helper 模块一起纳入 NT-free 测试安全网
