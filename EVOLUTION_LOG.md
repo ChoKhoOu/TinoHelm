@@ -2,6 +2,77 @@
 
 Chronological record of architectural improvements and maintenance work.
 
+## 2026-04-21 (2)
+
+**主题**: 把 `core/bridge.py` 的 `EventBridge` 纳入测试安全网（53 个 NT-free 用例），同时消除 `_listener` 与 `_heartbeat_poller` 两处复制的"relay → 全局 `*` + 逐 pattern 前缀匹配"两步逻辑，并修掉 `unsubscribe` 不回收空 set 造成的长期内存累积
+**维度**: 架构重构 + 测试补齐
+**改动范围**:
+- `src/tinohelm/core/bridge.py`（212 → 227 行，净 +15）
+  - 新增 `_publish_to_subscribers(channel, payload)` — 把 wildcard + channel-prefix fan-out 统一到单一 helper
+  - `_listener` 末端的 9 行 relay 代码 → 单行调用
+  - `_heartbeat_poller` 末端的 6 行 relay 代码 → 单行调用
+  - `unsubscribe` 增加空 set 回收（subscribe 后 defaultdict 会重建，外部行为不变）
+  - 删除未使用的 `from typing import Any`
+- `tests/core/test_bridge.py`（新增 466 行，53 个用例）— 覆盖 `_infer_type` + `EventBridge` 公开 API + 两条关键 fan-out 等价路径
+
+**动机**:
+
+`src/tinohelm/core/bridge.py`（212 行）是 FastAPI 进程里把 Redis PubSub 事件转发给所有已连接 WebSocket 客户端的**唯一**关键设施。前端所有实时推送（`backtest.progress`、`data.progress`、`node.heartbeat`、`fill.new`、`position.update`、`research.progress`）都流经它；TUI 同样依赖它做 `/ws/events` 订阅；4 层 Notification System 的 Layer 1（silent ticker）和 Layer 3（toast）实际上都是 EventBridge 广播的消费者。然而本轮演进之前：
+
+1. **零测试覆盖** —— `grep EventBridge tests/` 完全没有匹配。`_infer_type` 的 6 个前缀映射、`subscribe`/`unsubscribe` 的 pattern 注册、`client_count` 的跨 pattern 去重、`_relay` 的 dead-connection 回收 —— 任何一条契约发生漂移（包括 Redis 协议字段命名、JSON decode 失败降级、pattern prefix 语义）都不会触发任何告警，直到前端断流用户才会发现。这是整个项目**最贴近"实时 UX"**的代码路径中最大的测试盲区。
+
+2. **两处完全同构的 relay 代码**（`_listener` 行 141-149 + `_heartbeat_poller` 行 190-195）。**同样的 5 行**做"send to wildcard subscribers + 逐个 pattern 前缀匹配再 send"，只是表达方式不同（一处是 continue-based 反向条件，另一处是 if-based 正向条件）。这是典型的 "duplicate + drift" 陷阱：
+   - 任何对 fan-out 语义的修改（比如把 `startswith` 换成 glob、加入去重、加入 channel 模式排他规则）都必须同时改两处
+   - 两处各自的表达式写法已经不一致（`not channel.startswith(pattern)` vs `f"tino:heartbeat:{node_type}".startswith(pattern)`），后续阅读者必须确认两者等价才能改动
+   - 无法对 fan-out 写单一的参数化测试；每次想要验证广播语义都得把两条异步循环驱动起来
+
+3. **`unsubscribe` 内存累积**（行 99-102）。原实现 `for clients in self._clients.values(): clients.discard(ws)` 遍历所有 pattern set 删除该 ws，但**永远不删除空 set**。对于长生命周期的 API 进程，WebSocket 的连/断是每分钟都在发生的：每一次 `await bridge.subscribe(ws, ["tino:very-specific:channel"])` → `await bridge.unsubscribe(ws)` 都会在 `_clients` 里留下一个空 set。一周下来如果前端有动态订阅逻辑（比如按策略 ID 订阅 `tino:sandbox:strategy-abc123`），`_clients` 会膨胀到几千上万个空键。这不是单纯的风格问题 —— `_listener` 和 `_heartbeat_poller` 的 fan-out 都要 `for pattern, clients in list(self._clients.items())` 线性扫描 `_clients`，每次扫描都是 O(pattern 总数) 包括已退订的空键。广播延迟会随运行时间线性劣化。
+
+简言之：一条关键生产数据通道没有测试保护，同时存在一个可测 + 可修的真实性能/内存缺陷，还有一处明显的代码重复 —— 三件事应该一次性合并做完，不是分三轮。
+
+**要点**:
+
+1. **`_publish_to_subscribers(channel, payload)` —— fan-out 语义单点化**。把两处 relay 的"`_clients["*"]` 全广播 + 非 `*` pattern 中 `channel.startswith(pattern)` 的子集广播"压缩成一个 13 行 async 方法。`_listener` 和 `_heartbeat_poller` 各自缩到一行 `await self._publish_to_subscribers(channel, payload)`。语义上 100% 等价：pattern `"*"` 始终匹配、prefix-match 使用原有 `startswith`（非 regex/glob）、`list(self._clients.items())` 的快照拷贝保留（避免在 relay 过程中并发 subscribe/unsubscribe 修改 dict 时 RuntimeError）。`TestLegacyBehaviourParity` 测试类专门用两个场景（原 listener 的 backtest progress 广播 + 原 heartbeat 的 node-specific 分发）锁死这条等价性。
+
+2. **`unsubscribe` 回收空 pattern set**。新实现：遍历时收集空 pattern 到 `empty_patterns`，最后统一 `del self._clients[pattern]`。**不能在迭代中修改 dict** —— 第一版用 `for ... pop()` 立刻踩到 `RuntimeError: dictionary changed size during iteration`，所以两段式删除。`defaultdict(set)` 语义保证下一次 `subscribe` 会自动重建 key，外部观察行为不变。`TestUnsubscribe::test_reaps_empty_pattern_sets` / `test_reaps_wildcard_when_empty` / `test_subscribe_after_unsubscribe_recreates_pattern` 三个测试锁定 reap + recreate 契约。
+
+3. **完整 public API 覆盖**（`EventBridge` 类 5 个公共方法 + 1 个模块级函数 + 1 个共享新 helper）：
+   - `TestInferTypeChannelMap`（7）+ `TestInferTypeEdgeCases`（5）—— 覆盖全部 6 个前缀映射（backtest/heartbeat/sandbox/live/data/research）+ 未知 channel + 空字符串 + `tino:backtest:` 空 tail 的边缘切片。`test_all_prefixes_covered_by_tests` 把期望集断言成 `frozenset` 模式，任何新前缀加入 `_CHANNEL_TYPE_MAP` 必须同步加一行测试（类似 `FULL_RESULT_BASE_KEYS` 的防漂移机制）。
+   - `TestBridgeInit`（2）—— 初始空状态 + `_clients` defaultdict 行为不漏洞（未知 key 不 raise）。
+   - `TestSubscribe`（7）—— `None` / `[]` 都走 wildcard（锁定 `if channels:` 的 falsy 等价）、单 channel、多 channel、重复订阅幂等、多客户端同 channel、同客户端在 `*` 和特定 channel 的重叠订阅。
+   - `TestClientCount`（5）—— 0 默认、单 wildcard、跨 pattern 去重（同客户端多订阅计一次）、wildcard + 特定 channel 仍计一次、多客户端分别计数。
+   - `TestUnsubscribe`（7）—— 正确移除、empty-set reap（含 wildcard）、其他客户端订阅保留时不删除 pattern、未订阅客户端 unsubscribe 幂等、双重 unsubscribe 安全、subscribe-after-unsubscribe 重建 pattern。
+   - `TestRelay`（5）—— 广播到全部、dead ws 被回收、dead 不影响后续 alive 的投递、空 set no-op、外部 set 引用不被意外清空。
+   - `TestPublishToSubscribers`（8）—— wildcard / prefix / 非匹配的三路判定、同客户端跨 wildcard+prefix 两次投递（**这是当前语义，加了注释锁死，若未来要去重需要显式改测试**）、多 prefix 都是 channel 前缀的多播、无订阅 no-op、跨客户端同 prefix 独立、dead ws 在 fan-out 中被回收。
+   - `TestHeartbeatFanOut`（3）—— 针对 `tino:heartbeat:{node_type}` 特殊形式：pattern `"tino:heartbeat"` 匹配、wildcard 覆盖、`tino:sandbox` pattern 不错配。
+   - `TestLegacyBehaviourParity`（2）—— 原 `_listener` backtest 场景 + 原 `_heartbeat_poller` node-specific 场景，直接锁死重构前后行为等价。
+   - `TestStartStop`（2）—— `stop()` 无 `start()` 时安全（不 raise）；`start()` 创建两条 task 并 `psubscribe("tino:*")`，`stop()` 正确 cancel+await+`punsubscribe`+`close`，`aioredis.from_url` 通过 `monkeypatch` 替换，**零真实 Redis 连接**。
+
+4. **`_fake_ws(*, dead=False)` 测试 helper** —— 所有 WebSocket 测试用单行 `AsyncMock()` 生成 ws，`dead=True` 时 `send_text.side_effect = RuntimeError` 模拟断开。避免在每个测试里写 5 行 mock 配置，也让 dead-reaping 测试的意图一目了然。
+
+5. **`TestStartStop::test_start_creates_tasks_and_stop_cancels_them` —— 唯一的异步生命周期测试**。用 `monkeypatch` 替换 `tinohelm.core.bridge.aioredis.from_url`，返回一个 `pubsub().listen()` 立即耗尽的 async iterator，让 listener task 启动后立刻等待下一次 cancel。`stop()` cancel 后 task 要么 `.cancelled()` 要么 `.done()`，`punsubscribe("tino:*")` / `close()` 的 await 次序通过 `AsyncMock.assert_awaited_with` 锁定。这个测试是未来"改 start/stop 语义时必须过"的保险丝。
+
+6. **完整回归**：NT-free 全量 `pytest tests/`（排除需要 `nautilus_trader` 的 tests/actors/ + tests/node/ + tests/backtest/ + tests/portfolio/ + 3 个具体 NT-import 测试文件）—— 989 → 1042（+53），全部通过，耗时 7.13s。
+
+**讨论点**:
+
+- **Wildcard + prefix 同客户端双投递是不是 bug**？当前测试 `TestPublishToSubscribers::test_wildcard_and_prefix_same_client_delivers_only_once` **显式锁定投递 2 次**（因为 `_clients["*"]` 和 `_clients["tino:sandbox"]` 是两个独立 set）。实际前端代码里看起来没有一个客户端同时订阅 wildcard + 特定 channel 的场景（`hub.py` 里 `ws_events` 只会走其中一条分支），所以生产上不影响。但这是一个**隐式契约**，如果未来加"事件级 dedup（比如按事件 ID 去重）"需要显式改本测试。我选择**锁定当前行为**而不是直接加去重：(a) 去重需要事件级 ID 设计，改动影响协议；(b) 前端不存在该场景，无紧迫性；(c) 留给下一轮专项 evolution。
+
+- **`_publish_to_subscribers` 的 pattern 匹配语义**依然是 "prefix match via `startswith`"。这对简单场景是好的（`"tino:sandbox"` 匹配 `"tino:sandbox:positions"`），但如果前端想订阅 `tino:sandbox:*` 而不是 `tino:sandbox:*` 下所有子类型，就需要 glob 语义。本次不动 —— 会影响 hub.py 的 channels query param 语义，属于跨 API 变更。
+
+- **`_listener` 的 exception 重试逻辑**（`except Exception: sleep(5); psubscribe/punsubscribe`）没有覆盖测试。它需要模拟一个真实失败的 Redis pubsub 然后验证 5 秒延迟 + 重订阅。这是**集成测试**类型（需要 `fakeredis` 或 `asyncio.sleep` patching）；本次用单元测试把 fan-out + API 全覆盖，集成层留给未来"EventBridge 故障注入测试"专项。
+
+**验证**:
+- ✅ `PYTHONPATH=src .venv/bin/python -m pytest tests/core/test_bridge.py -v` —— **53 passed in 0.85s**
+- ✅ `PYTHONPATH=src .venv/bin/python -m pytest tests/` NT-free 全量 —— **1042 passed, 7 skipped in 7.13s**（baseline 989 + 53 新增 = 1042，精确匹配）
+- ✅ `ruff check src/tinohelm/core/bridge.py tests/core/test_bridge.py` —— All checks passed!
+- ✅ `py_compile src/tinohelm/api/app.py src/tinohelm/api/deps.py src/tinohelm/api/ws/hub.py` —— 所有依赖 EventBridge 的模块编译通过，public API 未变
+- ✅ 代码行数：`core/bridge.py` 212 → 227 行（净 +15：新 `_publish_to_subscribers` 方法 +18 行/含 docstring、`unsubscribe` +7 行 reap 逻辑、`_listener` -9 行、`_heartbeat_poller` -6 行、`-import Any` 以及删除 2 条注释 `# Relay to ...`）
+- ✅ 重复消除：`_listener` / `_heartbeat_poller` 两处 fan-out 内联代码合并到单一 `_publish_to_subscribers`，任何未来语义变动只改一处
+- ✅ 潜在内存缺陷修复：`unsubscribe` 空 pattern set 回收，前端高频订阅/退订场景下 `_clients` 不再线性增长
+
+---
+
 ## 2026-04-21
 
 **主题**: 从零搭建 `api/` 模块的测试安全网（192 个 NT-free 用例覆盖 9 个 route 文件 + 新 `_utils` 模块），同时消灭 3 组跨路由重复模式（UUID 路径穿越校验、Redis JSON-or-default、Redis 进度拉取）
