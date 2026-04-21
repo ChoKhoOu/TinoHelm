@@ -5,19 +5,33 @@ This module is retained ONLY for filling the T+1~T+3 gap where
 Vision archives are not yet available.
 
 Retained: fetch_klines, fetch_mark_price_klines, fetch_index_price_klines,
-          fetch_agg_trades, _fetch_klines_generic
+          fetch_agg_trades
 Removed:  fetch_funding_rates (replaced by Vision fundingRate monthly packs)
+
+Shared pagination / retry / throttle policy lives in :mod:`tinohelm.data.providers._rest`
+— see that module for the retry classification matrix and the Binance
+"X-MBX-USED-WEIGHT-1M" throttle tiers.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import httpx
 
 from tinohelm.data.instruments import strip_to_binance_api_symbol as _strip_to_binance_api_symbol
+from tinohelm.data.providers._rest import (
+    advance_cursor_after_agg_trade,
+    advance_cursor_after_kline,
+    agg_trade_row_to_dict,
+    kline_row_to_dict,
+    ms_range,
+    parse_used_weight_header,
+    request_with_retry,
+    throttle_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +44,16 @@ INTERVAL_MS = {
     "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
 }
 
+# Minimum per-request sleep for each endpoint family. Matches legacy behaviour:
+# the two klines-family loops used 0.5s, the aggTrades loop used 0.3s, and the
+# simpler mark/index "generic" path also used 0.5s.
+_KLINES_LOW_SLEEP: float = 0.5
+_AGG_TRADES_LOW_SLEEP: float = 0.3
+
+# Progress log intervals (rows-between-emits) — retained from legacy code.
+_KLINES_PROGRESS_EVERY: int = 15_000
+_AGG_TRADES_PROGRESS_EVERY: int = 50_000
+
 
 async def fetch_klines(
     symbol: str,
@@ -39,102 +63,23 @@ async def fetch_klines(
     testnet: bool = False,
     limit: int = 1500,
 ) -> list[dict[str, Any]]:
-    """Fetch klines from Binance Futures API with pagination.
+    """Fetch full klines from Binance Futures with pagination.
 
-    Returns list of dicts with keys: open_time, open, high, low, close, volume, close_time.
+    Returns list of dicts with keys: ``open_time, open, high, low, close,
+    volume, close_time, quote_volume, trades``.
     """
     base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
-    url = f"{base_url}/fapi/v1/klines"
-
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
-
-    all_klines: list[dict[str, Any]] = []
-    current_start = start_ms
-
-    max_retries = 5
-    retry_count = 0
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        while current_start < end_ms:
-            params = {
-                "symbol": _strip_to_binance_api_symbol(symbol),
-                "interval": interval,
-                "startTime": current_start,
-                "endTime": end_ms,
-                "limit": limit,
-            }
-
-            try:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                raw = resp.json()
-            except httpx.HTTPStatusError as e:
-                status = e.response.status_code
-                if status in (429, 418):  # Rate limited
-                    retry_count += 1
-                    if retry_count > max_retries:
-                        raise
-                    wait = min(2 ** retry_count, 60)
-                    logger.warning("Rate limited (HTTP %d), retry %d/%d in %ds", status, retry_count, max_retries, wait)
-                    await asyncio.sleep(wait)
-                    continue
-                elif status >= 500:  # Server error
-                    retry_count += 1
-                    if retry_count > max_retries:
-                        raise
-                    await asyncio.sleep(2)
-                    continue
-                else:  # 4xx client error — don't retry
-                    raise
-            except (httpx.RequestError, Exception) as e:
-                retry_count += 1
-                if retry_count > max_retries:
-                    raise
-                logger.warning("Request error: %s, retry %d/%d", e, retry_count, max_retries)
-                await asyncio.sleep(2)
-                continue
-
-            # Reset retry count on success
-            retry_count = 0
-
-            if not raw:
-                break
-
-            for k in raw:
-                all_klines.append({
-                    "open_time": k[0],
-                    "open": k[1],
-                    "high": k[2],
-                    "low": k[3],
-                    "close": k[4],
-                    "volume": k[5],
-                    "close_time": k[6],
-                    "quote_volume": k[7],
-                    "trades": k[8],
-                })
-
-            # Move start to after last candle
-            last_close_time = raw[-1][6]
-            current_start = last_close_time + 1
-
-            if len(all_klines) % 15000 == 0 or len(raw) < limit:
-                logger.info("Progress: %d klines fetched for %s %s", len(all_klines), symbol, interval)
-
-            if len(raw) < limit:
-                break
-
-            # Dynamic throttling based on Binance weight header (limit=1500 costs ~20 weight per call)
-            used_weight = int(resp.headers.get("X-MBX-USED-WEIGHT-1M", "0"))
-            if used_weight > 1800:  # 75% of 2400 limit
-                await asyncio.sleep(5)
-            elif used_weight > 1200:  # 50% of limit
-                await asyncio.sleep(1)
-            else:
-                await asyncio.sleep(0.5)  # Minimum 0.5s between calls
-
-    logger.info(f"Fetched {len(all_klines)} klines for {symbol} {interval}")
-    return all_klines
+    return await _paginate_klines(
+        url=f"{base_url}/fapi/v1/klines",
+        api_symbol=_strip_to_binance_api_symbol(symbol),
+        interval=interval,
+        start=start,
+        end=end,
+        limit=limit,
+        include_volume=True,
+        symbol_param="symbol",
+        label=f"klines for {symbol} {interval}",
+    )
 
 
 async def fetch_mark_price_klines(
@@ -147,14 +92,20 @@ async def fetch_mark_price_klines(
 ) -> list[dict[str, Any]]:
     """Fetch mark price klines from Binance ``/fapi/v1/markPriceKlines``.
 
-    Returns list of dicts with: open_time, open, high, low, close, close_time.
-    Volume fields are always 0 for mark price klines.
+    Returns list of dicts with: ``open_time, open, high, low, close,
+    close_time``. Volume fields are always 0 for mark price klines (the
+    API returns them as ``0`` strings and we omit them).
     """
     base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
-    return await _fetch_klines_generic(
-        f"{base_url}/fapi/v1/markPriceKlines",
-        _strip_to_binance_api_symbol(symbol),
-        interval, start, end, limit,
+    return await _paginate_klines(
+        url=f"{base_url}/fapi/v1/markPriceKlines",
+        api_symbol=_strip_to_binance_api_symbol(symbol),
+        interval=interval,
+        start=start,
+        end=end,
+        limit=limit,
+        include_volume=False,
+        symbol_param="symbol",
         label=f"mark price klines for {symbol}",
     )
 
@@ -169,15 +120,20 @@ async def fetch_index_price_klines(
 ) -> list[dict[str, Any]]:
     """Fetch index price klines from Binance ``/fapi/v1/indexPriceKlines``.
 
-    Uses ``pair`` param (not ``symbol``).
-    Returns list of dicts with: open_time, open, high, low, close, close_time.
+    Uses the ``pair`` query parameter instead of ``symbol`` (this is a
+    Binance-specific quirk for index-price endpoints). Returns list of
+    dicts with: ``open_time, open, high, low, close, close_time``.
     """
     base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
-    return await _fetch_klines_generic(
-        f"{base_url}/fapi/v1/indexPriceKlines",
-        _strip_to_binance_api_symbol(symbol),
-        interval, start, end, limit,
-        param_name="pair",
+    return await _paginate_klines(
+        url=f"{base_url}/fapi/v1/indexPriceKlines",
+        api_symbol=_strip_to_binance_api_symbol(symbol),
+        interval=interval,
+        start=start,
+        end=end,
+        limit=limit,
+        include_volume=False,
+        symbol_param="pair",
         label=f"index price klines for {symbol}",
     )
 
@@ -189,173 +145,110 @@ async def fetch_agg_trades(
     testnet: bool = False,
     limit: int = 1000,
 ) -> list[dict[str, Any]]:
-    """Fetch aggregate trades from Binance ``/fapi/v1/aggTrades``.
+    """Fetch aggregate trades from Binance ``/fapi/v1/aggTrades`` with pagination.
 
-    Returns list of dicts with: agg_id, price, quantity, timestamp_ms, is_buyer_maker.
+    Returns list of dicts with: ``agg_id, price, quantity, timestamp_ms,
+    is_buyer_maker``.
     """
     base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
     url = f"{base_url}/fapi/v1/aggTrades"
+    api_symbol = _strip_to_binance_api_symbol(symbol)
 
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
-
+    start_ms, end_ms = ms_range(start, end)
     all_trades: list[dict[str, Any]] = []
     current_start = start_ms
-
-    max_retries = 5
-    retry_count = 0
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while current_start < end_ms:
             params = {
-                "symbol": _strip_to_binance_api_symbol(symbol),
+                "symbol": api_symbol,
                 "startTime": current_start,
                 "endTime": end_ms,
                 "limit": limit,
             }
-
-            try:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                raw = resp.json()
-            except httpx.HTTPStatusError as e:
-                status = e.response.status_code
-                if status in (429, 418):
-                    retry_count += 1
-                    if retry_count > max_retries:
-                        raise
-                    await asyncio.sleep(min(2 ** retry_count, 60))
-                    continue
-                elif status >= 500:
-                    retry_count += 1
-                    if retry_count > max_retries:
-                        raise
-                    await asyncio.sleep(2)
-                    continue
-                else:
-                    raise
-            except (httpx.RequestError, Exception) as e:
-                retry_count += 1
-                if retry_count > max_retries:
-                    raise
-                logger.warning("Request error: %s, retry %d/%d", e, retry_count, max_retries)
-                await asyncio.sleep(2)
-                continue
-
-            retry_count = 0
+            resp = await request_with_retry(client, url, params=params)
+            assert resp is not None  # raise_on_404=True default — never None
+            raw = resp.json()
             if not raw:
                 break
 
-            for t in raw:
-                all_trades.append({
-                    "agg_id": t["a"],
-                    "price": t["p"],
-                    "quantity": t["q"],
-                    "timestamp_ms": t["T"],
-                    "is_buyer_maker": t["m"],
-                })
+            all_trades.extend(agg_trade_row_to_dict(t) for t in raw)
 
-            last_ts = raw[-1]["T"]
-            current_start = last_ts + 1
-
-            if len(all_trades) % 50000 == 0:
+            if len(all_trades) % _AGG_TRADES_PROGRESS_EVERY == 0:
                 logger.info("Progress: %d trades fetched for %s", len(all_trades), symbol)
+
+            current_start = advance_cursor_after_agg_trade(raw[-1]["T"])
 
             if len(raw) < limit:
                 break
 
-            used_weight = int(resp.headers.get("X-MBX-USED-WEIGHT-1M", "0"))
-            if used_weight > 1800:
-                await asyncio.sleep(5)
-            elif used_weight > 1200:
-                await asyncio.sleep(1)
-            else:
-                await asyncio.sleep(0.3)
+            sleep_s = throttle_seconds(
+                parse_used_weight_header(resp.headers),
+                low_sleep=_AGG_TRADES_LOW_SLEEP,
+            )
+            await asyncio.sleep(sleep_s)
 
     logger.info("Fetched %d aggregate trades for %s", len(all_trades), symbol)
     return all_trades
 
 
-async def _fetch_klines_generic(
+async def _paginate_klines(
+    *,
     url: str,
-    symbol: str,
+    api_symbol: str,
     interval: str,
     start: datetime,
     end: datetime,
     limit: int,
-    *,
-    param_name: str = "symbol",
-    label: str = "klines",
+    include_volume: bool,
+    symbol_param: str,
+    label: str,
 ) -> list[dict[str, Any]]:
-    """Generic klines-format fetcher shared by mark/index price endpoints."""
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
+    """Shared klines-family pagination loop used by all three klines endpoints.
 
+    The three endpoints differ only in URL path, whether rows carry volume
+    fields, and the name of the symbol query parameter (``symbol`` vs
+    ``pair``). Pagination, retry and throttle are identical.
+    """
+    start_ms, end_ms = ms_range(start, end)
     all_klines: list[dict[str, Any]] = []
     current_start = start_ms
-
-    max_retries = 5
-    retry_count = 0
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while current_start < end_ms:
             params = {
-                param_name: symbol,
+                symbol_param: api_symbol,
                 "interval": interval,
                 "startTime": current_start,
                 "endTime": end_ms,
                 "limit": limit,
             }
-
-            try:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                raw = resp.json()
-            except httpx.HTTPStatusError as e:
-                status = e.response.status_code
-                if status in (429, 418):
-                    retry_count += 1
-                    if retry_count > max_retries:
-                        raise
-                    await asyncio.sleep(min(2 ** retry_count, 60))
-                    continue
-                elif status >= 500:
-                    retry_count += 1
-                    if retry_count > max_retries:
-                        raise
-                    await asyncio.sleep(2)
-                    continue
-                else:
-                    raise
-            except (httpx.RequestError, Exception) as e:
-                retry_count += 1
-                if retry_count > max_retries:
-                    raise
-                logger.warning("Request error: %s, retry %d/%d", e, retry_count, max_retries)
-                await asyncio.sleep(2)
-                continue
-
-            retry_count = 0
+            resp = await request_with_retry(client, url, params=params)
+            assert resp is not None
+            raw = resp.json()
             if not raw:
                 break
 
-            for k in raw:
-                all_klines.append({
-                    "open_time": k[0],
-                    "open": k[1],
-                    "high": k[2],
-                    "low": k[3],
-                    "close": k[4],
-                    "close_time": k[6],
-                })
+            all_klines.extend(
+                kline_row_to_dict(k, include_volume=include_volume) for k in raw
+            )
 
-            last_close_time = raw[-1][6]
-            current_start = last_close_time + 1
+            if (
+                len(all_klines) % _KLINES_PROGRESS_EVERY == 0
+                or len(raw) < limit
+            ):
+                logger.info("Progress: %d %s", len(all_klines), label)
+
+            current_start = advance_cursor_after_kline(raw[-1][6])
 
             if len(raw) < limit:
                 break
 
-            await asyncio.sleep(0.5)
+            sleep_s = throttle_seconds(
+                parse_used_weight_header(resp.headers),
+                low_sleep=_KLINES_LOW_SLEEP,
+            )
+            await asyncio.sleep(sleep_s)
 
     logger.info("Fetched %d %s", len(all_klines), label)
     return all_klines

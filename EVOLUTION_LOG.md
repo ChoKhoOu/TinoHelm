@@ -2,6 +2,81 @@
 
 Chronological record of architectural improvements and maintenance work.
 
+## 2026-04-21 (5)
+
+**主题**: 抽 `data/providers/_rest.py` 纯逻辑层统一 4 份散落的 "HTTP 分类 → 退避 / 固定重试 / 放弃" 重试策略 + 消灭 3 条 klines 家族分页循环的复制粘贴 + 给 `data/providers/binance.py` 这个零覆盖的 REST 生产客户端建立 129 个 NT-free / 无网络的测试安全网
+**维度**: 架构重构（消灭 4 份跨模块的重试策略重复 + 3 条 klines 家族分页循环的复制粘贴） + 测试补齐（`providers/binance.py` 此前 0 个直接测试）+ 顺手 bug 修复（bare `except Exception` 对 `JSONDecodeError` 的 5 次静默重试 / `extract_zip` 里残留的第 3 份 `startswith` 路径检查）
+
+**改动范围**:
+- 新建 `src/tinohelm/data/providers/_rest.py`（277 行）—— 9 个 NT-free pure helper + 1 个 httpx-aware async 包装：
+  - `classify_http_status(status) -> {success, not_found, rate_limit, server_error, abort}` —— 单点定义 "429/418→退避 / 5xx→固定重试 / 404→可选 raise 或 None / 其他 4xx 与 3xx→放弃" 策略
+  - `backoff_seconds(attempt, *, max_seconds)` —— 指数退避，attempt=1→2s, attempt=6+→60s cap
+  - `parse_used_weight_header(headers)` —— 安全解析 `X-MBX-USED-WEIGHT-1M`（缺失/空/非数值→0），同时兼容 `httpx.Headers` 大小写不敏感语义
+  - `throttle_seconds(weight, *, low_sleep, ...)` —— 3 段阶梯（>1800→5s，>1200→1s，其他→endpoint-specific baseline）。严格 `>` 比较与历史一致
+  - `ms_range(start, end)` / `kline_row_to_dict(row, *, include_volume)` / `agg_trade_row_to_dict(row)` / `advance_cursor_after_kline / after_agg_trade` —— 把 3 份 ms 计算、3 份 row→dict 转换、2 份 `last_ts+1` 游标推进统一到单一实现
+  - `request_with_retry(client, url, *, params, max_retries, raise_on_404, follow_redirects, ...)` —— 单次 GET + 完整重试矩阵的 async 包装。对老代码里的 `except (httpx.RequestError, Exception)` 做**故意窄化**：只捕 `RequestError`，让 `JSONDecodeError` 第一次就冒泡（见下方"要点 3"）
+  - 6 个导出常量：`DEFAULT_MAX_RETRIES / MAX_BACKOFF_SECONDS / SERVER_ERROR_SLEEP_SECONDS / REQUEST_ERROR_SLEEP_SECONDS / WEIGHT_HIGH_THRESHOLD / WEIGHT_MEDIUM_THRESHOLD / WEIGHT_HIGH_SLEEP / WEIGHT_MEDIUM_SLEEP`
+- 重构 `src/tinohelm/data/providers/binance.py`（361 → 254 行，-30%）：
+  - `fetch_klines` 从 104 行压到 28 行：分页 / 重试 / 节流全部走 helper，只保留"构造 URL + 组装 params + 调用 `_paginate_klines`"这三件实际业务
+  - `fetch_mark_price_klines` / `fetch_index_price_klines` 从各自 20 行 + 共享 83 行 `_fetch_klines_generic` 压到各 16 行，共用新抽出的 `_paginate_klines`。`_fetch_klines_generic` 这个只对两个 caller 可见、已经是"部分 DRY"的中间抽象层**整体删除**（被更彻底的 `_paginate_klines` 取代）
+  - `fetch_agg_trades` 从 92 行压到 47 行：保留 agg-trade 特有的 dict-shape row 解析，重试/throttle 全走 helper
+  - 新增私有 `_paginate_klines(*, url, api_symbol, interval, start, end, limit, include_volume, symbol_param, label)` —— 3 种 klines endpoint 的**唯一**分页实现。之前 `fetch_klines` 主体 + `_fetch_klines_generic` 是两份几乎一样的循环（diff 只在行内的 row→dict 映射和 symbol 参数名 `symbol` vs `pair`），现在统一
+  - 顺手加注释说明为什么 `fetch_index_price_klines` 必须用 `pair` 而不是 `symbol`（Binance 指数价格端点的历史怪癖，很容易被"一键统一"错）
+- 重构 `src/tinohelm/data/downloader.py`（505 → 506 行，净 +1，但 `download_file` 主体从 65 行压到 18 行）：
+  - `download_file` 重试循环从 48 行（`while True / try / except HTTPStatusError + if 404/418/429/5xx / except RequestError / if retry_count > _MAX_RETRIES`）压成 1 行 `request_with_retry(client, url, max_retries=_MAX_RETRIES, raise_on_404=True, follow_redirects=True)`
+  - `_MAX_RETRIES = 5` 改成 `_MAX_RETRIES = DEFAULT_MAX_RETRIES` 从 helper 拉常量，防止两处数字漂移
+  - `extract_zip` 里的 `if not str(target).startswith(str(dest_dir.resolve()))` 改成 `if not is_within_dir(target, dest_dir)` —— 这是全仓剩下的**第 3 份**同构路径边界检查（2026-04-21 (3) 收了 scaffold + module_loader 的 2 份，2026-04-21 之前的那一轮收了 api/_utils 里的 5 份，`extract_zip` 这条因为在另一个 data/ 子模块里、之前的 grep 只扫 `src/tinohelm/api/` + `src/tinohelm/strategy/`/`core/` 漏了它）
+  - 模块 docstring 更新，显式指向 `_rest.py` 作为共享策略来源
+- 新建 `tests/data/providers/__init__.py`（空）与 `tests/data/providers/test_rest_helpers.py`（666 行，100 个用例 / 14 个测试类）—— 全部 pure helper + `request_with_retry` 通过 `httpx.MockTransport` 驱动，`asyncio.sleep` 全程 autouse-style patch 成 AsyncMock，**重试测试 < 1s 跑完 150+ 个 request 场景**
+- 新建 `tests/data/providers/test_binance.py`（554 行，29 个用例 / 9 个测试类）—— 每个 fetch 函数都走 `httpx.MockTransport`，覆盖分页 / 空响应 / 429 重试 / 500 重试 / 404 传递 / 权重节流 / testnet 切换 / 符号剥离 / `symbol` vs `pair` 参数名
+
+**动机**:
+
+`src/tinohelm/data/providers/binance.py`（361 行）是回测引擎和 Data Pipeline 用于 **T+1~T+3 vision 归档空窗期**补齐真金白银数据的 REST 客户端。它当前在 2 条生产路径被调用：
+1. `backtest/runner.py:498` —— 回测启动时拉 mark price / index price K 线（回测引擎需要 `MarkPriceUpdate` / `IndexPriceUpdate` 而不是 Bar）
+2. `data/pipeline.py:632,657` —— `BinanceVisionPipeline._rest_fallback_*` 在 vision 归档缺失时的 fallback 链
+
+但截止本次演进，`providers/binance.py` 是 **`data/` 子树里唯一一个零直接测试的生产模块**：
+- `test_downloader.py` 覆盖 vision 归档下载器
+- `test_pipeline.py` / `test_pipeline_helpers.py` 覆盖 pipeline orchestration
+- `test_instruments.py` 覆盖 instrument 构造
+- `test_converters.py` / `test_converter_stubs.py` 覆盖 12 种数据类型的 row → NT 对象转换
+- `test_worker.py` 覆盖数据 fetch job worker
+- `tests/data/test_binance*.py` —— **不存在**。`grep -rn "providers.binance\|fetch_klines\|fetch_agg_trades" tests/` 确认唯一提及它的是 `test_pipeline_helpers.py` 里的**名字字符串**（`assert KLINES_REST_FETCH_FN["klines"] == "fetch_klines"`），真正的函数行为没有任何测试
+
+这种情况下 3 条重复的分页循环 + 4 份散落的重试策略就是**每次 NT 升级或 Binance API 变动都要手工逐份核对**的技术债：
+1. **HTTP 重试策略散落 4 处**：`fetch_klines` 主体（83 行）/ `fetch_agg_trades`（48 行）/ `_fetch_klines_generic`（73 行）/ `downloader.py:download_file`（48 行）各自手写"429/418 指数退避 + 5xx 固定 2s + RequestError 固定 2s + max_retries 计数"。任何一条规则调整（例如未来 Binance 返回 409 要求退避）都要改 4 处，漏改就发散
+2. **3 条 klines 家族分页循环是剪贴兼代码**：`fetch_klines` / `fetch_mark_price_klines`（通过 `_fetch_klines_generic`）/ `fetch_index_price_klines`（通过 `_fetch_klines_generic`）的 while-loop 结构 99% 相同，只有三点差异：(a) row 映射带不带 volume (b) URL 路径 (c) symbol 参数名 `symbol` vs `pair`。`_fetch_klines_generic` 是上一次"部分 DRY"尝试但只覆盖了 mark + index 两条，`fetch_klines` 依然独立
+3. **`_fetch_klines_generic` 本身是另一种重复**：它和 `fetch_klines` 的 while-loop 几乎一样，但为了容纳 "index 用 pair"、"index/mark 不带 volume"、以及 fetch_klines 的特殊进度日志格式，没有合并
+4. **bare-`except (httpx.RequestError, Exception)` 是隐蔽 bug**：在 `fetch_klines` 和 `fetch_agg_trades` 里写的是 `except (httpx.RequestError, Exception) as e:` —— 等价于 `except Exception`。意味着**如果 Binance 返回了畸形 JSON**（`.json()` 抛 `json.JSONDecodeError` < `ValueError` < `Exception`），它会被当成 "Request error" 重试 5 次，每次睡 2 秒，然后才终于 raise。产线上这意味着一次真正的"服务端返回损坏数据"事件会被拖成 10 秒钟的假重试，才终于失败
+5. **`extract_zip` 里还藏着第 3 份 `str(a).startswith(str(b))` 路径边界检查**：2026-04-21 (3) 演进以为已经把 `api/_utils` + `scaffold` + `module_loader` 的 7 处全收拢了，但 grep 当时没扫 `data/downloader.py`。本次顺手收掉
+
+**要点**:
+
+1. **单一事实源 `_rest.py`** —— 所有"分类 / 退避 / 节流 / 游标"决策都定义在一处。测试覆盖：100 个用例纯逻辑 + 29 个用例 `httpx.MockTransport` 驱动端到端。`classify_http_status(status)` 的 parametrized 测试覆盖 2xx（6 个用例）/ 404 / 418 / 429 / 5xx（7 个用例）/ 其他 4xx（6 个用例）/ 3xx（7 个用例）—— 总共 29 个分支。
+2. **`_paginate_klines` 是三种 klines endpoint 的唯一实现**。endpoint 专属差异压到 4 个 kwargs：`url` / `symbol_param`（`symbol` 或 `pair`）/ `include_volume`（mark/index→False）/ `label`（日志字符串）。任何一条 klines endpoint 以后修改分页语义都只改这一处。测试覆盖点：跨两页分页 / 空响应早退 / `len(raw) < limit` 提前终止 / 限流重试 / 500 重试 / 404 传递 / `symbol` vs `pair` 参数路由 / `include_volume=True/False` 的 schema。
+3. **`except Exception` 窄化是故意的行为变更**。老代码里 `fetch_klines` 的 `except (httpx.RequestError, Exception) as e:` 实际等价于 `except Exception` —— `json.JSONDecodeError` 这种"服务端损坏数据"会被当成 transport error 重试 5 次 × 2s = 10s 延迟才失败。新 `request_with_retry` 只捕 `httpx.RequestError`。这是一个**可观察的行为变更**：Binance 返回畸形 JSON 时现在第一次就失败（更诚实、更快）。`TestRequestWithRetryJsonDecodeNoRetry::test_malformed_json_not_retried` 显式把这条语义 pin 住。这是今天演进里**唯一**的行为变更；其他全部是纯重构。
+4. **`request_with_retry` 的测试是 `asyncio.sleep` autouse-patched 的**。`@pytest.fixture(autouse=True) _patch_asyncio_sleep` 把整个 `tinohelm.data.providers._rest.asyncio.sleep` 换成 AsyncMock，这样 15 个 retry/backoff 测试（含 5 次 429 后成功、max_retries 耗尽、自定义 max cap、500 系列 3 个状态码 parametrized、404 的 raise vs 返回 None 两分支、transport error 重试、follow_redirects 开关）总计 < 100ms 跑完，而不是要等 2+4+8+16+32 = 62 秒的实际退避。
+5. **`TestFetchKlinesThrottle` 用真实分页场景锁定 `low_sleep` 差异**。`fetch_klines` 和 `_paginate_klines`（klines 家族）用 `_KLINES_LOW_SLEEP = 0.5`；`fetch_agg_trades` 用 `_AGG_TRADES_LOW_SLEEP = 0.3`。测试 `test_low_sleep_is_agg_trades_baseline` 断言 `0.3 in sleep_values and 0.5 not in sleep_values` —— 如果以后有人"统一" agg_trades 到 0.5，会立即炸。这是保护不对称 throttle 政策最直接的不变量。
+6. **`_fetch_klines_generic` 整体删除**。`TestLegacyEntryPointsPreserved::test_legacy_generic_helper_removed` 锁死 `not hasattr(mod, "_fetch_klines_generic")`，防止有人"恢复"这个中间抽象。老代码里它被 `fetch_mark_price_klines` / `fetch_index_price_klines` 两个公开函数调用，都已经改成调 `_paginate_klines`，外部没有 import 过它（grep 确认）。
+7. **`downloader.py:download_file` 主体从 65 行到 18 行**，所有网络重试全部委托给 `request_with_retry(..., raise_on_404=True, follow_redirects=True)`。existing 的 `TestDownloadFile` 31 个测试（其中 4 个涉及 retry 决策）**无一需要修改**就继续通过 —— 因为测试是用 `AsyncMock()` mock `httpx.AsyncClient`，底下的 `client.get()` 行为不变就保证了外层行为不变。
+8. **`extract_zip` 的 `is_within_dir` 迁移**被同一次演进的端到端 integration 验证覆盖：`TestExtractZip` 所有 4 个原测试（含 `test_extract_first_csv_when_multiple` 和 `test_csv_case_insensitive`）照跑，都没碰到路径比较的语义变化（正常文件路径、both `startswith` 和 `is_within_dir` 给出同样的答案）。未来的 "zip slip" 攻击向量（`../../../etc/passwd` 作为 ZIP 成员）会走 `Path.resolve().relative_to()` 路径，`is_within_dir` 会更严格地拒绝。
+
+**讨论点**:
+- `verify_checksum` 里的 `get(checksum_url)` 是**单次**调用，没有任何重试，对 404 单独降级为 warning。这条路径不走 `request_with_retry`，理由：checksum 文件很小、限流代价低，而且它和主下载是先后串联的（checksum 失败后主下载已经成功），加 retry 是 scope 外的行为扩展。留给将来真的观察到 checksum 限流时再补。
+- 本次演进**没有**引入 `httpx-mock` / `pytest-httpx` 等外部 mock 库，全部用 httpx 自带的 `httpx.MockTransport`。这是为了保持 CI 无新 dep，也让测试的断言边界清晰（我们只 mock 到 HTTP 响应层，连 `httpx.AsyncClient` 本身都不 mock）。这样 `request_with_retry` 的测试才真实地测到 httpx 的 `raise_for_status()` 行为。
+- `INTERVAL_MS` 表虽然保留但**本次仍然没有被 `_paginate_klines` 消费**。它是给上游 caller（`data/pipeline.py` 推断 bar 时长）用的，不是分页逻辑用的。未来若分页要用 `end_ms = start_ms + N * INTERVAL_MS[interval]` 策略（目前是直接传 end_ms），`INTERVAL_MS` 迁入 `_rest.py` 才合适。本次维持原位。
+
+**验证**:
+- **NT-free 全量回归**：`pytest tests/` baseline **1280 passed / 41 failed / 21 errors** → with changes **1409 passed / 41 failed / 21 errors**（41 failed + 21 errors 完全是 pre-existing NT-dependent 测试，**不变**）—— 净增 **+129 passed, 0 regression**
+- **新测试单独**：`pytest tests/data/providers/` → **129 passed in 0.42s**（100 `test_rest_helpers` + 29 `test_binance`）
+- **既有测试不受影响**：`pytest tests/data/test_downloader.py` → 31/31 passed（refactor 后老 mock 一行不改就继续通过）
+- **lint**：`ruff check` on 5 modified/new files → **All checks passed!**
+- **符号面稳定性**：`from tinohelm.data.providers.binance import fetch_klines, fetch_mark_price_klines, fetch_index_price_klines, fetch_agg_trades, INTERVAL_MS, BINANCE_FUTURES_BASE, BINANCE_FUTURES_TESTNET` 全部保留；`VisionDownloader / DownloadTask / ChecksumError` 公开符号保留；`_MAX_RETRIES` 保留且语义未变（现在引用共享常量）
+- **行为变更有且仅有一处**：malformed JSON 不再被静默重试 5 次（由 `TestRequestWithRetryJsonDecodeNoRetry` 锁定）
+
+---
+
 ## 2026-04-21 (4)
 
 **主题**: 把 5 个 node actor 共同依赖的 position/fill/bar/equity 事件序列化层抽到 `node/actors/serialize.py` 单一事实源，附带把 `_RedisLogHandler` 里的 inline token bucket 提升为可注入时钟的 `TokenBucket` 类；为新抽出的纯逻辑层（101 个 NT-free 测试）+ DbWriterActor 的 SQL 绑定 / buffer 调度路径建立安全网
