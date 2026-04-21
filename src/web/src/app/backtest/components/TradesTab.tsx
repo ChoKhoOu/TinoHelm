@@ -6,6 +6,7 @@ import { API_BASE } from "@/lib/api";
 import type { BacktestResult } from "../types";
 import { CARD_CLS, CARD_BODY_CLS, SectionTitle } from "./TradesHelpers";
 import { MetricCard } from "./TradesMetricCard";
+import { SectionLabel } from "@/components/qds";
 import {
   PnlDistributionChart,
   CumulativePnlChart,
@@ -195,7 +196,7 @@ export function TradesTab({ runId }: TradesTabProps) {
       </div>
 
       {/* ── Trade PnL ── */}
-      <span className="qds-section-label">Trade PnL</span>
+      <SectionLabel>Trade PnL</SectionLabel>
       <div className="grid grid-cols-2 gap-4">
         <div className={CARD_CLS}><div className={CARD_BODY_CLS}>
           <SectionTitle>盈亏分布</SectionTitle>
@@ -208,7 +209,7 @@ export function TradesTab({ runId }: TradesTabProps) {
       </div>
 
       {/* ── Scatter & MAE/MFE ── */}
-      <span className="qds-section-label">Scatter &amp; MAE / MFE</span>
+      <SectionLabel>Scatter &amp; MAE / MFE</SectionLabel>
       <div className="grid grid-cols-2 gap-4">
         <div className={CARD_CLS}><div className={CARD_BODY_CLS}>
           <SectionTitle>逐笔盈亏散点</SectionTitle>
@@ -221,7 +222,7 @@ export function TradesTab({ runId }: TradesTabProps) {
       </div>
 
       {/* ── Patterns & Streaks ── */}
-      <span className="qds-section-label">Patterns &amp; Streaks</span>
+      <SectionLabel>Patterns &amp; Streaks</SectionLabel>
       <div className="grid grid-cols-2 gap-4">
         <div className={CARD_CLS}><div className={CARD_BODY_CLS}>
           <SectionTitle>持仓时长分布</SectionTitle>
@@ -234,13 +235,13 @@ export function TradesTab({ runId }: TradesTabProps) {
       </div>
 
       {/* ── Long vs Short ── */}
-      <span className="qds-section-label">Long vs Short</span>
+      <SectionLabel>Long vs Short</SectionLabel>
       <div className={CARD_CLS}><div className={CARD_BODY_CLS}>
         <LongShortChart data={result.long_vs_short} />
       </div></div>
 
       {/* ── By Time ── */}
-      <span className="qds-section-label">By Time</span>
+      <SectionLabel>By Time</SectionLabel>
       <div className="grid grid-cols-2 gap-4">
         <div className={CARD_CLS}><div className={CARD_BODY_CLS}>
           <SectionTitle>按星期收益分布</SectionTitle>

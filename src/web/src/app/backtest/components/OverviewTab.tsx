@@ -1,35 +1,21 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  Tooltip as RechartsTooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-  ReferenceLine,
-} from "recharts";
 import { Skeleton } from "@/components/ui/skeleton";
 
-import { CHART_TOOLTIP_PROPS, CHART_GRID_STYLE, CHART_LABEL_STYLE } from "@/lib/chartTheme";
 import { API_BASE } from "@/lib/api";
+import { OverviewEquitySvg } from "./OverviewEquitySvg";
 import type { BacktestResult } from "../types";
 import {
   CARD_CLS,
-  CARD_HEADER_CLS,
   CARD_BODY_CLS,
-  BADGE_BASE_CLS,
-  BADGE_G_CLS,
-  BADGE_R_CLS,
   SEC_CLS,
   SectionLabel,
   StatRow,
   fmt,
-  fmtSigned,
   fmtCurrency,
 } from "./OverviewHelpers";
+import { VIEW_BTN_CLS } from "./backtestStyles";
 import { OverviewKpiGrid } from "./OverviewKpiGrid";
 import { MonthlyHeatmap } from "./OverviewMonthlyHeatmap";
 import { WinLossBar, LongShortBar } from "./OverviewDistributionBars";
@@ -46,9 +32,10 @@ import {
 
 interface OverviewTabProps {
   runId: string;
+  onViewAllTrades?: () => void;
 }
 
-export function OverviewTab({ runId }: OverviewTabProps) {
+export function OverviewTab({ runId, onViewAllTrades }: OverviewTabProps) {
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -116,25 +103,11 @@ export function OverviewTab({ runId }: OverviewTabProps) {
 
   const hasMultiInst = per_instrument && Object.keys(per_instrument).length > 1;
 
-  // Equity + drawdown chart data — sample to ~200 points
-  const maxPoints = 200;
-  const step = equity_curve.length > maxPoints ? Math.ceil(equity_curve.length / maxPoints) : 1;
-  const chartData = equity_curve
-    .filter((_, i) => i % step === 0)
-    .map((p) => ({
-      t: new Date(p.timestamp ?? p.date ?? "").toLocaleDateString("zh-CN", { month: "short", day: "numeric" }),
-      equity: p.equity,
-      drawdown: p.drawdown_pct ?? 0,
-    }));
-
   const totalPnl = s.total_pnl;
   const totalRetPct = s.total_return_pct;
   const isPnlPositive = totalPnl >= 0;
 
   const maxDdPct = s.max_drawdown !== null ? Math.abs(s.max_drawdown) * 100 : null;
-  const chartMaxDd = chartData.length > 0
-    ? Math.min(...chartData.map((d) => d.drawdown))
-    : null;
 
   return (
     <div className="flex flex-col gap-5 p-4">
@@ -148,92 +121,34 @@ export function OverviewTab({ runId }: OverviewTabProps) {
         maxDdPct={maxDdPct}
       />
 
-      {/* 3. Equity & Drawdown — side by side */}
-      {chartData.length > 0 && (
-        <div className={SEC_CLS}>
-          <SectionLabel>Equity &amp; Drawdown</SectionLabel>
-          <div className="grid grid-cols-2 gap-5">
-            {/* Equity Curve */}
-            <div className={CARD_CLS}>
-              <div className={CARD_HEADER_CLS}>
-                <span>Equity Curve</span>
-                <span className={`${BADGE_BASE_CLS} ${isPnlPositive ? BADGE_G_CLS : BADGE_R_CLS}`}>
-                  {fmtSigned(totalRetPct, 1)}%
-                </span>
-              </div>
-              <div className={CARD_BODY_CLS}>
-                <ResponsiveContainer width="100%" height={240}>
-                  <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
-                    <defs>
-                      <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="var(--info)" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="var(--info)" stopOpacity={0.02} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" />
-                    <XAxis dataKey="t" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-                    <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false}
-                      tickFormatter={(v) => `$${fmt(Number(v) / 1000, 0, "0")}k`} width={48} />
-                    <RechartsTooltip
-                      {...CHART_TOOLTIP_PROPS}
-                      formatter={(value: unknown) => [`$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })}`, "权益"]}
-                    />
-                    <ReferenceLine
-                      y={chartData[0]?.equity ?? 0}
-                      stroke="var(--warn)"
-                      strokeDasharray="4 4"
-                      strokeWidth={1}
-                      label={{ ...CHART_LABEL_STYLE, value: `本金 $${fmt((chartData[0]?.equity ?? 0) / 1000, 0, "0")}k`, fill: "var(--warn)", position: "insideTopLeft" }}
-                    />
-                    <Area type="monotone" dataKey="equity" stroke="var(--info)" strokeWidth={1.5} fill="url(#eqGrad)" dot={false} activeDot={{ r: 3, fill: "var(--info)" }} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* Drawdown */}
-            <div className={CARD_CLS}>
-              <div className={CARD_HEADER_CLS}>
-                <span>Drawdown</span>
-                <span className={`${BADGE_BASE_CLS} ${BADGE_R_CLS}`}>
-                  Max {chartMaxDd !== null ? fmt(chartMaxDd, 1) : (maxDdPct !== null ? `-${fmt(maxDdPct, 1)}` : "—")}%
-                </span>
-              </div>
-              <div className={CARD_BODY_CLS}>
-                <ResponsiveContainer width="100%" height={240}>
-                  <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
-                    <defs>
-                      <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#E5534B" stopOpacity={0.4} />
-                        <stop offset="95%" stopColor="#E5534B" stopOpacity={0.02} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid {...CHART_GRID_STYLE} strokeDasharray="3 3" />
-                    <XAxis dataKey="t" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-                    <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} tickLine={false} axisLine={false}
-                      tickFormatter={(v) => `${fmt(v, 1)}%`} width={48} />
-                    <RechartsTooltip
-                      {...CHART_TOOLTIP_PROPS}
-                      formatter={(value: unknown) => [`${fmt(value, 2)}%`, "回撤"]}
-                    />
-                    <Area type="monotone" dataKey="drawdown" stroke="#E5534B" strokeWidth={1.5} fill="url(#ddGrad)" dot={false} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
+      {/* 3. Equity & Drawdown — self-drawn SVG */}
+      <div className="mt-5">
+        <SectionLabel>Equity &amp; Drawdown</SectionLabel>
+        <div className={CARD_CLS}>
+          <div className={CARD_BODY_CLS}>
+            <OverviewEquitySvg data={equity_curve} />
           </div>
         </div>
-      )}
+      </div>
 
-      {/* 4. Monthly Returns Heatmap */}
-      {monthly_returns && monthly_returns.length > 0 && (
-        <div className={SEC_CLS}>
-          <SectionLabel>Monthly Returns</SectionLabel>
-          <div className={CARD_CLS}>
-            <div className={CARD_BODY_CLS}>
-              <MonthlyHeatmap data={monthly_returns} />
+      {/* 4. Monthly Returns Heatmap + Drawdown — side by side */}
+      {(monthly_returns && monthly_returns.length > 0 || drawdown_periods && drawdown_periods.length > 0) && (
+        <div className="grid grid-cols-[1.4fr_1fr] gap-5 mt-5">
+          {/* Left: Monthly Heatmap */}
+          {monthly_returns && monthly_returns.length > 0 ? (
+            <div className={SEC_CLS}>
+              <SectionLabel>Monthly Returns</SectionLabel>
+              <div className={CARD_CLS}>
+                <div className={CARD_BODY_CLS}>
+                  <MonthlyHeatmap data={monthly_returns} />
+                </div>
+              </div>
             </div>
-          </div>
+          ) : <div />}
+          {/* Right: Drawdown top 4 */}
+          {drawdown_periods && drawdown_periods.length > 0 && (
+            <DrawdownTable periods={drawdown_periods} topN={4} />
+          )}
         </div>
       )}
 
@@ -247,7 +162,9 @@ export function OverviewTab({ runId }: OverviewTabProps) {
       <div className="grid grid-cols-3 gap-3">
         {/* Trade Stats */}
         <div className={CARD_CLS}>
-          <div className={CARD_HEADER_CLS}>交易统计</div>
+          <div className="px-4 py-2 border-b border-border text-xs font-medium text-muted-foreground">
+            交易统计
+          </div>
           <div className={`${CARD_BODY_CLS} flex flex-col gap-0.5`}>
             <StatRow label="总交易" value={String(s.total_trades)} />
             <StatRow label="盈利笔数" value={String(s.winning_trades)} color="text-qds-success" />
@@ -264,7 +181,9 @@ export function OverviewTab({ runId }: OverviewTabProps) {
 
         {/* PnL Stats */}
         <div className={CARD_CLS}>
-          <div className={CARD_HEADER_CLS}>收益统计</div>
+          <div className="px-4 py-2 border-b border-border text-xs font-medium text-muted-foreground">
+            收益统计
+          </div>
           <div className={`${CARD_BODY_CLS} flex flex-col gap-0.5`}>
             <StatRow label="总盈利" value={fmtCurrency(s.gross_profit)} color="text-qds-success" />
             <StatRow label="总亏损" value={fmtCurrency(s.gross_loss)} color="text-destructive" />
@@ -279,7 +198,9 @@ export function OverviewTab({ runId }: OverviewTabProps) {
 
         {/* Holding & Streaks */}
         <div className={CARD_CLS}>
-          <div className={CARD_HEADER_CLS}>持仓与连续</div>
+          <div className="px-4 py-2 border-b border-border text-xs font-medium text-muted-foreground">
+            持仓与连续
+          </div>
           <div className={`${CARD_BODY_CLS} flex flex-col gap-0.5`}>
             <StatRow label="平均持仓" value={s.avg_holding_time ?? "—"} />
             <StatRow label="盈利持仓" value={s.avg_winning_holding_time ?? "—"} />
@@ -297,18 +218,20 @@ export function OverviewTab({ runId }: OverviewTabProps) {
         </div>
       </div>
 
-      {/* 7. Top Trades */}
+      {/* 7. View all trades button */}
+      <div className="flex justify-end">
+        <button type="button" className={VIEW_BTN_CLS} onClick={() => onViewAllTrades?.()}>
+          查看所有交易 →
+        </button>
+      </div>
+
+      {/* 8. Top Trades */}
       <TopTrades tradeLog={trade_log} />
 
-      {/* 8+9. Drawdowns + Instrument Breakdown — side by side */}
-      <div className="grid grid-cols-2 gap-5">
-        {drawdown_periods && drawdown_periods.length > 0 && (
-          <DrawdownTable periods={drawdown_periods} />
-        )}
-        {per_instrument && Object.keys(per_instrument).length > 0 && (
-          <InstrumentBreakdown data={per_instrument} />
-        )}
-      </div>
+      {/* 9. Instrument Breakdown */}
+      {per_instrument && Object.keys(per_instrument).length > 0 && (
+        <InstrumentBreakdown data={per_instrument} />
+      )}
 
       {/* 10. Correlation Matrix */}
       {hasMultiInst && instrument_correlation && Object.keys(instrument_correlation).length > 0 && (

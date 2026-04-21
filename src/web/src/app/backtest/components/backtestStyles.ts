@@ -6,7 +6,18 @@
  * create form stay in visual lock-step.
  */
 
-// Form section / row / group classes (used by BacktestCreateView).
+// Utility function for parsing timeframe strings.
+export function parseTimeframe(tf: string): { value: number; unit: string; clean: string } {
+  const m = tf.match(/^(\d+)(s|m|h|d|min|hour)$/i);
+  if (!m) return { value: 5, unit: "m", clean: "5m" };
+  let unit = m[2].toLowerCase();
+  if (unit === "min") unit = "m";
+  if (unit === "hour") unit = "h";
+  const value = parseInt(m[1]) || 1;
+  return { value, unit, clean: `${value}${unit}` };
+}
+
+// Form section / row / group classes (used by create sheet steps).
 export const FORM_SECTION_CLS =
   "mb-7 opacity-0 translate-y-4 transition-[opacity,transform] duration-[450ms] ease-qds data-[visible=true]:opacity-100 data-[visible=true]:translate-y-0";
 export const FORM_ROW_CLS = "grid grid-cols-2 gap-4 mb-4";
@@ -22,7 +33,7 @@ export const ACT_BTN_CLS =
 export const VIEW_BTN_CLS =
   "inline-flex items-center gap-1 font-mono text-[0.7rem] px-2.5 py-1 rounded-md border border-border bg-transparent text-qds-t1 cursor-pointer transition-all hover:border-primary hover:text-primary hover:bg-primary/10";
 
-// Status accent stripe + pill background/text maps (used by both row types).
+// Status accent stripe map (used by both row types).
 export const ACCENT_BG_MAP: Record<string, string> = {
   run: "bg-qds-info",
   done: "bg-qds-success",
@@ -30,9 +41,15 @@ export const ACCENT_BG_MAP: Record<string, string> = {
   queue: "bg-qds-t3",
 };
 
-export const STATUS_PILL_MAP: Record<string, string> = {
-  run: "bg-primary/15 text-primary",
-  done: "bg-qds-success-dim text-qds-success",
-  fail: "bg-qds-danger-dim text-destructive",
-  queue: "bg-secondary text-muted-foreground",
+export const STEPPER_DOT_CLS_MAP = {
+  active: "bg-primary text-primary-foreground",
+  completed: "bg-qds-success text-white",
+  pending: "border border-border text-muted-foreground bg-transparent",
 };
+
+export const TIMEFRAME_CHIP_CLS = {
+  active: "border-primary bg-primary/15 text-primary",
+  inactive: "border-border text-muted-foreground",
+};
+
+export const FORM_SECTION_STATIC_CLS = "mb-7 transition-[opacity,transform] duration-[450ms] ease-qds";

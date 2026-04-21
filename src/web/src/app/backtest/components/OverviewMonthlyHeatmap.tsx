@@ -2,6 +2,7 @@
 
 import { Fragment } from "react";
 import type { MonthlyReturn } from "../types";
+import { InlineError } from "@/components/qds";
 
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -16,7 +17,7 @@ export function MonthlyHeatmap({ data }: { data: MonthlyReturn[] }) {
   }
 
   const years = Object.keys(map).map(Number).sort((a, b) => a - b);
-  if (years.length === 0) return null;
+  if (years.length === 0) return <InlineError variant="hint">暂无月度收益数据</InlineError>;
 
   let maxAbs = 0;
   for (const yr of years) {
@@ -28,12 +29,12 @@ export function MonthlyHeatmap({ data }: { data: MonthlyReturn[] }) {
 
   const cellBg = (val: number | undefined) => {
     if (val === undefined) return "transparent";
-    if (val === 0) return "rgba(255,255,255,0.03)";
+    if (val === 0) return "var(--bg-t)";
     const ratio = Math.min(Math.abs(val) / (maxAbs || 1), 1);
-    const alpha = 0.12 + ratio * 0.45;
+    const pct = Math.round((0.12 + ratio * 0.45) * 100);
     return val > 0
-      ? `rgba(76, 175, 80, ${alpha})`
-      : `rgba(239, 83, 80, ${alpha})`;
+      ? `color-mix(in srgb, var(--suc) ${pct}%, transparent)`
+      : `color-mix(in srgb, var(--dan) ${pct}%, transparent)`;
   };
 
   const cellText = (val: number | undefined) => {

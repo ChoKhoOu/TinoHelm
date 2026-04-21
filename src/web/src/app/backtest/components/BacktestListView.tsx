@@ -3,6 +3,7 @@
 import { Plus, RefreshCw } from "lucide-react";
 import { EmptyState } from "@/components/EmptyState";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SectionLabel } from "@/components/qds";
 import type { RunStatus } from "../types";
 import { BacktestRunRow, BacktestHistoryRow } from "./BacktestRunRow";
 import { BacktestPagination } from "./BacktestPagination";
@@ -63,6 +64,10 @@ interface BacktestListViewProps {
   onViewDetail: (id: string) => void;
   onPageChange: (p: number) => void;
   onPageSizeChange: (size: number) => void;
+  // Optional handlers wired from page.tsx (S6)
+  onRetryRun?: (run: BacktestRunSummary) => void;
+  onCancelRun?: (runId: string) => void;
+  isWsStale?: boolean;
 }
 
 export function BacktestListView({
@@ -79,6 +84,9 @@ export function BacktestListView({
   onViewDetail,
   onPageChange,
   onPageSizeChange,
+  onRetryRun: _onRetryRun,
+  onCancelRun,
+  isWsStale = false,
 }: BacktestListViewProps) {
   // Split runs into active / history.
   const activeRuns = runs.filter((r) => r.status === "running" || r.status === "queued");
@@ -94,7 +102,7 @@ export function BacktestListView({
   return (
     <div className="mt-5">
       {/* Header */}
-      <div className="flex justify-between items-start mb-6">
+      <div className="flex justify-between items-start mb-6 animate-qds-fade-up [animation-delay:0ms]">
         <div>
           <div className="text-lg font-bold text-foreground mb-0.5">回测管理</div>
           <div className="text-[0.75rem] text-muted-foreground">
@@ -120,7 +128,7 @@ export function BacktestListView({
 
       {/* Summary strip */}
       {runs.length > 0 && (
-        <div className="flex gap-6 mb-5 font-mono text-[0.75rem]">
+        <div className="flex gap-6 mb-5 font-mono text-[0.75rem] animate-qds-fade-up [animation-delay:100ms]">
           {(() => {
             const items: { key: string; color: string; label: string }[] = [];
             if (statusCounts.running) items.push({ key: "running", color: "var(--info)", label: `${statusCounts.running} Running` });
@@ -140,7 +148,7 @@ export function BacktestListView({
 
       {/* Loading skeleton */}
       {runsLoading ? (
-        <div className="bg-card border border-border rounded-lg overflow-hidden">
+        <div className="bg-card border border-border rounded-lg overflow-hidden animate-qds-fade-up [animation-delay:200ms]">
           {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="px-4 py-3 border-b border-border last:border-b-0">
               <Skeleton className="h-10 w-full rounded" />
@@ -148,7 +156,7 @@ export function BacktestListView({
           ))}
         </div>
       ) : runs.length === 0 ? (
-        <div className="bg-card border border-border rounded-lg overflow-hidden">
+        <div className="bg-card border border-border rounded-lg overflow-hidden animate-qds-fade-up [animation-delay:160ms]">
           <EmptyState
             variant="first-use"
             icon={<span className="text-muted-foreground">⧖</span>}
@@ -162,7 +170,7 @@ export function BacktestListView({
         <>
           {/* ZONE 1: Active tasks */}
           {activeRuns.length > 0 && (
-            <div className="bg-card border border-border rounded-lg overflow-hidden">
+            <div className="bg-card border border-border rounded-lg overflow-hidden animate-qds-fade-up [animation-delay:160ms]">
               {activeRuns.map((run) => (
                 <BacktestRunRow
                   key={run.run_id}
@@ -172,6 +180,8 @@ export function BacktestListView({
                   expandedId={expandedId}
                   onToggleExpand={onToggleExpand}
                   onViewDetail={onViewDetail}
+                  onCancelRun={onCancelRun}
+                  isWsStale={isWsStale}
                 />
               ))}
             </div>
@@ -179,9 +189,9 @@ export function BacktestListView({
 
           {/* ZONE 2: History */}
           {historyRuns.length > 0 && (
-            <div className="mt-6">
+            <div className="mt-6 animate-qds-fade-up [animation-delay:160ms]">
               <div className="flex justify-between items-center mb-2.5">
-                <div className="qds-section-label !mb-0">历史记录</div>
+                <div className="mb-0"><SectionLabel>历史记录</SectionLabel></div>
                 <select
                   className="font-mono text-[0.68rem] px-2 py-1 bg-input border border-border rounded text-foreground outline-none cursor-pointer"
                   value={pageSize}
@@ -200,17 +210,20 @@ export function BacktestListView({
                     expanded={expandedId === run.run_id}
                     onToggleExpand={onToggleExpand}
                     onViewDetail={onViewDetail}
+                    onRetryRun={_onRetryRun}
                   />
                 ))}
               </div>
               {totalHistoryPages > 1 && (
-                <BacktestPagination
-                  curPage={safePage}
-                  totalPages={totalHistoryPages}
-                  total={historyRuns.length}
-                  pageSize={pageSize}
-                  onPageChange={onPageChange}
-                />
+                <div className="animate-qds-fade-up [animation-delay:240ms]">
+                  <BacktestPagination
+                    curPage={safePage}
+                    totalPages={totalHistoryPages}
+                    total={historyRuns.length}
+                    pageSize={pageSize}
+                    onPageChange={onPageChange}
+                  />
+                </div>
               )}
             </div>
           )}

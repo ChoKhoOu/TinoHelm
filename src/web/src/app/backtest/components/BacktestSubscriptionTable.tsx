@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api";
-import { FORM_SECTION_CLS } from "./backtestStyles";
+import { SectionLabel } from "@/components/qds";
+import { FORM_SECTION_STATIC_CLS } from "./backtestStyles";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -54,13 +55,13 @@ export function BacktestSubscriptionTable({ subscriptions, onSubscriptionsChange
   };
 
   return (
-    <div data-form-section className={FORM_SECTION_CLS}>
-      <div className="qds-section-label">
+    <div className={FORM_SECTION_STATIC_CLS}>
+      <SectionLabel>
         数据订阅
         <span className="font-normal text-muted-foreground text-[0.55rem] tracking-normal normal-case">
           {subscriptions.length > 0 ? `· ${subscriptions.length} 个数据源` : "· 选择策略后自动填充"}
         </span>
-      </div>
+      </SectionLabel>
       <div className="bg-card border border-border rounded-lg overflow-hidden">
         {subscriptions.length === 0 ? (
           <div className="py-10 px-8 text-center">
@@ -126,8 +127,8 @@ export function BacktestSubscriptionTable({ subscriptions, onSubscriptionsChange
                         </div>
                         {symbolDropdownIdx === idx && (
                           <div
-                            className="absolute z-50 max-h-[220px] overflow-y-auto w-[240px] bg-card border border-border rounded-[10px] mt-1 p-1.5"
-                            style={{ top: "100%", left: "1.25rem", boxShadow: "0 12px 40px rgba(0,0,0,.15)" }}
+                            className="absolute z-50 max-h-[220px] overflow-y-auto w-[240px] bg-card border border-border rounded-[10px] mt-1 p-1.5 shadow-2xl"
+                            style={{ top: "100%", left: "1.25rem" }}
                           >
                             {allSymbols
                               .filter((s) => {

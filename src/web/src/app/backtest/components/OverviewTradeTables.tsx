@@ -76,9 +76,9 @@ export function TopTrades({ tradeLog }: { tradeLog: BacktestResult["trade_log"] 
 /*  Notable Drawdowns                                                  */
 /* ------------------------------------------------------------------ */
 
-export function DrawdownTable({ periods }: { periods: DrawdownPeriod[] }) {
+export function DrawdownTable({ periods, topN }: { periods: DrawdownPeriod[]; topN?: number }) {
   if (!periods || periods.length === 0) return null;
-  const top5 = periods.slice(0, 5);
+  const top5 = periods.slice(0, topN ?? 5);
 
   return (
     <div className={SEC_CLS}>

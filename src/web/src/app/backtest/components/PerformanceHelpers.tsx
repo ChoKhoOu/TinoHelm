@@ -10,6 +10,7 @@ import {
   TooltipProvider,
 } from "@/components/ui/tooltip";
 import { useCountUp } from "@/hooks/useCountUp";
+import { SectionLabel } from "@/components/qds";
 
 /* ------------------------------------------------------------------ */
 /*  Pure helpers                                                       */
@@ -120,7 +121,7 @@ export function SectionHeader({
   title: string;
   index?: number;
 }) {
-  return <span className="qds-section-label">{title}</span>;
+  return <SectionLabel>{title}</SectionLabel>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -164,10 +165,10 @@ export function MetricCard({
 
   const accentColor =
     positive === null || positive === undefined
-      ? "rgba(76, 158, 235, 0.5)"
+      ? "color-mix(in srgb, var(--info) 50%, transparent)"
       : positive
-        ? "rgba(38, 217, 127, 0.5)"
-        : "rgba(239, 83, 80, 0.5)";
+        ? "color-mix(in srgb, var(--suc) 50%, transparent)"
+        : "color-mix(in srgb, var(--dan) 50%, transparent)";
 
   const formatted =
     value == null

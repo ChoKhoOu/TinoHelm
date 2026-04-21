@@ -45,13 +45,7 @@ export const pnlColor = (v: number) => (v >= 0 ? "text-qds-success" : "text-dest
 /*  Section label                                                      */
 /* ------------------------------------------------------------------ */
 
-export function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="qds-section-label">
-      {children}
-    </span>
-  );
-}
+export { SectionLabel } from "@/components/qds";
 
 /* ------------------------------------------------------------------ */
 /*  Stat row (label + value)                                           */

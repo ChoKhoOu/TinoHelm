@@ -1,14 +1,71 @@
 "use client";
 
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, RotateCcw } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { BacktestCopyableId } from "./BacktestRunningPlaceholder";
+import { StatusBadge } from "@/components/qds/status-badge";
+import { ShimmerBar } from "@/components/qds/shimmer-bar";
 import {
   ACCENT_BG_MAP,
-  STATUS_PILL_MAP,
   VIEW_BTN_CLS,
 } from "./backtestStyles";
 import type { BacktestProgressDetail, BacktestRunSummary } from "./BacktestListView";
+
+/* ------------------------------------------------------------------ */
+/*  RingProgress — SVG ring with percentage text                       */
+/* ------------------------------------------------------------------ */
+
+const RING_R = 18;
+const RING_C = 2 * Math.PI * RING_R;
+
+function RingProgress({ pct }: { pct: number }) {
+  const clampedPct = Math.min(100, Math.max(0, pct));
+  const dashOffset = RING_C * (1 - clampedPct / 100);
+  return (
+    <svg
+      data-ring-progress
+      viewBox="0 0 44 44"
+      width={44}
+      height={44}
+      style={{ flexShrink: 0 }}
+    >
+      {/* track */}
+      <circle
+        cx="22"
+        cy="22"
+        r={RING_R}
+        fill="none"
+        stroke="var(--bd)"
+        strokeWidth="3"
+      />
+      {/* progress */}
+      <circle
+        cx="22"
+        cy="22"
+        r={RING_R}
+        fill="none"
+        stroke="var(--info)"
+        strokeWidth="3"
+        strokeDasharray={RING_C}
+        strokeDashoffset={dashOffset}
+        transform="rotate(-90 22 22)"
+        style={{ transition: "stroke-dashoffset 0.3s ease" }}
+        className="motion-reduce:transition-none"
+      />
+      {/* center text */}
+      <text
+        x="22"
+        y="22"
+        textAnchor="middle"
+        dominantBaseline="central"
+        fontSize="10"
+        fill="var(--t0)"
+      >
+        {clampedPct}%
+      </text>
+    </svg>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /*  Formatting helpers                                                 */
@@ -28,6 +85,13 @@ function fmtBars(n: number | undefined): string {
   return String(n);
 }
 
+/** Format PnL with sign prefix, $ symbol, and thousands separator. */
+function fmtPnl(pnl: number | null | undefined): string {
+  if (pnl == null) return "—";
+  const abs = Math.abs(pnl).toLocaleString(undefined, { maximumFractionDigits: 0 });
+  return pnl >= 0 ? `+$${abs}` : `-$${abs}`;
+}
+
 /* ------------------------------------------------------------------ */
 /*  BacktestRunRow (active runs: running / queued)                     */
 /* ------------------------------------------------------------------ */
@@ -39,9 +103,11 @@ interface BacktestRunRowProps {
   expandedId: string | null;
   onToggleExpand: (id: string) => void;
   onViewDetail: (id: string) => void;
+  onCancelRun?: (runId: string) => void;
+  isWsStale?: boolean;
 }
 
-export function BacktestRunRow({ run, progress, progressDetail, expandedId, onToggleExpand, onViewDetail }: BacktestRunRowProps) {
+export function BacktestRunRow({ run, progress, progressDetail, expandedId, onToggleExpand, onViewDetail, onCancelRun, isWsStale = false }: BacktestRunRowProps) {
   const dateRange = `${run.start_date?.slice(0, 10) ?? "?"} → ${run.end_date?.slice(0, 10) ?? "?"}`;
   const isRunning = run.status === "running";
   const isQueued = run.status === "queued";
@@ -60,15 +126,6 @@ export function BacktestRunRow({ run, progress, progressDetail, expandedId, onTo
       ? "fail"
       : "queue";
 
-  const statusLabel: Record<string, string> = {
-    running: "Running",
-    completed: "Done",
-    failed: "Failed",
-    queued: "Queued",
-    cancelled: "Cancelled",
-    cancelling: "Cancelling",
-  };
-
   const handleRowClick = () => {
     if (isExpandable) {
       onToggleExpand(run.run_id);
@@ -78,17 +135,23 @@ export function BacktestRunRow({ run, progress, progressDetail, expandedId, onTo
   };
 
   const accentCls = ACCENT_BG_MAP[statusKey] ?? "bg-qds-t3";
-  const statusPillCls = STATUS_PILL_MAP[statusKey] ?? "bg-secondary text-muted-foreground";
 
   return (
     <div className="relative bg-card border-b border-border last:border-b-0 transition-colors hover:bg-secondary">
+      {/* 10-col responsive grid:
+          col1=3px stripe | col2=strategy+symbol (1fr) | col3=run_id (lg+) |
+          col4=date range | col5=status badge | col6=total return |
+          col7=sharpe (xl+) | col8=winrate (xl+) | col9=pnl | col10=actions */}
       <div
         className="grid items-center cursor-pointer"
-        style={{ gridTemplateColumns: "3px 1fr auto auto auto" }}
+        style={{ gridTemplateColumns: "3px 1fr auto auto auto auto auto auto auto auto" }}
         onClick={handleRowClick}
       >
+        {/* col1: accent stripe */}
         <div className={`self-stretch ${accentCls}`} />
-        <div className="flex flex-col gap-1 px-3 py-3">
+
+        {/* col2: strategy + symbol (always visible) */}
+        <div className="flex flex-col gap-1 px-3 py-3 min-w-0">
           <div className="flex items-center gap-2 font-mono text-[0.82rem] font-medium">
             {run.strategy_name}
             {(() => {
@@ -117,26 +180,60 @@ export function BacktestRunRow({ run, progress, progressDetail, expandedId, onTo
               );
             })()}
           </div>
+          {/* sub-row: interval · dateRange; on <lg also show run_id short */}
           <div className="flex items-center gap-2 font-mono text-[0.68rem] text-muted-foreground">
-            <BacktestCopyableId runId={run.run_id} />
+            <span className="lg:hidden text-qds-t3">{run.run_id.slice(0, 8)} ·</span>
             {run.interval} · {dateRange}
           </div>
         </div>
 
-        <div className="px-2 py-3">
-          <span className={`inline-flex items-center gap-1.5 font-mono text-[0.68rem] font-medium px-2 py-0.5 rounded-full ${statusPillCls}`}>
-            {run.status === "running" && (
-              <span className="relative w-1.5 h-1.5 rounded-full bg-primary shrink-0">
-                <span className="absolute inset-[-3px] rounded-full border-[1.5px] border-primary animate-qds-pulse opacity-0" />
-              </span>
-            )}
-            {run.status === "completed" && "✓ "}
-            {run.status === "failed" && "✕ "}
-            {run.status === "queued" && "◦ "}
-            {statusLabel[run.status] ?? run.status}
-          </span>
+        {/* col3: run_id — hidden on <lg, visible on lg+ */}
+        <div className="hidden lg:flex items-center px-2 py-3">
+          <BacktestCopyableId runId={run.run_id} />
         </div>
 
+        {/* col4: date range */}
+        <div className="px-2 py-3 font-mono text-[0.68rem] text-muted-foreground whitespace-nowrap">
+          {dateRange}
+        </div>
+
+        {/* col5: status badge */}
+        <div className="px-2 py-3" data-meta-cell>
+          <StatusBadge status={run.status} locale="en" />
+        </div>
+
+        {/* col6: total return pct */}
+        <div className="px-2 py-3 text-right font-mono text-[0.75rem]">
+          {isDone && run.result_summary?.total_return_pct != null ? (
+            <span className={run.result_summary.total_return_pct >= 0 ? "text-qds-success" : "text-destructive"}>
+              {run.result_summary.total_return_pct >= 0 ? "+" : ""}{run.result_summary.total_return_pct.toFixed(1)}%
+            </span>
+          ) : (
+            <span className="font-mono text-xs text-muted-foreground">—</span>
+          )}
+        </div>
+
+        {/* col7: sharpe — hidden on <xl */}
+        <div className="hidden xl:flex items-center px-2 py-3 text-right font-mono text-[0.75rem]">
+          {isDone && run.result_summary?.sharpe_ratio != null ? (
+            <span className={(run.result_summary.sharpe_ratio ?? 0) >= 1 ? "text-qds-success" : (run.result_summary.sharpe_ratio ?? 0) >= 0 ? "text-foreground" : "text-destructive"}>
+              {run.result_summary.sharpe_ratio.toFixed(2)}
+            </span>
+          ) : (
+            <span className="font-mono text-xs text-muted-foreground">—</span>
+          )}
+        </div>
+
+        {/* col8: win rate — hidden on <xl */}
+        <div className="hidden xl:flex items-center px-2 py-3 text-right font-mono text-[0.75rem]">
+          {isDone && run.result_summary?.win_rate != null ? (
+            <span>{(run.result_summary.win_rate * 100).toFixed(1)}%</span>
+          ) : (
+            <span className="font-mono text-xs text-muted-foreground">—</span>
+          )}
+        </div>
+
+        {/* col9: PnL */}
         <div className="px-2 py-3 text-right font-mono text-[0.75rem] min-w-[80px]">
           {isRunning && (
             <span className="text-primary">{pct}%</span>
@@ -150,14 +247,15 @@ export function BacktestRunRow({ run, progress, progressDetail, expandedId, onTo
           )}
           {isDone && run.result_summary?.total_pnl != null ? (
             <span className={run.result_summary.total_pnl >= 0 ? "text-qds-success" : "text-destructive"}>
-              {run.result_summary.total_pnl >= 0 ? "+" : ""}${Math.abs(run.result_summary.total_pnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              {fmtPnl(run.result_summary.total_pnl)}
             </span>
           ) : isDone ? (
-            <span className="text-qds-success">Completed</span>
+            <span className="font-mono text-xs text-muted-foreground">—</span>
           ) : null}
           {isFailed && <span className="text-destructive text-[0.68rem]">{run.error ? run.error.slice(0, 16) : "Error"}</span>}
         </div>
 
+        {/* col10: actions */}
         <div className="flex items-center pr-3 py-3 gap-1">
           {isExpandable && (
             <span
@@ -184,9 +282,11 @@ export function BacktestRunRow({ run, progress, progressDetail, expandedId, onTo
             className="h-full bg-primary transition-[width] duration-[1.5s] ease-qds"
             style={{ width: `${pct}%` }}
           />
-          <div className="absolute inset-0 animate-qds-shimmer pointer-events-none">
-            <div className="h-full w-full bg-gradient-to-r from-transparent via-white/35 to-transparent" />
-          </div>
+          {!isWsStale && (
+            <div className="absolute inset-0 animate-qds-shimmer pointer-events-none">
+              <div className="h-full w-full bg-gradient-to-r from-transparent via-white/35 to-transparent" />
+            </div>
+          )}
         </div>
       )}
 
@@ -195,33 +295,48 @@ export function BacktestRunRow({ run, progress, progressDetail, expandedId, onTo
           className="overflow-hidden bg-input border-t transition-[max-height] duration-[400ms] ease-qds"
           style={{ maxHeight: isExpanded ? 400 : 0, borderTopWidth: isExpanded ? 1 : 0 }}
         >
-          <div className="p-4 pl-[calc(1rem+3px)]">
+          <div className="p-4 pl-[calc(1rem+3px)]" data-ws-stale={isWsStale ? "true" : "false"}>
             {isRunning && (
               <>
-                <div className="relative h-1.5 rounded bg-secondary overflow-hidden mb-3">
-                  <div
-                    className="h-full rounded bg-primary transition-[width] duration-[1.5s] ease-qds"
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  <div className="flex flex-col gap-0.5">
-                    <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">Progress</div>
-                    <div className="font-mono text-[0.75rem] font-medium text-primary">{pct}%</div>
+                {/* Top row: ring + shimmer bar + cancel */}
+                <div className="flex items-center gap-3 mb-3">
+                  <RingProgress pct={pct} />
+                  <div className="flex-1">
+                    <ShimmerBar progress={pct} height="md" active={!isWsStale} variant="accent" />
                   </div>
-                  <div className="flex flex-col gap-0.5">
+                  {onCancelRun && (
+                    <button
+                      className={`${VIEW_BTN_CLS} !text-destructive hover:!border-destructive hover:!bg-destructive/10`}
+                      onClick={(e) => { e.stopPropagation(); onCancelRun(run.run_id); }}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+                {/* 6 meta cells */}
+                <div className="grid grid-cols-6 gap-2">
+                  <div className="flex flex-col gap-0.5" data-meta-cell>
+                    <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">Progress</div>
+                    <div className="font-mono text-[0.75rem] font-medium text-primary flex items-center">
+                      <span>{pct}%</span>
+                      {isWsStale && (
+                        <span className="text-qds-warning text-[0.6rem] ml-1">· 连接待恢复</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-0.5" data-meta-cell>
                     <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">Elapsed</div>
                     <div className="font-mono text-[0.75rem] font-medium">{fmtSecs(progressDetail?.elapsed_secs)}</div>
                   </div>
-                  <div className="flex flex-col gap-0.5">
+                  <div className="flex flex-col gap-0.5" data-meta-cell>
                     <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">ETA</div>
                     <div className="font-mono text-[0.75rem] font-medium">{progressDetail?.eta_secs != null ? `~${fmtSecs(progressDetail.eta_secs)}` : "—"}</div>
                   </div>
-                  <div className="flex flex-col gap-0.5">
+                  <div className="flex flex-col gap-0.5" data-meta-cell>
                     <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">Speed</div>
                     <div className="font-mono text-[0.75rem] font-medium">{progressDetail?.bars_per_sec != null ? `${fmtBars(progressDetail.bars_per_sec)}/s` : "—"}</div>
                   </div>
-                  <div className="flex flex-col gap-0.5">
+                  <div className="flex flex-col gap-0.5" data-meta-cell>
                     <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">Processed</div>
                     <div className="font-mono text-[0.75rem] font-medium">
                       {progressDetail?.processed_bars != null
@@ -229,17 +344,9 @@ export function BacktestRunRow({ run, progress, progressDetail, expandedId, onTo
                         : "—"}
                     </div>
                   </div>
-                  <div className="flex flex-col gap-0.5">
+                  <div className="flex flex-col gap-0.5" data-meta-cell>
                     <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">Trades</div>
                     <div className="font-mono text-[0.75rem] font-medium">{progressDetail?.trades != null ? progressDetail.trades : "—"}</div>
-                  </div>
-                  <div className="flex flex-col gap-0.5">
-                    <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">Memory</div>
-                    <div className="font-mono text-[0.75rem] font-medium text-muted-foreground">—</div>
-                  </div>
-                  <div className="flex flex-col gap-0.5">
-                    <div className="text-[0.6rem] uppercase tracking-wider text-muted-foreground">CPU</div>
-                    <div className="font-mono text-[0.75rem] font-medium text-muted-foreground">—</div>
                   </div>
                 </div>
               </>
@@ -290,26 +397,30 @@ interface BacktestHistoryRowProps {
   expanded: boolean;
   onToggleExpand: (id: string) => void;
   onViewDetail: (id: string) => void;
+  onRetryRun?: (run: BacktestRunSummary) => void;
 }
 
-export function BacktestHistoryRow({ run, expanded, onToggleExpand, onViewDetail }: BacktestHistoryRowProps) {
+export function BacktestHistoryRow({ run, expanded, onToggleExpand, onViewDetail, onRetryRun }: BacktestHistoryRowProps) {
   const dateRange = `${run.start_date?.slice(0, 10) ?? "?"} → ${run.end_date?.slice(0, 10) ?? "?"}`;
   const isDone = run.status === "completed";
   const statusKey = isDone ? "done" : "fail";
   const s = run.result_summary;
 
   const accentCls = ACCENT_BG_MAP[statusKey] ?? "bg-qds-t3";
-  const statusPillCls = STATUS_PILL_MAP[statusKey] ?? "bg-secondary text-muted-foreground";
 
   return (
     <div className="relative bg-card border-b border-border last:border-b-0 transition-colors hover:bg-secondary">
+      {/* 10-col responsive grid — same structure as BacktestRunRow */}
       <div
         className="grid items-center cursor-pointer"
-        style={{ gridTemplateColumns: "3px 1fr auto auto auto" }}
+        style={{ gridTemplateColumns: "3px 1fr auto auto auto auto auto auto auto auto" }}
         onClick={() => onToggleExpand(run.run_id)}
       >
+        {/* col1: accent stripe */}
         <div className={`self-stretch ${accentCls}`} />
-        <div className="flex flex-col gap-1 px-3 py-3">
+
+        {/* col2: strategy + symbol (always visible) */}
+        <div className="flex flex-col gap-1 px-3 py-3 min-w-0">
           <div className="flex items-center gap-2 font-mono text-[0.82rem] font-medium">
             {run.strategy_name}
             {(() => {
@@ -324,30 +435,73 @@ export function BacktestHistoryRow({ run, expanded, onToggleExpand, onViewDetail
               );
             })()}
           </div>
+          {/* sub-row: interval · dateRange; on <lg also show run_id short */}
           <div className="flex items-center gap-2 font-mono text-[0.68rem] text-muted-foreground">
-            <BacktestCopyableId runId={run.run_id} />
+            <span className="lg:hidden text-qds-t3">{run.run_id.slice(0, 8)} ·</span>
             {run.interval} · {dateRange}
           </div>
         </div>
 
-        <div className="px-2 py-3">
-          <span className={`inline-flex items-center gap-1.5 font-mono text-[0.68rem] font-medium px-2 py-0.5 rounded-full ${statusPillCls}`}>
-            {isDone ? "✓ Done" : "✕ Failed"}
-          </span>
+        {/* col3: run_id — hidden on <lg, visible on lg+ */}
+        <div className="hidden lg:flex items-center px-2 py-3">
+          <BacktestCopyableId runId={run.run_id} />
         </div>
 
-        <div className="px-2 py-3 text-right font-mono text-[0.75rem] min-w-[80px]">
-          {isDone && s?.total_pnl != null ? (
-            <span className={s.total_pnl >= 0 ? "text-qds-success" : "text-destructive"}>
-              {s.total_pnl >= 0 ? "+" : "-"}${Math.abs(s.total_pnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+        {/* col4: date range */}
+        <div className="px-2 py-3 font-mono text-[0.68rem] text-muted-foreground whitespace-nowrap">
+          {dateRange}
+        </div>
+
+        {/* col5: status badge */}
+        <div className="px-2 py-3" data-meta-cell>
+          <StatusBadge status={run.status} locale="en" />
+        </div>
+
+        {/* col6: total return pct */}
+        <div className="px-2 py-3 text-right font-mono text-[0.75rem]">
+          {isDone && s?.total_return_pct != null ? (
+            <span className={s.total_return_pct >= 0 ? "text-qds-success" : "text-destructive"}>
+              {s.total_return_pct >= 0 ? "+" : ""}{s.total_return_pct.toFixed(1)}%
             </span>
-          ) : isDone ? (
-            <span className="text-qds-success">Completed</span>
           ) : (
-            <span className="text-destructive text-[0.68rem]">{run.error ? run.error.slice(0, 24) : "Error"}</span>
+            <span className="font-mono text-xs text-muted-foreground">—</span>
           )}
         </div>
 
+        {/* col7: sharpe — hidden on <xl */}
+        <div className="hidden xl:flex items-center px-2 py-3 text-right font-mono text-[0.75rem]">
+          {isDone && s?.sharpe_ratio != null ? (
+            <span className={(s.sharpe_ratio ?? 0) >= 1 ? "text-qds-success" : (s.sharpe_ratio ?? 0) >= 0 ? "text-foreground" : "text-destructive"}>
+              {s.sharpe_ratio.toFixed(2)}
+            </span>
+          ) : (
+            <span className="font-mono text-xs text-muted-foreground">—</span>
+          )}
+        </div>
+
+        {/* col8: win rate — hidden on <xl */}
+        <div className="hidden xl:flex items-center px-2 py-3 text-right font-mono text-[0.75rem]">
+          {isDone && s?.win_rate != null ? (
+            <span>{(s.win_rate * 100).toFixed(1)}%</span>
+          ) : (
+            <span className="font-mono text-xs text-muted-foreground">—</span>
+          )}
+        </div>
+
+        {/* col9: PnL */}
+        <div className="px-2 py-3 text-right font-mono text-[0.75rem] min-w-[80px]">
+          {isDone && s?.total_pnl != null ? (
+            <span className={s.total_pnl >= 0 ? "text-qds-success" : "text-destructive"}>
+              {fmtPnl(s.total_pnl)}
+            </span>
+          ) : isDone ? (
+            <span className="font-mono text-xs text-muted-foreground">—</span>
+          ) : (
+            <span className="text-destructive text-[0.68rem]">{run.error ? run.error.slice(0, 16) : "Error"}</span>
+          )}
+        </div>
+
+        {/* col10: actions */}
         <div className="flex items-center pr-3 py-3 gap-1">
           <span className="inline-block text-[0.68rem] text-qds-t3 cursor-pointer transition-colors leading-none pl-1 pr-2 py-3">▾</span>
         </div>
@@ -427,6 +581,15 @@ export function BacktestHistoryRow({ run, expanded, onToggleExpand, onViewDetail
                 </div>
               </div>
               <div className="flex justify-end gap-2">
+                {onRetryRun && (
+                  <button
+                    type="button"
+                    className={VIEW_BTN_CLS}
+                    onClick={(e) => { e.stopPropagation(); onRetryRun(run); }}
+                  >
+                    <RotateCcw className="w-3 h-3" /> 重试
+                  </button>
+                )}
                 <button className={VIEW_BTN_CLS} onClick={(e) => { e.stopPropagation(); onViewDetail(run.run_id); }}>
                   查看日志 <span>&rarr;</span>
                 </button>
