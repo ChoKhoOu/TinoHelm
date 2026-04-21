@@ -379,6 +379,18 @@ html.light {
   to   { width: 0%; }
 }
 
+/* Stroke dash animation (e.g., SVG progress paths) */
+@keyframes dash {
+  from { stroke-dashoffset: var(--path-length, 1000); }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* Slide in from bottom with fade */
+@keyframes slideInUp {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
+
 /* Sonner toast entrance — matches v2: translateX(120%) scale(.95) → none, 350ms with --eo */
 [data-sonner-toast] {
   --toast-enter-duration: 350ms;
