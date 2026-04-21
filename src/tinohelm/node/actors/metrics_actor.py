@@ -14,6 +14,7 @@ from nautilus_trader.config import ActorConfig
 from nautilus_trader.core.message import Event
 
 from tinohelm.node.actors._utils import redis_publish, ts_ns_to_iso
+from tinohelm.node.actors.serialize import build_equity_snapshot
 
 
 class MetricsActorConfig(ActorConfig):
@@ -95,14 +96,9 @@ class MetricsActor(Actor):
             equity = balance + unrealized
             ts = ts_ns_to_iso(self.clock.timestamp_ns())
 
-            payload = {
-                "type": "equity.snapshot",
-                "node_type": self._node_type,
-                "equity": round(equity, 2),
-                "balance": round(balance, 2),
-                "unrealized_pnl": round(unrealized, 2),
-                "ts": ts,
-            }
+            payload = build_equity_snapshot(
+                self._node_type, equity, balance, unrealized, ts,
+            )
 
             redis_publish(self._redis, self._node_type, "equity", payload)
 

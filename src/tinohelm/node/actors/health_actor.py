@@ -115,7 +115,6 @@ class HealthActor(Actor):
         command when files have actually changed, avoiding expensive module
         import scans on every 10-second tick.
         """
-        import os
         import time
 
         strategies_dir = os.environ.get(

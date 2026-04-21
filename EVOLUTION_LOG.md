@@ -2,6 +2,85 @@
 
 Chronological record of architectural improvements and maintenance work.
 
+## 2026-04-21 (4)
+
+**主题**: 把 5 个 node actor 共同依赖的 position/fill/bar/equity 事件序列化层抽到 `node/actors/serialize.py` 单一事实源，附带把 `_RedisLogHandler` 里的 inline token bucket 提升为可注入时钟的 `TokenBucket` 类；为新抽出的纯逻辑层（101 个 NT-free 测试）+ DbWriterActor 的 SQL 绑定 / buffer 调度路径建立安全网
+**维度**: 架构重构（消灭 SnapshotActor vs DbWriterActor 的字段提取重复）+ 测试补齐（node actor 子树此前只有 RiskGuard 有测试）
+**改动范围**:
+- 新建 `src/tinohelm/node/actors/serialize.py`（258 行）—— 9 个 NT-free pure helper：`position_db_fields` / `build_position_update` / `fill_db_fields` / `build_fill_event` / `build_order_lifecycle_event` / `build_bar_event` / `build_strategy_signal_snapshot` / `tag_risk_metrics` / `build_equity_snapshot`。所有 NT 对象通过 duck-typing 传入，模块自身零 `nautilus_trader` import，可用 MagicMock 直接喂
+- 新建 `src/tinohelm/node/actors/rate_limit.py`（76 行）—— `TokenBucket` 类，带可注入 `clock` 参数。同时修掉原 inline handler 的一个隐蔽 bug：`_last_refill == 0.0` 当作"未初始化"哨兵 —— 在 `time.monotonic()` 永远非零的生产里没问题，但注入测试时钟从 0.0 开始就会让每次调用都触发 priming 分支。现在用 `None` 做哨兵，彻底消除"哨兵值和合法值冲突"的隐患
+- 重构 `src/tinohelm/node/actors/snapshot_actor.py`（276 → 189 行，-31%）：
+  - `_build_position_payload` / `_build_fill_payload` / bar 载荷 / 4 种 order 生命周期载荷 / 策略信号载荷 / 风险指标 tag —— 全部被删，改走 `serialize.py`
+  - 4 个 order 非 fill 事件分支（accepted/canceled/expired/rejected）从 4 个 `elif isinstance` 压缩成一个 `_ORDER_EVENT_KINDS` 表 + 1 个循环，rejected 的特殊 `reason` 字段通过 `build_order_lifecycle_event(event, "order_rejected")` 内部分支处理
+  - `_RedisLogHandler` 内部字段从 `_tokens/_last_refill/_rate_limit` 三个状态字段压成 `_bucket: TokenBucket`
+- 重构 `src/tinohelm/node/actors/db_writer_actor.py`（199 → 172 行，-14%）：
+  - 删除 `_persist_fill` 里 12 行 SQL 字符串 + 13 行 bind-param dict，改成 1 行 `session.execute(text(_INSERT_FILL_SQL), fill_db_fields(event, self._node_type))`
+  - `_persist_position` 同等收缩（删除 19 行 bind-param dict，改走 `position_db_fields`）
+  - SQL 字符串提到模块常量 `_INSERT_FILL_SQL` / `_UPSERT_POSITION_SQL`，便于测试用 regex 检查结构和列名
+  - 清理 `_on_position_event` 里的 deferred `from ... import PositionOpened, PositionChanged`（这两个类型已经在模块顶层 import 了 —— 函数内再 import 是遗留的过时 pattern）
+  - 修掉 `_write_batch` 里的 `from sqlalchemy import text` unused import
+- 重构 `src/tinohelm/node/actors/metrics_actor.py`（143 → 139 行）：
+  - Equity payload 的 6 字段 dict + `round(·, 2)` 三处内联调用改走 `build_equity_snapshot` 一行
+- 清理 `src/tinohelm/node/actors/_utils.py`（32 → 30 行）—— 删除 unused `typing.Any` import
+- 清理 `src/tinohelm/node/actors/health_actor.py`（233 → 232 行）—— 删除 `_file_watcher` 里重复的 `import os`（模块顶层已经 import 了）
+- 清理 `tests/actors/test_risk_guard.py` —— 删除 unused `pytest` import
+- 新增 `tests/actors/test_serialize.py`（553 行，51 用例 / 11 个测试类）
+- 新增 `tests/actors/test_rate_limit.py`（202 行，17 用例 / 4 个测试类）
+- 新增 `tests/actors/test_db_writer.py`（409 行，28 用例 / 5 个测试类）
+- 新增 `tests/actors/test_snapshot_log_handler.py`（76 行，5 用例 / 2 个测试类）
+
+**动机**:
+
+`SnapshotActor`（向 Redis PubSub 推 JSON 载荷）和 `DbWriterActor`（向 PostgreSQL 写 UPSERT 绑定）是两条紧挨着跑的真实交易事件出口。翻 `node/actors/*` 发现它们对 NT `Position` 的 19 个字段 + NT `OrderFilled` 的 13 个字段执行**完全同样的**提取序列：`str(pos.id)` / `str(pos.strategy_id) if pos.strategy_id else ""` / `pos.realized_pnl.as_double() if pos.realized_pnl else None` / `ts_ns_to_iso(pos.ts_closed) if pos.ts_closed and pos.ts_closed > 0 else None` …… 两处手写两份。
+
+这种重复在量化平台里是**直接的生产风险**：
+
+1. **Frontend/TUI 显示和 DB 持久化发散** —— 前端通过 WebSocket 收到的 `position.update` 事件里 `avg_px_close=None`（因为仓位刚开），用户在终端看到"未实现 PnL: -"；几秒后 DB 查询返回的同一 position 里 `avg_px_close=51000.0`（另一个分支忘了同步修复 `if pos.avg_px_close` 的判空逻辑）。用户切换"持仓"页面与"历史"页面会看到两个不同的数。这种 bug 在历史演进 log 里已经改过 3 次 —— **问题是结构性的，不是某次 typo**。
+2. **NT 字段重命名的隐性成本** —— `Position.duration_ns` 如果在上游 NT 升级里改成 `Position.duration_time`，目前要在两处各改一次，漏改一处就发散。抽到一个 helper 后只改一处。
+3. **测试不可能** —— 这些 payload 构造散在 4 个 Actor subclass 的 `on_*` 方法里，而 NT Actor 是 Cython 扩展类（CLAUDE.md 明确："Actor/Strategy 是 Cython 扩展类，不能用 `object.__new__` 在测试里实例化"）。不抽出来就没法写测试，于是 2026 年 4 月前，整个 `node/actors/` 子树**除了 RiskGuard 15 个用例，其他 4 个 Actor 总共 0 个测试**。这是把真钱交易风险下沉到"完全未测试的代码"的最后一块短板。
+
+附带的 `TokenBucket` 抽离是顺手的收益：SnapshotActor 的 log handler 在日志风暴（比如某策略每个 bar 都 traceback）下要守住 10 条/秒的上限，别把 Redis 打爆。这个限速器此前是 `_RedisLogHandler.emit` 里 8 行手动算术，和 SnapshotActor 绑死，无法测试。同时 `_last_refill == 0.0` 的初始化 sentinel 和注入测试时钟的 0 起点会冲突 —— 这是生产里潜伏的、但因为 `time.monotonic()` 永远 > 0 而没被触发的 latent bug。既然要抽，就把 sentinel 换成 `None`，彻底消除哨兵 / 合法值重叠的隐患。
+
+**要点**:
+
+1. **`serialize.py` 的 duck-typed 契约** —— 所有 helper 用 `Any` 类型标注输入，文档字符串里写明"需要的属性列表"（例如 `pos` 需要 `id` / `strategy_id` / `instrument_id` / `side.name` / …）。没有 `from nautilus_trader.model.position import Position`，所以测试用 `MagicMock()` 填上那些属性就能直接喂进去。生产里 SnapshotActor 塞 `PositionOpened.position`，DbWriterActor 塞 `PositionChanged.position` —— 两者鸭子兼容，不需要再任何 `isinstance` 保护。
+
+2. **snapshot 载荷 vs DB 载荷：严格的 superset 关系**。position 场景下 DB 19 字段，snapshot 25 字段，snapshot 额外 `{type, event, id, strategy_id, duration_ns, ts}`；fill 场景下 DB 13 字段，snapshot 17 字段，snapshot 额外 `{type, id, strategy_id, ts}`。`test_serialize.py::TestSnapshotDbOverlap` 用 `set(db_fields.keys()) & set(snap_payload.keys())` 做跨集合遍历，对**每一个**共享键断言 byte-for-byte 相等。这是防漂移的终极护栏 —— 任何一侧单方面修改字段值都会立刻失败。
+
+3. **唯一允许的语义分歧**："`realized_pnl=None` 时 DB 保持 None，Snapshot 强制 0.0"。这条差异是历史上前端契约，删不掉。`test_position_overlap_realized_pnl_diverges_only_on_none` 专门把这条分歧 pin 成一个 explicit 断言 —— 如果未来某天前端能处理 null 了，一人修了这一行，测试会明确指出要同时改掉。
+
+4. **SQL 语句提到模块常量，用 regex 验证结构和列名**。`_INSERT_FILL_SQL` 和 `_UPSERT_POSITION_SQL` 不再活在 `_persist_*` 方法里，而是模块顶层常量。测试用：
+   - `f":{key}" in _INSERT_FILL_SQL` 遍历 `fill_db_fields` 产出的每个键，验证每个 bind 参数都有对应的 SQL placeholder
+   - `"ON CONFLICT (trade_id) DO NOTHING"` / `"ON CONFLICT (position_id) DO UPDATE SET"` 锁定 conflict 策略
+   - `"updated_at = NOW()"` 锁定 DB timestamp 触发
+   - 对 UPDATE SET 子句反向断言"不变字段"（`ts_opened` / `entry_side` / `avg_px_open` / `instrument_id` / `strategy_id_tag`）**不在**其中 —— 这几个字段仓位开仓后永远不应该改，万一哪天有人手贱把它加进 `DO UPDATE SET`，测试立刻失败
+
+5. **`_DbWriterStub` 模式 —— 无 NT 代码复制**。RiskGuard 的 stub 是把整个 `_check_risks` 方法拷贝过来，代码重复 ~70 行。这次的 stub 采用更干净的"直接从生产类拉出 bound unrelated methods"写法：
+
+   ```python
+   class _DbWriterStub:
+       _on_order_event = dwa.DbWriterActor._on_order_event
+       _on_position_event = dwa.DbWriterActor._on_position_event
+       _flush = dwa.DbWriterActor._flush
+       _write_batch = dwa.DbWriterActor._write_batch
+       _persist_fill = dwa.DbWriterActor._persist_fill
+       _persist_position = dwa.DbWriterActor._persist_position
+   ```
+
+   因为这 6 个方法对 NT 的唯一依赖是 `queue_for_executor`（被 stub 覆盖捕获）和 `log`（MagicMock），所以直接把生产方法赋值到 stub class 上就能跑。此后生产代码改了这 6 个方法的任意一行，测试**自动覆盖到**，不需要像 RiskGuard 那样手动同步两处代码。这是未来其他 NT Actor 测试的更好模板。
+
+6. **`TokenBucket` 的三个生产平价测试**（`TestTokenBucketProductionParity`）用 `_FakeClock` 重放实际日志风暴场景：10 rps 容量 / 15 emit 突发 → 最多 10 accept；10 rps 容量 / 稳态 10 rps 输入 → 0 drop；10 rps 容量 / 20 rps 输入 / 10s → 100~115 accept（下限考虑稳态 100，上限考虑初始桶满时的 bonus burst ≈ 9-19 条）。这三条用例捕获了"生产里单位时间内丢多少条"的真实预期，而不是仅测试 `try_consume` 的本地状态变迁。
+
+7. **顺手债务清理**：`_utils.py` 删掉 unused `typing.Any`（把整个文件从 32 行压到 30 行），`health_actor.py` 的 `_file_watcher` 里重复的 `import os`（已经在顶层），`test_risk_guard.py` 删 unused `pytest` import。这些 lint finding 此前 ruff 能扫出来但没人修 —— 首席工程师看到顺手的 lint debt 就该清掉。
+
+**验证**:
+
+- 完整测试套件：**2057 → 2158**（+101 净增，0 回归）
+- `tests/actors/` 单独：**11 → 116**（+105，其中 +101 新增 + 4 个 risk_guard 测试在重构时一并通过）
+- `tests/actors/ + tests/node/` 组合：**292 / 292 passed**，4.48s
+- ruff 在 `src/tinohelm/node/actors/` 和 `tests/actors/` 两个修改目录：**All checks passed**
+- 手动验证新 helper 和旧 actor 行为字节级等价：`TestSnapshotDbOverlap::test_*_overlap_values_identical` 对 position 和 fill 的所有共享字段做 byte-for-byte 断言 —— 如果重构意外修改了任何一侧的值，测试会失败
+
 ## 2026-04-21 (3)
 
 **主题**: 给 `strategy/scaffold.py` + `strategy/validator.py` 这两条 API 路由直通的生成 / 校验路径建立测试安全网（117 个 NT-free 用例），同时把 `str(a).startswith(str(b))` 这条已经翻修过 5 次的脆弱路径边界检查收拢到 `core/utils.is_within_dir`，消灭最后 2 份同构代码

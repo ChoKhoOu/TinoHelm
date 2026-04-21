@@ -6,7 +6,6 @@ that replicates the same attributes and methods.
 """
 from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock
 from datetime import datetime, timezone
 
