@@ -1,13 +1,15 @@
 """SnapshotActor — bridges NT events to Redis PubSub for external consumers.
 
 Subscribes to position, order, bar, strategy snapshot, and risk metric events,
-builds JSON payloads, and publishes to Redis PubSub + ring buffers.
-Also includes a rate-limited RedisLogHandler for log forwarding.
+builds JSON payloads via :mod:`tinohelm.node.actors.serialize`, and publishes
+to Redis PubSub + ring buffers. Also includes a rate-limited
+:class:`_RedisLogHandler` built on :class:`TokenBucket` for log forwarding.
 """
 from __future__ import annotations
 
 import json
 import logging
+import time as _time
 from typing import Any
 
 import redis
@@ -28,6 +30,15 @@ from nautilus_trader.model.events import (
 )
 
 from tinohelm.node.actors._utils import redis_publish, ts_ns_to_iso
+from tinohelm.node.actors.rate_limit import TokenBucket
+from tinohelm.node.actors.serialize import (
+    build_bar_event,
+    build_fill_event,
+    build_order_lifecycle_event,
+    build_position_update,
+    build_strategy_signal_snapshot,
+    tag_risk_metrics,
+)
 
 
 class SnapshotActorConfig(ActorConfig):
@@ -35,28 +46,26 @@ class SnapshotActorConfig(ActorConfig):
     node_type: str = "sandbox"
 
 
+_ORDER_EVENT_KINDS = (
+    (OrderAccepted, "order_accepted"),
+    (OrderRejected, "order_rejected"),
+    (OrderCanceled, "order_canceled"),
+    (OrderExpired, "order_expired"),
+)
+
+
 class _RedisLogHandler(logging.Handler):
-    """Publishes log records to Redis with token bucket rate limiting."""
+    """Publishes log records to Redis with token-bucket rate limiting."""
 
     def __init__(self, redis_client: redis.Redis, node_type: str, rate_limit: int = 10):
         super().__init__()
         self._redis = redis_client
         self._node_type = node_type
-        self._tokens = float(rate_limit)
-        self._last_refill = 0.0
-        self._rate_limit = rate_limit
+        self._bucket = TokenBucket(rate_limit)
 
     def emit(self, record: logging.LogRecord) -> None:
-        import time as _time
-        now = _time.monotonic()
-        if self._last_refill == 0.0:
-            self._last_refill = now
-        elapsed = now - self._last_refill
-        self._tokens = min(self._rate_limit, self._tokens + elapsed * self._rate_limit)
-        self._last_refill = now
-        if self._tokens < 1:
+        if not self._bucket.try_consume():
             return
-        self._tokens -= 1
         try:
             payload = json.dumps({
                 "type": "log.entry",
@@ -125,116 +134,28 @@ class SnapshotActor(Actor):
     # --- Position events (all types for real-time frontend updates) ---
 
     def _on_position_event(self, event: Event) -> None:
-        if isinstance(event, (PositionOpened, PositionChanged, PositionClosed)):
-            pos = event.position
-            payload = self._build_position_payload(pos, type(event).__name__, event.ts_event)
-            self._publish("positions", payload)
-
-    def _build_position_payload(self, pos: Any, event_type: str, ts_event: int) -> dict:
-        strategy_id_str = str(pos.strategy_id) if pos.strategy_id else ""
-        return {
-            "type": "position.update",
-            "event": event_type,
-            "node_type": self._node_type,
-            "id": 0,
-            "position_id": str(pos.id),
-            "strategy_id": strategy_id_str,
-            "strategy_id_tag": strategy_id_str,
-            "instrument_id": str(pos.instrument_id),
-            "side": pos.side.name,
-            "quantity": str(pos.quantity),
-            "signed_qty": float(pos.signed_qty),
-            "avg_px_open": float(pos.avg_px_open),
-            "avg_px_close": float(pos.avg_px_close) if pos.avg_px_close else None,
-            "realized_pnl": pos.realized_pnl.as_double() if pos.realized_pnl else 0.0,
-            "unrealized_pnl": None,
-            "currency": str(pos.realized_pnl.currency) if pos.realized_pnl else None,
-            "entry_side": pos.entry.name,
-            "peak_qty": str(pos.peak_qty),
-            "is_open": pos.is_open,
-            "event_count": pos.event_count,
-            "ts_opened": ts_ns_to_iso(pos.ts_opened),
-            "ts_closed": ts_ns_to_iso(pos.ts_closed) if pos.ts_closed and pos.ts_closed > 0 else None,
-            "duration": str(pos.duration_ns) if pos.duration_ns else None,
-            "duration_ns": pos.duration_ns if pos.duration_ns else None,
-            "ts": ts_ns_to_iso(ts_event),
-        }
+        if not isinstance(event, (PositionOpened, PositionChanged, PositionClosed)):
+            return
+        payload = build_position_update(
+            event.position, self._node_type, type(event).__name__, event.ts_event,
+        )
+        self._publish("positions", payload)
 
     # --- Order events ---
 
     def _on_order_event(self, event: Event) -> None:
         if isinstance(event, OrderFilled):
-            self._on_order_filled(event)
-        elif isinstance(event, OrderAccepted):
-            self._publish("orders", {
-                "event": "order_accepted",
-                "order_id": str(event.client_order_id),
-                "instrument_id": str(event.instrument_id),
-                "ts": str(event.ts_event),
-            })
-        elif isinstance(event, OrderRejected):
-            self._publish("orders", {
-                "event": "order_rejected",
-                "order_id": str(event.client_order_id),
-                "instrument_id": str(event.instrument_id),
-                "reason": str(event.reason),
-                "ts": str(event.ts_event),
-            })
-        elif isinstance(event, OrderCanceled):
-            self._publish("orders", {
-                "event": "order_canceled",
-                "order_id": str(event.client_order_id),
-                "instrument_id": str(event.instrument_id),
-                "ts": str(event.ts_event),
-            })
-        elif isinstance(event, OrderExpired):
-            self._publish("orders", {
-                "event": "order_expired",
-                "order_id": str(event.client_order_id),
-                "instrument_id": str(event.instrument_id),
-                "ts": str(event.ts_event),
-            })
-
-    def _on_order_filled(self, event: OrderFilled) -> None:
-        payload = self._build_fill_payload(event)
-        self._publish("fills", payload)
-
-    def _build_fill_payload(self, event: OrderFilled) -> dict:
-        strategy_id_str = str(event.strategy_id) if event.strategy_id else None
-        return {
-            "type": "fill.new",
-            "id": 0,
-            "node_type": self._node_type,
-            "trade_id": str(event.trade_id),
-            "position_id": str(event.position_id) if event.position_id else None,
-            "client_order_id": str(event.client_order_id),
-            "venue_order_id": str(event.venue_order_id) if event.venue_order_id else None,
-            "strategy_id": strategy_id_str,
-            "strategy_id_tag": strategy_id_str,
-            "instrument_id": str(event.instrument_id),
-            "order_side": event.order_side.name,
-            "last_qty": str(event.last_qty),
-            "last_px": str(event.last_px),
-            "commission": str(event.commission.as_double()) if event.commission else None,
-            "liquidity_side": str(event.liquidity_side.name) if event.liquidity_side else None,
-            "ts_event": ts_ns_to_iso(event.ts_event),
-            "ts": ts_ns_to_iso(event.ts_event),
-        }
+            self._publish("fills", build_fill_event(event, self._node_type))
+            return
+        for event_cls, kind in _ORDER_EVENT_KINDS:
+            if isinstance(event, event_cls):
+                self._publish("orders", build_order_lifecycle_event(event, kind))
+                return
 
     # --- Bar events ---
 
     def _on_bar(self, bar: Bar) -> None:
-        self._publish("bars", {
-            "event": "bar",
-            "bar_type": str(bar.bar_type),
-            "instrument_id": str(bar.bar_type.instrument_id),
-            "open": str(bar.open),
-            "high": str(bar.high),
-            "low": str(bar.low),
-            "close": str(bar.close),
-            "volume": str(bar.volume),
-            "ts": str(bar.ts_event),
-        })
+        self._publish("bars", build_bar_event(bar))
 
     # --- Strategy snapshot + risk metrics ---
 
@@ -243,14 +164,7 @@ class SnapshotActor(Actor):
             fields = json.loads(snapshot.fields_json)
         except Exception:
             return
-        payload = {
-            "type": "signal.snapshot",
-            "node_type": self._node_type,
-            "strategy_id": snapshot.strategy_id,
-            "instrument_id": snapshot.instrument_id,
-            "fields": fields,
-            "ts": ts_ns_to_iso(snapshot.ts_event),
-        }
+        payload = build_strategy_signal_snapshot(snapshot, self._node_type, fields)
         self._publish("signals", payload)
         if self._redis:
             try:
@@ -263,14 +177,13 @@ class SnapshotActor(Actor):
     def _on_risk_metrics(self, data: Any) -> None:
         if not isinstance(data, dict):
             return
-        data["type"] = "risk.metrics"
-        data["node_type"] = self._node_type
-        self._publish("risk", data)
+        payload = tag_risk_metrics(data, self._node_type)
+        self._publish("risk", payload)
         if self._redis:
             try:
                 self._redis.setex(
                     f"tino:{self._node_type}:risk_metrics", 30,
-                    json.dumps(data, default=str),
+                    json.dumps(payload, default=str),
                 )
             except Exception:
                 pass
