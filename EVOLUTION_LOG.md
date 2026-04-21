@@ -632,3 +632,86 @@ Chronological record of architectural improvements and maintenance work.
 - ✅ `strategy_registry.py` 覆盖统计:7 个公开 API 方法(`scan`, `register`, `allocate_tags`, 5× `mark_*`, `get`, `get_bundle_for_strategy`, `available`, `get_all_states`, `to_dict`, `restore_was_running`)+ `_derive_tag` 私有辅助 + `StrategyEntry` dataclass,**全部有专用测试类**
 - ✅ `lifecycle_controller.py` 覆盖统计:21 个公开方法里 19 个有测试(剩 2 个是 trivial ack-only path);所有 4 个 precondition guard + 3 条 rollback 路径 + 2 条 timeout 路径 + 3 条 cancel_order 错误分支全部显式断言
 - ✅ 测试速度:`tests/node/test_strategy_registry.py` 0.17s(纯 Python);整个 node 测试包 2.10s
+
+
+## 2026-04-21
+
+**主题**: 抽出 `backtest/custom_statistics.py` 的纯数学到 NT-free `custom_statistics_helpers.py` + 给 `custom_statistics` 和 `tearsheet` 两大零覆盖报表模块补齐共 125 个单元测试
+**维度**: 测试补齐 + 架构重构(提取 helpers)
+**改动范围**:
+- 新建 `src/tinohelm/backtest/custom_statistics_helpers.py`(339 行)—— 17 个 `calc_*` 纯数学 helper,零 NT 依赖
+- 重构 `src/tinohelm/backtest/custom_statistics.py`(388 → 300 行,−88)—— 17 个 `PortfolioStatistic` 子类全部瘦身为 4 行 wrapper
+- 重构 `src/tinohelm/backtest/result/__init__.py`(33 → 51 行,+18)—— `extract_backtest_results` 改为 PEP 562 `__getattr__` 惰性加载,让 `tinohelm.backtest.result` 包顶层在缺 NT 环境下也能 import
+- 新建 `tests/backtest/test_custom_statistics_helpers.py`(637 行,89 用例)
+- 新建 `tests/backtest/test_tearsheet.py`(482 行,36 用例)
+
+**动机**:
+
+`backtest/` 下有三块"生产路径 + 零测试"的代码,是整个工程最后几块没装安全网的地方:
+
+1. **`custom_statistics.py`(388 行,0 测试)** —— 17 个 `PortfolioStatistic` 子类,实现 NT 内置 Rust 版本缺失或返回 None 的补丁统计量(CAGR、Calmar、Max Drawdown 的 pandas 回退;Total/Winning/Losing Trades、Gross Profit/Loss、Avg Win/Loss Ratio、Max Consecutive Wins/Losses、Avg Trade/Winning/Losing Duration、Total Commission、Total/Filled Orders)。这些直接进入用户看到的 tearsheet 里,任何计算 bug(rounding、NaN 处理、`> 0` vs `>= 0` 边界)都会静默改变报表数值。之前仅由端到端 backtest 运行间接覆盖——任何人在 optimizer 里加一条新分支都可能静默改变数字。
+2. **`tearsheet.py`(285 行,0 测试)** —— 多 instrument backtest 的 HTML 注入,生成 Plotly 柱状图、累计 PnL 面积图、相关性热图、月度 PnL 热图、PnL Treemap、投资组合分析摘要 6 大板块。整个函数 `try/except` 把 IO 错误 swallow 掉——意味着**任何回归都只会留一条 WARNING 日志,CI 永远看不到**。
+3. **`result/__init__.py`** —— 顶层 `__init__.py` eager 导入 NT 依赖的 `extract.py`,导致 `from tinohelm.backtest.result.statistics import _format_duration_ns`(明明是纯 Python)也会触发 NT import,成为本次抽 helpers 的直接阻塞。历史 `test_sections.py` 为此写了一个 60 行的 `_load_sections_isolated()` 绕过——补丁式而非结构性。
+
+这三件事拧成一股绳:**要给 custom_statistics 补 NT-free 测试,必须先把 `result` 包的 eager NT import 解开;把 pure 数学从 `PortfolioStatistic` 壳里抽出来;才能真正在没有 NT 的 lean CI 镜像下跑起来。**这是"一次演进"的完整边界。
+
+**要点**:
+
+1. **`custom_statistics_helpers.py` 的 17 个 `calc_*` 函数** —— 一一对应原 17 个 `PortfolioStatistic` 子类的 `calculate_from_*` 方法:
+
+   - **Returns-based** —— `calc_max_drawdown_pct` / `calc_annual_return` / `calc_calmar_ratio`(pure pandas,round 到 6/6/4 位小数,NaN 返回 None)
+   - **PnL-based** —— `calc_total_trades` / `calc_winning_trades` / `calc_losing_trades` / `calc_gross_profit` / `calc_gross_loss` / `calc_avg_win_loss_ratio` / `calc_max_consecutive_wins` / `calc_max_consecutive_losses`(锁定 `> 0` vs `<= 0` 两条不同边界——`LosingTrades` 严格 `<`,`GrossLoss` 宽松 `<=`,历史遗留语义,注释解释了为何保留)
+   - **Position-based** —— `calc_avg_trade_duration` / `calc_avg_winning_duration` / `calc_avg_losing_duration` / `calc_total_commission`(duck-typed:只要 `p.duration_ns` / `p.realized_pnl` / `p.commissions()` 三个属性存在即可,NT `Position` 或 stub 对象通吃;复用 `result/statistics.py` 的 `_parse_realized_pnl` 处理 `Money.as_double()` 和 string fallback 两种路径)
+   - **Order-based** —— `calc_total_orders` / `calc_filled_orders(orders, filled_status)`(`FilledOrders` wrapper 在 class-level lazily import `OrderStatus.FILLED` 作为 marker 参数传入——helper 不需要知道 NT 枚举,也能被任意值测试)
+
+2. **抽象设计决策:streak 辅助 `_max_consecutive(values, predicate)`** —— `MaxConsecutiveWins` 和 `MaxConsecutiveLosses` 本来有两段几乎一样的 for-loop,抽出谓词版 streak counter,两条 wrapper 各传一个 lambda。测试里显式锁了"zero 中断 streak"(严格 `> 0` 而非 `>= 0`)——这是历史契约。
+
+3. **`_filtered_durations(positions, predicate)`** —— `AvgWinningDuration` 和 `AvgLosingDuration` 本来各有一段 7 行重复代码(for-loop + `_parse_realized_pnl` + 过滤 + `duration_ns > 0` 守卫),抽成一个 helper。
+
+4. **`custom_statistics.py` 的 `PortfolioStatistic` 类保留原样** —— 17 个类、`name` property、`calculate_from_*` 签名一分不改,只把方法体替换为单行 helper 调用。`ALL_CUSTOM_STATISTICS` 顺序不动;`register_custom_statistics(analyzer) -> int` 签名不动。**NT 侧零行为变化**——tearsheet 渲染出的数字与之前完全一致。
+
+5. **`result/__init__.py` PEP 562 惰性化** —— `from tinohelm.backtest.result import extract_backtest_results` 这条 15 处使用的历史 import 路径继续 work;但改为通过 `__getattr__` 按需加载,**顶层包本身(`import tinohelm.backtest.result`)不再 eager 触发 NT import**。`from tinohelm.backtest.result import _format_duration_ns` 等 11 个 NT-free 符号仍然 eager 导出,unchanged。
+
+6. **`tests/backtest/test_custom_statistics_helpers.py`(89 用例,分 12 个测试类)**:
+
+   - `TestCalcMaxDrawdownPct`(6)—— None/empty/monotone-up/single-drop/rounding/single-elem/all-NaN
+   - `TestCalcAnnualReturn`(6)—— None/empty/single obs/negative total(wipeout)/zero total/252 天 1% 日收益的 CAGR 解析解比对/rounding
+   - `TestCalcCalmarRatio`(5)—— None/single obs/negative total/zero dd(除零)/happy path/rounding
+   - `TestCalcTotalTrades`(3)—— None → 0 / empty → 0 / 含零 PnL 也计数
+   - `TestCalcWinningLosingTrades`(7)—— winning 严格 `>`,losing 严格 `<`,零 PnL 两边都不算;测试返回 python int 不是 numpy int64
+   - `TestCalcGrossProfitLoss`(8)—— **`GrossLoss` 的 `<= 0` 边界显式测试**,覆盖 zero-PnL 被归入 losers 的契约(sum 一样是 0,但锁住了 mask 方向)
+   - `TestCalcAvgWinLossRatio`(7)—— 无 winners/losers/同时零 PnL/happy path/多 winners/rounding 4dp
+   - `TestConsecutiveStreaks`(9)—— **zero 中断 win streak 和 loss streak** 两边都显式锁定
+   - `TestPositionDurations`(9)—— 用 `_StubPosition` + `_StubPnl` duck-typed 替身验证 duration_ns=0 跳过/None realized_pnl 跳过/as_double fallback/losing duration 的 `<= 0` 包含零 PnL 边界
+   - `TestCalcTotalCommission`(6)—— 多币种求和/`commissions()` 异常被 swallow(broken position 不影响其它)/string fallback/4dp rounding
+   - `TestOrderHelpers`(7)—— marker 参数是 enum-agnostic(int/str/任意可比较值都行)/getattr 默认 None 跳过无 status 属性的 order
+   - `TestNoNTDependency` + `TestPublicAPI`(5)—— `sys.meta_path` blocker 下 fresh-load helpers 模块;断言 `sys.modules` 里没有 `nautilus_trader*`;锁定 `__all__` 恰好 17 个且全部 `calc_*` 前缀
+
+7. **`tests/backtest/test_tearsheet.py`(36 用例,分 8 个测试类)**:
+
+   - `TestGuardClauses`(4)—— 缺 tearsheet.html / `per_instrument` 空 / 单 instrument / 根本没有 `per_instrument` key 这 4 条 early-return 路径
+   - `TestBaseInjection`(10)—— 注入点在 `</body>` 之前;`.BINANCE` suffix 被剥离;表格按 total_pnl 降序;正 PnL 用 `class="pos"` 负 PnL 用 `class="neg"`;`recovery_factor=None` 渲染成 en-dash `–`;Plotly trace 中正确嵌入 `"type": "bar"`、`"orientation": "h"`;chart_height = max(300, N*35+100) 按 instrument 数缩放(实测 2 → 300、20 → 800);表头恰好 12 列;**idempotent 双调用**行为锁定(每次注入前面的 `</body>`,双调用生成两份 section)
+   - `TestCumulativePnLChart`(3)—— 缺 data → 不注入 chart;有 data → `"stackgroup": "one"` 堆叠面积图,每个 instrument 有独立 trace
+   - `TestCorrelationHeatmap`(4)—— 缺 data / 单 instrument(`< 2` 的 gate)跳过;配对生成 `"type": "heatmap"` + `"colorscale": "RdBu"`;对角线值恒为 1.0 不受 map 内容影响
+   - `TestMonthlyPnLHeatmap`(3)—— gate + RdYlGn colorscale + 缺失 (inst, month) 对 pnl=0 的默认填充
+   - `TestTreemap`(2)—— gate(>= 2 instruments)+ **treemap values 取 `abs(pnl)`**(用 regex 提取 Plotly.newPlot 参数 + json.loads 断言)—— 锁住了"负 PnL instrument 在 treemap 里仍有显示面积"这一关键 UX 不变式
+   - `TestAnalyticsSummary`(5)—— 无 `portfolio_analytics` / 空 dict / 只有 diversification_ratio / 两个字段都有 / 两个字段都 None(正确跳过,不渲染空壳 div)
+   - `TestIOResilience` + `TestNoNTDependency`(5)—— monkeypatch `Path.write_text` 和 `Path.read_text` 分别抛 `PermissionError` / `OSError` 测试异常 swallow;缺 `</body>` tag(str.replace 无 match)不 raise;最后用 `sys.meta_path` blocker 证明 `tearsheet` 模块顶层 import 零 NT 依赖
+
+**讨论点**:
+
+- **`GrossLoss` 的 `<= 0` 边界 vs `LosingTrades` 的 `< 0` 边界** —— 历史代码里这是两条不同的比较符,一处包含零 PnL 一处不包含。观察上对零 PnL 求和本就是 no-op 所以 `GrossLoss` 数值输出不变,但 boundary 差异保留在历史合约里。我在测试里用 `test_loss_boundary_includes_zero` 显式锁住这条 mask——如果将来有人把它统一成 `< 0`,观察值不变但测试会失败提醒,然后 reviewer 可以显式决定是否要做语义对齐。本次不改变行为。
+- **`AvgLosingDuration` 同样用 `<= 0` 包含零 PnL trades** —— `test_losing_duration_includes_zero_pnl` 锁定。这是对"duration 应该在'非盈利'中计算"的合理解释(而不是"持有过后零盈亏就完全不计入"),保留是合理的。
+- **`result/__init__.py` 的 PEP 562 惰性化触及其它 re-export 边界** —— 我只把 `extract_backtest_results`(唯一 NT 依赖符号)挪到 `__getattr__`;其它 11 个 `_*` helper 继续 eager 导出,因为它们本身 NT-free,eager 是免费的。`__all__` 顺序及内容未变——任何 `from tinohelm.backtest.result import *` 的老代码仍然拿到相同的 12 个名字。
+- **`custom_statistics.py` 仍保留 `from nautilus_trader.analysis.statistic import PortfolioStatistic` 顶部 import** —— 因为 17 个类本身继承自它,没 NT 就连 class 定义都做不出来。这是合理的:wrapper 模块的使命就是"在 NT 侧出现,生成 NT analyzer 看得懂的 Stat 对象",所以它跟 NT 的 coupling 是必要的,不是要消除的。纯数学下沉到 helpers 后,wrapper 只要 388 → 300 行,每个类 4 行也恰好够。
+
+**验证**:
+- ✅ **NT-free 全套 1397 passed, 48 skipped**(比引入本次改动前的基线 1272 passed 多 +125,等于 89 + 36,精确匹配新增用例数)
+- ✅ `.venv/bin/ruff check src/tinohelm/backtest/custom_statistics.py src/tinohelm/backtest/custom_statistics_helpers.py src/tinohelm/backtest/result/__init__.py tests/backtest/test_custom_statistics_helpers.py tests/backtest/test_tearsheet.py` —— **All checks passed!**
+- ✅ 5 个文件字节码编译通过(`py_compile`)
+- ✅ `custom_statistics_helpers.py` 在 `sys.meta_path` blocker 下 fresh-load 通过,加载后 `sys.modules` 里**没有任何 `nautilus_trader*`**,证实零 NT 依赖——这也是 `TestNoNTDependency::test_module_loads_without_nt` 用例在常规 pytest 里验证的不变式
+- ✅ `tearsheet.py` 同样在 blocker 下 fresh-load 通过(`TestNoNTDependency::test_tearsheet_module_imports_without_nt`)
+- ✅ `from tinohelm.backtest.result import extract_backtest_results` 惰性路径验证:stubbing `nautilus_trader.backtest.engine.BacktestEngine` 后 `__getattr__` 成功返回 callable
+- ✅ `tests/backtest/` 全包(除 4 个 NT-dep 文件)511 passed, 48 skipped,**无失败无新 warning**
+- ✅ `tests/backtest/test_sections.py`(原 `_load_sections_isolated` fallback 路径)133 passed —— 说明 `result/__init__.py` 的 PEP 562 改造对这块历史补丁代码保持兼容
+- ✅ 无 TODO/FIXME/XXX:grep 5 个新/改文件清零
