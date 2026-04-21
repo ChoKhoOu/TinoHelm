@@ -4,7 +4,8 @@ Downloads historical data files from https://data.binance.vision/ with:
 - Monthly-first planning (monthly packages + daily tail coverage)
 - Incremental skip (already-downloaded files are not re-fetched)
 - SHA-256 checksum verification
-- Exponential backoff retry (429/5xx)
+- Exponential backoff retry (429/5xx) — shared policy from
+  :mod:`tinohelm.data.providers._rest`
 """
 from __future__ import annotations
 
@@ -18,7 +19,12 @@ from pathlib import Path
 
 import httpx
 
+from tinohelm.core.utils import is_within_dir
 from tinohelm.data.instruments import strip_to_binance_api_symbol
+from tinohelm.data.providers._rest import (
+    DEFAULT_MAX_RETRIES,
+    request_with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +55,7 @@ _KLINES_TYPES = frozenset({
 })
 
 _VISION_BASE = "https://data.binance.vision"
-_MAX_RETRIES = 5
+_MAX_RETRIES = DEFAULT_MAX_RETRIES
 
 
 class ChecksumError(Exception):
@@ -290,54 +296,19 @@ class VisionDownloader:
             return dest_path
 
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        retry_count = 0
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            while True:
-                try:
-                    resp = await client.get(url, follow_redirects=True)
-                    resp.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    status = exc.response.status_code
-                    if status == 404:
-                        raise
-                    if status in (429, 418):
-                        retry_count += 1
-                        if retry_count > _MAX_RETRIES:
-                            raise
-                        wait = min(2 ** retry_count, 60)
-                        logger.warning(
-                            "Rate limited (HTTP %d) for %s, retry %d/%d in %ds",
-                            status, url, retry_count, _MAX_RETRIES, wait,
-                        )
-                        await asyncio.sleep(wait)
-                        continue
-                    if status >= 500:
-                        retry_count += 1
-                        if retry_count > _MAX_RETRIES:
-                            raise
-                        logger.warning(
-                            "Server error (HTTP %d) for %s, retry %d/%d in 2s",
-                            status, url, retry_count, _MAX_RETRIES,
-                        )
-                        await asyncio.sleep(2)
-                        continue
-                    raise
-                except httpx.RequestError as exc:
-                    retry_count += 1
-                    if retry_count > _MAX_RETRIES:
-                        raise
-                    logger.warning(
-                        "Request error for %s: %s, retry %d/%d",
-                        url, exc, retry_count, _MAX_RETRIES,
-                    )
-                    await asyncio.sleep(2)
-                    continue
-
-                # Success — write to disk
-                dest_path.write_bytes(resp.content)
-                logger.debug("Downloaded: %s (%d bytes)", dest_path.name, len(resp.content))
-                return dest_path
+            resp = await request_with_retry(
+                client,
+                url,
+                max_retries=_MAX_RETRIES,
+                raise_on_404=True,
+                follow_redirects=True,
+            )
+        assert resp is not None  # raise_on_404=True — None path is impossible
+        dest_path.write_bytes(resp.content)
+        logger.debug("Downloaded: %s (%d bytes)", dest_path.name, len(resp.content))
+        return dest_path
 
     async def verify_checksum(self, zip_path: Path, checksum_url: str) -> None:
         """Verify the SHA-256 checksum of a downloaded ZIP.
@@ -409,7 +380,7 @@ class VisionDownloader:
                 raise FileNotFoundError(f"No CSV file found inside {zip_path.name}")
             member = csv_names[0]
             target = (dest_dir / member).resolve()
-            if not str(target).startswith(str(dest_dir.resolve())):
+            if not is_within_dir(target, dest_dir):
                 raise ValueError(
                     f"Zip entry {member!r} would escape extraction directory"
                 )
