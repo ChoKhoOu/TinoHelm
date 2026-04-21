@@ -419,18 +419,17 @@ class TestPositionDurations:
         assert H.calc_avg_losing_duration(positions) is None
 
     def test_duration_handles_stringified_pnl(self):
-        # When as_double fails, parser falls back to str(pnl).split()[0]
-        pnl_obj = _StubPnl(1.5, use_as_double=False)
-        # Patch the stub to have no as_double attribute
-        del pnl_obj._use_as_double
-        # Recreate without as_double attribute
+        # When ``as_double`` is missing, the underlying parser falls back
+        # to ``str(pnl).split()[0]`` — covers positions whose PnL is a
+        # plain Money-like object without ``as_double``.
         class _StringOnlyPnl:
             def __str__(self):
                 return "1.5 USDT"
+
         positions = [
             _StubPosition(duration_ns=60 * 1_000_000_000, realized_pnl=_StringOnlyPnl()),
         ]
-        # Winner (1.5 > 0) → counted
+        # Winner (1.5 > 0) → counted under the winning-duration bucket
         assert H.calc_avg_winning_duration(positions) == "1m"
 
 
@@ -592,15 +591,25 @@ class TestNoNTDependency:
         for k in list(saved):
             sys.modules.pop(k, None)
 
+        # Baseline — NT submodules already loaded by *other* tests in this
+        # process (CI has NT installed and many earlier tests will have
+        # imported it).  We only care about what the helpers import chain
+        # *itself* pulls in, i.e. the delta after a fresh reload.
+        nt_before = {k for k in sys.modules if k.startswith("nautilus_trader")}
+
         sys.meta_path.insert(0, blocker)
         try:
             import importlib
             mod = importlib.import_module("tinohelm.backtest.custom_statistics_helpers")
             # Helpers module loaded successfully despite the blocker
             assert hasattr(mod, "calc_max_drawdown_pct")
-            # And no NT got pulled in as a side effect
-            nt_loaded = [k for k in sys.modules if k.startswith("nautilus_trader")]
-            assert nt_loaded == []
+            # Delta must be empty — nothing new NT-related sneaked in as
+            # a side effect of loading the helpers.  Absolute equality
+            # would be wrong because NT may already be loaded by previous
+            # tests in the same pytest session.
+            nt_after = {k for k in sys.modules if k.startswith("nautilus_trader")}
+            new_nt = nt_after - nt_before
+            assert new_nt == set(), f"helpers import pulled in NT modules: {sorted(new_nt)}"
         finally:
             sys.meta_path.remove(blocker)
             for k, v in saved.items():

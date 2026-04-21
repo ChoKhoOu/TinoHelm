@@ -468,14 +468,21 @@ class TestNoNTDependency:
 
         saved = sys.modules.pop("tinohelm.backtest.tearsheet", None)
 
+        # Under CI with NT installed, previous tests may have pre-loaded
+        # ``nautilus_trader`` into ``sys.modules``.  The correct invariant
+        # isn't "no NT in sys.modules" (absolute) — it's "no NT newly
+        # imported as a side effect of loading tearsheet" (delta).
+        nt_before = {k for k in sys.modules if k.startswith("nautilus_trader")}
+
         blocker = _Blocker()
         sys.meta_path.insert(0, blocker)
         try:
             import importlib
             mod = importlib.import_module("tinohelm.backtest.tearsheet")
             assert hasattr(mod, "enhance_tearsheet")
-            nt_loaded = [k for k in sys.modules if k.startswith("nautilus_trader")]
-            assert nt_loaded == []
+            nt_after = {k for k in sys.modules if k.startswith("nautilus_trader")}
+            new_nt = nt_after - nt_before
+            assert new_nt == set(), f"tearsheet import pulled in NT modules: {sorted(new_nt)}"
         finally:
             sys.meta_path.remove(blocker)
             if saved is not None:
