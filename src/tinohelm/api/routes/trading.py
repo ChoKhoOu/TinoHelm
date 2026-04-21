@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Literal
 
 import redis.asyncio as aioredis
@@ -11,6 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tinohelm.api._utils import load_redis_json
 from tinohelm.api.deps import get_db, get_redis
 from tinohelm.db.models import Fill, Position
 
@@ -334,20 +334,19 @@ async def cancel_order(
     return {"status": "ok", "client_order_id": client_order_id, "mode": mode}
 
 
+_RISK_METRICS_DEFAULT: dict = {
+    "equity": 0, "peak_equity": 0, "drawdown_pct": 0,
+    "daily_pnl_pct": 0, "total_exposure": 0, "position_count": 0,
+    "breached": False, "breach_reason": "", "per_instrument_exposure": {},
+}
+
+
 @router.get("/risk-metrics")
 async def risk_metrics(
     node_type: str = Query(..., description="Node type (sandbox/live)"),
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Return latest risk metrics from RiskGuardActor."""
-    import json as _json
-    raw = await rds.get(f"tino:{node_type}:risk_metrics")
-    if raw:
-        if isinstance(raw, bytes):
-            raw = raw.decode()
-        return _json.loads(raw)
-    return {
-        "equity": 0, "peak_equity": 0, "drawdown_pct": 0,
-        "daily_pnl_pct": 0, "total_exposure": 0, "position_count": 0,
-        "breached": False, "breach_reason": "", "per_instrument_exposure": {},
-    }
+    return await load_redis_json(
+        rds, f"tino:{node_type}:risk_metrics", dict(_RISK_METRICS_DEFAULT)
+    )
