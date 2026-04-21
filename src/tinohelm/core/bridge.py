@@ -9,7 +9,6 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
-from typing import Any
 
 import redis.asyncio as aioredis
 from fastapi import WebSocket
@@ -97,9 +96,39 @@ class EventBridge:
         return len(seen)
 
     async def unsubscribe(self, websocket: WebSocket) -> None:
-        """Remove a WebSocket client from all subscriptions."""
-        for channel_clients in self._clients.values():
+        """Remove a WebSocket client from all subscriptions and reap empty patterns.
+
+        Patterns whose subscriber sets become empty are deleted from
+        ``self._clients`` so short-lived channel subscriptions do not accumulate
+        indefinitely. ``defaultdict`` semantics will re-create an entry on the
+        next ``subscribe()`` call, so no external behaviour changes.
+        """
+        empty_patterns: list[str] = []
+        for pattern, channel_clients in self._clients.items():
             channel_clients.discard(websocket)
+            if not channel_clients:
+                empty_patterns.append(pattern)
+        for pattern in empty_patterns:
+            del self._clients[pattern]
+
+    async def _publish_to_subscribers(self, channel: str, payload: str) -> None:
+        """Deliver ``payload`` to wildcard subscribers and to channel-prefix subscribers.
+
+        A subscriber whose pattern is a prefix of ``channel`` receives the
+        message. The special pattern ``"*"`` always matches.  Pulling this out
+        of ``_listener`` and ``_heartbeat_poller`` keeps the fan-out semantics
+        defined in a single place.
+        """
+        # Wildcard subscribers get every message
+        await self._relay(payload, self._clients.get("*", set()))
+
+        # Prefix-pattern subscribers
+        for pattern, clients in list(self._clients.items()):
+            if pattern == "*":
+                continue
+            if not channel.startswith(pattern):
+                continue
+            await self._relay(payload, clients)
 
     async def _listener(self) -> None:
         """Background task: listen to Redis PubSub and relay to WebSocket clients.
@@ -137,16 +166,7 @@ class EventBridge:
                             data["type"] = channel.replace(":", ".")
 
                     payload = json.dumps(data, default=str)
-
-                    # Send to wildcard subscribers
-                    await self._relay(payload, self._clients.get("*", set()))
-
-                    # Send to channel-specific subscribers
-                    for pattern, clients in list(self._clients.items()):
-                        if pattern != "*" and not channel.startswith(pattern):
-                            continue
-                        if pattern != "*":
-                            await self._relay(payload, clients)
+                    await self._publish_to_subscribers(channel, payload)
 
             except asyncio.CancelledError:
                 return
@@ -186,13 +206,9 @@ class EventBridge:
                         "positions": data.get("positions", 0),
                     }
                     payload = json.dumps(event, default=str)
-
-                    # Relay to all WS clients (wildcard)
-                    await self._relay(payload, self._clients.get("*", set()))
-                    # Relay to channel-specific subscribers
-                    for pattern, clients in list(self._clients.items()):
-                        if pattern != "*" and f"tino:heartbeat:{node_type}".startswith(pattern):
-                            await self._relay(payload, clients)
+                    await self._publish_to_subscribers(
+                        f"tino:heartbeat:{node_type}", payload
+                    )
 
             except asyncio.CancelledError:
                 return
