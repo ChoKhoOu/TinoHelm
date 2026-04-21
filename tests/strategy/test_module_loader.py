@@ -115,6 +115,23 @@ class TestBoundaryEnforcement:
         with pytest.raises(ValueError, match="outside boundary"):
             load_module_from_file(plain_module_file, boundary_dir=boundary)
 
+    def test_similar_prefix_name_is_rejected(self, tmp_path: Path):
+        """Pin the fix that replaced ``str.startswith`` with ``is_within_dir``.
+
+        Before 2026-04-21: ``str("/t/allowed2/foo.py").startswith("/t/allowed")``
+        returned True, so a file in ``allowed2`` was incorrectly accepted
+        when the boundary was ``allowed``. Now the two paths are recognised
+        as siblings.
+        """
+        boundary = tmp_path / "allowed"
+        sibling = tmp_path / "allowed2"
+        boundary.mkdir()
+        sibling.mkdir()
+        bad = sibling / "foo.py"
+        bad.write_text("VALUE = 1\n")
+        with pytest.raises(ValueError, match="outside boundary"):
+            load_module_from_file(bad, boundary_dir=boundary)
+
 
 # ---------------------------------------------------------------------------
 # load_module_from_file: sys.path cleanup

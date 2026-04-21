@@ -1,12 +1,22 @@
 """策略脚手架生成器。
 
 生成策略参考模板，清晰说明每个回调的用途和常见用法。
+
+模块分工:
+    * ``STRATEGY_SCAFFOLD``  —— 超长模板字符串（本模块）
+    * ``generate_scaffold``  —— 组合公开入口（本模块）
+    * 校验 / 渲染 / 路径边界 —— :mod:`tinohelm.strategy.scaffold_helpers`
+      （NT-free，便于单元测试）
 """
 from __future__ import annotations
 
 import logging
-import re
-from pathlib import Path
+
+from tinohelm.strategy.scaffold_helpers import (
+    render_scaffold,
+    resolve_new_strategy_path,
+    validate_identifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -581,36 +591,51 @@ class {class_name}(Strategy):
                     tracking.pop(key, None)
 '''
 
-# 向后兼容
-BAR_SCAFFOLD = STRATEGY_SCAFFOLD
-TICK_SCAFFOLD = STRATEGY_SCAFFOLD
-
 
 # ===========================================================================
 # 生成器
 # ===========================================================================
 
+from pathlib import Path  # noqa: E402  (after the multi-line template string)
+
+
 def generate_scaffold(
     name: str,
     strategies_dir: str | Path,
-    scaffold_type: str = "strategy",
+    scaffold_type: str = "strategy",  # noqa: ARG001  (reserved for API compat)
 ) -> Path:
-    """生成策略脚手架文件。"""
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
-        raise ValueError(f"Invalid strategy name: must be a valid Python identifier, got '{name}'")
+    """生成策略脚手架文件。
 
-    strategies_dir = Path(strategies_dir)
-    strategies_dir.mkdir(parents=True, exist_ok=True)
+    Parameters
+    ----------
+    name:
+        目标文件 basename（不含 ``.py`` 后缀）。必须是合法 Python 标识符，因为
+        生成出来的文件会被 ``importlib`` 按 ``name`` 加载。
+    strategies_dir:
+        脚手架写入目录。不存在时自动创建。
+    scaffold_type:
+        前端 ``POST /strategies/create`` 的 ``type`` 字段透传参数。当前
+        ``"strategy"`` 和 ``"portfolio"`` 均生成同一份 Strategy 模板，保留入
+        参是为未来按类型分支（例如生成 portfolio.yaml + strategy.py 组合）
+        留接口；传任意值都不会报错也不影响生成内容。
 
-    class_name = "".join(word.capitalize() for word in name.split("_"))
-    content = STRATEGY_SCAFFOLD.format(name=name, class_name=class_name)
+    Raises
+    ------
+    ValueError
+        *name* 不是合法标识符，或路径解析后越过 *strategies_dir* 边界
+        （防御性，已由 :func:`validate_identifier` 前置兜底）。
+    FileExistsError
+        目标文件已存在 —— 避免覆盖用户手写的策略。
+    """
+    validate_identifier(name)
 
-    file_path = (strategies_dir / f"{name}.py").resolve()
-    if not str(file_path).startswith(str(strategies_dir.resolve())):
-        raise ValueError("Path traversal detected in strategy name")
+    strategies_path = Path(strategies_dir)
+    strategies_path.mkdir(parents=True, exist_ok=True)
+
+    file_path = resolve_new_strategy_path(strategies_path, name)
     if file_path.exists():
         raise FileExistsError(f"Strategy file already exists: {file_path}")
 
-    file_path.write_text(content)
+    file_path.write_text(render_scaffold(name))
     logger.info(f"Generated strategy scaffold: {file_path}")
     return file_path

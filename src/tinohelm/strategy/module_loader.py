@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tinohelm.core.utils import is_within_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +60,7 @@ def load_module_from_file(
 
     if boundary_dir is not None:
         boundary = Path(boundary_dir).resolve()
-        if not str(file_path).startswith(str(boundary)):
+        if not is_within_dir(file_path, boundary):
             raise ValueError(
                 f"Path {file_path} is outside boundary {boundary}"
             )
