@@ -2,6 +2,96 @@
 
 Chronological record of architectural improvements and maintenance work.
 
+## 2026-04-21 (3)
+
+**主题**: 给 `strategy/scaffold.py` + `strategy/validator.py` 这两条 API 路由直通的生成 / 校验路径建立测试安全网（117 个 NT-free 用例），同时把 `str(a).startswith(str(b))` 这条已经翻修过 5 次的脆弱路径边界检查收拢到 `core/utils.is_within_dir`，消灭最后 2 份同构代码
+**维度**: 测试补齐 + 架构重构（提取 helpers + 消灭重复）
+**改动范围**:
+- 新建 `src/tinohelm/strategy/scaffold_helpers.py`（87 行）—— 4 个 NT-free pure helper（`validate_identifier` / `derive_class_name` / `render_scaffold` / `resolve_new_strategy_path`）+ `IDENTIFIER_RE` 共享常量
+- 重构 `src/tinohelm/strategy/scaffold.py`（616 → 641 行，生成器逻辑压到 ~40 行且 100% 走 helper）
+  - 删除向后兼容 alias `BAR_SCAFFOLD` / `TICK_SCAFFOLD`（grep 确认无外部引用）
+  - 入口 `generate_scaffold()` 用 `validate_identifier` + `resolve_new_strategy_path` + `render_scaffold` 组装，每一行都可单测
+  - 补完 docstring：`scaffold_type` 参数正式标注"接受但当前无分支效果"的契约，避免未来悄悄改动
+- 新建 `src/tinohelm/strategy/validator_helpers.py`（99 行）—— 5 个 NT-free helper（`empty_validation_result` / `collect_implemented_hooks` / `build_missing_hook_warnings` / `extract_config_params`）+ `STRATEGY_HOOK_NAMES` 与 `RECOMMENDED_HOOKS` 两个锁定常量
+- 重构 `src/tinohelm/strategy/validator.py`（89 → 72 行，-17）
+  - 删除内联的 NT MRO 名称匹配代码（7 行），直接调用 `module_loader.discover_strategy_classes`（消灭第 1 份重复 —— 两处代码此前完全同构）
+  - 删除内联的 hook 扫描 `for hook in [...]: if hook in strategy_cls.__dict__` 片段、内联的 warning 组装 if/if 片段、内联的 `get_config_fields` try/except 片段 —— 全部替换为 helper 调用
+- 修改 `src/tinohelm/strategy/module_loader.py`（230 → 231 行，+1 import）
+  - 把 line 61 的 `str(file_path).startswith(str(boundary))` 替换为 `is_within_dir(file_path, boundary)`（消灭第 2 份重复，同时修掉"相似前缀目录名"误判场景）
+- 扩展 `src/tinohelm/core/utils.py`（17 → 40 行，+23）
+  - 新增 `is_within_dir(candidate, boundary) -> bool`：用 `Path.resolve().relative_to()` 统一 6 处原本各自写 `str(a).startswith(str(b))` 的路径包含检查。此前 2026-04-21 演进已经在 `api/_utils.resolve_artifact_path` 里做过一次同类收拢（5 份）；本轮把 scaffold + module_loader 这剩下 2 份也收拢到 `core/utils`，整个 repo 现在**只有这一个实现**
+- 新增 `tests/core/test_utils.py` 扩展（26 → 37 用例，+11）—— `TestIsWithinDir` 类 11 条：含符号链接逃逸、`..` 逃逸、同前缀目录误判、str/Path 双重接口、boundary 自身、深层路径
+- 新增 `tests/strategy/test_scaffold.py`（364 行，64 用例）
+- 新增 `tests/strategy/test_validator.py`（520 行，41 用例）
+- 扩展 `tests/strategy/test_module_loader.py::TestBoundaryEnforcement`（2 → 3 用例，+1）—— `test_similar_prefix_name_is_rejected` 专门锁死"`allowed2/foo.py` 误算作 `allowed/` 内部"这条历史 bug（`startswith` → `is_within_dir` 修复的触发场景）
+
+**动机**:
+
+`strategy/scaffold.py`（616 行）和 `strategy/validator.py`（89 行）是两条**直通前端用户操作**的关键路径，但本次演进之前二者测试覆盖都是 0：
+
+- **scaffold.py**：`POST /api/strategies/create` 的后端实现。用户点"新建策略"按钮触发 —— 生成失败或生成内容不正确（template 被改坏、`{{...}}` 转义漏掉、`{class_name}` 插值错位），用户看到的是"创建成功"消息但打开文件是空白或语法错误。更关键的是，`str(file_path).startswith(str(strategies_dir.resolve()))` 这条路径校验在本次之前已经是**第 6 份**同构代码（api/_utils 在上一轮收拢了 5 份），语义上对"相似前缀目录名"和 symlink 逃逸都不可靠。
+- **validator.py**：`POST /api/strategies/{name}/validate` 的后端实现。前端 Strategies 页面的"Validate"按钮每次鼠标悬停都可能打 —— 返回结果直接驱动 UI 的"有效"/"无效"/"警告"标记。**完全没有测试**意味着：
+  - 若有人改了 `"on_start"` / `"on_stop"` 的 recommended 名单，用户的已有策略会突然显示莫名其妙的 warning
+  - 若 MRO 名称匹配逻辑和 `module_loader.discover_strategy_classes` 发生漂移（两处此前是**完全同构的复制代码**），用户的合法策略可能在 validate endpoint 里显示 invalid 但在 backtest 里能跑
+  - 任何一条 error/warning 的文案变更都悄无声息地改变了前端展示
+
+同时，这两件事有天然的共同边界：
+1. validator.py 里的 `for base in inspect.getmro(obj): if base.__name__ == "Strategy" ...` **和** `module_loader.discover_strategy_classes` 是**完全同样语义**的代码。只是前者还要附加记录 `strategy_class` / `config_class` 的名字字符串到 result dict。
+2. scaffold.py 里的 `str(a).startswith(str(b))` 路径守卫 **和** module_loader.py 里的**完全同样**的守卫，是 `api/_utils.resolve_artifact_path` 当初没扫到的两个漏网之鱼。
+
+所以一次演进同时做三件事：（a）消灭最后 2 份 `startswith` 路径检查重复、（b）消灭 validator vs module_loader 的 MRO 复制、（c）给这两个模块补完测试 —— 而不是分三轮各自交付。
+
+**要点**:
+
+1. **`core/utils.is_within_dir(candidate, boundary)` —— 全仓唯一实现**。`Path(...).resolve()` 双向后通过 `relative_to` 判定包含关系。相比 `str(a).startswith(str(b))`：
+   - 抗 trailing-separator 差异（`/a/b` vs `/a/b/`）
+   - 抗相似前缀目录名（`/a/allowed2/foo` 被正确识别为不在 `/a/allowed` 内 —— `startswith` 会误判为在内）
+   - 抗 symlink escape（`resolve()` 展开后 `relative_to` 失败）
+   
+   把 2026-04-21 `api/_utils.resolve_artifact_path` 修好的 5 处 + 本次 scaffold / module_loader 的 2 处**收拢到 1 份**。任何未来对 boundary 语义的调整都只用改这一处。
+
+2. **`scaffold_helpers.py` —— 4 个 NT-free pure helper**：
+   - `validate_identifier(name)` —— 共享 `IDENTIFIER_RE`，显式 ValueError 文案包含 `name!r`
+   - `derive_class_name(name)` —— snake→Pascal；`"".capitalize()` 的幂等行为（`"BTC_Scalper" → "BtcScalper"`）被专门测试锁定，避免未来有人"修复"成正则保留大写
+   - `render_scaffold(name)` —— 延迟 import `STRATEGY_SCAFFOLD` 避免循环依赖；测试用 `ast.parse(content)` 作为**可解析性不变式**
+   - `resolve_new_strategy_path(dir, name)` —— 防御性第二道闸，即使 `validate_identifier` 漏过也能挡住
+
+3. **`validator_helpers.py` —— 5 个 NT-free helper**：
+   - `STRATEGY_HOOK_NAMES` 顺序稳定（driver 了 `result["hooks"]` 的顺序契约）；hook count pinned to 10
+   - `RECOMMENDED_HOOKS = ("on_start", "on_stop")` 显式锁定（测试 `test_recommended_contents_pinned` 防止偷偷扩大警告范围）
+   - `collect_implemented_hooks(cls, names)` 用 `cls.__dict__` 而非 `hasattr()` —— 继承自 NT `Strategy` 的空桩方法**不**算实现（避免"所有策略都看起来实现了所有 hook"的 false positive）
+   - `build_missing_hook_warnings` 顺序严格按 `RECOMMENDED_HOOKS`
+   - `extract_config_params` 吞下 `get_config_fields` 的任何异常 —— 保留 legacy 行为（宁可 `config_params=[]` 也不要 validate 整个失败）
+
+4. **`validator.py` 缩到 72 行**，全部是编排逻辑：读文件 → load_module_from_file → discover_strategy_classes → 填 result dict。无一行业务逻辑分散。
+
+5. **`scaffold.py` 的 `scaffold_type` 参数保留但显式标注**。`CreateStrategyRequest.type` 可以传 `"strategy"` 或 `"portfolio"`，目前两者生成同一份模板。我**没有**加校验（若传 `"weird"` 现在仍接受），因为加校验是可见行为变更 —— 留给下一轮演进做"真的按 type 分支生成 portfolio 结构"时一起做。`test_scaffold_type_accepted_but_no_effect` 和 `test_arbitrary_scaffold_type_string_still_succeeds` 锁死当前契约。
+
+6. **死代码清除**：`BAR_SCAFFOLD = STRATEGY_SCAFFOLD` / `TICK_SCAFFOLD = STRATEGY_SCAFFOLD` 两个向后兼容 alias 通过 `grep -rn BAR_SCAFFOLD\|TICK_SCAFFOLD src/ tests/ cli/` 确认无引用后直接删除。`test_dead_aliases_removed` 锁死移除状态。
+
+7. **测试策略 —— NT-free 但测 validator 端到端**：validator 的端到端测试（`TestValidateStrategyValid` 等）通过把"伪 NT 基类"写进临时 `.py` 文件并用 `load_module_from_file` 真正加载来达成。技巧：在伪文件里声明 `class Strategy: pass; Strategy.__module__ = "nautilus_trader.trading.strategy"` —— 这样 MRO 名称检查会命中，但整个测试不 `import nautilus_trader`。这让 validator 的完整集成路径（文件读 → 模块加载 → 类发现 → hook 识别 → 警告生成）都在 NT-free CI 里覆盖。
+
+**讨论点**:
+
+- **`scaffold_type` 当前是无分支参数但 API 签名继续接受它**：这不是 bug，是"前端已有 UI 但后端未实现"的半成品。继续接受任意字符串是为了在前端真正支持 "新建 portfolio" 时不用动 API 契约。本次演进下**没有增加 `scaffold_type` 的校验**（例如 `if scaffold_type not in {"strategy", "portfolio"}: raise`），因为加校验是客户端可观察的行为变更，需要 portfolio 模板和 API 对齐后一起做。
+- **`discover_strategy_classes` 的 break-first 语义保留**：如果一个模块里同时存在多个 Strategy 子类，`discover_strategy_classes` 只返回 `inspect.getmembers` 顺序里最后一个（历史行为）。validator 跟着走。这是合理的（portfolio/策略文件应该只有一个 Strategy 类），但若用户文件确实放了多个，只有一个会被 validate。这个语义的局限在本次**没有扩大范围处理**，保持跟 runner/loader 一致。
+- **`discover_actor_classes` 没复用进本次**：validator 只处理 Strategy 子类不处理 Actor 子类（actor 走 `tinohelm.node.factory` 的独立路径）。actor 文件（`~/.tino/actors/`）当前没有对应的 `validate_actor()` endpoint；若未来要加，应该和 validator 共用一套 helpers，届时把 `collect_implemented_hooks` 等拆成更中性的位置（或干脆把 `validator_helpers` 改名 `inspection_helpers`）。本次不预设结构。
+- **`str(file_path).startswith(str(boundary))` 全仓是否还有残留**：我搜过 `grep -rn "startswith(str" src/tinohelm/` —— 还有若干处但不是路径包含检查（比如 channel prefix 匹配之类语义明确的字符串前缀，保留不变）。真正属于"路径边界检查"的 7 处（5 个 api 路由 + scaffold + module_loader）已经全部收拢到 `core/utils.is_within_dir` + `api/_utils.resolve_artifact_path`。
+
+**验证**:
+- ✅ **NT-free 全套 1292 passed, 31 failed, 7 skipped**（baseline 1175 passed + 新增 117 = 1292，精确匹配）。31 failed 全部是 NT-dependent pre-existing 失败（需要 `nautilus_trader` 才能跑），与本轮改动无关
+  - 逐一拆分：scaffold 64 + validator 41 + is_within_dir 11 + module_loader 新增 boundary 1 = 117 ✓
+- ✅ `ruff check` 10 个新/改文件 —— **All checks passed!**
+- ✅ `py_compile` 10 个新/改文件 —— 全部通过
+- ✅ **端到端 smoke**：`generate_scaffold("test", tmp)` → 文件生成 + `ast.parse()` 通过；`validate_strategy` 对 4 种合法/非法 fake 模块产生正确的 `{valid, errors, warnings, hooks}` 组合
+- ✅ **向后兼容 100%**：
+  - `from tinohelm.strategy.scaffold import generate_scaffold, STRATEGY_SCAFFOLD` —— 签名 + 文案不变
+  - `from tinohelm.strategy.validator import validate_strategy` —— 签名 + 返回 dict 形状不变（测试 `TestValidateStrategyReturnsCanonicalShape` 显式锁定 8 键 set）
+  - `api/routes/strategy.py` 调用 `generate_scaffold(name=..., strategies_dir=..., scaffold_type=...)` 保持不变
+- ✅ **安全性强化（测试驱动）**：`test_symlink_escape_rejected`（core + scaffold 双重覆盖）+ `test_similar_prefix_name_is_rejected`（module_loader）证明 `is_within_dir` 挡住了 `startswith` 挡不住的两类真实漏判
+
+---
+
 ## 2026-04-21 (2)
 
 **主题**: 把 `core/bridge.py` 的 `EventBridge` 纳入测试安全网（53 个 NT-free 用例），同时消除 `_listener` 与 `_heartbeat_poller` 两处复制的"relay → 全局 `*` + 逐 pattern 前缀匹配"两步逻辑，并修掉 `unsubscribe` 不回收空 set 造成的长期内存累积

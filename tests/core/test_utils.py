@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
 
 import pytest
 
-from tinohelm.core.utils import sanitize_for_json
+from tinohelm.core.utils import is_within_dir, sanitize_for_json
 
 
 # ---------------------------------------------------------------------------
@@ -191,3 +193,88 @@ class TestSanitizeMixed:
         # Result should be sanitized
         assert result["a"] is None
         assert result["b"][0] is None
+
+
+# ---------------------------------------------------------------------------
+# is_within_dir: path-boundary safety
+# ---------------------------------------------------------------------------
+
+class TestIsWithinDir:
+    """Canonical implementation of ``path under boundary`` containment.
+
+    This helper replaces the fragile ``str(a).startswith(str(b))`` pattern
+    that historically shipped in six separate locations (``api/routes/backtest.py``
+    × 5 via ``resolve_artifact_path`` and ``strategy/module_loader.py`` +
+    ``strategy/scaffold.py``). Any change to boundary semantics must pass
+    through this single contract.
+    """
+
+    def test_same_path_is_within(self, tmp_path: Path):
+        assert is_within_dir(tmp_path, tmp_path) is True
+
+    def test_child_file(self, tmp_path: Path):
+        f = tmp_path / "child.txt"
+        f.write_text("x")
+        assert is_within_dir(f, tmp_path) is True
+
+    def test_deep_child(self, tmp_path: Path):
+        (tmp_path / "a" / "b" / "c").mkdir(parents=True)
+        f = tmp_path / "a" / "b" / "c" / "d.txt"
+        f.write_text("x")
+        assert is_within_dir(f, tmp_path) is True
+
+    def test_sibling_outside(self, tmp_path: Path):
+        other = tmp_path.parent / "other_dir"
+        assert is_within_dir(other, tmp_path) is False
+
+    def test_parent_is_outside(self, tmp_path: Path):
+        assert is_within_dir(tmp_path.parent, tmp_path) is False
+
+    def test_dotdot_traversal_resolved_and_rejected(self, tmp_path: Path):
+        escape = tmp_path / ".." / "other"
+        assert is_within_dir(escape, tmp_path) is False
+
+    def test_accepts_str_inputs(self, tmp_path: Path):
+        assert is_within_dir(str(tmp_path / "a"), str(tmp_path)) is True
+
+    def test_accepts_pathlib_inputs(self, tmp_path: Path):
+        assert is_within_dir(tmp_path / "a", tmp_path) is True
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+    def test_symlink_escape_rejected(self, tmp_path: Path):
+        """A symlink inside *boundary* that points outside is rejected.
+
+        Historical bug: ``str(a).startswith(str(b))`` answered ``True`` here
+        because the lexical path matched the prefix before ``resolve()``.
+        """
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        boundary = tmp_path / "allowed"
+        boundary.mkdir()
+        escape = boundary / "escape"
+        escape.symlink_to(outside)
+        target = escape / "secret.txt"
+        # Even though the lexical path starts with str(boundary), the
+        # resolved path lives under `outside` and so is rejected.
+        assert is_within_dir(target, boundary) is False
+
+    def test_non_existent_paths_are_handled(self, tmp_path: Path):
+        # Neither path must exist for the function to work — we still
+        # resolve them lexically and check containment.
+        a = tmp_path / "nope" / "inside"
+        assert is_within_dir(a, tmp_path) is True
+        b = tmp_path.parent / "nope_sibling"
+        assert is_within_dir(b, tmp_path) is False
+
+    def test_similar_name_not_prefix_match(self, tmp_path: Path):
+        """A common foot-gun with ``startswith``: ``/a/b`` is *not* inside ``/a/bc``."""
+        a = tmp_path / "foo"
+        b = tmp_path / "foobar"
+        a.mkdir()
+        b.mkdir()
+        # ``str(a).startswith(str(b))`` would have answered False here
+        # (correct), but ``str(b/ x).startswith(str(a))`` would have
+        # answered True for a path like ``b / "leaf"``. The resolve+
+        # relative_to combo produces the right answer unambiguously.
+        target = b / "leaf"
+        assert is_within_dir(target, a) is False
