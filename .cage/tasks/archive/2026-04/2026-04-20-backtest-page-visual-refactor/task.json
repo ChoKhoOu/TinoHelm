@@ -1,8 +1,8 @@
 {
   "id": "2026-04-20-backtest-page-visual-refactor",
   "title": "backtest-page-visual-refactor",
-  "status": "active",
-  "current_phase": "verify",
+  "status": "done",
+  "current_phase": "idle",
   "created": "2026-04-20T08:20:57Z",
   "subtasks": [
     {
