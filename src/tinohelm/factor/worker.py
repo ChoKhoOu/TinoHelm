@@ -7,7 +7,10 @@ factor-specific job body plus the module-level singleton handle.
 Redis key conventions (mirrors CLAUDE.md § Redis Key Patterns):
 - ``tino:factor:queue``               — job queue (LPUSH/BRPOP)
 - ``tino:factor:cancel:{run_id}``     — cancel flag (set to "1" to skip)
-- ``tino:factor:progress:{run_id}``   — progress PubSub (JSON messages)
+- ``tino:factor:progress:{run_id}``   — progress PubSub channel (JSON) **and**
+                                        last-known percent key (SETEX, 24h TTL)
+                                        — mirrors backtest worker so report
+                                        pages have a late-join fallback.
 - ``tino:factor:events``              — completion/failure event PubSub
 
 Payload schema consumed from the queue::
@@ -49,6 +52,7 @@ logger = logging.getLogger(__name__)
 QUEUE_KEY = "tino:factor:queue"
 EVENTS_CHANNEL = "tino:factor:events"
 PROGRESS_DB_STEP = 10
+PROGRESS_KEY_TTL_SECONDS = 86400  # 24h — mirrors backtest worker
 
 _handle: WorkerHandle = WorkerHandle(name="factor-worker")
 
@@ -192,6 +196,14 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         throttle = PercentStepThrottle(step=PROGRESS_DB_STEP)
 
         async def _progress(pct: int, msg: str = "") -> None:
+            # Persist last-known percent so /factor/report/{run_id} GET
+            # handlers (and clients that connect after some WS events were
+            # missed) can recover current progress without waiting for the
+            # next throttled DB write. Mirrors backtest worker semantics.
+            try:
+                await rds.setex(progress_channel, PROGRESS_KEY_TTL_SECONDS, str(pct))
+            except Exception:
+                pass
             await rds.publish(progress_channel, json.dumps({
                 "run_id": run_id,
                 "factor_name": factor_name,
