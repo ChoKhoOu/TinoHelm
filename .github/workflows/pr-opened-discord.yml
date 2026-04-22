@@ -19,6 +19,11 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set — skipping Discord notification."
+            exit 0
+          fi
+
           payload=$(jq -n \
             --arg content "**New PR opened**\nRepo: \`$REPO\`\nPR: **#$PR_NUMBER $PR_TITLE**\nAuthor: \`$PR_AUTHOR\`\nBranch: \`$HEAD_REF -> $BASE_REF\`\nURL: $PR_URL" \
             '{content: $content}')
