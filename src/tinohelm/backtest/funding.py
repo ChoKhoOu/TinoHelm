@@ -4,11 +4,9 @@ Perpetual contracts charge funding fees every 8 hours. This module provides
 an Actor that tracks funding costs during backtest execution by checking open
 positions at each funding timestamp and accumulating the cost.
 
-Funding cost = position_notional * funding_rate
-  - Long + positive rate → pay (cost > 0)
-  - Long + negative rate → receive (cost < 0)
-  - Short + positive rate → receive (cost < 0)
-  - Short + negative rate → pay (cost > 0)
+The actual cost formula, event-advancement, and result-summary shape live in
+``funding_math`` — this file only bridges the NT Actor surface (``on_start``,
+``on_bar``, ``self.cache.positions_open()``) to that pure layer.
 """
 from __future__ import annotations
 
@@ -16,6 +14,12 @@ import logging
 from typing import Any
 
 from nautilus_trader.common.actor import Actor, ActorConfig
+
+from tinohelm.backtest.funding_math import (
+    advance_due_events,
+    apply_funding_event,
+    summarize_funding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,65 +61,36 @@ class _FundingCostTracker(Actor):
         self._per_symbol_cost = {}
         self._next_event_idx = 0
 
-        for bt_str in self.__class__._bar_type_strs:
+        for bt_str in _FundingCostTracker._bar_type_strs:
             try:
                 self.subscribe_bars(BarType.from_str(bt_str))
             except Exception:
                 pass
 
     def on_bar(self, bar) -> None:
-        current_ns = bar.ts_init
-        funding_events = self.__class__._funding_events
-
-        # Process all funding events up to the current bar timestamp
-        while self._next_event_idx < len(funding_events):
-            event = funding_events[self._next_event_idx]
-            if event["timestamp_ns"] <= current_ns:
-                self._apply_funding(event)
-                self._next_event_idx += 1
-            else:
-                break
+        due, new_idx = advance_due_events(
+            _FundingCostTracker._funding_events,
+            current_ns=bar.ts_init,
+            next_idx=self._next_event_idx,
+        )
+        for event in due:
+            self._apply_funding(event)
+        self._next_event_idx = new_idx
 
     def _apply_funding(self, event: dict[str, Any]) -> None:
         """Calculate and record funding cost for all open positions matching the symbol."""
-        symbol_prefix = event["symbol"]  # e.g. "BTCUSDT-PERP.BINANCE"
-        rate = event["rate"]
-        mark_price = event["mark_price"]
-
-        positions = self.cache.positions_open()
-        for pos in positions:
-            pos_symbol = str(pos.instrument_id)
-            if pos_symbol != symbol_prefix:
-                continue
-
-            qty = float(pos.quantity)
-            notional = qty * mark_price
-
-            # Long pays positive rate, short receives positive rate
-            if pos.side.name == "LONG":
-                cost = notional * rate
-            else:  # SHORT
-                cost = -notional * rate
-
-            self._total_funding_cost += cost
-            self._per_symbol_cost[pos_symbol] = self._per_symbol_cost.get(pos_symbol, 0.0) + cost
-            self._funding_records.append({
-                "timestamp": event["timestamp_iso"],
-                "symbol": pos_symbol,
-                "side": pos.side.name,
-                "quantity": qty,
-                "mark_price": mark_price,
-                "funding_rate": rate,
-                "cost": round(cost, 6),
-            })
+        self._total_funding_cost, _, _ = apply_funding_event(
+            event,
+            self.cache.positions_open(),
+            total_cost=self._total_funding_cost,
+            per_symbol_cost=self._per_symbol_cost,
+            records=self._funding_records,
+        )
 
     def get_results(self) -> dict[str, Any]:
         """Return accumulated funding cost data for result extraction."""
-        return {
-            "total_funding_cost": round(self._total_funding_cost, 4),
-            "funding_event_count": len(self._funding_records),
-            "per_symbol_funding": {
-                k: round(v, 4) for k, v in self._per_symbol_cost.items()
-            },
-            "funding_records": self._funding_records,
-        }
+        return summarize_funding(
+            total_funding_cost=self._total_funding_cost,
+            per_symbol_cost=self._per_symbol_cost,
+            funding_records=self._funding_records,
+        )
