@@ -8,7 +8,9 @@ are only validated through the fan-out helper they share.
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -50,8 +52,13 @@ class TestInferTypeChannelMap:
     def test_data_prefix_expands_suffix(self):
         assert _infer_type("tino:data:progress") == "data.progress"
 
-    def test_research_prefix_expands_suffix(self):
-        assert _infer_type("tino:research:progress") == "research.progress"
+    def test_factor_prefix_expands_suffix(self):
+        # tino:factor:events → factor.events (research was renamed to factor)
+        assert _infer_type("tino:factor:events") == "factor.events"
+
+    def test_factor_progress_channel_includes_run_id_tail(self):
+        # tino:factor:progress:<run_id> → factor.progress (first segment only)
+        assert _infer_type("tino:factor:progress:some-uuid") == "factor.progress"
 
 
 class TestInferTypeEdgeCases:
@@ -78,7 +85,7 @@ class TestInferTypeEdgeCases:
             "tino:sandbox:",
             "tino:live:",
             "tino:data:",
-            "tino:research:",
+            "tino:factor:",
         }
 
 
@@ -464,3 +471,112 @@ class TestStartStop:
         assert bridge._heartbeat_task.cancelled() or bridge._heartbeat_task.done()
         fake_pubsub.punsubscribe.assert_awaited_with("tino:*")
         fake_redis.close.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# EventBridge listener relay — factor.completed / factor.failed
+# ---------------------------------------------------------------------------
+
+def _make_pubsub_message(channel: str, data: dict) -> dict:
+    """Build a fake Redis pmessage dict."""
+    return {
+        "type": "pmessage",
+        "channel": channel.encode(),
+        "data": json.dumps(data).encode(),
+    }
+
+
+async def _drive_listener_once(bridge: EventBridge, message: dict) -> None:
+    """Feed a single message through the bridge listener then cancel."""
+
+    async def _fake_listen():
+        yield message
+        # Block forever so listener stays alive until cancelled
+        await asyncio.sleep(3600)
+
+    bridge._pubsub.listen = lambda: _fake_listen()
+
+    task = asyncio.create_task(bridge._listener())
+    await asyncio.sleep(0.05)  # let listener process the one message
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+class TestEventBridgeFactorRelay:
+    """EventBridge correctly relays factor.completed / factor.failed events
+    from ``tino:factor:events`` Redis pubsub to WebSocket wildcard clients.
+    """
+
+    def _make_bridge(self) -> EventBridge:
+        bridge = EventBridge.__new__(EventBridge)
+        bridge._redis_url = "redis://localhost:6379"
+        bridge._redis = AsyncMock()
+        bridge._pubsub = MagicMock()
+        bridge._clients = {"*": set()}
+        bridge._task = None
+        bridge._heartbeat_task = None
+        return bridge
+
+    async def test_factor_completed_forwarded_to_wildcard_clients(self):
+        bridge = self._make_bridge()
+
+        ws = AsyncMock()
+        bridge._clients["*"].add(ws)
+
+        payload = {
+            "type": "factor.completed",
+            "run_id": "run-abc-123",
+            "factor_name": "ret_5",
+            "rating": 3,
+        }
+        msg = _make_pubsub_message("tino:factor:events", payload)
+
+        await _drive_listener_once(bridge, msg)
+
+        ws.send_text.assert_awaited_once()
+        sent = json.loads(ws.send_text.call_args[0][0])
+        assert sent["type"] == "factor.completed"
+        assert sent["run_id"] == "run-abc-123"
+        assert sent["factor_name"] == "ret_5"
+        assert sent["rating"] == 3
+
+    async def test_factor_failed_forwarded_with_run_id(self):
+        bridge = self._make_bridge()
+
+        ws = AsyncMock()
+        bridge._clients["*"].add(ws)
+
+        payload = {
+            "type": "factor.failed",
+            "run_id": "run-xyz-999",
+            "factor_name": "mom_20",
+            "error": "division by zero",
+        }
+        msg = _make_pubsub_message("tino:factor:events", payload)
+
+        await _drive_listener_once(bridge, msg)
+
+        ws.send_text.assert_awaited_once()
+        sent = json.loads(ws.send_text.call_args[0][0])
+        assert sent["type"] == "factor.failed"
+        assert sent["run_id"] == "run-xyz-999"
+        assert sent["error"] == "division by zero"
+
+    async def test_factor_completed_type_not_overwritten(self):
+        """When payload already carries ``type``, bridge must NOT overwrite it."""
+        bridge = self._make_bridge()
+
+        ws = AsyncMock()
+        bridge._clients["*"].add(ws)
+
+        payload = {"type": "factor.completed", "run_id": "r1", "factor_name": "f"}
+        msg = _make_pubsub_message("tino:factor:events", payload)
+
+        await _drive_listener_once(bridge, msg)
+
+        sent = json.loads(ws.send_text.call_args[0][0])
+        # type must be preserved from payload, not inferred
+        assert sent["type"] == "factor.completed"

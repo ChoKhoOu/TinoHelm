@@ -23,7 +23,10 @@ _CHANNEL_TYPE_MAP: dict[str, str] = {
     "tino:sandbox:": "node.sandbox.",
     "tino:live:": "node.live.",
     "tino:data:": "data.",
-    "tino:research:": "research.",
+    # factor worker publishes factor.completed / factor.failed with explicit
+    # ``type`` fields; this entry handles any future un-typed messages on the
+    # channel (e.g. progress events from tino:factor:progress:<run_id>).
+    "tino:factor:": "factor.",
 }
 
 
