@@ -2,6 +2,75 @@
 
 Chronological record of architectural improvements and maintenance work.
 
+## 2026-04-22
+
+**主题**: 抽 `backtest/funding_math.py` + `data/funding_cache_helpers.py` 两层 NT-free 纯逻辑，为 `backtest/funding.py`（零直接测试的永续资金费率核算器）和 `data/funding_cache.py`（增量缓存 orchestrator，仅有 2 个外围测试触及 `_CACHE_DIR` 路径）建立 117 个 NT-free / 无网络的测试安全网 + 修掉一个 "FLAT 等异常 side 静默走 SHORT 分支" 的隐蔽语义坑
+
+**维度**: 架构重构（把 funding 成本公式 / 事件游标 / 结果汇总 / 缓存增量决策 / 去重排序全部下沉到单点纯函数） + 测试补齐（`backtest/funding.py` + `data/funding_cache.py` 合计此前 0 个直接测试；本次补 117 个）+ 顺手行为变更（`compute_funding_cost` 对未知 side 从"静默按 SHORT 处理"改为显式 `ValueError`；`dedup_and_sort_records` 对损坏行从"抛 KeyError 中断保存"改为"安静丢弃")
+
+**改动范围**:
+- 新建 `src/tinohelm/backtest/funding_math.py`（206 行）—— 5 个 NT-free pure helper + 3 个导出常量：
+  - `compute_funding_cost(*, side, quantity, mark_price, rate) -> float` —— 单点定义 "LONG + 正费率=付 / SHORT + 正费率=收" 的符号对称公式；未知 side 显式 `ValueError`（行为变更，见下方要点 3）
+  - `build_funding_record(*, timestamp_iso, symbol, side, quantity, mark_price, rate, cost) -> dict` —— 7-key 单条记录 schema（keyword-only，`cost` 在此处做 6-dp 四舍五入）
+  - `advance_due_events(events, *, current_ns, next_idx) -> (due, new_idx)` —— 纯游标推进，沿用原 `<=` 包含边界；返回列表切片（非共享引用，避免 tracker 外部可能的 mutation 污染事件列表）
+  - `apply_funding_event(event, positions, *, total_cost, per_symbol_cost, records) -> (total, per_symbol, records)` —— 整个"遍历 positions_open() → 匹配 symbol → 算 cost → 落 record"流水线下沉到纯层，只要 duck-type 出 `.instrument_id` / `.side.name` / `.quantity` 三个属性就能跑（Protocol 类型注解，不依赖 NT Position 类）
+  - `summarize_funding(*, total_funding_cost, per_symbol_cost, funding_records) -> dict` —— 4-key 结果 schema；total/per-symbol 在此处做 4-dp 四舍五入（records 里的 cost 不再重复 round，避免双次舍入）
+  - 3 个导出常量：`RECORD_COST_PRECISION=6 / SUMMARY_TOTAL_PRECISION=4 / SUMMARY_PER_SYMBOL_PRECISION=4`——测试里 pin 住，防止精度漂移
+- 新建 `src/tinohelm/data/funding_cache_helpers.py`（125 行）—— 6 个 NT-free / FS-free pure helper + 1 个导出常量：
+  - `ensure_utc(dt)` / `to_epoch_ms(dt)` / `from_epoch_ms(ms)` —— 统一的 naive→UTC 归一化 + 毫秒往返。原代码在 `load_funding_rates` 里 inline 了两次 `if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)`
+  - `dedup_and_sort_records(records)` —— 新版："later wins" 语义 + 丢弃损坏行（缺 `funding_time_ms` / 非数值 / `bool` / 非 dict）而不是抛 KeyError
+  - `filter_records_by_range(records, *, start_ms, end_ms)` —— 原 `[r for r in cached if start_ms <= r["funding_time_ms"] <= end_ms]` 的安全版（也过滤损坏行）
+  - `compute_fetch_start(cached_times_ms, *, start, end) -> datetime | None` —— 增量决策的**全部**逻辑压到一处（no-cache / cache-missing-older / cache-missing-newer / full-cover 4 分支），返回必然是 UTC-aware 或 None
+  - `DEFAULT_FUNDING_INTERVAL_MINUTES = 480` —— Binance perp 默认 8h，之前散在 `runner_helpers.py` 和 runner 里
+- 重构 `src/tinohelm/backtest/funding.py`（121 → 96 行，-21%；跨 `_apply_funding` 单方法 34 → 9 行，-74%）：
+  - `_apply_funding` 从"内联 for-loop + side 判断 + cost 累加 + 手搓 record dict"压到 1 次 `apply_funding_event(...)` 调用；公式不再散落在 Actor 里
+  - `on_bar` 从"内联 while + `<=` 比较 + 手滚 idx"压到 `advance_due_events(...)`
+  - `get_results` 从"手搓 dict + round 散点调用"压到 `summarize_funding(...)`
+  - `self.__class__._funding_events` / `self.__class__._bar_type_strs` 改成显式 `_FundingCostTracker._funding_events` / `_bar_type_strs`—— `self.__class__` 依赖于 `self` 是真实 Actor 实例，这个间接访问在测试里用 SimpleNamespace stand-in 时会取错 class；显式类名引用让测试可以通过 unbound-method pattern 调用 `_FundingCostTracker.on_bar(stub, bar)` 也能访问正确的类属性。生产运行完全等价（从未被子类化）
+  - 模块 docstring 更新：明确标注"公式/游标/汇总都在 `funding_math`，这里只剩 NT Actor surface 桥接"
+- 重构 `src/tinohelm/data/funding_cache.py`（134 → 116 行，-13%）：
+  - `_save_cache` 从 14 行手搓 dedup-by-set + sort 改成 1 行 `dedup_and_sort_records(records)`。原实现用 `seen: set[int]` + 先排序后去重（"earlier wins" 语义），新实现是 dict-overwrite（"later wins"）—— 对 Binance 返回的旧数据这是更合理的语义（新 fetch 覆盖老 fetch）
+  - `_save_cache` 之前若遇到损坏行（缺 `funding_time_ms`）会抛 `KeyError` 把整个保存流程中断；现在安全丢弃
+  - `load_funding_rates` 从 3 个独立决策分支（no cache / earliest / latest）+ 4 行 `if dt.tzinfo is None` 压到：`start = ensure_utc(start)` + `end = ensure_utc(end)` + `fetch_start = compute_fetch_start(cached_times, start=start, end=end)` + 1 处 `filter_records_by_range`
+  - 删掉 `datetime.fromtimestamp((latest_cached_ms + 1) / 1000, tz=timezone.utc)` 这种裸的 ts-math（下沉到 `from_epoch_ms`）
+- 新建 `tests/backtest/test_funding_math.py`（469 行，41 个用例 / 6 个测试类）—— 纯函数 + 端到端组合，全部 NT-free / < 10ms 跑完
+- 新建 `tests/backtest/test_funding_tracker.py`（340 行，18 个用例 / 2 个测试类）—— 用 `SimpleNamespace` stand-in + unbound-method 调用模式验证 tracker 到纯层的 wiring；遵循 `tests/actors/test_risk_guard.py` 的 stub pattern
+- 新建 `tests/data/test_funding_cache_helpers.py`（368 行，37 个用例 / 5 个测试类）—— 纯函数测试，也断言模块源文件不包含 `nautilus_trader` / `httpx` / `open(` 等 IO 关键字
+- 新建 `tests/data/test_funding_cache.py`（345 行，21 个用例 / 4 个测试类）—— 用 `tmp_path` + `monkeypatch` 替换 `_CACHE_DIR` 和 `BinanceVisionPipeline`，覆盖 7 条路径：cache 全覆盖→不调管道 / 无 cache→全量 fetch / range filter / naive-vs-aware / pipeline 异常→降级到 cache / pipeline=0+cache=0→warn / 增量 tail fetch / older 再抓
+
+**动机**:
+
+`backtest/funding.py` 是**永续合约回测的资金费率核算器**——每 8 小时把所有 open position 按 mark_price × rate 计提费用，LONG 付正费率、SHORT 收正费率。这是"真金白银"的成本计算，直接影响 `pnl_after_funding` 和 `total_funding_cost` 这两个写入 API / tearsheet 的关键字段。但截止本次演进：
+
+1. **`backtest/funding.py` 是 `backtest/` 子树里唯一一个零直接测试的生产模块**：
+   - `test_runner_pure_helpers.py::TestAssembleFundingEvents` 只覆盖了 **上游**的 event 拼装（从 per-symbol 列表到排序好的 event 流）
+   - `test_runner_helpers.py` / `test_runner_compat.py` / `test_runner_pure_helpers.py` 这些 runner 测试都 mock 掉了 `_FundingCostTracker`
+   - `grep -rn "FundingCostTracker\|funding_math\|_apply_funding" tests/` —— **本次之前返回零**
+   - 核心公式 `cost = notional × rate × (+1 for LONG / -1 for SHORT)` 过去从未被单测验证过。一次 CI 通过意味着"代码能 import"，不意味着"符号对没对"
+2. **`data/funding_cache.py::load_funding_rates` 只有 2 个外围测试**：`tests/api/test_data_helpers.py` 里的 2 个测试只验证了"存在一个 JSON 文件 → 删除 API 能删掉"，完全没有测试增量 fetch 的决策（cache 缺前段 vs 缺后段 vs 全覆盖 vs 无 cache），也没有测试损坏缓存 / pipeline 失败 / naive vs aware datetime 行为
+3. **`_save_cache` 的 dedup 在损坏行面前会崩溃**：原代码 `for r in sorted(records, key=lambda x: x["funding_time_ms"])` —— 任何一个半写入的 JSON 记录（比如 pipeline 下载中断）会直接 KeyError 把保存流程中断，同时导致**缓存文件无法被写出**，整个 symbol 的下次请求要重新从 Binance 全量拉一次。这个失败模式以前没有测试覆盖
+4. **`compute_funding_cost` 的 else-SHORT 分支对非 LONG/SHORT side 会静默按 SHORT 处理**：原代码 `if pos.side.name == "LONG": cost = ... else: cost = -...`。虽然 `positions_open()` 实际只会返回 LONG/SHORT，但"万一 NT 以后新增 PositionSide 枚举值"或"测试桩传了 FLAT"会导致符号偷偷翻转，无任何报错。这种"静默错误大于显式错误"的反模式在资金费率这种安全关键路径上**不应该存在**
+
+**要点**:
+
+1. **`apply_funding_event` 通过 Protocol duck-type 把 NT Position 解耦** —— 纯层签名是 `Iterable[_PositionLike]`，`_PositionLike` 是一个 `Protocol` 只要求 `.instrument_id` / `.side.name` / `.quantity` 三个属性。生产路径传的是 `self.cache.positions_open()` 的 NT Position 对象，测试路径传的是 `SimpleNamespace(instrument_id=..., side=SimpleNamespace(name="LONG"), quantity=...)`。纯层永远不 import NT，测试 18 个用例覆盖了单 long / 单 short / 混合对冲 / 非匹配 symbol / 多仓累加 / 已有 per-symbol 进一步累加 / in-place 同引用返回——整条累加流水线独立于 NT Actor Cython kernel 跑。
+2. **测试里用 "unbound method + stand-in self" 模式验证 tracker wiring** —— NT Actor 是 Cython extension class，`__new__()` 后可以创建实例但 `self.cache = MagicMock()` 会抛 `AttributeError: attribute 'cache' of 'nautilus_trader.common.actor.Actor' objects is not writable`。解法：测试直接 `_FundingCostTracker.on_bar(stub, bar)` 这样把 unbound 方法当普通函数调用，`stub` 是 `SimpleNamespace(_total_funding_cost=..., cache=MagicMock(...), _apply_funding=lambda ev: _FundingCostTracker._apply_funding(stub, ev))`。这样 6 个 wiring 测试覆盖了 on_bar 推进游标 / 包含边界 / 空事件无副作用 / 同 ts 重放幂等 / 多事件一次排空 / get_results 委托给 summarize_funding 的全部路径，**不需要启动 NT kernel**。
+3. **`compute_funding_cost` 对未知 side 改抛 `ValueError` 是故意的行为变更** —— 原 `if LONG: +; else: -` 对 `"FLAT"` / `""` / `"long"` 都会走 `-` 分支。新版显式检查 `{"LONG", "SHORT"}` 白名单，否则抛 `ValueError` 带上期望值。对生产路径**零影响**（NT `PositionSide.name` 固定返回 `"LONG"` / `"SHORT"`），但对未来回归测试 / 桩数据 / 三方集成是一个诚实的契约保护。`test_unknown_side_raises_value_error` + `test_side_is_case_sensitive` 把这条 pin 住。
+4. **`dedup_and_sort_records` 的语义修正是静默 bug fix 而不是破坏性变更** —— 原代码对**同一个 funding_time_ms 的两条记录**是"earlier wins"（先 add 到 set，后面的被 skip）；新代码是"later wins"（dict-overwrite）。实际上 Binance 的 fundingRate 归档对同一 ts 永远只会有一条记录，在生产中这个分歧永远不会触发；但语义上"later wins" 更符合"新 fetch 覆盖老 fetch"的意图，也更符合增量 incremental update 的预期。单独开一个 `test_dedup_by_funding_time_ms_later_wins` 用例把新语义 pin 住。**更重要的是**，损坏行（缺 / 非数值 / bool / 非 dict）现在被安静丢弃而不是抛 KeyError——这是真正的生产价值 bug fix，因为 `_save_cache` 里一条损坏行以前会让整个 flush 失败，现在不会。
+5. **`compute_fetch_start` 的 4 条决策分支全部 pin 住优先级** —— `test_priority_older_before_newer_when_both_missing` 显式断言：当 `start < earliest` **并且** `end > latest` 同时成立时（即 cache 两头都缺数据），helper 选"再抓一遍从 start"而不是"tail fetch"。这是原代码的行为（`if start_ms < earliest_cached_ms:` 先判断），但此前从未有测试 pin 住；一旦未来有人"优化"成"分两次抓更高效"会立即炸。测试覆盖 9 个分支：无 cache / full cover / 缺老数据 / 缺新数据 / 边界命中 / 退化 start>end 不 crash / naive→UTC / 返回值必 UTC-aware / both missing 的优先级。
+6. **测试独立性 pin 得很死** —— `TestNtFreeIndependence` 有三条断言：源文件不出现 `nautilus_trader` / `from nautilus` 字符串、`open(` / `httpx` / `requests` 字符串（保证纯层不意外做 IO）、"如果 NT 还没被其他测试预加载，re-import 本模块不会加载 NT"。这是防止未来的"懒人 import" 悄悄污染纯层。
+
+**验证**:
+
+- **单元测试（新建）**：
+  - `tests/backtest/test_funding_math.py` —— 41 用例，全绿，~10ms
+  - `tests/backtest/test_funding_tracker.py` —— 18 用例，全绿，~50ms（用 unbound-method stub pattern，0 次 Actor 实例化）
+  - `tests/data/test_funding_cache_helpers.py` —— 37 用例，全绿，~10ms
+  - `tests/data/test_funding_cache.py` —— 21 用例，全绿，~50ms（tmp_path + 假 pipeline）
+  - **新增 117 个用例**，全部 NT-free / 无网络 / < 150ms 合计
+- **全套测试**：`.venv/bin/python -m pytest tests/` —— `2287 → 2404 passed`（+117，**零回归**），13.77s。之前存在的"间接覆盖" funding path 的测试（`test_runner_pure_helpers.py::TestAssembleFundingEvents` 9 个用例、`test_data_helpers.py::test_funding_rate_*` 2 个用例、`test_loader.py::test_funding_alias_*` / `load_funding_rates` 相关 6 个用例）全部保持 passing
+- **生产路径烟测**：`python -c "from tinohelm.backtest.funding import _FundingCostTracker; t = _FundingCostTracker(config=_FundingCostTrackerConfig()); print(t.id)"` → `FundingCostTracker-001`。NT Actor kernel 初始化链路 `__init__` → `super().__init__()` 未受影响
+
 ## 2026-04-21 (5)
 
 **主题**: 抽 `data/providers/_rest.py` 纯逻辑层统一 4 份散落的 "HTTP 分类 → 退避 / 固定重试 / 放弃" 重试策略 + 消灭 3 条 klines 家族分页循环的复制粘贴 + 给 `data/providers/binance.py` 这个零覆盖的 REST 生产客户端建立 129 个 NT-free / 无网络的测试安全网
