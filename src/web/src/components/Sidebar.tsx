@@ -20,7 +20,7 @@ const navGroups: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
       { href: "/backtest", label: "Backtests", icon: FlaskConical },
-      { href: "/research", label: "Factor Research", icon: Hexagon },
+      { href: "/factor", label: "Factor Research", icon: Hexagon },
     ],
   },
   {
