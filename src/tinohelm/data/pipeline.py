@@ -537,9 +537,9 @@ class BinanceVisionPipeline:
             return paths
 
         elif category == "funding_rate":
-            # Store as JSON in funding_cache format for backward compat
-            self._write_funding_rates(objects, symbol)
-            return []
+            # Write to both Parquet (primary) and JSON (backward-compat fallback)
+            parquet_path = self._write_funding_rates(objects, symbol)
+            return [parquet_path] if parquet_path else []
 
         else:
             logger.warning(
@@ -548,9 +548,13 @@ class BinanceVisionPipeline:
             )
             return []
 
-    def _write_funding_rates(self, records: list, symbol: str) -> None:
-        """Write funding rate records to the local JSON cache."""
+    def _write_funding_rates(self, records: list, symbol: str) -> str | None:
+        """Write funding rate records to Parquet (primary) and JSON (fallback cache).
+
+        Returns the Parquet file path string if written, else None.
+        """
         from tinohelm.data.funding_cache import _save_cache
+        from tinohelm.data.catalog import write_funding_rate_parquet
 
         cache_records = [
             {
@@ -560,8 +564,27 @@ class BinanceVisionPipeline:
             }
             for r in records
         ]
+        # JSON write (backward compat — preserves existing deployments)
         _save_cache(symbol, cache_records)
-        logger.info("Wrote %d funding rate records for %s", len(records), symbol)
+
+        # Parquet write (new primary path)
+        try:
+            parquet_path = write_funding_rate_parquet(
+                records=records,
+                symbol=symbol,
+                catalog_root=self.catalog_path,
+            )
+            logger.info(
+                "Wrote %d funding rate records for %s (Parquet + JSON)",
+                len(records), symbol,
+            )
+            return str(parquet_path)
+        except Exception:
+            logger.warning(
+                "Failed to write funding rates as Parquet for %s — JSON cache written",
+                symbol, exc_info=True,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # REST API fallback

@@ -417,3 +417,102 @@ def write_trade_ticks(
     written = sorted(current - existing)
     logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
+
+
+# ---------------------------------------------------------------------------
+# FundingRate Parquet support
+# ---------------------------------------------------------------------------
+
+def funding_rate_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
+    """Return the canonical Parquet path for a symbol's funding-rate data.
+
+    Convention: ``{catalog_root}/data/funding_rate/{symbol.lower()}.parquet``.
+    This matches the ``funding_rate`` write-category in WRITE_CATEGORY and the
+    ``_DEFAULT_CATALOG_ROOT`` used by DataLayer.
+    """
+    return Path(catalog_root) / "data" / "funding_rate" / f"{symbol.lower()}.parquet"
+
+
+def write_funding_rate_parquet(
+    records: list,
+    symbol: str,
+    catalog_root: str | Path,
+) -> Path:
+    """Write BinanceFundingRate records to a single Parquet file per symbol.
+
+    Schema
+    ------
+    - ``ts_event`` : int64 — funding time in nanoseconds since epoch
+    - ``funding_rate`` : float64
+
+    Records from ``records`` may be :class:`BinanceFundingRate` dataclass
+    instances (with ``.ts_event`` and ``.funding_rate`` attrs) **or** plain
+    dicts with ``funding_time_ms`` / ``funding_rate`` keys (JSON cache format).
+
+    Existing data is merged (deduped by ``ts_event``, keeping latest) before
+    writing so incremental ingestion is safe.
+
+    Returns the path of the written Parquet file.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    out_path = funding_rate_parquet_path(symbol, catalog_root)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Normalise records → list of (ts_event_ns, funding_rate)
+    def _to_tuple(r):
+        if hasattr(r, "ts_event"):
+            # BinanceFundingRate dataclass
+            return int(r.ts_event), float(r.funding_rate)
+        # Plain dict (JSON cache format)
+        return int(r["funding_time_ms"]) * 1_000_000, float(r["funding_rate"])
+
+    new_rows: dict[int, float] = {}
+    for r in records:
+        ts_ns, rate = _to_tuple(r)
+        new_rows[ts_ns] = rate
+
+    # Merge with existing Parquet if present
+    if out_path.exists():
+        existing_table = pq.read_table(str(out_path))
+        for ts_ns, rate in zip(
+            existing_table["ts_event"].to_pylist(),
+            existing_table["funding_rate"].to_pylist(),
+        ):
+            # New records take precedence (overwrite existing by ts_event key)
+            if ts_ns not in new_rows:
+                new_rows[ts_ns] = float(rate)
+
+    # Sort by ts_event and build Arrow table
+    sorted_ts = sorted(new_rows)
+    table = pa.table(
+        {
+            "ts_event": pa.array(sorted_ts, type=pa.int64()),
+            "funding_rate": pa.array([new_rows[t] for t in sorted_ts], type=pa.float64()),
+        }
+    )
+    pq.write_table(table, str(out_path))
+    logger.info(
+        "Wrote %d funding-rate rows to %s", len(sorted_ts), out_path
+    )
+    return out_path
+
+
+def read_funding_rate_parquet(
+    symbol: str,
+    catalog_root: str | Path,
+) -> "pd.DataFrame | None":
+    """Read a funding-rate Parquet file and return a DataFrame or None.
+
+    Columns: ``ts_event`` (int64 ns), ``funding_rate`` (float64).
+    Returns ``None`` when the file does not exist.
+    """
+    import pyarrow.parquet as pq
+
+    path = funding_rate_parquet_path(symbol, catalog_root)
+    if not path.exists():
+        return None
+    table = pq.read_table(str(path))
+    # Return as pandas DataFrame (caller handles conversion to Series)
+    return table.to_pandas()
