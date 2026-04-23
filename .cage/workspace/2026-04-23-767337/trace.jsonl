@@ -1,5 +1,0 @@
-{"ts":"2026-04-23T03:11:30.226363Z","type":"phase","detail":"debug started","meta":{"task":"declarative-factor-framework"}}
-{"ts":"2026-04-23T03:16:53.885057Z","type":"decision","detail":"root cause confirmed: 19/21 issues verified, 1 downgraded (ic_max_abs not crash), 1 removed (list_runs not a bug)","meta":{"task":"declarative-factor-framework"}}
-{"ts":"2026-04-23T03:26:14.526864Z","type":"phase","detail":"fix completed","meta":{"result":"success","task":"declarative-factor-framework"}}
-{"ts":"2026-04-23T03:30:58.291917Z","type":"phase","detail":"debug started","meta":{"task":"ci-failure"}}
-{"ts":"2026-04-23T03:31:44.075704Z","type":"phase","detail":"fix completed","meta":{"result":"success","task":"ci-failure"}}

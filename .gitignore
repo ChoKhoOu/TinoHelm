@@ -21,3 +21,6 @@ target/
 
 # Playwright CLI session logs / screenshots (transient)
 .playwright-cli/
+
+# Cage harness (local workflow state, not project source)
+.cage/

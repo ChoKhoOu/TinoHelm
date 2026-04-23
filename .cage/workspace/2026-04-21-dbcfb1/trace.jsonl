@@ -1,4 +1,0 @@
-{"ts":"2026-04-21T03:50:29.219098Z","type":"phase","detail":"debug started — backtest list visual drift query","meta":{"task":"backtest-page-visual-refactor"}}
-{"ts":"2026-04-21T03:56:08.552085Z","type":"decision","detail":"root cause: reference mock uses legacy CSS classes deleted by 2026-04-19 DS standardization; task spec intentionally re-implemented with Tailwind+QDS components, not class-for-class copy","meta":{"task":"backtest-page-visual-refactor"}}
-{"ts":"2026-04-21T06:56:37.540334Z","type":"phase","detail":"debug started — contractindex /v1/indexconfig?coin=TQQQX no response","meta":{"task":"contractindex-tqqqx-debug"}}
-{"ts":"2026-04-21T07:06:37.721126Z","type":"decision","detail":"dispatching 3 debugger lanes for TQQQX no-sources root cause","meta":{"task":"contractindex-tqqqx-debug"}}

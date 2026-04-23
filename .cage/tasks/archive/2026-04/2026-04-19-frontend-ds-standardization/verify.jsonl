@@ -1,2 +1,0 @@
-{"path":"/Users/ouzhuohao/.claude/projects/-Users-ouzhuohao-TinoHelm/memory/feedback-agent-frontend-unreliable.md","reason":"verify 阶段需核查 agent 产出的 3 类典型失效：布局框架是否用了 inline style（而非 CSS class）、是否有新发明的 class 名（应全为 Tailwind 语义类）、是否有 Unicode 转义字符"}
-{"path":"/Users/ouzhuohao/.claude/projects/-Users-ouzhuohao-TinoHelm/memory/feedback-parallel-agent-race.md","reason":"verify 阶段需校验并行 agent 产出未被覆盖：检查每个 subtask 的关键输出文件内容（diff 或 Read 验证），若 agent 报告异常简短（如只说'Now I'll write files'）需深入核查是否发生写入竞态"}
