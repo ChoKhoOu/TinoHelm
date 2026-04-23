@@ -111,6 +111,13 @@ class Registry:
             current_hash = self._spec_cache.get(name, ("", None))[0]
             self._spec_cache[name] = (current_hash, spec)
 
+        # 5. Remove stale entries no longer present in any source
+        stale = set(self._spec_cache) - set(merged)
+        for name in stale:
+            self._spec_cache.pop(name)
+            self._kernel_cache.pop(name, None)
+            logger.debug("Removed stale factor %r from cache", name)
+
         return merged
 
     def get_spec(self, name: str) -> FactorSpec | None:

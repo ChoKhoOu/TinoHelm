@@ -69,7 +69,6 @@ FIELD_ALIAS: dict[str, str] = {
 
     # ── amount (quote currency turnover, i.e. dollar volume) ──────────────
     "amount": "amount",
-    "turnover": "amount",
     "成交额": "amount",
     "quote_volume": "amount",
     "quoteqty": "amount",

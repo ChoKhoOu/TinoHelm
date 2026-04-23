@@ -77,8 +77,9 @@ class TestResolveShortAliases:
     def test_v_to_volume(self):
         assert resolve_alias("v") == "volume"
 
-    def test_turnover_to_amount(self):
-        assert resolve_alias("turnover") == "amount"
+    def test_turnover_passthrough(self):
+        """'turnover' no longer aliases to 'amount' — conflicts with EvalResult.turnover."""
+        assert resolve_alias("turnover") == "turnover"
 
     def test_quote_volume_to_amount(self):
         assert resolve_alias("quote_volume") == "amount"

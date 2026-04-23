@@ -112,7 +112,8 @@ def _build_input_specs(func: Callable) -> tuple[InputSpec, ...]:  # type: ignore
         # Determine if this is a Panel input
         if _is_panel_annotation(annotation):
             canonical_name = resolve_alias(param_name)
-            specs.append(InputSpec(field_name=canonical_name))
+            required = param.default is inspect.Parameter.empty
+            specs.append(InputSpec(field_name=canonical_name, required=required))
         else:
             # Unknown annotation type — skip with a debug log
             logger.debug(
@@ -226,7 +227,12 @@ def factor(
                 final_lookback,
             )
 
-        # 4. Build FactorSpec (frozen dataclass — all fields supplied at once)
+        # 4. Pre-compute whether the kernel needs a `backend` first argument.
+        sig = inspect.signature(func)
+        _param_names = list(sig.parameters.keys())
+        _needs_backend = bool(_param_names and _param_names[0] == "backend")
+
+        # 5. Build FactorSpec (frozen dataclass — all fields supplied at once)
         spec = FactorSpec(
             name=func_name,
             category=category,
@@ -237,9 +243,10 @@ def factor(
             params=dict(params) if params is not None else {},
             version=version,
             code_hash=code_hash,
+            needs_backend=_needs_backend,
         )
 
-        # 5. Attach spec and return original function unchanged
+        # 6. Attach spec and return original function unchanged
         func.__factor_spec__ = spec  # type: ignore[attr-defined]
         return func
 

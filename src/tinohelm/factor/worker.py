@@ -86,15 +86,18 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
         # any pre-existing queued rows).
         queued_ids = (
             await db.execute(
-                select(FactorRun.id).where(FactorRun.status == "queued")
+                select(FactorRun.id)
+                .where(FactorRun.status == "queued")
+                .order_by(FactorRun.created_at.asc())
             )
         ).scalars().all()
 
         # Clear the old queue and re-populate atomically to avoid duplicates.
+        # Use rpush to preserve chronological (created_at ASC) order.
         if queued_ids:
             await rds.delete(QUEUE_KEY)
             for run_id in queued_ids:
-                await rds.lpush(QUEUE_KEY, run_id)
+                await rds.rpush(QUEUE_KEY, run_id)
 
     if recovered:
         logger.info("Recovered %d interrupted factor run(s)", recovered)
@@ -324,10 +327,8 @@ def _run_orchestrator(
     backend = PandasBackend()
     evaluator = Evaluator()
 
-    # Cache stored alongside catalog
-    cache_dir = pathlib.Path(catalog_path) / ".factor_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache = FactorCache(cache_root=str(cache_dir))
+    # Cache — use settings.paths.factor_cache (no hardcoded path).
+    cache = FactorCache()
 
     # Observer with progress hook that calls back into the async loop.
     # The Observer's span mechanism drives coarse-grained step events.

@@ -13,12 +13,29 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level globals for ProcessPoolExecutor initializer pattern.
+# Each worker process creates a Registry once in _init_worker() and reuses
+# it for every task, avoiding redundant scan() calls per symbol.
+# ---------------------------------------------------------------------------
+_worker_registry: Any = None
+
+
+def _init_worker() -> None:
+    """ProcessPoolExecutor initializer — build Registry once per worker."""
+    global _worker_registry  # noqa: PLW0603
+    from tinohelm.factor.registry import Registry
+
+    _worker_registry = Registry()
+    _worker_registry.scan()
 
 
 # Public threshold for "significant" — p-value strict-less-than this is significant.
@@ -151,15 +168,22 @@ def _cross_symbol_worker(args: tuple) -> dict:
     """Worker for cross-symbol IC (top-level for pickling).
 
     Loads bar data via DataLayer and computes the factor signal using the
-    declarative factor registry (replacing the removed research module).
+    declarative factor registry.  Reuses the module-level ``_worker_registry``
+    created by ``_init_worker()`` to avoid rebuilding the Registry per symbol.
+
+    The kernel is called with the same convention as
+    :meth:`Scheduler._call_kernel`: ``kernel(**factor_data)`` where
+    ``factor_data`` maps ``input_spec.field_name → Panel``.  ``params`` is
+    injected when the kernel's spec declares a ``params`` parameter.
     """
     symbol, factor_name, factor_params, interval, start, end, forward_period, catalog_path = args
     try:
         from tinohelm.factor.data_layer import DataLayer
         from tinohelm.factor.evaluation.ic import forward_returns
-        from tinohelm.factor.registry import Registry
         from tinohelm.factor.types import DataRequest
         from tinohelm.factor.universe import Universe
+
+        global _worker_registry  # noqa: PLW0602
 
         universe_obj = Universe.from_symbols([symbol])
         catalog_root = __import__("pathlib").Path(catalog_path) if catalog_path else None
@@ -177,21 +201,33 @@ def _cross_symbol_worker(args: tuple) -> dict:
         if close_panel is None or close_panel.empty or len(close_panel) < 100:
             return {"symbol": symbol, "ic": 0, "n_obs": 0}
 
-        # Build single-column per-field panels for the factor kernel
-        sym_panels: dict[str, pd.DataFrame] = {
-            field: panels[field].rename(columns={symbol: symbol})
-            for field in ("close", "open", "high", "low", "volume")
-            if field in panels and symbol in panels[field].columns
-        }
-        close_df = sym_panels.get("close", close_panel)
-
-        # Resolve factor kernel via the registry
-        registry = Registry()
-        registry.scan()
+        # Resolve factor kernel + spec via the worker-level registry
+        registry = _worker_registry
         kernel = registry.get_kernel(factor_name)
+        spec = registry.get_spec(factor_name)
 
-        sig_panel = kernel(close_df, params=factor_params, panels=sym_panels)
+        # Build factor_data dict from spec.input_specs — same convention as
+        # Scheduler._select_inputs: keys are field_name strings.
+        factor_data: dict[str, pd.DataFrame] = {}
+        if spec is not None:
+            for inp in spec.input_specs:
+                if inp.field_name in panels:
+                    factor_data[inp.field_name] = panels[inp.field_name]
+        else:
+            # Fallback: pass close if spec is unavailable
+            factor_data["close"] = close_panel
+
+        # Inject params if the kernel accepts it (legacy convention used by
+        # all built-in factors: ``def ret_N(close, params=None)``).
+        import inspect
+        sig = inspect.signature(kernel)
+        if "params" in sig.parameters:
+            factor_data["params"] = factor_params  # type: ignore[assignment]
+
+        sig_panel = kernel(**factor_data)
         sig = sig_panel[symbol] if symbol in sig_panel.columns else sig_panel.iloc[:, 0]
+
+        close_df = panels["close"]
         fwd = forward_returns(close_df[symbol], forward_period)
 
         paired = pd.DataFrame({"f": sig, "r": fwd}).dropna()
@@ -232,7 +268,7 @@ def cross_symbol_ic(
     ]
 
     results = []
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker) as pool:
         futures = {pool.submit(_cross_symbol_worker, a): a[0] for a in args_list}
         for fut in as_completed(futures):
             results.append(fut.result())

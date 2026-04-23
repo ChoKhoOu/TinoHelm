@@ -251,20 +251,17 @@ class Scheduler:
            Panel parameters (the primary convention in this framework).
 
         2. **Backend-first** — ``kernel(backend, **factor_data)`` — for
-           kernels that need the backend to be passed explicitly.  Detected by
-           checking for a ``backend`` parameter in the signature.
+           kernels that need the backend to be passed explicitly.  Detected
+           via ``spec.needs_backend`` (pre-computed by the ``@factor``
+           decorator at import time — no runtime ``inspect.signature``
+           call).
 
         Returns
         -------
         Panel
             The output DataFrame produced by the kernel.
         """
-        import inspect
-
-        sig = inspect.signature(kernel)
-        param_names = list(sig.parameters.keys())
-
-        if param_names and param_names[0] == "backend":
+        if spec.needs_backend:
             result = kernel(backend, **factor_data)
         else:
             result = kernel(**factor_data)

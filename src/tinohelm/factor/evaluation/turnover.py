@@ -61,9 +61,11 @@ def compute_turnover(
         if len(group) == 0:
             continue
         curr_q = group["q"]
-        if prev_q is not None and len(prev_q) == len(curr_q):
-            changed = (curr_q.values != prev_q.values).mean()
-            turnovers.append(changed)
+        if prev_q is not None:
+            aligned_prev, aligned_curr = prev_q.align(curr_q, join="inner")
+            if len(aligned_prev) > 0:
+                changed = (aligned_curr.values != aligned_prev.values).mean()
+                turnovers.append(changed)
         prev_q = curr_q
 
     daily_turn = float(np.mean(turnovers)) if turnovers else 0

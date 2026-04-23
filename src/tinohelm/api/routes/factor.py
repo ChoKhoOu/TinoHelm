@@ -188,9 +188,8 @@ async def explore_factor(req: ExploreRequest) -> dict:
     data_layer = DataLayer(universe_obj, catalog_root=Path(catalog_path))
     backend = PandasBackend()
     evaluator = Evaluator()
-    cache_dir = Path(catalog_path) / ".factor_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache = FactorCache(cache_root=str(cache_dir))
+    # Cache — use settings.paths.factor_cache (no hardcoded path).
+    cache = FactorCache()
     observer = Observer()
 
     orchestrator = Orchestrator(
@@ -226,6 +225,7 @@ async def explore_factor(req: ExploreRequest) -> dict:
         "ir": result.ir,
         "ic_tstat": result.ic_tstat,
         "ic_positive_pct": result.ic_positive_pct,
+        "ic_max_abs": result.ic_max_abs,
         "rating": result.rating,
         "quantile_pnl": result.quantile_pnl,
         "quantile_cum_returns": result.quantile_cum_returns,
@@ -256,6 +256,14 @@ async def submit_run(
     Creates a ``FactorRun`` DB record, pushes to ``tino:factor:queue``, and
     returns ``{run_id, status: "queued"}``.
     """
+    # Validate factor_name exists in registry (same guard as /explore).
+    from tinohelm.factor.registry import Registry
+
+    registry = Registry()
+    registry.scan()
+    if registry.get_spec(req.factor_name) is None:
+        raise HTTPException(status_code=404, detail=f"Factor '{req.factor_name}' not found")
+
     run_id = str(uuid4())
 
     run = FactorRun(

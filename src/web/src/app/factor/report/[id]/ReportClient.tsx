@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -39,13 +39,33 @@ export function ReportClient() {
   const router = useRouter();
   const runId = (params?.id as string) ?? "";
 
-  const { report, loading, error } = useReport(runId);
+  const { report, loading, error, reload } = useReport(runId);
 
   const [activeTab, setActiveTab] = useState<TabKey>("profile");
 
   const result = report?.result;
 
   const handleBack = () => router.push("/factor");
+
+  /* ------------------------------------------------------------------ */
+  /*  Auto-refresh while queued / running (5s interval)                  */
+  /* ------------------------------------------------------------------ */
+
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
+  useEffect(() => {
+    const status = report?.status;
+    const shouldPoll = status === "queued" || status === "running";
+
+    if (!shouldPoll) return;
+
+    const id = setInterval(() => {
+      reloadRef.current();
+    }, 5_000);
+
+    return () => clearInterval(id);
+  }, [report?.status]);
 
   /* ------------------------------------------------------------------ */
   /*  Loading skeleton                                                   */
@@ -69,6 +89,11 @@ export function ReportClient() {
           </Button>
         </div>
         <InlineError>{`加载报告失败: ${error}`}</InlineError>
+        <div className="mt-3">
+          <Button variant="outline" size="sm" onClick={reload}>
+            重试
+          </Button>
+        </div>
       </div>
     );
   }

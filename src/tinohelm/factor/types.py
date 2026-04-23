@@ -136,6 +136,7 @@ class FactorSpec:
     params: dict[str, Any] = field(default_factory=dict, compare=False, hash=False)
     version: str = "1.0.0"
     code_hash: str = ""
+    needs_backend: bool = False
 
 
 # ---------------------------------------------------------------------------
