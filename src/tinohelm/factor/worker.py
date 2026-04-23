@@ -195,12 +195,14 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         throttle = PercentStepThrottle(step=PROGRESS_DB_STEP)
 
         async def _progress(pct: int, msg: str = "") -> None:
-            await rds.publish(progress_channel, json.dumps({
+            payload = json.dumps({
                 "run_id": run_id,
                 "factor_name": factor_name,
                 "progress": pct,
                 "message": msg,
-            }))
+            })
+            await rds.publish(progress_channel, payload)
+            await rds.setex(progress_channel, 86400, str(pct))
             if throttle.should_write(pct):
                 async with factory() as db2:
                     await db2.execute(
