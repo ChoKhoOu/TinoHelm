@@ -262,8 +262,10 @@ class Planner:
                 name for name in remaining if in_degree[name] == 0
             }
             if not current_layer_names:
-                # Cycle detected — fall back: put all remaining in one layer
-                current_layer_names = remaining.copy()
+                raise ValueError(
+                    f"Cyclic dependency detected among factors: "
+                    f"{sorted(remaining)}"
+                )
 
             # Sort for deterministic ordering
             current_layer = [

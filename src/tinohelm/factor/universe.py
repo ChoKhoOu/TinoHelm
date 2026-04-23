@@ -262,6 +262,28 @@ class Universe:
     # PIT query
     # ------------------------------------------------------------------
 
+    def get_symbol_boundaries(self) -> dict[str, tuple[datetime, datetime | None]]:
+        """Return a mapping of symbol → (eligible_from, delisting_date).
+
+        ``eligible_from`` is ``listing_date + 7 days`` (the new-coin isolation
+        boundary).  ``delisting_date`` is ``None`` when the symbol is still
+        active (no delisting).
+
+        This is useful for vectorised PIT filtering: callers can build column
+        masks without calling ``get_symbols_at`` per timestamp.
+
+        Returns
+        -------
+        dict[str, tuple[datetime, datetime | None]]
+            Keys are symbol strings; values are ``(eligible_from, delisting_date)``
+            tuples where both dates are timezone-naive ``datetime`` instances.
+        """
+        result: dict[str, tuple[datetime, datetime | None]] = {}
+        for row in self._rows:
+            eligible_from = row.listing_date + timedelta(days=_NEW_COIN_ISOLATION_DAYS)
+            result[row.symbol] = (eligible_from, row.delisting_date)
+        return result
+
     def get_symbols_at(self, ts: datetime | pd.Timestamp) -> list[str]:
         """Return eligible symbols at a given point in time.
 

@@ -22,6 +22,9 @@ import hashlib
 import json
 import logging
 import math
+import os
+import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -157,6 +160,7 @@ class FactorCache:
         self._values_dir = self._root / "values"
         self._eval_dir = self._root / "eval"
         self._manifest_path = self._root / "manifest.json"
+        self._manifest_lock = threading.Lock()
         self._ensure_dirs()
 
     # ------------------------------------------------------------------ #
@@ -187,8 +191,22 @@ class FactorCache:
         return {}
 
     def _save_manifest(self, manifest: dict) -> None:
-        with open(self._manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2, default=str)
+        # Atomic write: write to a temp file in the same directory, then
+        # os.replace (which is atomic on POSIX and Windows NTFS).
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self._root), suffix=".tmp", prefix=".manifest_"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(manifest, f, indent=2, default=str)
+            os.replace(tmp_path, str(self._manifest_path))
+        except BaseException:
+            # Clean up temp file on any failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _update_manifest(
         self,
@@ -197,18 +215,19 @@ class FactorCache:
         code_hash: str,
         extra_size: int = 0,
     ) -> None:
-        manifest = self._load_manifest()
-        entry = manifest.get(key, {})
-        if not entry:
-            entry = {
-                "factor_name": factor_name,
-                "code_hash": code_hash,
-                "created_at": datetime.now().isoformat(),
-                "size_bytes": 0,
-            }
-        entry["size_bytes"] = entry.get("size_bytes", 0) + extra_size
-        manifest[key] = entry
-        self._save_manifest(manifest)
+        with self._manifest_lock:
+            manifest = self._load_manifest()
+            entry = manifest.get(key, {})
+            if not entry:
+                entry = {
+                    "factor_name": factor_name,
+                    "code_hash": code_hash,
+                    "created_at": datetime.now().isoformat(),
+                    "size_bytes": 0,
+                }
+            entry["size_bytes"] = entry.get("size_bytes", 0) + extra_size
+            manifest[key] = entry
+            self._save_manifest(manifest)
 
     # ------------------------------------------------------------------ #
     # Public API

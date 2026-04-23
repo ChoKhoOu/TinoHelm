@@ -192,65 +192,13 @@ class Evaluator:
 
         The ``Evaluator`` is conservative and *does not* heuristically detect
         "price vs forward-return"; callers must pass forward returns
-        explicitly.  ``Evaluator._prepare_returns()`` is the single
-        integration point if a heuristic is added later.
+        explicitly.  ``_prepare_returns()`` is the single integration point
+        if a heuristic is added later.
         """
-        factor_s = _to_series(factor_values)
-        fwd_s = self._prepare_returns(returns, config)
-
-        # Defensive: align indices so stacked panels share the same time axis.
-        factor_s, fwd_s = factor_s.align(fwd_s, join="inner")
-
-        result = EvalResult()
-
-        # 1. Distribution — factor-only analysis, cheap.
-        dist = compute_distribution(factor_s)
-        result.distribution_stats = dist.get("stats", {})
-        result.distribution_histogram = dist.get("histogram", [])
-
-        # 2. IC series + summary.
-        ic_series_df = compute_ic_series(factor_s, fwd_s, freq=config.ic_freq)
-        summary = compute_ic_summary(ic_series_df)
-        result.ic_mean = float(summary["ic_mean"])
-        result.ic_std = float(summary["ic_std"])
-        result.ir = float(summary["ir"])
-        result.ic_tstat = float(summary["ic_tstat"])
-        result.ic_positive_pct = float(summary["ic_positive_pct"])
-        result.ic_max_abs = float(summary["ic_max_abs"])
-        result.ic_series = (
-            ic_series_df.to_dict("records") if len(ic_series_df) > 0 else []
+        result, _factor_s, _fwd_s, _close_s = self._evaluate_core(
+            factor_values, returns, config
         )
-
-        # 3. Decay + half-life — needs the close price, not forward returns.
-        # When the caller gives us forward returns directly we can't recover
-        # close prices, so decay is only meaningful when ``returns`` is a
-        # Panel/Series of prices. Callers pass a Panel to _prepare_returns()
-        # which stashes the original close on ``self._last_close``.
-        if self._last_close is not None:
-            decay = compute_ic_decay(factor_s, self._last_close)
-            result.ic_decay = decay
-            result.half_life = compute_half_life(decay)
-
-        # 4. Quantile analysis.
-        q = compute_quantile_returns(factor_s, fwd_s, n_quantiles=config.quantiles)
-        result.quantile_pnl = q.get("avg_returns", {})
-        result.quantile_cum_returns = q.get("cum_returns", {})
-        result.is_monotonic = bool(q.get("is_monotonic", False))
-
-        # 5. Turnover — uses the cost_bps config for fee drag.
-        fee_rate = config.cost_bps / 10000.0 / 2.0  # bps → per-side decimal
-        turn = compute_turnover(factor_s, fwd_s, n_quantiles=config.quantiles, fee_rate=fee_rate)
-        result.turnover = float(turn["daily"])
-        result.turnover_annualized = float(turn["annualized"])
-        result.fee_drag_monthly = float(turn["fee_drag_monthly"])
-
-        # 6. Rating.
-        result.rating = compute_rating({
-            "ir": result.ir,
-            "ic_positive_pct": result.ic_positive_pct,
-        })
-
-        return _scrub_result(result)
+        return result
 
     # ------------------------------------------------------------------ #
     # evaluate_full — full diagnostic (robustness + cost)
@@ -283,12 +231,10 @@ class Evaluator:
               "interval": str, "start": str, "end": str,
               "catalog_path": str | None, "max_workers": int}``.
         """
-        # Start with the fast evaluation.
-        result = self.evaluate(factor_values, returns, config)
-
-        factor_s = _to_series(factor_values)
-        fwd_s = self._prepare_returns(returns, config)
-        factor_s, fwd_s = factor_s.align(fwd_s, join="inner")
+        # Reuse the core evaluation (no redundant _prepare_returns call).
+        result, factor_s, fwd_s, _close_s = self._evaluate_core(
+            factor_values, returns, config
+        )
 
         robustness: dict[str, Any] = {}
 
@@ -330,19 +276,14 @@ class Evaluator:
         return _scrub_result(result)
 
     # ------------------------------------------------------------------ #
-    # _prepare_returns — compute forward returns from a price panel
+    # _evaluate_core — shared implementation for evaluate / evaluate_full
     # ------------------------------------------------------------------ #
 
-    # Stash the close (price) panel between evaluate() and compute_ic_decay()
-    # so we can compute decay lags without re-passing the price to every
-    # call site. ``None`` means decay was skipped.
-    _last_close: pd.Series | None = None
-
+    @staticmethod
     def _prepare_returns(
-        self,
         returns: Panel | pd.Series,
         config: EvalConfig,
-    ) -> pd.Series:
+    ) -> tuple[pd.Series, pd.Series | None]:
         """Translate ``returns`` into a forward-return series.
 
         Heuristic: if the input already contains explicit NaNs in the tail
@@ -350,23 +291,89 @@ class Evaluator:
         pre-shifted forward returns.  Otherwise treat it as close prices
         and apply ``forward_returns``.
 
-        The caller may bypass the heuristic by passing a pre-shifted series
-        — the tail NaN check will trigger the pre-shifted branch.
+        Returns
+        -------
+        tuple[pd.Series, pd.Series | None]
+            ``(forward_return_series, close_series_or_none)``.
+            ``close_series_or_none`` is the flattened price series when the
+            input was detected as prices (used for IC decay).  ``None``
+            when the input was already pre-shifted forward returns.
         """
-        # Always keep the flattened series; decay needs prices so we also
-        # stash the "price-like" input when we detect one.
         as_series = _to_series(returns)
 
         # Tail NaN heuristic — if the last ``forward_period`` entries are
         # all NaN, assume it's already a forward-return series.
         tail = as_series.iloc[-config.forward_period:]
         if len(tail) == config.forward_period and tail.isna().all():
-            self._last_close = None  # no price available → decay skipped
-            return as_series
+            return as_series, None
 
         # Treat as close price; compute forward returns.
-        self._last_close = as_series
-        return forward_returns(as_series, config.forward_period, log_ret=config.log_ret)
+        fwd = forward_returns(as_series, config.forward_period, log_ret=config.log_ret)
+        return fwd, as_series
+
+    def _evaluate_core(
+        self,
+        factor_values: Panel | pd.Series,
+        returns: Panel | pd.Series,
+        config: EvalConfig,
+    ) -> tuple[EvalResult, pd.Series, pd.Series, pd.Series | None]:
+        """Shared implementation returning ``(result, factor_s, fwd_s, close_s)``.
+
+        Both ``evaluate()`` and ``evaluate_full()`` delegate here so that
+        flattening and ``_prepare_returns`` happen exactly once.
+        """
+        factor_s = _to_series(factor_values)
+        fwd_s, close_s = self._prepare_returns(returns, config)
+
+        # Defensive: align indices so stacked panels share the same time axis.
+        factor_s, fwd_s = factor_s.align(fwd_s, join="inner")
+
+        result = EvalResult()
+
+        # 1. Distribution — factor-only analysis, cheap.
+        dist = compute_distribution(factor_s)
+        result.distribution_stats = dist.get("stats", {})
+        result.distribution_histogram = dist.get("histogram", [])
+
+        # 2. IC series + summary.
+        ic_series_df = compute_ic_series(factor_s, fwd_s, freq=config.ic_freq)
+        summary = compute_ic_summary(ic_series_df)
+        result.ic_mean = float(summary["ic_mean"])
+        result.ic_std = float(summary["ic_std"])
+        result.ir = float(summary["ir"])
+        result.ic_tstat = float(summary["ic_tstat"])
+        result.ic_positive_pct = float(summary["ic_positive_pct"])
+        result.ic_max_abs = float(summary["ic_max_abs"])
+        result.ic_series = (
+            ic_series_df.to_dict("records") if len(ic_series_df) > 0 else []
+        )
+
+        # 3. Decay + half-life — needs the close price, not forward returns.
+        if close_s is not None:
+            decay = compute_ic_decay(factor_s, close_s)
+            result.ic_decay = decay
+            result.half_life = compute_half_life(decay)
+
+        # 4. Quantile analysis.
+        q = compute_quantile_returns(factor_s, fwd_s, n_quantiles=config.quantiles)
+        result.quantile_pnl = q.get("avg_returns", {})
+        result.quantile_cum_returns = q.get("cum_returns", {})
+        result.is_monotonic = bool(q.get("is_monotonic", False))
+
+        # 5. Turnover — uses the cost_bps config for fee drag.
+        fee_rate = config.cost_bps / 10000.0 / 2.0  # bps → per-side decimal
+        turn = compute_turnover(factor_s, fwd_s, n_quantiles=config.quantiles, fee_rate=fee_rate)
+        result.turnover = float(turn["daily"])
+        result.turnover_annualized = float(turn["annualized"])
+        result.fee_drag_monthly = float(turn["fee_drag_monthly"])
+
+        # 6. Rating.
+        result.rating = compute_rating({
+            "ir": result.ir,
+            "ic_positive_pct": result.ic_positive_pct,
+        })
+
+        return _scrub_result(result), factor_s, fwd_s, close_s
 
 
 __all__ = ["Evaluator"]

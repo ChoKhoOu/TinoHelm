@@ -500,6 +500,11 @@ class DataLayer:
         ``Universe.get_symbols_at(ts)`` are set to NaN.  The panel shape
         (index × columns) is preserved — rows are NOT dropped.
 
+        Vectorised implementation: precompute per-symbol (eligible_from,
+        delisting_date) boundaries from the Universe, then build column-level
+        boolean masks using broadcasting.  This avoids the O(n_timestamps *
+        n_symbols) Python loop of the naive approach.
+
         Parameters
         ----------
         panel:
@@ -513,19 +518,29 @@ class DataLayer:
         if panel.empty:
             return panel
 
+        boundaries = self._universe.get_symbol_boundaries()
+
         # Build a mask: True where a cell should be NaN
-        # Shape: (n_timestamps, n_symbols)
         mask = pd.DataFrame(False, index=panel.index, columns=panel.columns)
 
-        # Group consecutive timestamps by their eligible symbol set to reduce
-        # calls to get_symbols_at (which iterates over universe rows).
-        # For small panels, we just call it per timestamp.
-        all_symbols = list(panel.columns)
-        for ts in panel.index:
-            eligible = set(self._universe.get_symbols_at(ts))
-            for sym in all_symbols:
-                if sym not in eligible:
-                    mask.loc[ts, sym] = True
+        for sym in panel.columns:
+            boundary = boundaries.get(sym)
+            if boundary is None:
+                # Symbol not in universe at all → mask entire column
+                mask[sym] = True
+                continue
+
+            eligible_from, delisting_date = boundary
+            eligible_from_ts = pd.Timestamp(eligible_from)
+
+            # Ineligible before eligible_from (listing_date + 7d)
+            col_mask = panel.index < eligible_from_ts
+            # Ineligible at or after delisting_date
+            if delisting_date is not None:
+                delisting_ts = pd.Timestamp(delisting_date)
+                col_mask = col_mask | (panel.index >= delisting_ts)
+
+            mask[sym] = col_mask
 
         panel = panel.copy()
         panel[mask] = float("nan")

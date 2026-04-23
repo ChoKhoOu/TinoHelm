@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -98,9 +99,21 @@ class Observer:
         self._logger: logging.Logger = logger or _DEFAULT_LOGGER
         self._spans: list[SpanRecord] = []
         self._output_stats: dict[str, dict[str, Any]] = {}
-        # Stack of active span_ids for parent tracking (thread-local would be
-        # more robust in concurrent use, but factor runs are sequential)
-        self._active_stack: list[str] = []
+        # Thread-local storage for active span stack so concurrent threads
+        # do not corrupt each other's parent_id tracking.
+        self._local = threading.local()
+
+    # ------------------------------------------------------------------
+    # Thread-local stack accessor
+    # ------------------------------------------------------------------
+
+    def _get_active_stack(self) -> list[str]:
+        """Return the active span stack for the current thread (lazily init)."""
+        stack = getattr(self._local, "stack", None)
+        if stack is None:
+            self._local.stack = []
+            stack = self._local.stack
+        return stack
 
     # ------------------------------------------------------------------
     # Span API
@@ -129,10 +142,11 @@ class Observer:
                 result = compute(...)
         """
         span_id = str(uuid.uuid4())
-        parent_id = self._active_stack[-1] if self._active_stack else None
+        active_stack = self._get_active_stack()
+        parent_id = active_stack[-1] if active_stack else None
         start_ts = time.time()
         ctx = SpanCtx(self, span_id, name, parent_id, start_ts, tags)
-        self._active_stack.append(span_id)
+        active_stack.append(span_id)
         try:
             yield ctx
         except Exception as exc:
@@ -143,8 +157,9 @@ class Observer:
             if not ctx._finished:
                 self.end_span(ctx, error=None)
             # Pop from stack (guard against double-pop if end_span called manually)
-            if span_id in self._active_stack:
-                self._active_stack.remove(span_id)
+            active_stack = self._get_active_stack()
+            if span_id in active_stack:
+                active_stack.remove(span_id)
 
     def end_span(self, span: SpanCtx, error: Exception | None = None) -> None:
         """Finalize a span and emit a structured log line.
@@ -179,8 +194,9 @@ class Observer:
         self._spans.append(record)
 
         # Remove from active stack
-        if span.span_id in self._active_stack:
-            self._active_stack.remove(span.span_id)
+        active_stack = self._get_active_stack()
+        if span.span_id in active_stack:
+            active_stack.remove(span.span_id)
 
         # Emit structured JSON log line
         log_payload: dict[str, Any] = {
