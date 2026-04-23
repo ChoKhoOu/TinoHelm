@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 
 from tinohelm.api import deps
-from tinohelm.api.routes import backtest, dashboard, data, node, optimize, research, settings, strategy, trading, watchlist
+from tinohelm.api.routes import backtest, dashboard, data, factor, node, optimize, settings, strategy, trading, watchlist
 from tinohelm.api.ws import hub
 from tinohelm.core.bridge import EventBridge
 from tinohelm.core.config import get_settings
@@ -22,13 +22,8 @@ from tinohelm.core.process_manager import ProcessManager
 from tinohelm.core.watchdog import Watchdog
 from tinohelm.backtest.worker import recover_interrupted_runs as recover_backtest_runs
 from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker
-from tinohelm.research.worker import (
-    recover_interrupted_jobs as recover_research_jobs,
-    start_research_worker,
-    stop_research_worker,
-)
-from tinohelm.db.models import Base
-from tinohelm.db.session import get_engine, get_session_factory
+from tinohelm.factor.worker import recover_interrupted_jobs as recover_factor_jobs, start_factor_worker, stop_factor_worker
+from tinohelm.db.session import get_session_factory
 from tinohelm.strategy.registry import persist_strategies, scan_strategies
 
 logger = logging.getLogger(__name__)
@@ -53,12 +48,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ---- startup ----
     logger.info("TinoHelm API starting up")
     deps.set_startup_time(time.time())
-
-    # Ensure all tables exist (safe if already created by Alembic)
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables ensured")
 
     # Redis (async)
     redis_client = aioredis.from_url(cfg.redis.url)
@@ -99,9 +88,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await recover_interrupted_jobs(redis_client)
     start_data_worker(redis_url=cfg.redis.url, catalog_path=str(cfg.paths.catalog))
 
-    # Research worker (async, in-process)
-    await recover_research_jobs(redis_client)
-    start_research_worker(redis_url=cfg.redis.url, catalog_path=str(cfg.paths.catalog))
+    # Factor worker (async, in-process)
+    await recover_factor_jobs(redis_client)
+    start_factor_worker(redis_url=cfg.redis.url)
 
     logger.info("TinoHelm API ready")
 
@@ -110,7 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ---- shutdown ----
     logger.info("TinoHelm API shutting down")
     stop_data_worker()
-    stop_research_worker()
+    stop_factor_worker()
 
     from .routes.optimize import cleanup_optimizer_processes
     cleanup_optimizer_processes()
@@ -158,7 +147,7 @@ def create_app() -> FastAPI:
     # Read-only routers — no auth required
     app.include_router(strategy.router)
     app.include_router(data.router)
-    app.include_router(research.router, dependencies=_auth_deps)
+    app.include_router(factor.router, dependencies=_auth_deps)
     app.include_router(trading.router)
     app.include_router(dashboard.router)
     app.include_router(hub.router)

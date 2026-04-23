@@ -1,0 +1,41 @@
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/research/worker.py","reason":"factor/worker.py 要基于相同的 core/async_queue_worker.py 原语实现，旧 research/worker.py 是直接参考实现（consumer_loop/WorkerHandle/PercentStepThrottle 用法 + DB 状态机 queued→running→completed）。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/core/async_queue_worker.py","reason":"factor/worker.py 必须复用这个文件的 consumer_loop / WorkerHandle / PercentStepThrottle 原语，需理解其接口再编写 factor worker。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/research/factors.py","reason":"含 12 个内置因子的旧实现（_COMPUTE_MAP + 计算逻辑），US-013 要求新旧实现数值误差 \u003c 1e-10，executor 需要对照此文件逐一迁移。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/research/registry.py","reason":"旧 Registry 的 get_all_factors / get_compute_fn 接口，新 factor/registry.py 扫描/注册逻辑可参考其结构，避免重复设计。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/research/loader.py","reason":"含 _BAR_TYPES/_TICK_TYPES/_FUNDING_TYPES frozenset 和 load_data() dispatcher，factor/data_layer.py 的多源加载逻辑直接复用这里的分派模式。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/research/analysis.py","reason":"现有 IC/decay/quantile/distribution/turnover 计算实现，factor/evaluation/ 各模块需与其指标一致（AC-7.2），executor 需对照确认输出字段名和计算方式。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/research/robustness.py","reason":"shuffle_test / subsample_ic / cross_symbol_ic 现有实现，factor/evaluation/robustness.py 迁移时直接参考。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/research/cost.py","reason":"edge_waterfall 现有实现，factor/evaluation/cost.py 迁移时直接参考。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/research/report.py","reason":"generate_report 和 4-tab verdict 的现有结构，factor worker 的报告生成逻辑需与此结构对齐后再重构。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/data/catalog.py","reason":"DataLayer 直接复用 Parquet 读取能力（AC-3.6），需了解 ParquetDataCatalog 的 query API 和路径约定（bar/{bar_type_str}/）。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/data/pipeline_helpers.py","reason":"WRITE_CATEGORY MappingProxyType 定义 data_type→category 映射，DataLayer 中 funding_rate/bar/trade_tick 的 Parquet 路径计算依赖此映射。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/data/converters/funding_rate.py","reason":"US-014 要求升级 funding_rate 写入路径为 Parquet，executor 需修改此转换器新增 Parquet 写入分支。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/data/funding_cache.py","reason":"US-014 要求保留为降级回退，executor 需理解其 JSON 读取逻辑，并确保迁移脚本能正确转换已有 JSON 缓存。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/data/converters/book_ticker.py","reason":"orderbook_imbalance_L1 因子依赖 bookTicker 数据，DataLayer 的 bookTicker 路径读取需参考此转换器的输出字段名。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/data/converters/metrics.py","reason":"oi_change 因子依赖 BinanceMetrics 数据（sum_open_interest），DataLayer 读取 metrics 路径时需参考此转换器的输出字段名。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/strategy/registry.py","reason":"已有 Registry 模式（扫描 + 状态机 + order_id_tag 分配），factor/registry.py 的文件扫描和发现逻辑可参考其结构（避免 sys.path 污染和模块名冲突）。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/strategy/module_loader.py","reason":"安全 importlib 模式（try/finally sys.path 清理 + sys.modules 删除防止缓存），factor/registry.py 扫描 ~/.tino/research/factors/ 时必须复用此模式。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/api/routes/research.py","reason":"旧 research 路由的 7 个 endpoint 实现（request/response 结构 + worker 启停接入方式），factor/routes/factor.py 重写时直接参考其模式。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/api/app.py","reason":"需要修改此文件（行 17/25-28/103-104/113/161）将 research router 替换为 factor router，执行前需了解现有注册方式和 worker 启停钩子。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/core/bridge.py","reason":"需要在 _CHANNEL_TYPE_MAP 新增 'tino:factor:': 'factor.' 映射，执行前需了解现有 EventBridge channel 注册机制。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/core/config.py","reason":"需要在 PathSettings 新增 factor_cache: Path，执行前需了解现有 PathSettings 结构和 ENV 变量命名约定。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/db/models.py","reason":"需要新增 FactorRun 模型并删除 ResearchJob，需了解现有 ResearchJob schema（行 275-300）及 DateTime 列的 aware/naive 约定（utcnow() 不能传 timezone.utc）。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/tinohelm/db/migrations/versions/010_add_backtest_job_payload.py","reason":"migration 011 的上游（down_revision 必须为 '010'），执行前需确认 revision 字符串以避免 Alembic chain 断裂。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/app/research/page.tsx","reason":"旧 /research 页面的组件结构（左侧配置面板 + 右侧结果面板布局），/factor 页面重构时直接迁移并按 QDS 规范升级。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/app/research/components/ResearchExploreResult.tsx","reason":"探索结果面板现有实现（IC/quantile/distribution 图表 + 布局），factor/ExploreResult 组件迁移时直接参考。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/app/research/components/ResearchFactorList.tsx","reason":"因子列表分类手风琴 + 多选逻辑现有实现，factor/FactorList 迁移时直接参考。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/app/research/report/[id]/ReportClient.tsx","reason":"4-tab 报告页面的现有实现（SignalProfile/PredictivePower/Robustness/CostParams tab 结构），factor/report/[id] 迁移时直接参考。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/app/research/report/[id]/components/SignalProfileTab.tsx","reason":"Signal Profile tab 现有实现，因子迁移时参考其图表组件组合方式。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/app/research/report/[id]/components/PredictivePowerTab.tsx","reason":"Predictive Power tab 现有实现（ICTimeseries/ICDecay/QuantileReturn 图表组合），因子迁移时参考。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/app/research/report/[id]/components/RobustnessTab.tsx","reason":"Robustness tab 现有实现，迁移时参考 shuffle/subsample/cross-symbol 的图表组合。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/app/research/report/[id]/components/CostParamsTab.tsx","reason":"Cost \u0026 Params tab 现有实现（Waterfall + Sweep + Heatmap 图表），迁移时参考。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/lib/chartTheme.ts","reason":"AC-12.3 要求所有图表使用此文件的 CHART_TOOLTIP_PROPS/CHART_GRID_STYLE/CHART_AXIS_STYLE，executor 实现前端图表时必须引用这些常量而非自定义样式。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/lib/notification-router.ts","reason":"需要修改此文件将 research.* 事件映射改为 factor.*（AC-15.5），执行前需了解现有 router 的 event → channel 映射表结构。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/src/components/TopBar.tsx","reason":"需要修改路由标题映射（/research → /factor），执行前需了解现有 TopBar 的路由标题 Map 结构（行 17）。"}
+{"path":"/Users/ouzhuohao/TinoHelm/src/web/CLAUDE.md","reason":"前端开发规范权威文档——QDS 组件用法、Tailwind 语义类映射表、禁止的遗留 class 列表（sc/cd/sl/fl 等）、4-layer 通知系统、useAction hook 模式，executor 实现任何前端组件前必须阅读。"}
+{"path":"/Users/ouzhuohao/TinoHelm/.claude/skills/TinoHelmDS/Web UI Kit.html","reason":"QDS 设计系统 master reference——完整 dashboard frame、token 定义、组件 HTML 结构，前端页面严格对齐此规范（AC-11.5/AC-12.4）。"}
+{"path":"/Users/ouzhuohao/TinoHelm/.claude/skills/TinoHelmDS/Charts Spec.html","reason":"Recharts 图表主题规范——tooltip/grid/legend/label 完整实现模式，因子探索和报告页面的所有图表必须对齐此规范。"}
+{"path":"/Users/ouzhuohao/TinoHelm/.claude/skills/TinoHelmDS/preview/component-tabs.html","reason":"FactorReport 4-tab 报告页的 Tab 组件视觉规范，executor 实现 /factor/report/[id] 页面前必须对照此规范确认 tab 样式。"}
+{"path":"/Users/ouzhuohao/TinoHelm/.claude/skills/TinoHelmDS/preview/component-kpi.html","reason":"StatCard / KPI 卡片视觉规范，探索结果面板的 TurnoverKPI 和报告页 StatsGrid 使用 StatCard 组件时必须对照此规范。"}
+{"path":"/Users/ouzhuohao/TinoHelm/.claude/skills/TinoHelmDS/preview/component-badges.html","reason":"StatusBadge 7 色语义规范，FactorReport 页面的 StatusBadge 使用前必须对照此规范选择正确的语义色。"}
+{"path":"/Users/ouzhuohao/TinoHelm/.claude/skills/TinoHelmDS/preview/type-section-label.html","reason":"SectionLabel 排版规范，因子探索页左侧配置面板各区块标题使用 SectionLabel 时必须对照此规范。"}

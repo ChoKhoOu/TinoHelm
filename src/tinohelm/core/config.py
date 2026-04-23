@@ -41,6 +41,7 @@ class PathSettings(BaseModel):
     artifacts: Path = Path("tino/data/artifacts")
     research: Path = Path("tino/research")
     logs: Path = Path("tino/logs")
+    factor_cache: Path = Path.home() / ".tino" / "factor_cache"
 
 
 class DataSettings(BaseModel):
