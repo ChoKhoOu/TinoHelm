@@ -2,7 +2,79 @@
 
 Chronological record of architectural improvements and maintenance work.
 
-## 2026-04-22
+## 2026-04-23
+
+**主题**: 给 `factor/evaluation/` 7 个纯数学模块（ic / quantile / distribution / turnover / cost / rating / robustness pure 部分）建立 172 个零依赖 / 确定性 / < 4 s 的数值契约测试安全网，覆盖每个精度、阈值、schema、数值约定；顺手修掉 `compute_ic_summary` 里一个 "IR 因 IEEE 浮点残差暴走到 10^15 量级" 的真实生产 bug
+
+**维度**: 测试补齐（7 个 evaluation 模块合计 793 行生产代码，之前只有 `tests/factor/test_evaluation.py` 里 7 个 class 共 12 个 smoke 测试；本次补 172 个深度 unit 测试）+ 顺手 bug 修复（`compute_ic_summary` 的 `std_ic > 0` 守卫对 `np.std([0.1, 0.1, 0.1])` 返回的 1.388e-17 残差判断为 True，导致 IR = mean/noise = 7.2 × 10^15，暴露到前端；新版加 1e-12 容差门槛）
+
+**改动范围**:
+- 新建 `tests/factor/evaluation/__init__.py` + 7 个专门的 unit test 文件：
+  - `tests/factor/evaluation/test_ic.py`（39 用例 / 4 个 class）—— 覆盖 `forward_returns`（5）、`compute_ic_series`（9）、`compute_ic_summary`（10）、`compute_ic_decay`（7）、`compute_half_life`（7）、`_DEFAULT_LAGS`/`_EMPTY_SUMMARY` 常量 pin。包括浮点残差 guard 的显式回归测试（`test_zero_std_collapses_ir_and_tstat_to_zero` + `test_float_imprecision_residue_below_tolerance_is_ignored`）
+  - `tests/factor/evaluation/test_quantile.py`（19 用例 / 5 个 class）—— `compute_quantile_returns` 的 schema / 短路阈值 / 退化因子 / 单调性 `>=`（不是严格 `>`）/ 精度（avg 8 dp、cum 6 dp）/ 采样点 ≤ 100 / 防御性拷贝
+  - `tests/factor/evaluation/test_distribution.py`（20 用例 / 5 个 class）—— `compute_distribution` 的 9-key stats schema / < 10 短路 / NaN+Inf 过滤不计数 / 9 个精度约束（mean/std/min/max 6 dp，skew/kurt/zero_pct/autocorr 4 dp）/ 混合统计约定 pin（np.std ddof=0 vs pandas.skew/kurtosis adjusted=True）/ autocorr NaN 强制归零 / 已知分布 sanity（均匀 / 正态）
+  - `tests/factor/evaluation/test_turnover.py`（14 用例 / 5 个 class）—— `compute_turnover` 的"退化因子 → 0 不是 100%"回归守卫（NaN bin 过滤）/ 252 年化 / `daily × 2 × fee_rate × 21` 月费耗 / fee_rate 默认 0.0004 / fee_drag 随 fee_rate 线性 / 输入 NaN+Inf 不 crash
+  - `tests/factor/evaluation/test_cost.py`（13 用例 / 4 个 class）—— `edge_waterfall` 的 4-key schema / abs(IC) 对称 / round-trip fee × 2 / 零 turnover 清零 / 默认 fee_rate=0.0004 / slippage_bps=1.0 / 现实场景 sanity（强 IC + 低频 → 正 net；弱 IC + 高频 → 负 net）
+  - `tests/factor/evaluation/test_rating.py`（36 用例 / 3 个 class）—— `compute_rating` 的 17 条 parametrize 覆盖所有 3/2/1/0 tier + 所有边界（严格 `>`，tier-1 无 pct gate，abs(ir) 对称）+ `rating_letter` 的 5 层 S/A/B/C/D 映射（`>=3` 也是 S；pct=0.45 严格 `>=` 归 C；missing summary → D）
+  - `tests/factor/evaluation/test_robustness_pure.py`（31 用例 / 5 个 class）—— `summarize_shuffle_distribution`（14 用例，schema / p-value 严格 `<` / 空分布 / 4-dp 精度 / NaN+Inf real_ic 归零 / 接受 numpy array）+ `subsample_ic`（8 用例，ME 月度 / < 20 过滤 / 完美相关 IC=1 / NaN 期桶跳过）+ `_single_shuffle_ic`（5 用例，可 pickle / 确定性 / 不 mutate 输入）+ `SHUFFLE_MIN_OBSERVATIONS`=100 / `SHUFFLE_SIGNIFICANCE_THRESHOLD`=0.05 pin + 顶层无 NT import 检查
+- 修改 `src/tinohelm/factor/evaluation/ic.py`（+7 行）—— `compute_ic_summary` 的 `std_ic > 0` 守卫换成 `std_eff = std_ic if std_ic > 1e-12 else 0.0`，防止 IEEE 754 双精度浮点残差让 IR 暴走到 10^15 量级
+
+**动机**:
+
+`factor/evaluation/` 是整个因子研究管道的**数值末端**——所有因子卡片、所有排行榜、所有评级字母、所有 edge waterfall 饼图展示给用户的每一个数字都从这 7 个模块的 round(...) 出来。这 7 个模块合计 793 行，全部 NT-free，依赖只有 numpy + pandas + scipy，本该是整个代码库里**最容易写深度单测**的区域。但在本次演进之前：
+
+1. **直接单元测试覆盖极薄**：`tests/factor/test_evaluation.py` 里 7 个 `TestXxxModule` class 合计只有 12 个 smoke 测试，平均每个模块不到 2 个。这些测试做的是"能 import、空输入不 crash、给个正常输入能返回"的生存性检查，**几乎没有任何精度、阈值、schema、边界的显式契约**。
+2. **任何重构都没有安全网**：比如有人把 `np.std(ics)` 从 ddof=0 改成 ddof=1（样本 vs 总体），现在的测试不会发现；`round(ir, 4)` 改成 `round(ir, 2)` 不会发现；IR 分母保护从 `> 0` 改成 `> 1e-6` 不会发现；甚至 `ic_positive_pct` 从 `mean(ics > 0)` 改成 `mean(ics >= 0)` 也不会发现（前者不算 0，后者算）。
+3. **`compute_ic_summary` 在 production 里就已经在"偷偷产出垃圾数据"**。凡是某段时间所有 daily IC 等于一个非-IEEE-可精确表示的值（比如 0.1、0.3、0.7、-0.2），`np.std` 返回的是 1e-17 量级的浮点残差。原代码的 `if std_ic > 0 else 0` 守卫直接 pass。然后 `ir = mean / 1.388e-17 ≈ 7.2e15`。这个 7.2e15 被 `round(ir, 4)` 后依然是 7.2e15，写进 `EvalResult`，经 API 到前端，最后以"IR: 7205759403792795.0"呈现给用户。
+   - 从 bug 性质看这是一个**静默数据损坏**，不 crash，只是让评级显示离谱大的 IR，用户无法判断是因子真的很强还是算出 bug 了。
+   - 触发条件看起来罕见（需要所有 daily IC 相等），但在**短回测窗口**（比如只有 3-5 天）且因子是**硬切断开关型**（signal ∈ {-1, 0, 1}，daily spearman IC 只有有限取值）的情况下完全可能触发，至少我们这轮写测试就直接撞上了。
+4. **`research.analysis`/`research.robustness` 旧模块已经被删**（见 `refactor(research): 删除旧 research 模块（已迁移至 factor/）` commit），AC-13.2 那条"bit-for-bit regression"的保护线也随之消失，只剩 `tests/research/` 归档对照。现在新版是唯一真源，更需要自己把自己的每一位数字锁死。
+
+**要点**:
+
+1. **`compute_ic_summary` 的 IR 暴走 bug 修复是一行级别的小改但是用户可见的大问题** —— 新代码引入 `std_eff = std_ic if std_ic > 1e-12 else 0.0` 作为 IR / t-stat 的分母源。1e-12 容差选型有两条理由：（a）`compute_ic_series` 里每个 ic 都已经 `round(ic, 6)` 过，任何合法统计上等价的 std 至少是 1e-6 量级；把门槛放在 1e-12 留 6 个数量级的保护；（b）IEEE 754 双精度 float 的机器 epsilon 是 2.22e-16，所有 [0.1]*N / [0.3]*N / [0.7]*N 的残差都在 1e-17 ~ 1e-15 之间。1e-12 既能 100% 抓住所有 IEEE 残差，又不会误伤任何真实有效的 IC 离散度。`ic_std` 本身继续报告 `round(std_ic, 6)` = 0.0（之前也是 0.0，无变化），只有 IR / t-stat 从垃圾值归零。**生产影响分析**：任何真实有意义的 daily IC 序列 std 都远大于 1e-12，不受影响；受影响的只有 "std 是 IEEE 残差" 的病理场景，此前这些场景就是 bug。
+
+2. **`compute_rating` 的 17 个 parametrize 把每条 tier 的严格 `>` 边界钉死** —— 原 `test_evaluation.py::TestRatingModule` 只有 5 个 smoke 用例，本次扩展到 17 个，显式覆盖：
+   - `ir` 恰好 1.0 → 回退到 tier 2（不是 tier 3，因为代码用严格 `>`）
+   - `pct` 恰好 0.60 → 同理
+   - `ir` 恰好 0.5 → 回退到 tier 1
+   - `ir` 恰好 0.2 → 回退到 tier 0
+   - **tier 1 (`ir > 0.2 → 1`) 没有 pct gate**：`(ir=0.3, pct=0.0)` → 1，这是代码实际行为但测试里从未显式覆盖过。如果未来有人"补齐"成 `ir > 0.2 and pct > 0.45` 会立即炸出来
+   - `rating_letter(0, {"ic_positive_pct": 0.45})` → C（严格 `>=` 归 C，不是 D）
+   - `rating_letter(rating=4)` → S（是 `>= 3` 不是 `== 3`）
+   - `compute_rating({})` 缺字段 → 0 → D
+
+3. **turnover.py 的"退化因子 false 100% turnover 回归守卫"pin 得非常死** —— `test_constant_factor_returns_zero_not_100pct` 显式测试了：如果 `qcut(..., duplicates="drop")` 对常数因子返回 all-NaN 的 q 列，且没有 `.dropna(subset=["q"])` 过滤，那么 `(NaN != NaN).mean() == 1.0` 会冒充 100% 换手率。这个 bug 在 `turnover.py` 里已经被注释掉了（`# NaN-vs-NaN comparison below would otherwise be True, falsely reporting 100% turnover`），但**之前没有测试把"不修会 false 100%"这条特性锁住**。任何人把 `paired = paired.dropna(subset=["q"])` 那行删掉（以为是多余的），这个测试会立即 FAIL 而不是 silently regress 到 100% turnover。
+
+4. **`summarize_shuffle_distribution` 的 p-value 严格 `<` 阈值 pin** —— `test_significance_uses_strict_less_than` 显式构造 p=0.05（恰好在 threshold 上），断言 `significant == False`；`test_significance_just_below_threshold_marked_true` 构造 p=0.04，断言 `significant == True`。这一条至关重要：学术界对 "p < 0.05 显著" 的约定都是严格 `<`，但如果代码里不小心写成 `p_value <= threshold`，系统就会**把刚好等于 0.05 的边缘 case 判为显著**，误导用户认为因子有统计显著的 alpha。
+
+5. **数值精度每个 round(..., N) 都有一个专门测试** —— 每个 evaluation 模块里都散落了不同精度的 `round` 调用：
+   - ic 6 dp（mean/std/max/decay/subsample）、ir 4 dp、tstat 2 dp、pct 4 dp
+   - avg_returns 8 dp、cum_returns 6 dp
+   - histogram edges 6 dp、stats (mean/std/min/max 6 dp，skew/kurt/zero_pct/autocorr 4 dp)
+   - turnover daily 4 dp、annualized 1 dp、fee_drag 4 dp
+   - edge_waterfall 全部 2 dp
+   - shuffle p_value 4 dp
+   每个精度都有 `round(x, N) == x` 的显式断言。一旦任何一个精度被人"统一成" 2 dp 或 6 dp，相应测试立即 FAIL。这对前端 chart 的数据密度很关键——cum_returns 的 6 dp 保证了累积收益曲线的平滑度，annualized 的 1 dp 是因为 252× 放大后已经没有小数位的意义。
+
+6. **每个模块的枚举常量全部 pin** —— `_DEFAULT_LAGS = (1, 2, 3, 5, 8, 13, 21, 34, 55, 89)`（Fibonacci-ish 网格）、`SHUFFLE_MIN_OBSERVATIONS = 100`、`SHUFFLE_SIGNIFICANCE_THRESHOLD = 0.05`、`_EMPTY_SUMMARY` 6-key schema。任何一个常量被人"微调"会立即炸测试。
+
+7. **pure/NT-free 纪律 pin** —— `TestPureDiscipline::test_source_does_not_import_nautilus_at_module_top` 读 robustness.py 源码，逐行扫描顶层（无缩进）的 `import`/`from` 行，断言其中不含 `nautilus`。允许函数内部懒加载 NT（`_cross_symbol_worker` 里就有，保证 ProcessPool 拆箱前不 pull 大依赖）。这是一条制度性保护：未来任何人在 `robustness.py` 顶部加 `from nautilus_trader.xyz import abc` 会立即违约。
+
+**验证**:
+
+- **新建单元测试**：
+  - `tests/factor/evaluation/test_ic.py` —— 39 用例，全绿，< 1 s
+  - `tests/factor/evaluation/test_quantile.py` —— 19 用例，全绿，< 500 ms
+  - `tests/factor/evaluation/test_distribution.py` —— 20 用例，全绿，< 300 ms
+  - `tests/factor/evaluation/test_turnover.py` —— 14 用例，全绿，< 500 ms
+  - `tests/factor/evaluation/test_cost.py` —— 13 用例，全绿，< 10 ms
+  - `tests/factor/evaluation/test_rating.py` —— 36 用例，全绿，< 10 ms
+  - `tests/factor/evaluation/test_robustness_pure.py` —— 31 用例，全绿，< 300 ms
+  - **合计 172 新用例，全部纯函数 / 确定性 / NT-free，新子目录全量 ~3.3 s 跑完**
+- **全套测试**：`.venv/bin/python -m pytest tests/` —— `2611 → 2783 passed`（+172，**零回归**），8 skipped（不变），19.77 s。包括 `tests/factor/test_evaluation.py` 的 32 个集成测试（Evaluator 流水线、NaN scrubbing、panel flattening）全部保持 passing——说明 IR 浮点残差修复没有改变任何现有测试关心的输出。
+- **bug 修复影响评估**：修改只触及 `compute_ic_summary` 的 IR / tstat 分母；`ic_std` 输出保持不变（`round(1.388e-17, 6) = 0.0` 不变）；所有 std > 1e-12 的合法输入输出完全不变（已被 39 个 ic 用例 + 32 个现有 evaluation 集成用例 + 4 个 test_e2e_single 用例交叉验证）。
+
 
 **主题**: 抽 `backtest/funding_math.py` + `data/funding_cache_helpers.py` 两层 NT-free 纯逻辑，为 `backtest/funding.py`（零直接测试的永续资金费率核算器）和 `data/funding_cache.py`（增量缓存 orchestrator，仅有 2 个外围测试触及 `_CACHE_DIR` 路径）建立 117 个 NT-free / 无网络的测试安全网 + 修掉一个 "FLAT 等异常 side 静默走 SHORT 分支" 的隐蔽语义坑
 

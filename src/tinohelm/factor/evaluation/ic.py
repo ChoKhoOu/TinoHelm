@@ -108,8 +108,14 @@ def compute_ic_summary(ic_series: pd.DataFrame) -> dict[str, float]:
 
     mean_ic = float(np.mean(ics))
     std_ic = float(np.std(ics))
-    ir = mean_ic / std_ic if std_ic > 0 else 0
-    ic_tstat = mean_ic / (std_ic / np.sqrt(len(ics))) if std_ic > 0 else 0
+    # Guard against IEEE float noise: np.std of identical values (e.g. [0.1]*N)
+    # leaks a ~1e-17 residue from the double-precision representation of 0.1,
+    # which would otherwise turn IR / t-stat into 10^15-scale garbage. IC
+    # values are rounded to 6 dp in compute_ic_series, so anything below 1e-12
+    # is provably within that rounding tolerance and must be treated as zero.
+    std_eff = std_ic if std_ic > 1e-12 else 0.0
+    ir = mean_ic / std_eff if std_eff > 0 else 0
+    ic_tstat = mean_ic / (std_eff / np.sqrt(len(ics))) if std_eff > 0 else 0
     pct_pos = float(np.mean(ics > 0))
     max_abs = float(np.max(np.abs(ics)))
 
