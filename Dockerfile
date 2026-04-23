@@ -70,8 +70,13 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
-# Non-root user
-RUN groupadd -r tino && useradd -r -g tino -d /app tino \
+# Non-root user.
+# UID/GID default to 1000 to match the typical Linux first-login user so bind-mounted
+# ~/.tino/* directories remain writable inside the container. Override at build time
+# with `--build-arg UID=$(id -u) --build-arg GID=$(id -g)` when the host user differs.
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g ${GID} tino && useradd --uid ${UID} --gid ${GID} -d /app -s /usr/sbin/nologin tino \
     && chown -R tino:tino /app
 USER tino
 
