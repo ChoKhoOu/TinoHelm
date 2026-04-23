@@ -85,18 +85,39 @@ def _spec_to_dict(spec: object) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/list")
-async def list_factors() -> list[dict]:
+async def list_factors(
+    include_experimental: bool = Query(
+        default=False,
+        description=(
+            "Include factors whose underlying data source is not yet supported "
+            "by DataLayer (e.g. oi_change, orderbook_imbalance_L1). Their "
+            "kernels raise NotImplementedError so running them always fails."
+        ),
+    ),
+) -> list[dict]:
     """Return all registered factor metadata.
 
-    Each element matches::
+    Each element includes at least ``name``, ``category``, ``description``,
+    ``lookback``, ``version``, ``input_fields``, ``params_schema``,
+    ``experimental``, and ``needs_backend``.
 
-        {name, category, description, lookback, input_fields, params_schema}
+    Experimental factors are filtered out by default to prevent users from
+    scheduling runs that are guaranteed to fail.  Pass
+    ``?include_experimental=true`` to include them (e.g. when the UI wants
+    to render them greyed-out).
     """
     from tinohelm.factor.registry import Registry
 
     registry = Registry()
     specs = registry.scan()
-    return [_spec_to_dict(spec) for spec in sorted(specs.values(), key=lambda s: s.name)]
+
+    items = [
+        _spec_to_dict(spec)
+        for spec in sorted(specs.values(), key=lambda s: s.name)
+    ]
+    if not include_experimental:
+        items = [item for item in items if not item.get("experimental", False)]
+    return items
 
 
 # ---------------------------------------------------------------------------
