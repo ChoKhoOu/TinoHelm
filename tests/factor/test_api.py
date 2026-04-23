@@ -88,19 +88,47 @@ def client():
 # ---------------------------------------------------------------------------
 
 def test_list_factors_returns_builtins(client):
-    """GET /list returns all built-in factors; expect ≥12."""
+    """GET /list returns non-experimental built-in factors by default.
+
+    Experimental factors (those awaiting DataLayer support) are hidden unless
+    ``include_experimental=true`` is passed — see ``list_factors``.
+    """
     resp = client.get("/api/factor/list")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert isinstance(body, list)
-    assert len(body) >= 12, (
-        f"Expected ≥12 built-in factors, got {len(body)}: {[f['name'] for f in body]}"
-    )
-    # Each element must have the required keys
-    required_keys = {"name", "category", "description", "lookback", "input_fields", "params_schema"}
+    # Each element must have the required keys (incl. the experimental flag)
+    required_keys = {
+        "name", "category", "description", "lookback",
+        "input_fields", "params_schema", "experimental",
+    }
     for item in body:
         missing = required_keys - set(item.keys())
         assert not missing, f"Factor {item.get('name')!r} missing keys: {missing}"
+    # Default list excludes experimental factors.
+    experimental_names = {"oi_change", "orderbook_imbalance_L1", "trade_imbalance"}
+    returned = {item["name"] for item in body}
+    assert returned.isdisjoint(experimental_names), (
+        f"Experimental factors leaked into default /list: "
+        f"{returned & experimental_names}"
+    )
+    # Sanity: at least the stable (non-experimental) built-ins remain.
+    assert len(body) >= 9, (
+        f"Expected ≥9 stable built-in factors, got {len(body)}: {sorted(returned)}"
+    )
+
+
+def test_list_factors_include_experimental(client):
+    """GET /list?include_experimental=true surfaces experimental factors and
+    each carries ``experimental=True`` so the UI can grey them out.
+    """
+    resp = client.get("/api/factor/list?include_experimental=true")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    names = {item["name"]: item for item in body}
+    for exp_name in ("oi_change", "orderbook_imbalance_L1", "trade_imbalance"):
+        assert exp_name in names, f"Missing experimental factor {exp_name!r}"
+        assert names[exp_name]["experimental"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ from tinohelm.factor.types import Panel
     lookback=20,
     params={"lookback": 20},
     description="买卖不平衡 — net buy/sell volume from trade_tick data (pending DataLayer support)",
+    experimental=True,
 )
 def trade_imbalance(
     trade_qty: Panel, trade_side: Panel, params=None
