@@ -23,8 +23,7 @@ from tinohelm.core.watchdog import Watchdog
 from tinohelm.backtest.worker import recover_interrupted_runs as recover_backtest_runs
 from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker
 from tinohelm.factor.worker import recover_interrupted_jobs as recover_factor_jobs, start_factor_worker, stop_factor_worker
-from tinohelm.db.models import Base
-from tinohelm.db.session import get_engine, get_session_factory
+from tinohelm.db.session import get_session_factory
 from tinohelm.strategy.registry import persist_strategies, scan_strategies
 
 logger = logging.getLogger(__name__)
@@ -49,12 +48,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ---- startup ----
     logger.info("TinoHelm API starting up")
     deps.set_startup_time(time.time())
-
-    # Ensure all tables exist (safe if already created by Alembic)
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables ensured")
 
     # Redis (async)
     redis_client = aioredis.from_url(cfg.redis.url)
