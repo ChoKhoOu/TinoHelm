@@ -137,6 +137,9 @@ class FactorSpec:
     version: str = "1.0.0"
     code_hash: str = ""
     needs_backend: bool = False
+    # Factor requires data-layer support not yet implemented; kernel will raise.
+    # /api/factor/list filters these out by default.
+    experimental: bool = False
 
 
 # ---------------------------------------------------------------------------

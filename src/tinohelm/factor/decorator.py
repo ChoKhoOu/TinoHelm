@@ -155,6 +155,7 @@ def factor(
     description: str = "",
     version: str = "1.0.0",
     output_spec: OutputSpec | None = None,
+    experimental: bool = False,
 ) -> Callable:  # type: ignore[type-arg]
     """Decorator that attaches a :class:`FactorSpec` to a factor function.
 
@@ -180,6 +181,12 @@ def factor(
     output_spec:
         Custom :class:`OutputSpec`.  Defaults to ``OutputSpec()`` (float64,
         unbounded, no description).
+    experimental:
+        When ``True``, the factor requires a data source (e.g. ``open_interest``,
+        ``quote_tick``, ``trade_tick``) that ``DataLayer`` does not yet support.
+        Its kernel is expected to raise ``NotImplementedError``.  The
+        ``/api/factor/list`` endpoint hides these unless
+        ``include_experimental=true`` is passed.  Default ``False``.
 
     Returns
     -------
@@ -244,6 +251,7 @@ def factor(
             version=version,
             code_hash=code_hash,
             needs_backend=_needs_backend,
+            experimental=experimental,
         )
 
         # 6. Attach spec and return original function unchanged
