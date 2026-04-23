@@ -237,8 +237,7 @@ def _full_panel_output(factor_fn) -> pd.DataFrame:
     if name == "vwap_dev":
         return factor_fn(HIGH, LOW, CLOSE, VOLUME, params=params20)
     if name == "trade_imbalance":
-        # trade_imbalance requires trade_tick DataLayer support (not yet implemented).
-        # The function raises NotImplementedError; skip execution here.
+        # Experimental: pending trade_tick DataLayer support — kernel raises.
         pytest.skip("trade_imbalance pending trade_tick DataLayer support")
     if name == "amihud_illiq":
         return factor_fn(CLOSE, VOLUME, params=params20)
@@ -247,9 +246,11 @@ def _full_panel_output(factor_fn) -> pd.DataFrame:
     if name == "funding_rate_mom":
         return factor_fn(FUNDING_RATE, params={"lookback": 1})
     if name == "oi_change":
-        return factor_fn(OPEN_INTEREST, params={"lookback": 1})
+        # Experimental: pending open_interest DataLayer support — kernel raises.
+        pytest.skip("oi_change pending open_interest DataLayer support")
     if name == "orderbook_imbalance_L1":
-        return factor_fn(ORDERBOOK_IMBALANCE, params={})
+        # Experimental: pending quote_tick DataLayer support — kernel raises.
+        pytest.skip("orderbook_imbalance_L1 pending quote_tick DataLayer support")
     raise ValueError(f"Unknown factor: {name}")
 
 
@@ -264,11 +265,10 @@ def test_output_shape(fn):
 
 # ── Shape + finite rate for crypto / funding factors ─────────────────────────
 
+# Non-experimental crypto/funding factors with runnable kernels.
 CRYPTO_FACTORS = [
     (funding_rate_level, FUNDING_RATE, {}),
     (funding_rate_mom, FUNDING_RATE, {"lookback": 1}),
-    (oi_change, OPEN_INTEREST, {"lookback": 1}),
-    (orderbook_imbalance_L1, ORDERBOOK_IMBALANCE, {}),
 ]
 
 
@@ -300,6 +300,42 @@ def test_crypto_factor_finite_rate(fn, panel, params):
         f"{fn.__name__}: finite rate {rate:.1%} < 80%. "
         "Too many non-finite values in output."
     )
+
+
+# ── Experimental factors: kernels must raise NotImplementedError ─────────────
+
+# Signed {+1, -1} Panel that is a plausible ``trade_side`` shape once the
+# kernel is implemented, so this test keeps producing a meaningful failure
+# (not a TypeError) if the experimental guard is ever removed.
+_TRADE_SIDE_DUMMY = pd.DataFrame(
+    RNG.choice([-1.0, 1.0], size=(N_ROWS, N_COLS)),
+    index=IDX,
+    columns=SYMBOLS,
+)
+
+EXPERIMENTAL_FACTORS = [
+    # trade_imbalance(trade_qty, trade_side, params=None) — VOLUME is a
+    # reasonable trade_qty stand-in; _TRADE_SIDE_DUMMY keeps shapes correct.
+    (trade_imbalance, (VOLUME, _TRADE_SIDE_DUMMY), {"lookback": 20}),
+    (oi_change, (OPEN_INTEREST,), {"lookback": 1}),
+    (orderbook_imbalance_L1, (ORDERBOOK_IMBALANCE,), {}),
+]
+
+
+@pytest.mark.parametrize(
+    "fn, args, params",
+    EXPERIMENTAL_FACTORS,
+    ids=[c[0].__name__ for c in EXPERIMENTAL_FACTORS],
+)
+def test_experimental_factor_raises(fn, args, params):
+    """Experimental kernels must raise so orchestrator flags the run as failed,
+    instead of returning an empty Panel that evaluates to rating=0 silently.
+    """
+    assert fn.__factor_spec__.experimental is True, (
+        f"{fn.__name__}: spec.experimental must be True"
+    )
+    with pytest.raises(NotImplementedError):
+        fn(*args, params=params)
 
 
 # ── Import smoke test: all sub-modules importable ─────────────────────────────

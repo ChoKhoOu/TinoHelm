@@ -494,6 +494,90 @@ class TestLoadGrouping:
 # Tests: _parse_ts helper
 # ---------------------------------------------------------------------------
 
+class TestLookbackWarmup:
+    """Bug 008 regression: ``DataLayer`` must honor the ``DataRequest.lookback``
+    field by shifting the effective load start earlier by ``lookback *
+    bar_duration``.  Without this, the first N rows of the user window are NaN
+    for any factor that uses ``pct_change(N)`` / ``shift(N)``.
+    """
+
+    def test_lookback_expands_start_by_bar_duration(self, tmp_path: Path, monkeypatch):
+        _stub_make_instrument(monkeypatch)
+
+        catalog_path = tmp_path / "catalog"
+        catalog_path.mkdir()
+
+        # 30 1-minute bars starting at T0
+        ts_ns = [_T0_NS + i * _1MIN_NS for i in range(30)]
+        closes = [100.0 + i for i in range(30)]
+        _write_catalog_bars(catalog_path, "BTCUSDT-PERP", ts_ns, closes)
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        uni = Universe.load_csv(uni_path)
+        dl = DataLayer(uni, catalog_root=catalog_path)
+
+        # User window: skip the first 10 bars.  With lookback=5 the loader must
+        # reach back 5 bars earlier, so the Panel should start 5 minutes before
+        # the user-specified start, giving kernels the warmup they need.
+        user_start = pd.Timestamp(_T0_NS + 10 * _1MIN_NS, unit="ns")
+        user_end = pd.Timestamp(_T0_NS + 20 * _1MIN_NS, unit="ns")
+
+        req = DataRequest(
+            symbol="BTCUSDT-PERP",
+            field_name="close",
+            frequency="1m",
+            lookback=5,
+            source="bar",
+        )
+        panels = dl.load(req, start=user_start, end=user_end)
+        panel = panels["close"]
+
+        assert not panel.empty
+        # The panel's first timestamp must be <= user_start - 5 minutes
+        expected_warmup_start = user_start - pd.Timedelta(minutes=5)
+        assert panel.index[0] <= expected_warmup_start, (
+            f"Expected panel to include warmup rows starting at or before "
+            f"{expected_warmup_start}, got {panel.index[0]}"
+        )
+        # And must still cover the user window
+        assert panel.index[-1] >= user_end - pd.Timedelta(minutes=1)
+
+    def test_lookback_zero_does_not_expand_start(self, tmp_path: Path, monkeypatch):
+        """When lookback=0 the panel must start at or after ``start`` — no shift."""
+        _stub_make_instrument(monkeypatch)
+
+        catalog_path = tmp_path / "catalog"
+        catalog_path.mkdir()
+
+        ts_ns = [_T0_NS + i * _1MIN_NS for i in range(30)]
+        closes = [100.0 + i for i in range(30)]
+        _write_catalog_bars(catalog_path, "BTCUSDT-PERP", ts_ns, closes)
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        uni = Universe.load_csv(uni_path)
+        dl = DataLayer(uni, catalog_root=catalog_path)
+
+        user_start = pd.Timestamp(_T0_NS + 10 * _1MIN_NS, unit="ns")
+        user_end = pd.Timestamp(_T0_NS + 20 * _1MIN_NS, unit="ns")
+
+        req = DataRequest(
+            symbol="BTCUSDT-PERP",
+            field_name="close",
+            frequency="1m",
+            lookback=0,
+            source="bar",
+        )
+        panels = dl.load(req, start=user_start, end=user_end)
+        panel = panels["close"]
+
+        assert not panel.empty
+        assert panel.index[0] >= user_start
+
+
 class TestParseTs:
     def test_iso_string(self):
         ts = _parse_ts("2021-01-01T00:00:00")
