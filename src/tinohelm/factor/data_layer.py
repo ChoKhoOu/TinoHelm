@@ -168,6 +168,17 @@ class DataLayer:
         ts_start = _parse_ts(start) if start is not None else None
         ts_end = _parse_ts(end) if end is not None else None
 
+        # Apply the warmup lookback offset: shift ``start`` earlier by
+        # ``lookback × bar_duration`` so the kernel has enough history for its
+        # first valid output inside the requested window.  Without this, a
+        # factor like ``ret_N(lookback=20)`` would produce NaN for the first
+        # 20 bars of every requested range (see Bug 008).
+        ts_load_start = ts_start
+        if ts_start is not None:
+            offset_ns = _lookback_offset_ns(frequency, lookback)
+            if offset_ns is not None:
+                ts_load_start = ts_start - pd.Timedelta(offset_ns, unit="ns")
+
         # Parallel per-symbol load
         series_by_symbol: dict[str, pd.Series] = {}
         futures: dict = {}
@@ -179,7 +190,7 @@ class DataLayer:
                     field_name=field_name,
                     source=source,
                     frequency=frequency,
-                    start=ts_start,
+                    start=ts_load_start,
                     end=ts_end,
                 )
                 futures[fut] = sym
@@ -626,3 +637,26 @@ def _parse_ts(value: str | pd.Timestamp) -> pd.Timestamp:
         return value.replace(tzinfo=None) if value.tzinfo is not None else value
     ts = pd.Timestamp(value)
     return ts.replace(tzinfo=None) if ts.tzinfo is not None else ts
+
+
+def _lookback_offset_ns(frequency: str, lookback: int) -> int | None:
+    """Return ``lookback * bar_duration`` in nanoseconds, or ``None`` when no
+    offset should be applied.
+
+    Returns ``None`` when either the frequency is not a known NT bar interval
+    (e.g. ``"tick"`` — such sources are not supported by the loader anyway)
+    or ``lookback`` is non-positive.  Callers treat a ``None`` result as
+    "leave ``start`` unchanged".
+    """
+    if lookback <= 0:
+        return None
+    try:
+        from tinohelm.data.catalog_helpers import interval_to_nanoseconds
+        return interval_to_nanoseconds(frequency) * lookback
+    except ValueError:
+        logger.debug(
+            "_lookback_offset_ns: frequency %r is not a known bar interval; "
+            "skipping warmup offset",
+            frequency,
+        )
+        return None
