@@ -37,6 +37,7 @@ from typing import Sequence
 
 import pandas as pd
 
+from tinohelm.core.paths import paths
 from tinohelm.factor.types import DataRequest, Panel
 from tinohelm.factor.universe import Universe
 
@@ -53,13 +54,6 @@ _BAR_FIELD_ATTR: dict[str, str] = {
     "low": "low",
     "volume": "volume",
 }
-
-# Default catalog root (matches docker volume mount convention)
-_DEFAULT_CATALOG_ROOT = Path.home() / ".tino" / "data" / "catalog"
-
-# Default funding-rate JSON directory (matches funding_cache._CACHE_DIR)
-_DEFAULT_FUNDING_DIR = Path.home() / ".tino" / "data" / "funding_rates"
-
 
 # ---------------------------------------------------------------------------
 # DataLayer
@@ -90,8 +84,8 @@ class DataLayer:
         max_workers: int = 4,
     ) -> None:
         self._universe = universe
-        self._catalog_root = Path(catalog_root) if catalog_root is not None else _DEFAULT_CATALOG_ROOT
-        self._funding_dir = Path(funding_dir) if funding_dir is not None else _DEFAULT_FUNDING_DIR
+        self._catalog_root = Path(catalog_root) if catalog_root is not None else paths.get("catalog")
+        self._funding_dir = Path(funding_dir) if funding_dir is not None else paths.get("funding_rates")
         self._max_workers = max_workers
 
     # ------------------------------------------------------------------

@@ -32,8 +32,6 @@ router = APIRouter(prefix="/api/factor", tags=["factor"])
 
 QUEUE_KEY = "tino:factor:queue"
 
-_DEFAULT_FACTORS_DIR = Path.home() / ".tino" / "research" / "factors"
-
 
 # ---------------------------------------------------------------------------
 # Request / response schemas
@@ -381,10 +379,14 @@ async def get_report(
 
 @router.post("/create")
 async def create_factor(req: CreateRequest) -> dict:
-    """Generate a ``@factor`` decorated template file under ~/.tino/research/factors/.
+    """Generate a ``@factor`` decorated template file under the configured
+    user-factors directory (``settings.paths.research / "factors"`` —
+    see ``tinohelm.core.paths.PathRegistry`` field ``"factors_dir"``).
 
     Raises 400 for invalid names, 409 if the file already exists.
     """
+    from tinohelm.core.paths import paths
+
     name = req.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Factor name is required")
@@ -395,7 +397,7 @@ async def create_factor(req: CreateRequest) -> dict:
             detail="Name must be a valid Python identifier (letters, digits, underscores; start with letter or underscore)",
         )
 
-    factors_dir = _DEFAULT_FACTORS_DIR
+    factors_dir = paths.get("factors_dir")
     factors_dir.mkdir(parents=True, exist_ok=True)
     target = factors_dir / f"{name}.py"
 

@@ -33,11 +33,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from tinohelm.core.paths import paths
 from tinohelm.factor.types import EvalConfig, EvalResult, Panel
 
 log = logging.getLogger(__name__)
-
-_DEFAULT_CACHE_ROOT = Path.home() / ".tino" / "factor_cache"
 
 
 # ---------------------------------------------------------------------------
@@ -145,18 +144,7 @@ class FactorCache:
     """
 
     def __init__(self, cache_root: Path | None = None) -> None:
-        if cache_root is None:
-            try:
-                from tinohelm.core.config import get_settings
-                settings = get_settings()
-                paths = settings.paths
-                if hasattr(paths, "factor_cache"):
-                    cache_root = paths.factor_cache
-                else:
-                    cache_root = _DEFAULT_CACHE_ROOT
-            except Exception:
-                cache_root = _DEFAULT_CACHE_ROOT
-        self._root = Path(cache_root)
+        self._root = Path(cache_root) if cache_root is not None else paths.get("factor_cache")
         self._values_dir = self._root / "values"
         self._eval_dir = self._root / "eval"
         self._manifest_path = self._root / "manifest.json"

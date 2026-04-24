@@ -146,15 +146,19 @@ def test_list_universes_returns_list(client):
         assert isinstance(item, str)
 
 
-def test_list_universes_with_csv(client, tmp_path):
-    """GET /universes discovers CSVs placed in a custom dir."""
+def test_list_universes_with_csv(client, tmp_path, paths_override):
+    """GET /universes discovers CSVs placed in a custom dir.
+
+    The endpoint resolves its scan directory via ``paths.get("universes_dir")``,
+    so we install a PathRegistry override instead of patching the legacy helper.
+    """
     uni_dir = tmp_path / "universes"
     uni_dir.mkdir()
     (uni_dir / "binance_perp_top20.csv").write_text(
         "symbol,listing_date\nBTCUSDT-PERP,2020-01-01\n", encoding="utf-8"
     )
-    with patch("tinohelm.factor.universe._DEFAULT_UNIVERSE_DIR", uni_dir):
-        resp = client.get("/api/factor/universes")
+    paths_override("universes_dir", uni_dir)
+    resp = client.get("/api/factor/universes")
     assert resp.status_code == 200
     assert "binance_perp_top20" in resp.json()
 
@@ -469,12 +473,11 @@ def test_get_report_completed(client):
 # 8. POST /api/factor/create
 # ---------------------------------------------------------------------------
 
-def test_create_factor_writes_template(client, tmp_path):
+def test_create_factor_writes_template(client, tmp_path, paths_override):
     """POST /create writes a @factor template file and returns path."""
     factors_dir = tmp_path / "factors"
-
-    with patch.object(factor_module, "_DEFAULT_FACTORS_DIR", factors_dir):
-        resp = client.post("/api/factor/create", json={"name": "test_factor_abc"})
+    paths_override("factors_dir", factors_dir)
+    resp = client.post("/api/factor/create", json={"name": "test_factor_abc"})
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -489,36 +492,33 @@ def test_create_factor_writes_template(client, tmp_path):
     assert "test_factor_abc" in content
 
 
-def test_create_factor_409_duplicate(client, tmp_path):
+def test_create_factor_409_duplicate(client, tmp_path, paths_override):
     """POST /create with same name twice returns 409 on second call."""
     factors_dir = tmp_path / "factors"
+    paths_override("factors_dir", factors_dir)
+    resp1 = client.post("/api/factor/create", json={"name": "dup_factor"})
+    assert resp1.status_code == 200
 
-    with patch.object(factor_module, "_DEFAULT_FACTORS_DIR", factors_dir):
-        resp1 = client.post("/api/factor/create", json={"name": "dup_factor"})
-        assert resp1.status_code == 200
-
-        resp2 = client.post("/api/factor/create", json={"name": "dup_factor"})
-        assert resp2.status_code == 409
+    resp2 = client.post("/api/factor/create", json={"name": "dup_factor"})
+    assert resp2.status_code == 409
 
 
-def test_create_factor_400_invalid_name(client, tmp_path):
+def test_create_factor_400_invalid_name(client, tmp_path, paths_override):
     """POST /create with non-identifier name returns 400."""
     factors_dir = tmp_path / "factors"
+    paths_override("factors_dir", factors_dir)
+    for bad_name in ["123bad", "bad-name", "path/traversal", "has space"]:
+        resp = client.post("/api/factor/create", json={"name": bad_name})
+        assert resp.status_code == 400, (
+            f"Expected 400 for name={bad_name!r}, got {resp.status_code}"
+        )
 
-    with patch.object(factor_module, "_DEFAULT_FACTORS_DIR", factors_dir):
-        for bad_name in ["123bad", "bad-name", "path/traversal", "has space"]:
-            resp = client.post("/api/factor/create", json={"name": bad_name})
-            assert resp.status_code == 400, (
-                f"Expected 400 for name={bad_name!r}, got {resp.status_code}"
-            )
 
-
-def test_create_factor_registry_can_discover(client, tmp_path):
+def test_create_factor_registry_can_discover(client, tmp_path, paths_override):
     """End-to-end: file created by POST /create can be found by Registry.get_spec()."""
     factors_dir = tmp_path / "factors"
-
-    with patch.object(factor_module, "_DEFAULT_FACTORS_DIR", factors_dir):
-        resp = client.post("/api/factor/create", json={"name": "e2e_test_factor"})
+    paths_override("factors_dir", factors_dir)
+    resp = client.post("/api/factor/create", json={"name": "e2e_test_factor"})
     assert resp.status_code == 200
     factor_path = Path(resp.json()["path"])
     assert factor_path.exists()

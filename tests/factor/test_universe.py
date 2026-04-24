@@ -367,8 +367,9 @@ class TestPrebuiltUniverse:
         assert "BTCUSDT-PERP" in symbols
         assert "ETHUSDT-PERP" in symbols
 
-    def test_listed_in_list_universes(self, top20_path: Path):
+    def test_listed_in_list_universes(self, top20_path: Path, paths_override):
         if not top20_path.exists():
             pytest.skip("binance_perp_top20.csv not present")
+        paths_override("universes_dir", top20_path.parent)
         names = Universe.list_universes()
         assert "binance_perp_top20" in names

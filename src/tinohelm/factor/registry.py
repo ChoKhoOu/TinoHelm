@@ -2,7 +2,9 @@
 
 Scan flow
 ---------
-1. **User factors**: Walk ``user_dir`` (default ``~/.tino/research/factors/``)
+1. **User factors**: Walk ``user_dir`` (default resolved from
+   ``settings.paths.research / "factors"``; falls back to
+   ``~/.tino/research/factors/`` when the configured path does not exist)
    for all ``.py`` files.  Each file is loaded via
    :func:`~tinohelm.strategy.module_loader.load_module_from_file` (safe
    importlib pattern — try/finally sys.path cleanup + sys.modules eviction).
@@ -30,12 +32,12 @@ import pkgutil
 from pathlib import Path
 from typing import Callable
 
+from tinohelm.core.paths import paths
 from tinohelm.factor.types import FactorSpec
 from tinohelm.strategy.module_loader import load_module_from_file
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_USER_DIR = Path.home() / ".tino" / "research" / "factors"
 _DEFAULT_BUILTINS_PACKAGE = "tinohelm.factor.builtins"
 
 
@@ -61,7 +63,8 @@ class Registry:
     ----------
     user_dir:
         Directory to scan for user-defined factor ``.py`` files.
-        Defaults to ``~/.tino/research/factors/``.
+        Defaults to ``paths.get("factors_dir")`` from
+        :class:`tinohelm.core.paths.PathRegistry`.
     builtins_package:
         Dotted package name for built-in factors.
         Defaults to ``"tinohelm.factor.builtins"``.
@@ -72,7 +75,7 @@ class Registry:
         user_dir: Path | None = None,
         builtins_package: str = _DEFAULT_BUILTINS_PACKAGE,
     ) -> None:
-        self._user_dir: Path = Path(user_dir) if user_dir is not None else _DEFAULT_USER_DIR
+        self._user_dir: Path = Path(user_dir) if user_dir is not None else paths.get("factors_dir")
         self._builtins_package: str = builtins_package
 
         # {name: (code_hash, FactorSpec)}

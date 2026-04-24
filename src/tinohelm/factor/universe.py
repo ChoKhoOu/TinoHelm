@@ -24,7 +24,13 @@ PIT semantics
 
 Default universe directory
 --------------------------
-``list_universes()`` scans ``~/.tino/research/universes/`` by default.
+``list_universes()`` derives the default scan directory from
+``paths.get("universes_dir")`` (the canonical PathRegistry entry for
+``research / "universes"``).  In Docker the host mount ``~/.tino/research``
+is surfaced inside the container as ``/app/tino/research`` (no leading dot),
+so we read the research root from ``Settings`` instead of hard-coding
+``Path.home() / ".tino" / "research"``.
+
 The directory is NOT auto-created by this module; callers should create
 it before calling ``load_csv()``.  ``load_csv`` will raise ``FileNotFoundError``
 if the path does not exist.
@@ -38,15 +44,14 @@ from typing import Iterator
 
 import pandas as pd
 
+from tinohelm.core.paths import paths
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 #: New-coin isolation window — a symbol is excluded for 7 days after listing.
 _NEW_COIN_ISOLATION_DAYS: int = 7
-
-#: Default base directory scanned by ``list_universes()``.
-_DEFAULT_UNIVERSE_DIR: Path = Path.home() / ".tino" / "research" / "universes"
 
 
 # ---------------------------------------------------------------------------
@@ -331,14 +336,17 @@ class Universe:
     def list_universes(base_dir: Path | None = None) -> list[str]:
         """Return the names of available universe CSV files (without extension).
 
-        Scans *base_dir* (default: ``~/.tino/research/universes/``) for
-        ``*.csv`` files and returns their stems sorted alphabetically.
+        Scans *base_dir* for ``*.csv`` files and returns their stems sorted
+        alphabetically.  When *base_dir* is ``None``, the directory is derived
+        from ``paths.get("universes_dir")`` (the canonical PathRegistry entry
+        for ``research / "universes"``).
 
         Parameters
         ----------
         base_dir:
-            Directory to scan.  Defaults to ``~/.tino/research/universes/``.
-            If the directory does not exist, returns an empty list.
+            Directory to scan.  If ``None``, the default is resolved at call
+            time from project settings.  If the directory does not exist,
+            returns an empty list.
 
         Returns
         -------
@@ -346,7 +354,7 @@ class Universe:
             Sorted list of universe names (filename stems, no ``.csv``
             suffix), e.g. ``["binance_perp_top20", "sp500"]``.
         """
-        directory = Path(base_dir) if base_dir is not None else _DEFAULT_UNIVERSE_DIR
+        directory = Path(base_dir) if base_dir is not None else paths.get("universes_dir")
         if not directory.exists():
             return []
         return sorted(p.stem for p in directory.glob("*.csv"))
