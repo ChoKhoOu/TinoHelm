@@ -13,6 +13,8 @@ from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.config import ActorConfig
 from nautilus_trader.core.message import Event
 
+from tinohelm.node.actors.file_watch import detect_and_enqueue
+
 
 class HealthActorConfig(ActorConfig):
     redis_url: str = "redis://localhost:6379"
@@ -125,20 +127,11 @@ class HealthActor(Actor):
             try:
                 # Call resolve_strategies_dir() each iteration so that env-var
                 # or settings changes take effect without restarting the Actor.
-                dir_path = resolve_strategies_dir()
-                if not dir_path.exists():
-                    continue
-
-                current_mtimes: dict[str, float] = {}
-                for py_file in dir_path.rglob("*.py"):
-                    try:
-                        current_mtimes[str(py_file)] = py_file.stat().st_mtime
-                    except OSError:
-                        pass
-
-                if current_mtimes != self._strategy_file_mtimes:
-                    self._strategy_file_mtimes = current_mtimes
-                    self._command_deque.append({"cmd": "_rescan_strategies"})
+                self._strategy_file_mtimes = detect_and_enqueue(
+                    resolve_strategies_dir(),
+                    self._strategy_file_mtimes,
+                    self._command_deque,
+                )
             except Exception:
                 pass
 

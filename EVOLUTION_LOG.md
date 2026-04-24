@@ -1100,3 +1100,140 @@ Chronological record of architectural improvements and maintenance work.
 - ✅ `tests/backtest/` 全包(除 4 个 NT-dep 文件)511 passed, 48 skipped,**无失败无新 warning**
 - ✅ `tests/backtest/test_sections.py`(原 `_load_sections_isolated` fallback 路径)133 passed —— 说明 `result/__init__.py` 的 PEP 562 改造对这块历史补丁代码保持兼容
 - ✅ 无 TODO/FIXME/XXX:grep 5 个新/改文件清零
+
+
+## 2026-04-24
+
+**主题**: 抽出 `CommandActor`/`HealthActor` 的 NT-free 调度与文件监听逻辑到 `command_dispatch.py` + `file_watch.py`,`actors/__init__.py` 改为 PEP 562 惰性,给两大 helper + 共享 `_utils.py` + 包级懒加载契约补齐 92 个单元测试
+**维度**: 测试补齐 + 架构重构(extract helpers + PEP 562 惰性化)
+**改动范围**:
+- 新建 `src/tinohelm/node/actors/command_dispatch.py`(150 行)—— 2 个纯 Python 函数 `dispatch_command` + `handle_rescan_strategies`,零 NT 依赖
+- 新建 `src/tinohelm/node/actors/file_watch.py`(74 行)—— 2 个纯 Python 函数 `compute_mtime_map` + `detect_and_enqueue`,零 NT 依赖
+- 重构 `src/tinohelm/node/actors/command_actor.py`(215 → 166 行,−49)—— `_drain_pending_commands` 的 75 行 if/elif 树替换为 13 行委托调用 `dispatch_command`
+- 重构 `src/tinohelm/node/actors/health_actor.py`(229 → 222 行,−7)—— `_file_watcher` 线程循环体从 35 行瘦身到 10 行,委托 `detect_and_enqueue`
+- 重构 `src/tinohelm/node/actors/__init__.py`(14 → 57 行,转为 PEP 562 惰性)—— 10 个 NT-dep 符号(5 Actor × 2:Actor + Config)改为 `__getattr__` 触发,`tinohelm.node.actors` 包本身 import 不再 eager 触发 NT
+- 新建 `tests/actors/test_command_dispatch.py`(467 行,38 用例 / 8 个测试类)
+- 新建 `tests/actors/test_file_watch.py`(329 行,22 用例 / 3 个测试类)
+- 新建 `tests/actors/test_utils.py`(289 行,32 用例 / 5 个测试类)
+
+**动机**:
+
+`node/actors/` 下的 `CommandActor` 和 `HealthActor` 是 live/sandbox TradingNode 的两个关键桥接点,但 Cython 继承 + NT deps + 线程化 I/O 把它们的核心逻辑囚禁在无法单测的状态里:
+
+1. **`CommandActor._drain_pending_commands`(75 行 if/elif)** —— 这是**所有**外部 lifecycle 命令(pause/resume/flatten/halt/shutdown/start_strategy/flatten_stop_strategy/pause_strategy/resume_strategy/cancel_order/内部 `_rescan_strategies`)从 Redis SUBSCRIBE 到 `LifecycleController` 方法调用的唯一路径。一个 branch 写错(比如 `pause` 没区分 `_all` 与 `_strategy_id`,或 `cancel_order` 丢了 client_order_id 守卫),所有 CLI/TUI/Web 发过来的命令会静默失效,node 还继续心跳显示"健康",操作员毫无察觉——零测试。
+2. **`HealthActor._file_watcher`(35 行 mtime 追踪 + 队列推送)** —— 用户在 `~/.tino/strategies/` 编辑 .py 时,node 通过这个线程 10s 轮询感知变化、推送 `_rescan_strategies` 命令到 `CommandActor` 的队列,然后触发 `StrategyRegistry.scan()`。bug 会让编辑在磁盘上的策略代码**永远**不被重新扫描——零测试。
+3. **`_utils.py`(`redis_publish` + `ts_ns_to_iso`,30 行)** —— 五个 node actor 全部依赖。`redis_publish` 的 channel 前缀格式 `tino:{node_type}:{suffix}` 是前端/TUI/DB 跨进程约定;`ts_ns_to_iso` 把 NT 的 ns 时间戳转换成 ISO-8601 UTC,数据库和 UI 都靠它。任何一个函数退化——比如 `redis_publish` 把 KeyboardInterrupt 一起吞掉、`ts_ns_to_iso` 在 epoch 附近出现时区漂移——都只在端到端才会暴露——**零直接测试**。
+4. **`actors/__init__.py` 本身 eager 加载 5 个 NT Actor** —— 阻止任何 NT-free helper(`rate_limit`、`serialize`、`_utils`、现在的 `command_dispatch`、`file_watch`)在缺 NT 环境下被加载。这与 2026-04-21 对 `backtest/result/__init__.py` 的 PEP 562 改造是完全对称的债务点。
+
+这四个问题紧密耦合,构成一次自然的演进边界:要给 `_drain_pending_commands` 写 NT-free 测试,就必须先抽成纯函数;要保证"helper 真的 NT-free"这个不变式能被测试守住,就必须打掉 `actors/__init__.py` 的 eager import;同样一次 PR 里把 `_utils.py` 的 32 个直接测试补上才算把这一层的测试覆盖封死。
+
+**要点**:
+
+1. **`command_dispatch.py`(150 行)** —— 两个公开函数:
+
+   - `dispatch_command(cmd, *, lifecycle, registry, resolve_strategies_dir, publish_ack, log)` —— 保留旧 `_drain_pending_commands` 的全部契约:
+     * `pause` / `resume` 无 `strategy_id` 时走 `pause_all` / `resume_all`;有则走 `pause_strategy_id` / `resume_strategy_id`。
+     * `lifecycle is None` → `log.warning` + `publish_ack("commands_ack", {cmd, status: "error", reason: "no_lifecycle"})`,**不 raise**。
+     * lifecycle 方法抛异常 → `log.error` + `publish_ack("commands_ack", {cmd, status: "error", reason: str(e)})`,**不再抛**(这样下一条命令仍能处理)。
+     * `cancel_order` 缺 `client_order_id` 静默 no-op(legacy `if coid:` 守卫)。
+     * 未知 `cmd` 走 `log.warning` 但**不** ack(legacy 行为)。
+     * `_rescan_strategies` 分支在 lifecycle guard 之前,所以 file-watcher 触发的 rescan 不依赖 LifecycleController 是否就绪。
+   - `handle_rescan_strategies(*, registry, resolve_strategies_dir, publish_ack, log)` —— 独立导出的 helper,包装"扫描 + 如果有变更推送 `strategy_update` ack"逻辑,`registry is None` 或目录不存在时静默 no-op,扫描异常走 `log.error` 吞掉。
+
+2. **`file_watch.py`(74 行)** —— 两个公开函数:
+
+   - `compute_mtime_map(dir_path, pattern="*.py") -> dict[str, float]` —— rglob + stat,单个文件 OSError 跳过(匹配 legacy 的 `try/except OSError pass`),整个 rglob 过程中的其它异常**向上抛**——由线程循环决定是否吞掉。
+   - `detect_and_enqueue(dir_path, prev_mtimes, command_deque, *, pattern="*.py") -> dict[str, float]` —— 一轮轮询:dir 不存在 → 原 map 不动(identity preserved);否则重新计算 → 与 prev 对比 → 有差异就 `command_deque.append({"cmd": "_rescan_strategies"})` → 返回新 map。`pattern` 参数留出未来 `portfolio.yaml` 监听的扩展点,不破坏当前 `*.py` 契约。
+
+3. **`actors/__init__.py` PEP 562 惰性化** ——
+
+   - `__all__` 保持不变(10 个符号)——`from tinohelm.node.actors import *` 的老代码路径继续 work。
+   - `__getattr__` 拦截 10 个 legacy attr,按需 `importlib.import_module` 对应的 `_actor.py`,返回真正的类——这个懒加载只在**首次**访问时触发;后续访问通过 Python 的 module attribute caching 直接命中。
+   - `__dir__` 也对应列出 10 个 lazy name,保证 IDE/REPL tab 补全不退化。
+   - 包本身(`import tinohelm.node.actors`)不再 eager 触发 NT——`tests/actors/test_utils.py` 里 `test_package_import_does_not_pull_in_nautilus_trader` 用 `sys.meta_path` blocker 锁住这个不变式。
+   - 所有 legacy consumer(`tinohelm.node._common`, `tests/node/test_node_portfolio.py`)用的是 `from tinohelm.node.actors import CommandActor`,PEP 562 下这触发一次 `__getattr__`,正常加载——**消费端代码零改动**。`tests/actors/test_db_writer.py` 走的是 `from tinohelm.node.actors import db_writer_actor` 子模块路径,完全绕过 `__getattr__`,也 unaffected。
+
+4. **`_drain_pending_commands` 的新实现** —— 从 75 行瘦到 13 行:
+
+   ```python
+   def _drain_pending_commands(self) -> None:
+       from tinohelm.node._common import resolve_strategies_dir
+
+       def _publish_ack(suffix, data):
+           redis_publish(self._redis, self._node_type, suffix, data)
+
+       while self._pending_commands:
+           cmd = self._pending_commands.popleft()
+           dispatch_command(
+               cmd,
+               lifecycle=self._lifecycle,
+               registry=self._registry,
+               resolve_strategies_dir=resolve_strategies_dir,
+               publish_ack=_publish_ack,
+               log=self.log,
+           )
+   ```
+
+   注意:`_publish_ack` closure 把 `self._redis` + `self._node_type` pre-bind,正好满足 `PublishAck = Callable[[str, dict], None]` 协议;`resolve_strategies_dir` 传 function ref(不是已解析结果)——每个 `_rescan_strategies` 命令**重新解析**一次目录,保留了 legacy 行为中"env 变量改动不需要重启 Actor"的动态性。
+
+5. **`_file_watcher` 的新实现** —— 从 35 行瘦到 10 行:
+
+   ```python
+   while self._running:
+       time.sleep(10)
+       if self._command_deque is None:
+           continue
+       try:
+           self._strategy_file_mtimes = detect_and_enqueue(
+               resolve_strategies_dir(),
+               self._strategy_file_mtimes,
+               self._command_deque,
+           )
+       except Exception:
+           pass
+   ```
+
+   legacy 的外层 `try/except Exception: pass` 保留——它现在守护 `resolve_strategies_dir()` 和 `detect_and_enqueue()` 两处可能抛的错(helper 不再吞 rglob-level 异常,由线程体决定是否吞)。
+
+6. **92 个新测试的分类与覆盖**:
+
+   - **`test_command_dispatch.py`(38 用例 / 8 类)**:
+     * `TestPauseResumeOverload`(6)—— `pause`/`resume` 的 `_all` vs `_strategy_id` 分流,`""` / `None` / 实际 str 三种 `strategy_id` 取值的 falsy 判定
+     * `TestSystemWideCommands`(5)—— `flatten`(含 None 传参语义)/`halt`/`unhalt`/`shutdown` 的 0-arg 直通
+     * `TestStrategyNameCommands`(5)—— `start_strategy`/`flatten_stop_strategy`/`pause_strategy`/`resume_strategy` 的 `cmd.get("strategy_name", "")` 空 str 回退
+     * `TestCancelOrder`(4)—— 有 coid / 缺 coid / 空 str coid / None coid 四种组合
+     * `TestUnknownCommand`(4)—— log.warning 命中、无 ack、无 lifecycle 调用、缺 `cmd` key 等同于 unknown
+     * `TestNoLifecycle`(5)—— 5 种不同 cmd 下的 `no_lifecycle` ack payload 精确结构断言,`_rescan_strategies` 不受 lifecycle=None 影响
+     * `TestLifecycleException`(5)—— 异常不 reraise、ack `reason=str(e)`、log.error 命中、`cancel_order` 异常独立覆盖、两条连续 cmd 的独立性(一条抛不影响下一条)
+     * `TestRescanStrategies`(8)—— scan 成功/目录不存在/registry=None/scan 异常/resolver 异常/`handle_rescan_strategies` 直接调用路径
+     * `TestPublicSurface`(2)—— `__all__` 锁定 + `sys.meta_path` blocker 验证 NT-free import
+
+   - **`test_file_watch.py`(22 用例 / 3 类)**:
+     * `TestComputeMtimeMap`(10)—— 空目录/单文件/递归 3 层/非匹配后缀过滤/自定义 pattern(`portfolio.yaml`)/mtime float 类型/内容变更后 mtime 上升/单文件 stat OSError 跳过且不影响其它/所有 *.py stat 全挂返回空/连续调用返回新 dict 非共享
+     * `TestDetectAndEnqueue`(10)—— 首次空目录无入队/首次有文件入队一次/稳态无重复入队/新增文件/删除文件/mtime bump/缺目录 identity preserved/pattern override 传播/入队 envelope 精确结构/10 次稳态 0 入队/list-like 也可用/rglob 级异常向上抛
+     * `TestNoNTDependency`(1)—— `sys.meta_path` blocker + NT delta 断言
+
+   - **`test_utils.py`(32 用例 / 5 类)**:
+     * `TestTsNsToIso`(7)—— epoch zero、已知 unix 秒边界(1700000000)、500ms sub-second 保留、microsecond 精度、任意 ns 都带 `+00:00` 后缀、字符串类型、通过 `datetime.fromisoformat` 往返
+     * `TestRedisPublishChannelFormatting`(4)—— `tino:sandbox:...` / `tino:live:...` / 任意 node_type verbatim 透传 / suffix 内嵌 `:` 原样保留
+     * `TestRedisPublishPayloadEncoding`(4)—— dict → JSON / `default=str` 兜底非 JSON 类型 / 空 dict / 嵌套 dict roundtrip
+     * `TestRedisPublishErrorHandling`(4)—— None client 静默 no-op / `.publish()` 抛 Exception 被 swallow 且 log.ERROR 命中 channel 名 / log 消息含异常信息 / KeyboardInterrupt **不**被 swallow
+     * `TestActorsPackageLazyExports`(5)—— 10 个 legacy 符号全部可访问且都是类、未知 attr 抛 AttributeError、`dir()` 报出 lazy name、包导入零 NT 触发(sys.meta_path blocker)、4 个子模块(`command_dispatch`/`file_watch`/`rate_limit`/`_utils`)直接导入绕过 `__getattr__`
+
+**讨论点**:
+
+- **为什么 `detect_and_enqueue` 不吞 rglob 级异常** —— legacy 的 `_file_watcher` 外层 `try/except Exception: pass` 捕获一切,是线程体的安全兜底。helper 本身让异常向上抛,原因是:(a)测试里我们希望 rglob 真坏掉就看到错误,而不是静默;(b)线程体保留兜底足以覆盖生产路径;(c)未来如果 helper 在其它同步上下文复用(比如 `tino node rescan` CLI),调用方可能**希望**看到异常而不是静默。这是有意设计——测试用 `TestDetectAndEnqueue::test_compute_mtime_map_exception_propagates` 显式锁住。
+- **`actors/__init__.py` 的 lazy dict 表格化** —— 用 `_LAZY_EXPORTS: dict[str, tuple[str, str]]` 表格映射(符号名 → (子模块名, attr 名)),而不是 10 个单独 `if name == "X": from ... import X`。表格化更易维护(加一个新 Actor 只加一行),且 `dir()` 的实现直接 `sorted(_LAZY_EXPORTS.keys())` 复用这张表,不用再手写一遍。
+- **`_utils.ts_ns_to_iso` 的字符串格式选择** —— `datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc).isoformat()` 返回 `"2023-11-14T22:13:20+00:00"`。测试锁定这一形式;如果后续想统一为 `"Z"` 后缀(RFC 3339 更短),会触发 `TestTsNsToIso::test_always_utc_suffix` 失败,提醒 review 者这是一次跨 DB/UI 的序列化协议变更,不是无痛 refactor。
+- **`_drain_pending_commands` 仍是 `Actor` 方法而非静态入口** —— 我没把它整个移出去,因为 NT `TimeEvent` 驱动的 `on_event` handler 依赖 `self.clock` / `self.msgbus` / `self._pending_commands`,属于 Actor 契约本身。只把**内部纯逻辑**下沉到 `dispatch_command`,与项目既有模式(`runner.py` 里业务逻辑下沉到 `runner_helpers.py`,`runner.py` 保留 orchestration)一致。
+
+**验证**:
+- ✅ **全量 `pytest tests/` 基线 2815 passed → 2907 passed**(+92 精确匹配新增 38+22+32=92 个用例),耗时 40.92s,零失败、零新 warning
+- ✅ **`tests/actors/ + tests/node/` 子集**:380 passed,耗时 6.06s
+- ✅ **三个新测试文件**:92 passed,耗时 3.71s
+- ✅ `ruff check src/tinohelm/node/actors/ tests/actors/test_command_dispatch.py tests/actors/test_file_watch.py tests/actors/test_utils.py` —— **All checks passed!**(全仓 ruff 余下 112 个错误均为 pre-existing,与本次改动无关)
+- ✅ **NT-free 不变式**:在 `sys.meta_path` blocker 下(任何 `nautilus_trader*` 导入抛 ImportError),`tinohelm.node.actors` 包导入零 NT 触发;`command_dispatch`、`file_watch`、`_utils`、`rate_limit` 四个子模块直接导入都零 NT 触发
+- ✅ **Legacy 消费端零回归**:`tinohelm.node._common.load_components` 的 `from tinohelm.node.actors import CommandActor, ...` 仍然拿到真正的 Actor 类;`tests/node/test_node_portfolio.py` 同路径,380 个 node+actors 测试全绿
+- ✅ **行为契约 1:1 锁定**:38 个 `test_command_dispatch` 用例把原 `_drain_pending_commands` 的每一条 branch、每一个守卫、每一条错误路径、每一种 payload 结构独立断言;22 个 `test_file_watch` 用例覆盖 `_file_watcher` 线程体的全部可观测行为
+- ✅ `_drain_pending_commands` 瘦身 75 → 13 行 (−82%),`_file_watcher` 瘦身 35 → 10 行 (−71%)
+- ✅ 无 TODO/FIXME/XXX:grep 全部新/改 8 个文件清零
