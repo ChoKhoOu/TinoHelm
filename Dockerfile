@@ -22,11 +22,13 @@ COPY pyproject.toml ./
 
 # Extract dependency list from pyproject.toml with stdlib tomllib (Python 3.11+)
 # Also append psycopg2-binary which is a runtime-only dep not in pyproject.toml
+# Include [optimize] extras (optuna) so the optimizer feature works in container
 RUN python - <<'EOF'
 import tomllib, pathlib
 data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
 deps = data["project"]["dependencies"]
-pathlib.Path("requirements.txt").write_text("\n".join(deps) + "\npsycopg2-binary\n")
+optimize_deps = data["project"]["optional-dependencies"].get("optimize", [])
+pathlib.Path("requirements.txt").write_text("\n".join(deps + optimize_deps) + "\npsycopg2-binary\n")
 EOF
 
 # P3: BuildKit cache mount keeps the pip HTTP cache across all rebuilds
