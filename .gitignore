@@ -24,3 +24,6 @@ target/
 
 # Cage harness (local workflow state, not project source)
 .cage/
+
+# Local runtime data (PathSettings default root when running from project dir)
+tino/
