@@ -212,7 +212,7 @@ class BacktestRunner:
 
         return None
 
-    def _resolve_bars(
+    async def _resolve_bars(
         self,
         catalog: ParquetDataCatalog,
         sym: str,
@@ -262,18 +262,17 @@ class BacktestRunner:
 
         # 3. Fetch via data job queue
         logger.info("No local data for %s %s, submitting fetch job...", sym, ivl)
-        bars = self._download_bars(sym, ivl, catalog)
+        bars = await self._download_bars(sym, ivl)
         if bars:
             logger.info("Fetched and loaded %d %s bars for %s", len(bars), ivl, sym)
             return bars, _make_bar_type_str(sym, ivl), None
 
         return None, bar_type_str, None
 
-    def _download_bars(
+    async def _download_bars(
         self,
         sym: str,
         ivl: str,
-        catalog: ParquetDataCatalog,
     ) -> list | None:
         """Fetch bars via DataFetchJob queue and wait for completion.
 
@@ -281,13 +280,7 @@ class BacktestRunner:
         enqueues it to the data worker, and blocks until done.
         Returns the loaded Bar objects, or None on failure.
         """
-        import asyncio
-
-        loop = asyncio.new_event_loop()
-        try:
-            success = loop.run_until_complete(self._submit_and_wait_fetch(sym, ivl))
-        finally:
-            loop.close()
+        success = await self._submit_and_wait_fetch(sym, ivl)
 
         if not success:
             return None
@@ -297,9 +290,19 @@ class BacktestRunner:
         return self._try_load_bars(bar_type_str, source_type=self.data_type)
 
     async def _submit_and_wait_fetch(
-        self, sym: str, ivl: str | None = None, data_type: str | None = None,
+        self,
+        sym: str,
+        ivl: str | None = None,
+        data_type: str | None = None,
+        *,
+        start_override: datetime | None = None,
     ) -> bool:
-        """Create a DataFetchJob, enqueue to Redis, and poll until done."""
+        """Create a DataFetchJob, enqueue to Redis, and poll until done.
+
+        ``start_override`` lets callers narrow the fetch window to only the
+        uncovered tail (e.g. funding-rate incremental update) rather than
+        re-downloading the full ``[self.start, self.end]`` range.
+        """
         import uuid
         import asyncio as _aio
         from sqlalchemy import select
@@ -315,7 +318,8 @@ class BacktestRunner:
 
         effective_data_type = data_type or self.data_type
         job_id = str(uuid.uuid4())
-        start_date = self.start.date() if isinstance(self.start, datetime) else self.start
+        effective_start = start_override if start_override is not None else self.start
+        start_date = effective_start.date() if isinstance(effective_start, datetime) else effective_start
         end_date = self.end.date() if isinstance(self.end, datetime) else self.end
 
         try:
@@ -486,49 +490,64 @@ class BacktestRunner:
             cancel_latency_nanos=int(config.get("cancel_latency_nanos", 0)),
         )
 
-    def _load_auxiliary_price_data(
+    async def _load_auxiliary_price_data(
         self, engine: BacktestEngine, nt_symbols: list[str],
     ) -> None:
         """Load mark price and index price data for all symbols.
 
-        Uses BinanceVisionPipeline to download data, then builds
-        MarkPriceUpdate / IndexPriceUpdate objects for the engine.
+        Cache-first flow (mirrors the main klines ``_try_load_bars`` path):
+          1. Try to load existing Parquet bars from the catalog
+             (``{catalog}/bar/{markPriceKlines,indexPriceKlines}/``).
+          2. For any symbol missing data, enqueue a DataFetchJob via
+             ``_submit_and_wait_fetch`` so the pipeline downloads from
+             Binance Vision + REST fallback and writes Parquet.
+          3. Reload from catalog after the job completes.
+          4. Convert the NT Bar objects into MarkPriceUpdate /
+             IndexPriceUpdate and inject into the engine.
+
+        Running the same backtest twice now reuses local Parquet and does
+        not re-hit Binance. Individual per-symbol failures are silently
+        downgraded (logger.debug) — a broken aux pull must not crash the
+        whole run.
+
+        Injection order into ``engine.add_data`` follows ``self.symbols``
+        to keep backtests reproducible (mark before index, symbols in
+        declared order) even though NT re-sorts internally.
         """
-        import asyncio
-        from tinohelm.data.providers.binance import (
-            fetch_mark_price_klines,
-            fetch_index_price_klines,
+        ivl = self.intervals[0] if self.intervals else "1h"
+        sym_pairs = list(zip(self.symbols, nt_symbols))
+        if not sym_pairs:
+            return
+
+        self._report_progress(
+            7,
+            message=f"Loading auxiliary price data for {len(sym_pairs)} symbols",
         )
 
-        ivl = self.intervals[0] if self.intervals else "1h"
         total_mark = 0
         total_index = 0
-
-        for sym, nt_sym in zip(self.symbols, nt_symbols):
-            # Mark price — still uses REST API directly since the data
-            # needs to be injected as MarkPriceUpdate (not Bar)
+        for sym, nt_sym in sym_pairs:
             try:
-                mark_klines = asyncio.run(fetch_mark_price_klines(
-                    symbol=sym, interval=ivl, start=self.start, end=self.end,
-                ))
-                if mark_klines:
-                    updates = self._build_mark_price_updates(mark_klines, nt_sym)
-                    if updates:
-                        engine.add_data(updates, sort=False)
-                        total_mark += len(updates)
+                mark_updates = await self._load_or_fetch_aux_updates(
+                    sym, nt_sym, ivl,
+                    source_type="markPriceKlines",
+                    build_fn=self._build_mark_price_updates_from_bars,
+                )
+                if mark_updates:
+                    engine.add_data(mark_updates, sort=False)
+                    total_mark += len(mark_updates)
             except Exception:
                 logger.debug("Failed to load mark price for %s", sym, exc_info=True)
 
-            # Index price
             try:
-                index_klines = asyncio.run(fetch_index_price_klines(
-                    symbol=sym, interval=ivl, start=self.start, end=self.end,
-                ))
-                if index_klines:
-                    updates = self._build_index_price_updates(index_klines, nt_sym)
-                    if updates:
-                        engine.add_data(updates, sort=False)
-                        total_index += len(updates)
+                index_updates = await self._load_or_fetch_aux_updates(
+                    sym, nt_sym, ivl,
+                    source_type="indexPriceKlines",
+                    build_fn=self._build_index_price_updates_from_bars,
+                )
+                if index_updates:
+                    engine.add_data(index_updates, sort=False)
+                    total_index += len(index_updates)
             except Exception:
                 logger.debug("Failed to load index price for %s", sym, exc_info=True)
 
@@ -538,50 +557,76 @@ class BacktestRunner:
                 total_mark, total_index,
             )
 
+    async def _load_or_fetch_aux_updates(
+        self,
+        sym: str,
+        nt_sym: str,
+        ivl: str,
+        *,
+        source_type: str,
+        build_fn,
+    ) -> list:
+        """Load aux (mark/index) bars from catalog, fetching via job queue if missing.
+
+        Parquet for mark/index lives under ``{catalog}/bar/{source_type}/``
+        (see :func:`resolve_catalog_path`). We reuse ``_try_load_bars`` with
+        the correct ``source_type`` so we don't mix klines with mark/index.
+        """
+        bar_type_str = _make_bar_type_str(sym, ivl)
+        bars = self._try_load_bars(bar_type_str, source_type=source_type)
+        if bars:
+            return build_fn(bars, nt_sym)
+
+        # Missing — enqueue fetch job and retry catalog read once it's done.
+        if self._redis_client:
+            success = await self._submit_and_wait_fetch(sym, ivl, data_type=source_type)
+            if success:
+                bars = self._try_load_bars(bar_type_str, source_type=source_type)
+
+        if not bars:
+            return []
+        return build_fn(bars, nt_sym)
+
     @staticmethod
-    def _build_mark_price_updates(klines: list[dict], nt_symbol: str) -> list:
-        """Convert mark price klines to NT MarkPriceUpdate objects."""
+    def _build_mark_price_updates_from_bars(bars: list, nt_symbol: str) -> list:
+        """Convert NT Bar objects (mark price klines) into MarkPriceUpdate objects."""
         try:
             from nautilus_trader.model.data import MarkPriceUpdate
             from nautilus_trader.model.identifiers import InstrumentId
-            from nautilus_trader.model.objects import Price
 
             inst_id = InstrumentId.from_str(nt_symbol)
             updates = []
-            for k in klines:
-                close_time_ns = int(k["close_time"]) * 1_000_000  # ms → ns
+            for b in bars:
                 updates.append(MarkPriceUpdate(
                     instrument_id=inst_id,
-                    value=Price.from_str(str(k["close"])),
-                    ts_event=close_time_ns,
-                    ts_init=close_time_ns,
+                    value=b.close,
+                    ts_event=b.ts_event,
+                    ts_init=b.ts_init,
                 ))
             return updates
         except Exception:
-            logger.warning("Failed to build MarkPriceUpdate objects", exc_info=True)
+            logger.warning("Failed to build MarkPriceUpdate from bars", exc_info=True)
             return []
 
     @staticmethod
-    def _build_index_price_updates(klines: list[dict], nt_symbol: str) -> list:
-        """Convert index price klines to NT IndexPriceUpdate objects."""
+    def _build_index_price_updates_from_bars(bars: list, nt_symbol: str) -> list:
+        """Convert NT Bar objects (index price klines) into IndexPriceUpdate objects."""
         try:
             from nautilus_trader.model.data import IndexPriceUpdate
             from nautilus_trader.model.identifiers import InstrumentId
-            from nautilus_trader.model.objects import Price
 
             inst_id = InstrumentId.from_str(nt_symbol)
             updates = []
-            for k in klines:
-                close_time_ns = int(k["close_time"]) * 1_000_000
+            for b in bars:
                 updates.append(IndexPriceUpdate(
                     instrument_id=inst_id,
-                    value=Price.from_str(str(k["close"])),
-                    ts_event=close_time_ns,
-                    ts_init=close_time_ns,
+                    value=b.close,
+                    ts_event=b.ts_event,
+                    ts_init=b.ts_init,
                 ))
             return updates
         except Exception:
-            logger.warning("Failed to build IndexPriceUpdate objects", exc_info=True)
+            logger.warning("Failed to build IndexPriceUpdate from bars", exc_info=True)
             return []
 
     @staticmethod
@@ -611,30 +656,50 @@ class BacktestRunner:
             logger.warning("Failed to build FundingRateUpdate objects", exc_info=True)
             return []
 
-    def _load_funding_rates(self, nt_symbols: list[str]) -> list[dict]:
+    async def _load_funding_rates(self, nt_symbols: list[str]) -> list[dict]:
         """Load historical funding rates for all symbols via data catalog queue.
 
         Submits DataFetchJobs for fundingRate data, waits for completion,
         then loads from the local JSON cache.
 
+        Symbols whose JSON cache already covers ``[self.start, self.end]``
+        are skipped entirely — no DataFetchJob row is created. Symbols with
+        only a partial tail gap get a job whose ``start_date`` is the first
+        uncovered timestamp, keeping incremental fetches narrow and making
+        the second run of an identical backtest a no-op.
+
         Returns a list of funding events sorted by timestamp_ns, ready for the
         FundingCostTracker actor.
         """
-        import asyncio
-        from tinohelm.data.funding_cache import load_funding_rates
+        from tinohelm.data.funding_cache import _load_cache, load_funding_rates
+        from tinohelm.data.funding_cache_helpers import compute_fetch_start
         from tinohelm.data.instruments import fetch_funding_info, strip_to_binance_api_symbol
 
-        # Fetch funding rate data via job queue
-        if self._redis_client:
-            loop = asyncio.new_event_loop()
-            try:
-                for sym in self.symbols:
-                    self._report_progress(5, message=f"Fetching funding rates: {sym}...")
-                    loop.run_until_complete(
-                        self._submit_and_wait_fetch(sym, None, data_type="fundingRate")
+        # Fetch funding rate data via job queue, but only for symbols whose
+        # local JSON cache does not already span [self.start, self.end].
+        if self._redis_client and self.start and self.end:
+            for sym in self.symbols:
+                cached = _load_cache(sym)
+                cached_times = [
+                    int(r["funding_time_ms"])
+                    for r in cached
+                    if isinstance(r, dict)
+                    and isinstance(r.get("funding_time_ms"), (int, float))
+                ]
+                fetch_start = compute_fetch_start(
+                    cached_times, start=self.start, end=self.end,
+                )
+                if fetch_start is None:
+                    logger.info(
+                        "Funding rate cache already covers %s [%s..%s], "
+                        "skipping fetch job", sym, self.start, self.end,
                     )
-            finally:
-                loop.close()
+                    continue
+                self._report_progress(5, message=f"Fetching funding rates: {sym}...")
+                await self._submit_and_wait_fetch(
+                    sym, None, data_type="fundingRate",
+                    start_override=fetch_start,
+                )
 
         # Load per-symbol funding interval (hours) from Binance
         funding_info = fetch_funding_info()
@@ -722,7 +787,7 @@ class BacktestRunner:
     # Shared engine setup (eliminates duplication between run/prepare)
     # ------------------------------------------------------------------
 
-    def _setup_engine(self) -> tuple["BacktestEngine", Any, float]:
+    async def _setup_engine(self) -> tuple["BacktestEngine", Any, float]:
         """Create and configure the BacktestEngine with all data loaded.
 
         This is the shared setup logic used by both :meth:`run` (single
@@ -825,7 +890,7 @@ class BacktestRunner:
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
-                bars, bt_str, source_bt_str = self._resolve_bars(
+                bars, bt_str, source_bt_str = await self._resolve_bars(
                     catalog, sym, nt_sym, ivl,
                 )
                 if bars:
@@ -886,11 +951,11 @@ class BacktestRunner:
 
         return engine, strategy_bundle, starting_balance
 
-    def run(self) -> dict[str, Any]:
+    async def run(self) -> dict[str, Any]:
         """Execute the backtest and return results dict."""
         logger.info("Starting backtest: %s on %s", self.strategy_path, self.symbols)
 
-        engine, strategy_bundle, starting_balance = self._setup_engine()
+        engine, strategy_bundle, starting_balance = await self._setup_engine()
 
         self._report_progress(4, total_bars=self._total_bar_count)
 
@@ -938,7 +1003,7 @@ class BacktestRunner:
         # Add funding cost tracker + inject FundingRateUpdate data for perpetual futures
         self._funding_enabled = False
         if self.symbols and self.start and self.end:
-            funding_events = self._load_funding_rates(self._nt_symbols)
+            funding_events = await self._load_funding_rates(self._nt_symbols)
             if funding_events:
                 from tinohelm.backtest.funding import (
                     _FundingCostTracker,
@@ -966,7 +1031,7 @@ class BacktestRunner:
 
         # Load mark price and index price data for strategies
         if self.symbols and self.start and self.end:
-            self._load_auxiliary_price_data(engine, self._nt_symbols)
+            await self._load_auxiliary_price_data(engine, self._nt_symbols)
 
         self._report_progress(9)  # Auxiliary price data loaded
 
@@ -1022,7 +1087,7 @@ class BacktestRunner:
     # Engine reuse API (for Optuna optimization — avoids reloading data)
     # ------------------------------------------------------------------
 
-    def prepare_engine(self) -> tuple[BacktestEngine, Any, float]:
+    async def prepare_engine(self) -> tuple[BacktestEngine, Any, float]:
         """Create and configure engine with data loaded, but do NOT run.
 
         This is the "heavy" setup step — loads instruments, bar data, and
@@ -1032,7 +1097,7 @@ class BacktestRunner:
         Returns:
             (engine, strategy_bundle, starting_balance)
         """
-        engine, strategy_bundle, starting_balance = self._setup_engine()
+        engine, strategy_bundle, starting_balance = await self._setup_engine()
 
         logger.info(
             "Engine prepared: %d symbols, %d bar types",

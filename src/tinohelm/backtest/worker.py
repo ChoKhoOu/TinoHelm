@@ -1,6 +1,7 @@
 """Backtest worker — runs in subprocess, dequeues jobs from Redis."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import signal
@@ -258,7 +259,7 @@ def backtest_worker(redis_url: str, catalog_path: str, artifacts_path: str, db_u
                 artifact_dir.mkdir(parents=True, exist_ok=True)
                 runner.artifacts_dir = artifact_dir
 
-                results = runner.run()
+                results = asyncio.run(runner.run())
 
                 # Progress: engine done, saving artifacts
                 elapsed = round(time.monotonic() - job_start_time, 1)

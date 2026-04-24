@@ -11,6 +11,7 @@ NT/optuna-free environments.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, date
@@ -141,7 +142,7 @@ def _run_backtest(
         start=datetime(start.year, start.month, start.day),
         end=datetime(end.year, end.month, end.day),
     )
-    return runner.run()
+    return asyncio.run(runner.run())
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +397,7 @@ class BacktestOptimizer:
                     start=datetime(train_start.year, train_start.month, train_start.day),
                     end=datetime(train_end.year, train_end.month, train_end.day),
                 )
-                engine, pc, sb = runner.prepare_engine()
+                engine, pc, sb = asyncio.run(runner.prepare_engine())
                 self._shared_runner = runner
                 self._shared_engine = engine
                 self._shared_strategy_bundle = pc
