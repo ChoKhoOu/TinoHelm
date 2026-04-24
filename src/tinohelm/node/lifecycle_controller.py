@@ -207,9 +207,13 @@ class LifecycleController:
         try:
             from tinohelm.portfolio.config import load_strategy_bundle
             from tinohelm.strategy.loader import create_strategies, create_actors
+            from tinohelm.node._common import resolve_strategies_dir
 
-            import os
-            _strategies_dir = os.environ.get("TINO_STRATEGIES_DIR")
+            # Pass the resolved directory so ``load_strategy_bundle`` doesn't
+            # have to re-run its own settings lookup.  ``resolve_strategies_dir``
+            # honours ``TINO_STRATEGIES_DIR`` first (back-compat), then falls
+            # through to ``settings.paths.strategies``.
+            _strategies_dir = resolve_strategies_dir()
             strategy_cfg = load_strategy_bundle(name, strategies_dir=_strategies_dir)
 
             # Allocate tags with collision check

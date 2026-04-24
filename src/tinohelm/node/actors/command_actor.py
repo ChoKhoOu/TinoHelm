@@ -8,10 +8,8 @@ from __future__ import annotations
 import collections
 import json
 import logging
-import os
 import threading
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
 import redis
@@ -154,10 +152,9 @@ class CommandActor(Actor):
             if action == "_rescan_strategies":
                 if self._registry is not None:
                     try:
-                        strategies_dir = Path(os.environ.get(
-                            "TINO_STRATEGIES_DIR",
-                            str(Path.home() / ".tino" / "strategies"),
-                        ))
+                        from tinohelm.node._common import resolve_strategies_dir
+
+                        strategies_dir = resolve_strategies_dir()
                         if strategies_dir.exists():
                             changed = self._registry.scan(strategies_dir)
                             if changed:

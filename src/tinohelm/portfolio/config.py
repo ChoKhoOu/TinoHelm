@@ -7,13 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tinohelm.core.paths import paths
+
 logger = logging.getLogger(__name__)
 
 # Matches symbols like BTCUSDT-PERP, ETHUSDT-PERP, SOLUSDT-PERP
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]+-[A-Z]+$")
-
-# Default strategies directory
-_DEFAULT_STRATEGIES_DIR = Path.home() / ".tino" / "strategies"
 
 
 @dataclass
@@ -110,7 +109,9 @@ def load_strategy_bundle(
 
     ``symbol``/``symbols`` and ``interval`` are required.
     """
-    strategies_dir = Path(strategies_dir) if strategies_dir else _DEFAULT_STRATEGIES_DIR
+    strategies_dir = (
+        Path(strategies_dir) if strategies_dir else paths.get("strategies")
+    )
     path = Path(name_or_path)
 
     # Merge symbol/symbols for backward compat

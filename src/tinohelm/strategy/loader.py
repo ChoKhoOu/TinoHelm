@@ -25,13 +25,12 @@ from tinohelm.strategy.loader_helpers import (
     resolve_actor_class_path,
     resolve_module_file,
 )
+from tinohelm.core.paths import paths
 from tinohelm.strategy.module_loader import load_module_from_file
 from tinohelm.strategy.utils import get_config_field_names
 
 logger = logging.getLogger(__name__)
 
-# Default actors directory
-_DEFAULT_ACTORS_DIR = Path.home() / ".tino" / "actors"
 # Built-in actors shipped with the package
 _BUILTIN_ACTORS_DIR = Path(__file__).resolve().parent.parent / "actors"
 
@@ -130,7 +129,7 @@ def create_actors(
     if not config.actors and config.risk_guard is None:
         return []
 
-    actors_dir = Path(actors_dir) if actors_dir else _DEFAULT_ACTORS_DIR
+    actors_dir = Path(actors_dir) if actors_dir else paths.get("actors")
     results: list[Any] = []
 
     if config.risk_guard is not None and config.risk_guard.enabled:
@@ -290,7 +289,7 @@ def _discover_actor_classes(
 
 def scan_actors(actors_dir: str | Path | None = None) -> list[dict[str, Any]]:
     """Scan the actors directory for Actor/ActorConfig subclasses."""
-    actors_dir = Path(actors_dir) if actors_dir else _DEFAULT_ACTORS_DIR
+    actors_dir = Path(actors_dir) if actors_dir else paths.get("actors")
     if not actors_dir.exists():
         return []
 

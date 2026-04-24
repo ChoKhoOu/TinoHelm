@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
 import redis
@@ -117,10 +115,7 @@ class HealthActor(Actor):
         """
         import time
 
-        strategies_dir = os.environ.get(
-            "TINO_STRATEGIES_DIR",
-            str(Path.home() / ".tino" / "strategies"),
-        )
+        from tinohelm.node._common import resolve_strategies_dir
 
         while self._running:
             time.sleep(10)
@@ -128,7 +123,9 @@ class HealthActor(Actor):
                 continue
 
             try:
-                dir_path = Path(strategies_dir)
+                # Call resolve_strategies_dir() each iteration so that env-var
+                # or settings changes take effect without restarting the Actor.
+                dir_path = resolve_strategies_dir()
                 if not dir_path.exists():
                     continue
 

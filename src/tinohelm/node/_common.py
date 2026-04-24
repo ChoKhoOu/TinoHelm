@@ -12,7 +12,27 @@ from urllib.parse import urlparse
 
 import redis
 
+from tinohelm.core.paths import paths
+
 logger = logging.getLogger(__name__)
+
+
+def resolve_strategies_dir() -> Path:
+    """Return the strategies directory for the node runtime.
+
+    Resolution order:
+
+    1. ``TINO_STRATEGIES_DIR`` environment variable — legacy ad-hoc override
+       kept for back-compat.  Existing deployments still set this in
+       docker-compose, so we honour it first.
+    2. ``paths.get("strategies")`` — canonical project-wide path via
+       PathRegistry (set by ``TINO_PATHS__STRATEGIES=/app/tino/strategies``
+       in Docker).
+    """
+    env_override = os.environ.get("TINO_STRATEGIES_DIR")
+    if env_override:
+        return Path(env_override).expanduser().resolve()
+    return paths.get("strategies")
 
 
 def build_cache_config(
@@ -152,10 +172,7 @@ def load_components(
 
     # ---- Strategy Registry setup ----------------------------------------
     registry = StrategyRegistry()
-    strategies_dir = Path(os.environ.get(
-        "TINO_STRATEGIES_DIR",
-        str(Path.home() / ".tino" / "strategies"),
-    ))
+    strategies_dir = resolve_strategies_dir()
 
     # ---- Strategies and actors via strategy loader -----------------------
     strategy_config_name = config.get("strategy_bundle")

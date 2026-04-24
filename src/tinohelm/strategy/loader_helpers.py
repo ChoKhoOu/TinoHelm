@@ -136,6 +136,65 @@ def resolve_module_file(
     )
 
 
+# NOTE: Not a settings fallback — this is the explicit legacy actor
+# class path anchor (e.g. "~/.tino/foo:Bar"). NFR-008 requires keeping
+# this reference for backward compatibility with user actor files.
+_HOME_TINO_ROOT: Path = Path.home() / ".tino"
+
+
+def _configured_tino_roots() -> list[Path]:
+    """Return candidate root dirs used by ``resolve_actor_class_path``.
+
+    We accept an Actor ``class_path`` that resolves inside any of the
+    user-data roots declared in ``settings.paths`` (``strategies``,
+    ``actors``, ``research``).  The parent of each configured path is also
+    considered so a legacy ``~/.tino/foo:Class`` reference keeps working in
+    mixed setups.  Each candidate is kept only when it points at an
+    existing directory to avoid false positives on misconfigured env vars.
+
+    Semantics:
+      * Read ``strategies``/``actors``/``research`` from PathRegistry; failure
+        on any single field is tolerated (per-field ``try/except``) because
+        this function is a best-effort aggregator — the caller validates
+        individually.
+      * Always append ``_HOME_TINO_ROOT`` as a legacy compat anchor so
+        ``~/.tino/foo:Bar`` class paths keep resolving in zero-config dev.
+      * De-duplicate while preserving order; drop non-existent entries
+        only when all-missing (preserve original ``result or [...]``
+        semantic for the legacy anchor).
+    """
+    from tinohelm.core.paths import paths, PathConfigError
+
+    roots: list[Path] = []
+    for field in ("strategies", "actors", "research"):
+        try:
+            p = paths.get(field)
+        except PathConfigError:
+            continue  # per-field tolerant; not a global silent fallback
+        roots.append(p)
+        # The parent of each configured root is the canonical ``tino/`` root
+        # (e.g. ``/app/tino``).  Including it lets legacy Actor paths such
+        # as ``~/.tino/custom_actor:Foo`` resolve through the same check.
+        roots.append(p.parent)
+
+    # Always include the legacy home anchor (职责 ii — NFR-008)
+    roots.append(_HOME_TINO_ROOT)
+
+    # De-duplicate while preserving order; drop candidates that don't exist
+    # so we don't accept paths under an empty env-var misconfiguration.
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for p in roots:
+        if p in seen:
+            continue
+        seen.add(p)
+        if p.exists():
+            result.append(p)
+    # If nothing exists, at least return the legacy anchor so
+    # ``resolve_actor_class_path`` has a non-empty candidate list
+    return result or [_HOME_TINO_ROOT]
+
+
 def resolve_actor_class_path(
     class_path: str,
     source_path: Path | None,
@@ -149,8 +208,10 @@ def resolve_actor_class_path(
     * ``"./module:ClassName"`` — path relative to ``source_path`` (the
       strategy folder).  The resolved file must stay inside ``source_path``.
     * ``"module_path:ClassName"`` — a bare path that must resolve inside
-      one of the allowed directories: ``home_tino_dir`` (defaults to
-      ``~/.tino``) or ``source_path``.
+      one of the allowed directories: ``home_tino_dir`` when supplied,
+      otherwise the roots returned by :func:`_configured_tino_roots`
+      (``settings.paths.strategies`` / ``actors`` / ``research`` plus the
+      ``~/.tino`` fallback), or ``source_path``.
 
     This function performs **only** string parsing and boundary checks.
     Module loading is delegated to ``strategy.module_loader``.
@@ -184,8 +245,10 @@ def resolve_actor_class_path(
     else:
         raw_file = Path(module_part + ".py")
         resolved = raw_file.resolve()
-        tino_root = home_tino_dir or (Path.home() / ".tino")
-        allowed_dirs: list[Path] = [tino_root]
+        if home_tino_dir is not None:
+            allowed_dirs: list[Path] = [home_tino_dir]
+        else:
+            allowed_dirs = list(_configured_tino_roots())
         if source_path is not None:
             allowed_dirs.append(source_path.resolve())
         if not any(resolved.is_relative_to(d) for d in allowed_dirs):

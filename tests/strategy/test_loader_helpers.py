@@ -496,3 +496,75 @@ class TestImportStability:
         assert L._nt_symbol_to_jesse is nt_symbol_to_jesse
         assert L._INTERVAL_MAP is INTERVAL_MAP
         assert L._resolve_module_file is resolve_module_file
+
+
+# ---------------------------------------------------------------------------
+# NFR-008 regression: _HOME_TINO_ROOT legacy actor anchor
+# ---------------------------------------------------------------------------
+
+class TestHomeTinoAnchorLegacyActorRef:
+    """NFR-008: ``~/.tino/`` must always appear in ``_configured_tino_roots()``
+    even when every configured path field resolves to a non-existent directory,
+    so that legacy actor class paths like ``~/.tino/foo:Bar`` keep working.
+    """
+
+    def test_home_tino_anchor_kept_for_legacy_actor_ref(self, tmp_path, monkeypatch):
+        """``_configured_tino_roots()`` includes ``Path.home() / ".tino"`` even
+        when all configured roots point at non-existent directories.
+        """
+        from tinohelm.strategy.loader_helpers import _configured_tino_roots
+        from tinohelm.core.paths import paths
+
+        nonexistent = tmp_path / "nonexistent_strategies"
+        # Override all three fields with non-existent paths via PathRegistry
+        paths.override("strategies", nonexistent / "strategies")
+        paths.override("actors", nonexistent / "actors")
+        paths.override("research", nonexistent / "research")
+        try:
+            result = _configured_tino_roots()
+        finally:
+            paths.reset_overrides()
+
+        home_anchor = Path.home() / ".tino"
+        assert home_anchor in result, (
+            f"Expected {home_anchor!r} in _configured_tino_roots() result, got {result!r}"
+        )
+
+    def test_home_tino_anchor_present_when_settings_fields_raise(self, monkeypatch):
+        """When PathRegistry raises PathConfigError for all fields (e.g. settings
+        completely unavailable), the home anchor is still in the returned list.
+        """
+        from tinohelm.strategy.loader_helpers import _configured_tino_roots, _HOME_TINO_ROOT
+        from tinohelm.core.paths import paths, PathConfigError
+
+        # Patch paths.get to always raise PathConfigError (simulate broken settings)
+        def always_raise(field: str) -> Path:
+            raise PathConfigError(f"settings unavailable for {field!r}")
+
+        monkeypatch.setattr(paths, "get", always_raise)
+
+        result = _configured_tino_roots()
+        assert _HOME_TINO_ROOT in result, (
+            f"Expected _HOME_TINO_ROOT {_HOME_TINO_ROOT!r} in result, got {result!r}"
+        )
+
+    def test_resolve_actor_class_path_does_not_raise_boundary_for_home_tino(self, tmp_path):
+        """``resolve_actor_class_path`` with a ``~/.tino/``-relative path enters
+        the allowed-dirs boundary check without raising, when the actual file
+        exists inside the home tino dir.
+
+        Uses ``home_tino_dir`` explicit override to avoid real ``~/.tino`` FS
+        dependency, while exercising the same boundary logic.
+        """
+        fake_home_tino = tmp_path / ".tino"
+        fake_home_tino.mkdir()
+        actor_file = fake_home_tino / "some_actor.py"
+        actor_file.write_text("class Foo: pass\n")
+
+        module_file, class_name = resolve_actor_class_path(
+            f"{fake_home_tino / 'some_actor'}:Foo",
+            source_path=None,
+            home_tino_dir=fake_home_tino,
+        )
+        assert module_file == actor_file.resolve()
+        assert class_name == "Foo"
