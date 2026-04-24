@@ -19,6 +19,7 @@ from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.config import ActorConfig
 
 from tinohelm.node.actors._utils import redis_publish
+from tinohelm.node.actors.command_dispatch import dispatch_command
 
 logger = logging.getLogger(__name__)
 
@@ -142,74 +143,24 @@ class CommandActor(Actor):
             self.log.error(f"Command listener error: {e}")
 
     def _drain_pending_commands(self) -> None:
-        """Process all queued commands on the NT event loop thread."""
+        """Process all queued commands on the NT event loop thread.
+
+        Delegates each command to :func:`dispatch_command`; all error handling,
+        ack emission and branch selection live there so the Actor body stays
+        NT-bound only for the I/O wiring.
+        """
+        from tinohelm.node._common import resolve_strategies_dir
+
+        def _publish_ack(suffix: str, data: dict) -> None:
+            redis_publish(self._redis, self._node_type, suffix, data)
+
         while self._pending_commands:
             cmd = self._pending_commands.popleft()
-            action = cmd.get("cmd")
-            strategy_id = cmd.get("strategy_id")
-
-            # Internal: rescan strategy folders (from HealthActor file watcher)
-            if action == "_rescan_strategies":
-                if self._registry is not None:
-                    try:
-                        from tinohelm.node._common import resolve_strategies_dir
-
-                        strategies_dir = resolve_strategies_dir()
-                        if strategies_dir.exists():
-                            changed = self._registry.scan(strategies_dir)
-                            if changed:
-                                self.log.info(f"Strategy folder change detected: {changed}")
-                                redis_publish(self._redis, self._node_type, "strategy_update", {
-                                    "strategies": self._registry.get_all_states(),
-                                })
-                    except Exception as e:
-                        self.log.error(f"Rescan strategies error: {e}")
-                continue
-
-            if self._lifecycle is None:
-                self.log.warning(f"Command '{action}' ignored: no LifecycleController")
-                redis_publish(self._redis, self._node_type, "commands_ack", {
-                    "cmd": action, "status": "error", "reason": "no_lifecycle",
-                })
-                continue
-
-            try:
-                if action == "pause" and not strategy_id:
-                    self._lifecycle.pause_all()
-                elif action == "resume" and not strategy_id:
-                    self._lifecycle.resume_all()
-                elif action == "pause":
-                    self._lifecycle.pause_strategy_id(strategy_id)
-                elif action == "resume":
-                    self._lifecycle.resume_strategy_id(strategy_id)
-                elif action == "flatten":
-                    self._lifecycle.flatten(strategy_id)
-                elif action == "halt":
-                    self._lifecycle.halt()
-                elif action == "unhalt":
-                    self._lifecycle.unhalt()
-                elif action == "shutdown":
-                    self._lifecycle.shutdown()
-                elif action == "start_strategy":
-                    name = cmd.get("strategy_name", "")
-                    self._lifecycle.start_strategy(name)
-                elif action == "flatten_stop_strategy":
-                    name = cmd.get("strategy_name", "")
-                    self._lifecycle.flatten_stop_strategy(name)
-                elif action == "pause_strategy":
-                    name = cmd.get("strategy_name", "")
-                    self._lifecycle.pause_strategy(name)
-                elif action == "resume_strategy":
-                    name = cmd.get("strategy_name", "")
-                    self._lifecycle.resume_strategy(name)
-                elif action == "cancel_order":
-                    coid = cmd.get("client_order_id")
-                    if coid:
-                        self._lifecycle.cancel_order(coid)
-                else:
-                    self.log.warning(f"Unknown command: {action}")
-            except Exception as e:
-                self.log.error(f"Command '{action}' failed: {e}")
-                redis_publish(self._redis, self._node_type, "commands_ack", {
-                    "cmd": action, "status": "error", "reason": str(e),
-                })
+            dispatch_command(
+                cmd,
+                lifecycle=self._lifecycle,
+                registry=self._registry,
+                resolve_strategies_dir=resolve_strategies_dir,
+                publish_ack=_publish_ack,
+                log=self.log,
+            )
