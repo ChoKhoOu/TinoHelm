@@ -428,7 +428,8 @@ def funding_rate_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
 
     Convention: ``{catalog_root}/data/funding_rate/{symbol.lower()}.parquet``.
     This matches the ``funding_rate`` write-category in WRITE_CATEGORY and the
-    ``_DEFAULT_CATALOG_ROOT`` used by DataLayer.
+    catalog root resolved by ``DataLayer._resolve_catalog_root`` (see
+    ``tinohelm.factor.data_layer``).
     """
     return Path(catalog_root) / "data" / "funding_rate" / f"{symbol.lower()}.parquet"
 

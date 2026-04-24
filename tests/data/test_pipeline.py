@@ -161,6 +161,136 @@ class TestIngestNoTasks:
 
 
 # ---------------------------------------------------------------------------
+# 4b. ingest() — funding-rate cache short-circuit
+# ---------------------------------------------------------------------------
+
+class TestFundingRateCacheShortCircuit:
+    """The pipeline must skip plan_downloads when the JSON cache already
+    covers [start, end] — defense-in-depth against repeated Binance hits.
+    """
+
+    def test_ingest_skips_when_funding_cache_covers_range(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import tinohelm.data.funding_cache as fc
+        # Seed a cache spanning 2024-01-01 → 2024-02-01 (UTC ms).
+        # 1704067200000 = 2024-01-01 00:00:00 UTC
+        # 1706745600000 = 2024-02-01 00:00:00 UTC
+        monkeypatch.setattr(fc, "_load_cache", lambda sym: [
+            {"funding_time_ms": 1_704_067_200_000, "funding_rate": 0.01},
+            {"funding_time_ms": 1_705_276_800_000, "funding_rate": 0.02},
+            {"funding_time_ms": 1_706_745_600_000, "funding_rate": 0.03},
+        ])
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+
+        # plan_downloads must NOT be called because we short-circuit first.
+        mock_dl = MagicMock()
+        mock_dl.plan_downloads.side_effect = AssertionError(
+            "plan_downloads must not run when cache covers range"
+        )
+        p.downloader = mock_dl
+
+        async def _noop(*a, **kw):
+            pass
+
+        with patch.object(p, "_update_db_catalog", side_effect=_noop):
+            result = asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="fundingRate",
+                start=date(2024, 1, 5),
+                end=date(2024, 1, 20),
+            ))
+
+        assert result.skipped is True
+        assert result.objects_count == 0
+        mock_dl.plan_downloads.assert_not_called()
+
+    def test_ingest_runs_when_funding_cache_empty(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import tinohelm.data.funding_cache as fc
+        monkeypatch.setattr(fc, "_load_cache", lambda sym: [])
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+        mock_dl = MagicMock()
+        mock_dl.plan_downloads.return_value = []  # also no tasks → skipped
+        p.downloader = mock_dl
+
+        async def _noop(*a, **kw):
+            pass
+
+        with patch.object(p, "_update_db_catalog", side_effect=_noop):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="fundingRate",
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 5),
+            ))
+
+        # Empty cache means we fall through to plan_downloads as before.
+        mock_dl.plan_downloads.assert_called_once()
+
+    def test_ingest_runs_when_funding_cache_has_gap(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import tinohelm.data.funding_cache as fc
+        # Cache covers up to 2024-01-10; requested end is 2024-01-20 → gap.
+        monkeypatch.setattr(fc, "_load_cache", lambda sym: [
+            {"funding_time_ms": 1_704_067_200_000, "funding_rate": 0.01},  # 2024-01-01
+            {"funding_time_ms": 1_704_844_800_000, "funding_rate": 0.02},  # 2024-01-10
+        ])
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+        mock_dl = MagicMock()
+        mock_dl.plan_downloads.return_value = []
+        p.downloader = mock_dl
+
+        async def _noop(*a, **kw):
+            pass
+
+        with patch.object(p, "_update_db_catalog", side_effect=_noop):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="fundingRate",
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 20),
+            ))
+
+        # Gap detected → plan_downloads must run.
+        mock_dl.plan_downloads.assert_called_once()
+
+    def test_short_circuit_only_applies_to_funding_rate(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A full funding cache must not short-circuit a klines ingest."""
+        import tinohelm.data.funding_cache as fc
+        monkeypatch.setattr(fc, "_load_cache", lambda sym: [
+            {"funding_time_ms": 1_704_067_200_000, "funding_rate": 0.01},
+            {"funding_time_ms": 1_706_745_600_000, "funding_rate": 0.03},
+        ])
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+        mock_dl = MagicMock()
+        mock_dl.plan_downloads.return_value = []
+        p.downloader = mock_dl
+
+        async def _noop(*a, **kw):
+            pass
+
+        with patch.object(p, "_update_db_catalog", side_effect=_noop):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="klines",
+                interval="1m",
+                start=date(2024, 1, 5),
+                end=date(2024, 1, 20),
+            ))
+
+        mock_dl.plan_downloads.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # 5. ingest_sync — sync wrapper
 # ---------------------------------------------------------------------------
 

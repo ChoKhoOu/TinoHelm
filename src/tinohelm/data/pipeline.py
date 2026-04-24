@@ -146,6 +146,17 @@ class BinanceVisionPipeline:
 
         await _progress(0, f"Planning downloads for {symbol} {data_type}...")
 
+        # Early exit: funding-rate JSON cache already covers [start, end].
+        # Defense-in-depth — protects every caller (not just BacktestRunner)
+        # from re-downloading an already-cached range.
+        if data_type == "fundingRate" and self._funding_cache_covers(symbol, start, end):
+            await _progress(100, "Funding rate cache already covers range")
+            return IngestResult(
+                symbol=symbol, data_type=data_type,
+                objects_count=0, files_written=0,
+                start=start, end=end, skipped=True,
+            )
+
         # 1. Plan downloads (monthly-first + daily-tail)
         tasks = self.downloader.plan_downloads(
             data_type=data_type,
@@ -547,6 +558,33 @@ class BinanceVisionPipeline:
                 data_type, category,
             )
             return []
+
+    @staticmethod
+    def _funding_cache_covers(symbol: str, start: date, end: date) -> bool:
+        """Return True iff the JSON funding-rate cache fully spans ``[start, end]``.
+
+        Reuses :func:`funding_cache_helpers.compute_fetch_start` — the same
+        decision the ``load_funding_rates`` orchestrator uses. A return value
+        of ``None`` from that helper means "no API call needed", which is
+        exactly our skip condition.
+        """
+        from datetime import datetime as _dt, time as _time, timezone as _tz
+        from tinohelm.data.funding_cache import _load_cache
+        from tinohelm.data.funding_cache_helpers import compute_fetch_start
+
+        cached = _load_cache(symbol)
+        cached_times = [
+            int(r["funding_time_ms"])
+            for r in cached
+            if isinstance(r, dict) and isinstance(r.get("funding_time_ms"), (int, float))
+        ]
+        if not cached_times:
+            return False
+        # Pipeline callers pass ``date``; promote to UTC datetime for the
+        # helper (start-of-day, end-of-day).
+        start_dt = _dt.combine(start, _time.min, tzinfo=_tz.utc)
+        end_dt = _dt.combine(end, _time.max, tzinfo=_tz.utc)
+        return compute_fetch_start(cached_times, start=start_dt, end=end_dt) is None
 
     def _write_funding_rates(self, records: list, symbol: str) -> str | None:
         """Write funding rate records to Parquet (primary) and JSON (fallback cache).
