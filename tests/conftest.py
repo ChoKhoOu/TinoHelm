@@ -131,3 +131,28 @@ def syntax_error_file(tmp_path: Path) -> Path:
     f = tmp_path / "bad_syntax.py"
     f.write_text(_SYNTAX_ERROR_PY)
     return f
+
+
+# ---------------------------------------------------------------------------
+# PathRegistry overrides
+# ---------------------------------------------------------------------------
+
+from tinohelm.core.paths import paths as _paths  # noqa: E402
+
+
+@pytest.fixture
+def paths_override():
+    """Return a helper to install PathRegistry overrides with auto-teardown.
+
+    Usage::
+
+        def test_x(tmp_path, paths_override):
+            paths_override("funding_rates", tmp_path)
+            # ... test body ...
+        # teardown automatically clears overrides via reset_overrides()
+    """
+    def _set(field: str, value: Path) -> None:
+        _paths.override(field, Path(value))
+
+    yield _set
+    _paths.reset_overrides()

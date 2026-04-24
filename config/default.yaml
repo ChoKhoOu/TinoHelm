@@ -14,9 +14,14 @@ binance:
 
 paths:
   strategies: "tino/strategies"
+  actors: "tino/actors"
   catalog: "tino/data/catalog"
   artifacts: "tino/data/artifacts"
+  research: "tino/research"
   logs: "tino/logs"
+  funding_rates: "tino/data/funding_rates"
+  data_cache: "tino/data"
+  factor_cache: "tino/factor_cache"
 
 data:
   download_concurrency: 5

@@ -36,12 +36,36 @@ class BinanceSettings(BaseModel):
 
 
 class PathSettings(BaseModel):
+    """Canonical filesystem roots for all TinoHelm components.
+
+    Defaults are expressed as **relative** paths (e.g. ``tino/strategies``)
+    so they resolve against the current working directory.  The API / node
+    containers set ``WORKDIR=/app`` and bind-mount the host's ``~/.tino/*``
+    trees at ``/app/tino/*`` (note: no leading ``.`` — ``HOME=/app`` in the
+    container has no matching ``.tino`` directory).
+
+    Local developers either run from the project root and have
+    ``~/.tino/*`` bind-mounted via docker-compose, or they override these
+    paths via ``config/user.yaml`` / ``TINO_PATHS__*`` env vars.  Each
+    module-level ``_FALLBACK_*`` constant pins the home-dir default so
+    zero-config local runs still work when settings cannot be loaded or
+    the relative root isn't present under CWD.
+    """
+
     strategies: Path = Path("tino/strategies")
+    actors: Path = Path("tino/actors")
     catalog: Path = Path("tino/data/catalog")
     artifacts: Path = Path("tino/data/artifacts")
     research: Path = Path("tino/research")
     logs: Path = Path("tino/logs")
-    factor_cache: Path = Path.home() / ".tino" / "factor_cache"
+    funding_rates: Path = Path("tino/data/funding_rates")
+    # Shared ``data/`` root used by caches that live alongside ``catalog/``
+    # (e.g. ``instruments_cache.json`` / ``funding_info_cache.json``).  The
+    # ``catalog`` and ``funding_rates`` subtrees are nested under this root
+    # but stay independent — callers must read them via their dedicated
+    # fields and never assume ``data_cache / "catalog"`` is authoritative.
+    data_cache: Path = Path("tino/data")
+    factor_cache: Path = Path("tino/factor_cache")
 
 
 class DataSettings(BaseModel):
