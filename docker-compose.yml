@@ -41,8 +41,15 @@ services:
     volumes:
       - ~/.tino/strategies:/app/tino/strategies
       - ~/.tino/actors:/app/tino/actors
-      - ~/.tino/data/catalog:/app/tino/data/catalog
-      - ~/.tino/data/artifacts:/app/tino/data/artifacts
+      # Mount the entire ``~/.tino/data`` tree so that the child folders
+      # (``catalog/``, ``artifacts/``, ``funding_rates/``) AND the
+      # top-level cache files (``instruments_cache.json`` /
+      # ``funding_info_cache.json``) are all visible via a single bind
+      # mount.  Child-level mounts would hide sibling files because
+      # Docker overlays each child as its own mount point — the root
+      # ``data/`` directory would then only expose the listed mounts.
+      - ~/.tino/data:/app/tino/data
+      - ~/.tino/factor_cache:/app/tino/factor_cache
       - ~/.tino/logs:/app/tino/logs
       - ~/.tino/research:/app/tino/research
       - ~/.tino/config:/app/config
@@ -57,6 +64,19 @@ services:
     environment:
       TINO_DATABASE__URL: "postgresql+asyncpg://${POSTGRES_USER:-tinohelm}:${POSTGRES_PASSWORD:-tinohelm_secret}@postgres:5432/${POSTGRES_DB:-tinohelm}"
       TINO_REDIS__URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
+      # Pin every PathSettings field to its absolute container mount so
+      # helpers never fall back to ``/app/.tino/*`` (HOME=/app has no
+      # leading-dot dir) and ``Path.home()`` can no longer produce the
+      # wrong root inside the container.
+      TINO_PATHS__STRATEGIES: "/app/tino/strategies"
+      TINO_PATHS__ACTORS: "/app/tino/actors"
+      TINO_PATHS__CATALOG: "/app/tino/data/catalog"
+      TINO_PATHS__ARTIFACTS: "/app/tino/data/artifacts"
+      TINO_PATHS__FUNDING_RATES: "/app/tino/data/funding_rates"
+      TINO_PATHS__DATA_CACHE: "/app/tino/data"
+      TINO_PATHS__FACTOR_CACHE: "/app/tino/factor_cache"
+      TINO_PATHS__LOGS: "/app/tino/logs"
+      TINO_PATHS__RESEARCH: "/app/tino/research"
       BINANCE_API_KEY: "${BINANCE_API_KEY:-}"
       BINANCE_API_SECRET: "${BINANCE_API_SECRET:-}"
       HOST_HOME: "${HOME}"
@@ -79,7 +99,10 @@ services:
     volumes:
       - ~/.tino/strategies:/app/tino/strategies
       - ~/.tino/actors:/app/tino/actors
-      - ~/.tino/data/catalog:/app/tino/data/catalog
+      - ~/.tino/data:/app/tino/data
+      - ~/.tino/factor_cache:/app/tino/factor_cache
+      - ~/.tino/logs:/app/tino/logs
+      - ~/.tino/research:/app/tino/research
       - ~/.tino/config:/app/config
     depends_on:
       postgres:
@@ -92,9 +115,25 @@ services:
     environment:
       TINO_DATABASE__URL: "postgresql+asyncpg://${POSTGRES_USER:-tinohelm}:${POSTGRES_PASSWORD:-tinohelm_secret}@postgres:5432/${POSTGRES_DB:-tinohelm}"
       TINO_REDIS__URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
+      # Pin every PathSettings field — the node workers will eventually
+      # need factor/funding/artifact access for cross-process features, so
+      # we keep the surface identical to the api service.
+      TINO_PATHS__STRATEGIES: "/app/tino/strategies"
+      TINO_PATHS__ACTORS: "/app/tino/actors"
+      TINO_PATHS__CATALOG: "/app/tino/data/catalog"
+      TINO_PATHS__ARTIFACTS: "/app/tino/data/artifacts"
+      TINO_PATHS__FUNDING_RATES: "/app/tino/data/funding_rates"
+      TINO_PATHS__DATA_CACHE: "/app/tino/data"
+      TINO_PATHS__FACTOR_CACHE: "/app/tino/factor_cache"
+      TINO_PATHS__LOGS: "/app/tino/logs"
+      TINO_PATHS__RESEARCH: "/app/tino/research"
       BINANCE_API_KEY: "${BINANCE_API_KEY:-}"
       BINANCE_API_SECRET: "${BINANCE_API_SECRET:-}"
       SSL_CERT_FILE: "/usr/lib/ssl/cert.pem"
+      # Legacy env kept for back-compat (``node._common.resolve_strategies_dir``
+      # honours it first).  New deployments should prefer
+      # ``TINO_PATHS__STRATEGIES`` which feeds the same value into
+      # ``PathSettings`` alongside every other root.
       TINO_STRATEGIES_DIR: "/app/tino/strategies"
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -112,7 +151,10 @@ services:
     volumes:
       - ~/.tino/strategies:/app/tino/strategies
       - ~/.tino/actors:/app/tino/actors
-      - ~/.tino/data/catalog:/app/tino/data/catalog
+      - ~/.tino/data:/app/tino/data
+      - ~/.tino/factor_cache:/app/tino/factor_cache
+      - ~/.tino/logs:/app/tino/logs
+      - ~/.tino/research:/app/tino/research
       - ~/.tino/config:/app/config
     depends_on:
       postgres:
@@ -125,9 +167,19 @@ services:
     environment:
       TINO_DATABASE__URL: "postgresql+asyncpg://${POSTGRES_USER:-tinohelm}:${POSTGRES_PASSWORD:-tinohelm_secret}@postgres:5432/${POSTGRES_DB:-tinohelm}"
       TINO_REDIS__URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
+      TINO_PATHS__STRATEGIES: "/app/tino/strategies"
+      TINO_PATHS__ACTORS: "/app/tino/actors"
+      TINO_PATHS__CATALOG: "/app/tino/data/catalog"
+      TINO_PATHS__ARTIFACTS: "/app/tino/data/artifacts"
+      TINO_PATHS__FUNDING_RATES: "/app/tino/data/funding_rates"
+      TINO_PATHS__DATA_CACHE: "/app/tino/data"
+      TINO_PATHS__FACTOR_CACHE: "/app/tino/factor_cache"
+      TINO_PATHS__LOGS: "/app/tino/logs"
+      TINO_PATHS__RESEARCH: "/app/tino/research"
       BINANCE_API_KEY: "${BINANCE_API_KEY:-}"
       BINANCE_API_SECRET: "${BINANCE_API_SECRET:-}"
       SSL_CERT_FILE: "/usr/lib/ssl/cert.pem"
+      # Legacy env kept for back-compat; see node-sandbox for rationale.
       TINO_STRATEGIES_DIR: "/app/tino/strategies"
     healthcheck:
       test: ["CMD", "python", "-c",

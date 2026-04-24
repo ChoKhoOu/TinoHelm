@@ -335,10 +335,10 @@ export function BacktestCreateStep3({
                   <span>
                     参数列表{" "}
                     <span className="text-muted-foreground font-normal">
-                      · {strategyParams.length > 0 ? `${strategyParams.length} 个参数` : "选择策略后显示"}
+                      · {Array.isArray(strategyParams) && strategyParams.length > 0 ? `${strategyParams.length} 个参数` : "选择策略后显示"}
                     </span>
                   </span>
-                  {strategyParams.length > 0 && (
+                  {Array.isArray(strategyParams) && strategyParams.length > 0 && (
                     <button
                       type="button"
                       className="font-normal text-[0.68rem] text-primary cursor-pointer bg-transparent border-0 transition-opacity hover:opacity-80"
@@ -352,7 +352,7 @@ export function BacktestCreateStep3({
                   className="overflow-hidden transition-[max-height] duration-[400ms] ease-qds"
                   style={{ maxHeight: paramsExpanded ? 600 : 0 }}
                 >
-                  {strategyParams.map((p) => (
+                  {Array.isArray(strategyParams) && strategyParams.map((p) => (
                     <div
                       key={p.name}
                       className="grid items-center gap-3 px-3.5 py-1.5 border-b border-border last:border-b-0"

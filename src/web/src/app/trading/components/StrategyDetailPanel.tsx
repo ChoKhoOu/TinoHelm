@@ -33,6 +33,12 @@ interface EquityPoint {
   equity: number;
 }
 
+interface StrategyParamsResponse {
+  name: string;
+  config_params: Array<{ name: string; type: string; default: string | number | boolean | null }>;
+  optimize_ranges: Record<string, unknown>;
+}
+
 
 function fmtPnl(v: number): string {
   const sign = v >= 0 ? "+" : "";
@@ -138,9 +144,16 @@ export function StrategyDetailPanel({ strategyId, nodeType, positions, fills, on
   // Load strategy config params
   useEffect(() => {
     let cancelled = false;
-    apiGet<Record<string, string>>(`/api/strategies/${encodeURIComponent(strategyId)}/params`)
+    apiGet<StrategyParamsResponse>(`/api/strategies/${encodeURIComponent(strategyId)}/params`)
       .then((res) => {
-        if (!cancelled && res && typeof res === "object") setStrategyConfig(res);
+        if (cancelled) return;
+        if (Array.isArray(res?.config_params)) {
+          const kvMap: Record<string, string> = {};
+          for (const p of res.config_params) {
+            kvMap[p.name] = String(p.default ?? "");
+          }
+          setStrategyConfig(kvMap);
+        }
       })
       .catch(() => {});
     return () => { cancelled = true; };

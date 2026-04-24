@@ -119,8 +119,10 @@ interface UseWebSocketOptions {
   path?: string;
   channels?: string[];
   onMessage?: (msg: WsEventMessage) => void;
+  /** Base reconnect delay in ms (starting point for exponential backoff). */
   reconnectInterval?: number;
-  maxRetries?: number;
+  /** Maximum reconnect delay cap in ms (exponential backoff ceiling). */
+  maxReconnectInterval?: number;
 }
 
 export function useWebSocket({
@@ -128,20 +130,50 @@ export function useWebSocket({
   channels = [],
   onMessage,
   reconnectInterval = 3000,
-  maxRetries = 10,
+  maxReconnectInterval = 60000,
 }: UseWebSocketOptions = {}) {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  // Retry counter feeds exponential backoff (delay = base * 2^n, capped).
+  // Never stops retrying — the backend may be down for hours or the
+  // laptop may be sleeping; a hard give-up leaves the UI permanently
+  // stale with no recovery path.
   const retriesRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Sticky shutdown flag — set by disconnect() and cleanup to block
+  // further reconnect attempts after the hook unmounts.
+  const shutdownRef = useRef(false);
+  // Ref to the latest `connect` implementation. Breaks the self-
+  // referential closure problem in the socket `onclose` handler: the
+  // handler only needs "whatever connect is at the time a reconnect
+  // fires" — capturing the latest via a ref avoids both stale closures
+  // and the lint warning about accessing `connect` before declaration.
+  const connectRef = useRef<(() => void) | null>(null);
 
   const channelsRef = useRef(channels);
-  channelsRef.current = channels;
   const onMessageRef = useRef(onMessage);
-  onMessageRef.current = onMessage;
+  // Mirror the latest props into refs so long-lived callbacks
+  // (WebSocket handlers, reconnect timers) can read "current" values
+  // without being in the useCallback deps array and thus triggering
+  // socket churn on every render.
+  useEffect(() => {
+    channelsRef.current = channels;
+    onMessageRef.current = onMessage;
+  });
+
+  const computeBackoff = useCallback(() => {
+    // 3s, 6s, 12s, 24s, 48s, 60s cap — then flat 60s.
+    const exp = Math.min(
+      reconnectInterval * Math.pow(2, retriesRef.current),
+      maxReconnectInterval,
+    );
+    return exp;
+  }, [reconnectInterval, maxReconnectInterval]);
 
   const connect = useCallback(() => {
+    if (shutdownRef.current) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (wsRef.current?.readyState === WebSocket.CONNECTING) return;
 
     const chans = channelsRef.current;
     const params = chans.length
@@ -167,10 +199,13 @@ export function useWebSocket({
       setConnected(false);
       wsRef.current = null;
 
-      if (retriesRef.current < maxRetries) {
-        retriesRef.current++;
-        reconnectTimerRef.current = setTimeout(connect, reconnectInterval);
-      }
+      if (shutdownRef.current) return;
+
+      const delay = computeBackoff();
+      retriesRef.current++;
+      reconnectTimerRef.current = setTimeout(() => {
+        connectRef.current?.();
+      }, delay);
     };
 
     ws.onerror = () => {
@@ -178,13 +213,21 @@ export function useWebSocket({
     };
 
     wsRef.current = ws;
-  }, [path, reconnectInterval, maxRetries]);
+  }, [path, computeBackoff]);
+
+  // Keep the ref pointing at the latest connect so deferred timers
+  // and the visibility handler can invoke the current implementation
+  // without introducing stale-closure hazards or a self-referential
+  // useCallback.
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   const disconnect = useCallback(() => {
+    shutdownRef.current = true;
     clearTimeout(reconnectTimerRef.current);
-    retriesRef.current = maxRetries; // prevent reconnect
     wsRef.current?.close();
-  }, [maxRetries]);
+  }, []);
 
   const send = useCallback((data: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -195,14 +238,43 @@ export function useWebSocket({
   const channelsKey = channels?.join(",") ?? "";
 
   useEffect(() => {
+    shutdownRef.current = false;
     connect();
-    return () => {
+
+    // Visibility-driven fast resume: when the tab comes back to the
+    // foreground after being hidden (laptop sleep, tab switch), reset
+    // the backoff counter and kick a reconnect immediately if the
+    // socket isn't already OPEN. Also dispatch a window event so
+    // polling hooks (useBacktestRuns) can skip the 5s wait.
+    const onVisibility = () => {
+      if (typeof document === "undefined") return;
+      if (document.visibilityState !== "visible") return;
+
+      try {
+        window.dispatchEvent(new CustomEvent("tino:ws-visible"));
+      } catch {
+        // ignore environments without CustomEvent
+      }
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) return;
+      retriesRef.current = 0;
       clearTimeout(reconnectTimerRef.current);
-      retriesRef.current = maxRetries;
+      connect();
+    };
+
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+
+    return () => {
+      shutdownRef.current = true;
+      clearTimeout(reconnectTimerRef.current);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
       wsRef.current?.close();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connect, maxRetries, channelsKey]);
+  }, [connect, channelsKey]);
 
   return { connected, send, disconnect };
 }

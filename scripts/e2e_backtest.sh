@@ -45,9 +45,9 @@ step "Fetching sample data (BTCUSDT-PERP ${INTERVAL}, last 30 days)..."
 END_DATE=$(date +%Y-%m-%d)
 START_DATE=$(date -v-30d +%Y-%m-%d 2>/dev/null || date -d "30 days ago" +%Y-%m-%d)
 FETCH=$($TINO data fetch BTCUSDT-PERP "$INTERVAL" "$START_DATE" "$END_DATE" --format json 2>/dev/null || \
-        curl -sf -X POST "${API_URL}/api/data/fetch" \
+        curl -sf -X POST "${API_URL}/api/data/fetch-batch" \
         -H "Content-Type: application/json" \
-        -d "{\"symbol\":\"BTCUSDT-PERP\",\"interval\":\"${INTERVAL}\",\"start\":\"${START_DATE}\",\"end\":\"${END_DATE}\"}")
+        -d "{\"symbols\":[\"BTCUSDT-PERP\"],\"intervals\":[\"${INTERVAL}\"],\"start\":\"${START_DATE}\",\"end\":\"${END_DATE}\"}")
 echo "$FETCH" | python3 -m json.tool 2>/dev/null || echo "$FETCH"
 pass "Data fetch initiated"
 

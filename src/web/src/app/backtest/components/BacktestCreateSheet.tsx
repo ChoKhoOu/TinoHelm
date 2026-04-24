@@ -27,6 +27,12 @@ interface ParamInfo {
   default: string | number | boolean | null;
 }
 
+interface ParamsResponse {
+  name: string;
+  config_params: Array<{ name: string; type: string; default: string | number | boolean | null }>;
+  optimize_ranges: Record<string, unknown>;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Types                                                               */
 /* ------------------------------------------------------------------ */
@@ -126,8 +132,11 @@ export function BacktestCreateSheet({
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reason: clear params on strategy switch
     if (!step1Form.strategy_name) { setStrategyParams([]); return; }
-    apiGet<ParamInfo[]>(`/api/strategies/${encodeURIComponent(step1Form.strategy_name)}/params`)
-      .then((d) => d && setStrategyParams(d))
+    apiGet<ParamsResponse>(`/api/strategies/${encodeURIComponent(step1Form.strategy_name)}/params`)
+      .then((d) => {
+        const params = d?.config_params;
+        setStrategyParams(Array.isArray(params) ? params : []);
+      })
       .catch(() => setStrategyParams([]));
   }, [step1Form.strategy_name]);
 
