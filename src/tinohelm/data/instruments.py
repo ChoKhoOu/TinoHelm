@@ -17,6 +17,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from tinohelm.core.paths import paths
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -25,11 +27,18 @@ logger = logging.getLogger(__name__)
 BINANCE_FUTURES_BASE = "https://fapi.binance.com"
 BINANCE_FUTURES_TESTNET = "https://testnet.binancefuture.com"
 
-_CACHE_DIR = Path.home() / ".tino" / "data"
-_CACHE_FILE = _CACHE_DIR / "instruments_cache.json"
-_FUNDING_INFO_CACHE_FILE = _CACHE_DIR / "funding_info_cache.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 _FUNDING_INFO_TTL_SECONDS = 1 * 60 * 60  # 1 hour
+
+
+def _cache_file() -> Path:
+    """Path to the exchangeInfo JSON cache (resolved at call time)."""
+    return paths.get("data_cache") / "instruments_cache.json"
+
+
+def _funding_info_cache_file() -> Path:
+    """Path to the fundingInfo JSON cache (resolved at call time)."""
+    return paths.get("data_cache") / "funding_info_cache.json"
 
 # Known NT currency constants (import once, map for fast lookup)
 _KNOWN_CURRENCIES: dict[str, Any] | None = None
@@ -142,9 +151,10 @@ def fetch_exchange_info(testnet: bool = False) -> dict:
     Returns the raw JSON response dict.
     """
     # --- Check cache ---
-    if _CACHE_FILE.exists():
+    cache_file = _cache_file()
+    if cache_file.exists():
         try:
-            raw = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+            raw = json.loads(cache_file.read_text(encoding="utf-8"))
             fetched_at = raw.get("fetched_at", 0)
             if time.time() - fetched_at < _CACHE_TTL_SECONDS:
                 logger.debug(
@@ -174,22 +184,23 @@ def fetch_exchange_info(testnet: bool = False) -> dict:
 
     # --- Write cache (atomic: write to temp file, then rename) ---
     data["fetched_at"] = time.time()
+    cache_dir = paths.get("data_cache")
     try:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(_CACHE_FILE.parent), suffix=".tmp")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(cache_dir), suffix=".tmp")
         try:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp_path, str(_CACHE_FILE))
+            os.replace(tmp_path, str(cache_file))
         except Exception:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
             raise
-        logger.debug("Wrote exchangeInfo cache to %s", _CACHE_FILE)
+        logger.debug("Wrote exchangeInfo cache to %s", cache_file)
     except OSError:
-        logger.warning("Could not write instruments cache to %s", _CACHE_FILE)
+        logger.warning("Could not write instruments cache to %s", cache_file)
 
     return data
 
@@ -204,9 +215,10 @@ def fetch_funding_info(testnet: bool = False) -> dict[str, int]:
     24-hour TTL.
     """
     # --- Check cache ---
-    if _FUNDING_INFO_CACHE_FILE.exists():
+    funding_info_cache_file = _funding_info_cache_file()
+    if funding_info_cache_file.exists():
         try:
-            raw = json.loads(_FUNDING_INFO_CACHE_FILE.read_text(encoding="utf-8"))
+            raw = json.loads(funding_info_cache_file.read_text(encoding="utf-8"))
             fetched_at = raw.get("fetched_at", 0)
             if time.time() - fetched_at < _FUNDING_INFO_TTL_SECONDS:
                 logger.debug(
@@ -241,22 +253,27 @@ def fetch_funding_info(testnet: bool = False) -> dict[str, int]:
 
     # --- Write cache (atomic) ---
     cache_data = {"fetched_at": time.time(), "intervals": intervals}
+    cache_dir = paths.get("data_cache")
     try:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(_FUNDING_INFO_CACHE_FILE.parent), suffix=".tmp")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(cache_dir), suffix=".tmp"
+        )
         try:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(cache_data, f, ensure_ascii=False)
-            os.replace(tmp_path, str(_FUNDING_INFO_CACHE_FILE))
+            os.replace(tmp_path, str(funding_info_cache_file))
         except Exception:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
             raise
-        logger.debug("Wrote fundingInfo cache to %s", _FUNDING_INFO_CACHE_FILE)
+        logger.debug("Wrote fundingInfo cache to %s", funding_info_cache_file)
     except OSError:
-        logger.warning("Could not write funding info cache to %s", _FUNDING_INFO_CACHE_FILE)
+        logger.warning(
+            "Could not write funding info cache to %s", funding_info_cache_file
+        )
 
     return intervals
 

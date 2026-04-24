@@ -117,8 +117,8 @@ def _delete_storage_files(
         nt_sym = normalize_symbol(symbol)
         target_dir = Path(catalog_path) / "data" / "trade_tick" / nt_sym
     elif data_type == "funding_rate":
-        from tinohelm.data.funding_cache import _CACHE_DIR
-        json_path = _CACHE_DIR / f"{symbol.lower()}.json"
+        from tinohelm.core.paths import paths
+        json_path = paths.get("funding_rates") / f"{symbol.lower()}.json"
         if json_path.exists():
             size = json_path.stat().st_size
             json_path.unlink()

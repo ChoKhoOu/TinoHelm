@@ -183,32 +183,37 @@ class TestDeleteStorageFiles:
             "BTCUSDT-PERP", "quote_tick", "tick", str(tmp_path)
         ) == (0, 0)
 
-    def test_funding_rate_deletes_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        import tinohelm.data.funding_cache as fc
+    def test_funding_rate_deletes_json(self, tmp_path: Path):
+        from tinohelm.core.paths import paths as _paths
 
         cache_dir = tmp_path / "funding_rates"
         cache_dir.mkdir()
         target = cache_dir / "btcusdt-perp.json"
         target.write_bytes(b'[{"funding": 0.0001}]')
-        monkeypatch.setattr(fc, "_CACHE_DIR", cache_dir)
-
-        deleted, freed = _delete_storage_files(
-            "BTCUSDT-PERP", "funding_rate", "8h", str(tmp_path)
-        )
+        _paths.override("funding_rates", cache_dir)
+        try:
+            deleted, freed = _delete_storage_files(
+                "BTCUSDT-PERP", "funding_rate", "8h", str(tmp_path)
+            )
+        finally:
+            _paths.reset_overrides()
         assert deleted == 1
         assert freed == len(b'[{"funding": 0.0001}]')
         assert not target.exists()
 
-    def test_funding_rate_missing_is_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        import tinohelm.data.funding_cache as fc
+    def test_funding_rate_missing_is_noop(self, tmp_path: Path):
+        from tinohelm.core.paths import paths as _paths
 
         cache_dir = tmp_path / "funding_rates"
         cache_dir.mkdir()
-        monkeypatch.setattr(fc, "_CACHE_DIR", cache_dir)
-
-        assert _delete_storage_files(
-            "BTCUSDT-PERP", "funding_rate", "8h", str(tmp_path)
-        ) == (0, 0)
+        _paths.override("funding_rates", cache_dir)
+        try:
+            result = _delete_storage_files(
+                "BTCUSDT-PERP", "funding_rate", "8h", str(tmp_path)
+            )
+        finally:
+            _paths.reset_overrides()
+        assert result == (0, 0)
 
     def test_unknown_data_type_warns_and_returns_zero(self, tmp_path: Path, caplog):
         import logging
