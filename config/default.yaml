@@ -28,4 +28,6 @@ data:
   convert_workers: 4
 
 backtest:
+  max_concurrent: 4
+  # DEPRECATED — retained for back-compat; not consumed.
   max_workers: 2

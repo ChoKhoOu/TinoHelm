@@ -1,0 +1,310 @@
+"""Unit and integration tests for tinohelm.backtest.runner_cli."""
+from __future__ import annotations
+
+import asyncio as _asyncio
+import io
+import json
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Minimal job payload used across multiple tests
+# ---------------------------------------------------------------------------
+
+_MINIMAL_JOB = {
+    "run_id": "r-1",
+    "strategy_path": "fake/strat.py:FakeStrategy",
+    "config_path": "fake/strat.py:FakeStrategyConfig",
+    "symbol": "BTCUSDT-PERP",
+    "interval": "1m",
+    "start": "2025-01-01T00:00:00",
+    "end": "2025-02-01T00:00:00",
+}
+
+_FAKE_STATS = {
+    "total_trades": 10,
+    "pnl_total": 500.0,
+    "win_rate": 0.6,
+}
+
+_FAKE_RESULTS = {
+    "statistics": _FAKE_STATS,
+    "trade_log": [],
+    "equity_curve": [],
+}
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _mock_settings(tmp_path: Path) -> MagicMock:
+    """Return a mock settings object with temp paths and dummy URLs."""
+    settings = MagicMock()
+    settings.redis.url = "redis://localhost:6379"
+    settings.database.url = "sqlite:///:memory:"
+    settings.paths.catalog = tmp_path / "catalog"
+    settings.paths.artifacts = tmp_path / "artifacts"
+    return settings
+
+
+def _mock_redis() -> MagicMock:
+    """Return a mock Redis client; r.get returns None (no cancel flag)."""
+    r = MagicMock()
+    r.get.return_value = None
+    return r
+
+
+def _sync_run(coro):
+    """Synchronously run a coroutine in a fresh event loop (test helper)."""
+    loop = _asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+# ---------------------------------------------------------------------------
+# T1: test_run_id_success
+# ---------------------------------------------------------------------------
+
+def test_run_id_success(tmp_path, monkeypatch):
+    """_run_queue_mode returns 0 and calls update_db_status with status='completed'."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+
+    # Inject job payload via stdin
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+
+    # Patch events helpers
+    mock_update_db = MagicMock()
+    mock_publish_completed = MagicMock()
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", mock_update_db)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", mock_publish_completed)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+
+    # Patch asyncio.run to execute coroutines synchronously
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    # BacktestRunner is imported lazily: from tinohelm.backtest.runner import BacktestRunner
+    # Patch the class at its source module so the lazy import resolves to our mock.
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 0, f"Expected exit code 0, got {rc}"
+
+    # update_db_status must be called with status="completed" at some point
+    completed_calls = [
+        c for c in mock_update_db.call_args_list
+        if len(c.args) >= 3 and c.args[2] == "completed"
+    ]
+    assert completed_calls, (
+        f"update_db_status never called with status='completed'. "
+        f"All calls: {mock_update_db.call_args_list}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T2: test_run_id_failure
+# ---------------------------------------------------------------------------
+
+def test_run_id_failure(tmp_path, monkeypatch):
+    """_run_queue_mode returns 1 and publish_completed is called with status='failed'."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+
+    mock_update_db = MagicMock()
+    mock_publish_completed = MagicMock()
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", mock_update_db)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", mock_publish_completed)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    # Make BacktestRunner.run raise
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 1, f"Expected exit code 1, got {rc}"
+
+    # publish_completed must be called with status="failed"
+    # Signature: publish_completed(r, run_id, status, ...)
+    failed_calls = [
+        c for c in mock_publish_completed.call_args_list
+        if len(c.args) >= 3 and c.args[2] == "failed"
+    ]
+    assert failed_calls, (
+        f"publish_completed never called with status='failed'. "
+        f"All calls: {mock_publish_completed.call_args_list}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T3: test_run_id_cancel_sigterm (integration — real subprocess)
+# ---------------------------------------------------------------------------
+
+def _redis_available() -> bool:
+    """Check if a local Redis instance is reachable for integration tests."""
+    try:
+        import redis as _redis
+        r = _redis.from_url("redis://localhost:6379", socket_connect_timeout=1)
+        r.ping()
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _redis_available(), reason="No local Redis available for integration test")
+def test_run_id_cancel_sigterm(tmp_path):
+    """Real subprocess: send SIGTERM mid-run and expect returncode=2.
+
+    Requires a real Redis instance at localhost:6379 and a real PostgreSQL
+    database reachable via the TINO_DATABASE__URL environment variable.
+    Skipped automatically when no Redis is available.
+    """
+    job = {
+        **_MINIMAL_JOB,
+        "run_id": "r-sigterm-test",
+    }
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tinohelm.backtest.runner_cli", "--run-id", "r-sigterm-test"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Write job payload and close stdin
+    proc.stdin.write(json.dumps(job).encode())
+    proc.stdin.close()
+
+    # Give subprocess a moment to start up (import + settings load) before SIGTERM
+    time.sleep(0.5)
+    proc.send_signal(signal.SIGTERM)
+
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("Subprocess did not exit within 10s after SIGTERM")
+
+    assert proc.returncode == 2, (
+        f"Expected returncode=2 (cancelled), got {proc.returncode}. "
+        f"stderr: {proc.stderr.read().decode()[:500]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T4: test_fold_config_success
+# ---------------------------------------------------------------------------
+
+def test_fold_config_success(tmp_path, monkeypatch, capsys):
+    """_run_fold_mode returns 0 and stdout last line is valid JSON with status=ok."""
+    from tinohelm.backtest import runner_cli
+
+    fold_cfg = {
+        "strategy_path": "fake/strat.py:FakeStrategy",
+        "config_path": "fake/strat.py:FakeStrategyConfig",
+        "catalog_path": str(tmp_path / "catalog"),
+        "symbol": "BTCUSDT-PERP",
+        "interval": "1m",
+        "start": "2025-01-01T00:00:00",
+        "end": "2025-02-01T00:00:00",
+        "fitness_objective": "sharpe_ratio",
+    }
+    cfg_path = tmp_path / "fold_config.json"
+    cfg_path.write_text(json.dumps(fold_cfg))
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
+
+    # BacktestRunner is lazily imported from tinohelm.backtest.runner
+    # extract_fitness is lazily imported from tinohelm.backtest.optimizer_helpers
+    with (
+        patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance),
+        patch("tinohelm.backtest.optimizer_helpers.extract_fitness", return_value=0.5),
+    ):
+        rc = runner_cli._run_fold_mode(str(cfg_path))
+
+    assert rc == 0, f"Expected exit code 0, got {rc}"
+
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+    assert lines, "No stdout output from _run_fold_mode"
+
+    payload = json.loads(lines[-1])
+    assert payload["status"] == "ok"
+    assert isinstance(payload["fitness"], float)
+    assert "metrics" in payload
+
+
+# ---------------------------------------------------------------------------
+# T5: test_fold_config_failure
+# ---------------------------------------------------------------------------
+
+def test_fold_config_failure(tmp_path, monkeypatch, capsys):
+    """_run_fold_mode returns 1 and stdout last line is JSON with status=fail."""
+    from tinohelm.backtest import runner_cli
+
+    fold_cfg = {
+        "strategy_path": "fake/strat.py:FakeStrategy",
+        "config_path": "fake/strat.py:FakeStrategyConfig",
+        "catalog_path": str(tmp_path / "catalog"),
+        "symbol": "BTCUSDT-PERP",
+        "interval": "1m",
+        "start": "2025-01-01T00:00:00",
+        "end": "2025-02-01T00:00:00",
+        "fitness_objective": "sharpe_ratio",
+    }
+    cfg_path = tmp_path / "fold_config.json"
+    cfg_path.write_text(json.dumps(fold_cfg))
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(side_effect=RuntimeError("fold exploded"))
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_fold_mode(str(cfg_path))
+
+    assert rc == 1, f"Expected exit code 1, got {rc}"
+
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+    assert lines, "No stdout output from _run_fold_mode on failure"
+
+    payload = json.loads(lines[-1])
+    assert payload["status"] == "fail"
+    assert "error" in payload
+    assert "fold exploded" in payload["error"]

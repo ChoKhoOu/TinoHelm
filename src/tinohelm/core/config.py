@@ -74,6 +74,8 @@ class DataSettings(BaseModel):
 
 
 class BacktestSettings(BaseModel):
+    max_concurrent: int = 4
+    # DEPRECATED: use max_concurrent instead. Retained so existing yaml entries don't break pydantic validation.
     max_workers: int = 2
 
 
