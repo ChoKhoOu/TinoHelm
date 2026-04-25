@@ -94,31 +94,48 @@ def publish_completed(
     )
 
 
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
 def update_db_status(
     db_url: str,
     run_id: str,
     status: str,
     result_summary: dict | None = None,
     error_msg: str | None = None,
+    *,
+    only_if_not_terminal: bool = False,
 ) -> None:
     """Update the backtest_runs table using a synchronous DB session.
 
     The worker/runner_cli runs in a subprocess, so we use a cached sync engine
     to perform the update without depending on the async stack.
+
+    Args:
+        only_if_not_terminal: When ``True``, the UPDATE is conditional —
+            it only applies if the current DB status is NOT already a terminal
+            value (``completed``, ``failed``, or ``cancelled``).  This lets
+            parent-process safety-net writes act as atomic compare-and-swap
+            without overwriting a terminal state already written by the
+            subprocess.
     """
     try:
         engine = get_sync_engine(db_url)
         with Session(engine) as session:
             values: dict[str, Any] = {"status": RunStatus(status)}
-            if status in ("completed", "failed", "cancelled"):
+            if status in _TERMINAL_STATUSES:
                 values["completed_at"] = datetime.utcnow()
             if result_summary is not None:
                 values["result_summary_json"] = sanitize_for_json(result_summary)
             if error_msg is not None:
                 values["error"] = error_msg
-            session.execute(
-                update(BacktestRun).where(BacktestRun.run_id == run_id).values(**values)
-            )
+
+            stmt = update(BacktestRun).where(BacktestRun.run_id == run_id)
+            if only_if_not_terminal:
+                stmt = stmt.where(
+                    BacktestRun.status.not_in(list(_TERMINAL_STATUSES))
+                )
+            session.execute(stmt.values(**values))
             session.commit()
     except Exception:
         logger.exception("Failed to update DB status for run %s", run_id)

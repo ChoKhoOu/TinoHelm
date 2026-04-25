@@ -10,6 +10,8 @@ from datetime import datetime
 
 import redis.asyncio as aioredis
 
+from tinohelm.backtest.events import update_db_status
+
 logger = logging.getLogger(__name__)
 
 _shutdown_event: asyncio.Event = asyncio.Event()
@@ -117,6 +119,11 @@ async def _consumer_loop(
                 except asyncio.CancelledError:
                     pass
 
+            # Parent-process safety net: converge DB status for any non-normal exit.
+            # Uses only_if_not_terminal=True so we never overwrite a terminal state
+            # the subprocess already wrote (atomic compare-and-swap at DB level).
+            await _fallback_db_status(run_id, returncode, db_url, rds)
+
             proc = None
 
         except asyncio.CancelledError:
@@ -136,6 +143,56 @@ async def _consumer_loop(
             logger.exception("bt-consumer-%d error — continuing", slot_idx)
 
     logger.info("bt-consumer-%d stopped", slot_idx)
+
+
+async def _fallback_db_status(
+    run_id: str,
+    returncode: int,
+    db_url: str,
+    rds: aioredis.Redis,
+) -> None:
+    """Parent-process safety net: converge DB status for abnormal subprocess exits.
+
+    Branches:
+    - returncode == 0  : subprocess completed normally; no action (it wrote
+                         its own terminal status).
+    - returncode == 2  : SIGTERM handler path (cancelled); converge to
+                         ``cancelled`` only if not already terminal.
+    - other non-zero   : SIGKILL, OOM, native panic, etc.; converge to
+                         ``failed`` with returncode in error_msg.
+    """
+    if returncode == 0:
+        # Normal exit — subprocess is responsible for its own terminal write.
+        return
+
+    if returncode == 2:
+        fallback_status = "cancelled"
+        fallback_error = None
+        # Idempotent cleanup: cancel key may already be deleted by _cancel_watcher
+        cancel_key = f"tino:backtest:cancel:{run_id}"
+        try:
+            await rds.delete(cancel_key)
+        except Exception:
+            logger.exception("Failed to delete cancel key %s in fallback", cancel_key)
+    else:
+        fallback_status = "failed"
+        fallback_error = f"Subprocess exited with code {returncode}"
+
+    logger.warning(
+        "run %s subprocess exited with code %d — fallback DB write: %s",
+        run_id,
+        returncode,
+        fallback_status,
+    )
+    await asyncio.to_thread(
+        update_db_status,
+        db_url,
+        run_id,
+        fallback_status,
+        None,
+        fallback_error,
+        only_if_not_terminal=True,
+    )
 
 
 async def _cancel_watcher(

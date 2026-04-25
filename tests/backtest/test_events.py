@@ -218,3 +218,96 @@ def test_update_db_status_running_does_not_set_completed_at():
         ).scalar_one()
         assert row.status == RunStatus.running
         assert row.completed_at is None
+
+
+def test_update_db_status_only_if_not_terminal_does_not_overwrite_completed():
+    """only_if_not_terminal=True must not overwrite an already-terminal status.
+
+    Simulates the parent-process safety-net writing 'failed' after a subprocess
+    already wrote 'completed'.  The row must remain 'completed'.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    run_id = "run-test-004"
+    with Session(engine) as session:
+        session.add(
+            BacktestRun(
+                run_id=run_id,
+                strategy_name="test_strategy",
+                symbol="BTCUSDT-PERP",
+                interval="5m",
+                start_date=__import__("datetime").date(2025, 1, 1),
+                end_date=__import__("datetime").date(2025, 2, 1),
+                status=RunStatus.completed,
+            )
+        )
+        session.commit()
+
+    with __import__("unittest.mock", fromlist=["patch"]).patch(
+        "tinohelm.backtest.events.get_sync_engine", return_value=engine
+    ):
+        update_db_status(
+            "sqlite:///:memory:",
+            run_id,
+            "failed",
+            error_msg="Subprocess exited with code -9",
+            only_if_not_terminal=True,
+        )
+
+    # The row must still be 'completed' — the fallback write must be a no-op.
+    with Session(engine) as session:
+        row = session.execute(
+            select(BacktestRun).where(BacktestRun.run_id == run_id)
+        ).scalar_one()
+        assert row.status == RunStatus.completed, (
+            f"Expected status=completed after no-op CAS, got {row.status!r}"
+        )
+        assert row.error is None, (
+            "error field must not be written when the CAS condition fails"
+        )
+
+
+def test_update_db_status_only_if_not_terminal_updates_running():
+    """only_if_not_terminal=True must still update when status is non-terminal.
+
+    Simulates the parent safety-net writing 'failed' for a run stuck in 'running'.
+    The WHERE clause must allow the update to go through.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    run_id = "run-test-005"
+    with Session(engine) as session:
+        session.add(
+            BacktestRun(
+                run_id=run_id,
+                strategy_name="test_strategy",
+                symbol="BTCUSDT-PERP",
+                interval="5m",
+                start_date=__import__("datetime").date(2025, 1, 1),
+                end_date=__import__("datetime").date(2025, 2, 1),
+                status=RunStatus.running,
+            )
+        )
+        session.commit()
+
+    with __import__("unittest.mock", fromlist=["patch"]).patch(
+        "tinohelm.backtest.events.get_sync_engine", return_value=engine
+    ):
+        update_db_status(
+            "sqlite:///:memory:",
+            run_id,
+            "failed",
+            error_msg="Subprocess exited with code -9",
+            only_if_not_terminal=True,
+        )
+
+    with Session(engine) as session:
+        row = session.execute(
+            select(BacktestRun).where(BacktestRun.run_id == run_id)
+        ).scalar_one()
+        assert row.status == RunStatus.failed, (
+            f"Expected status=failed after CAS on running row, got {row.status!r}"
+        )
+        assert row.error == "Subprocess exited with code -9"

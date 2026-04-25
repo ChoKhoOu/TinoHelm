@@ -304,3 +304,100 @@ async def test_stop_consumers_closes_redis_connection():
     await consumer_mod.stop_consumers([], rds, timeout=3.0)
 
     rds.aclose.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests 7-9: _fallback_db_status — three-branch coverage
+# ---------------------------------------------------------------------------
+
+async def test_fallback_db_status_sigkill_writes_failed():
+    """returncode=-9 (SIGKILL/OOM) triggers update_db_status with status='failed'.
+
+    Validates:
+    - update_db_status is called exactly once
+    - status='failed'
+    - error_msg contains the returncode string
+    - only_if_not_terminal=True is forwarded (atomic CAS guard)
+    - rds.delete is NOT called (only the cancelled branch deletes the key)
+    """
+    import tinohelm.backtest.consumer as consumer_mod
+    from tinohelm.backtest.consumer import _fallback_db_status
+
+    captured: list[tuple] = []
+
+    def _mock_update(db_url, run_id, status, result_summary=None, error_msg=None, *, only_if_not_terminal=False):
+        captured.append((db_url, run_id, status, result_summary, error_msg, only_if_not_terminal))
+
+    rds = _make_rds()
+
+    with patch.object(consumer_mod, "update_db_status", _mock_update):
+        await _fallback_db_status("run-sigkill", -9, "sqlite:///:memory:", rds)
+
+    assert len(captured) == 1, "update_db_status must be called exactly once"
+    db_url, run_id, status, result_summary, error_msg, only_if_not_terminal = captured[0]
+    assert status == "failed", f"Expected status='failed', got {status!r}"
+    assert error_msg is not None and "-9" in error_msg, (
+        f"error_msg must contain the returncode '-9', got {error_msg!r}"
+    )
+    assert only_if_not_terminal is True, (
+        "only_if_not_terminal must be True to prevent overwriting subprocess-written terminal state"
+    )
+    rds.delete.assert_not_awaited()
+
+
+async def test_fallback_db_status_returncode2_writes_cancelled():
+    """returncode=2 (SIGTERM / cancelled path) writes 'cancelled' and cleans up the cancel key.
+
+    Validates:
+    - update_db_status called once with status='cancelled'
+    - only_if_not_terminal=True
+    - rds.delete is awaited with the correct cancel key
+    - error_msg is None (cancelled is user-initiated, no error message)
+    """
+    import tinohelm.backtest.consumer as consumer_mod
+    from tinohelm.backtest.consumer import _fallback_db_status
+
+    captured: list[tuple] = []
+
+    def _mock_update(db_url, run_id, status, result_summary=None, error_msg=None, *, only_if_not_terminal=False):
+        captured.append((db_url, run_id, status, result_summary, error_msg, only_if_not_terminal))
+
+    run_id = "run-cancelled"
+    rds = _make_rds()
+
+    with patch.object(consumer_mod, "update_db_status", _mock_update):
+        await _fallback_db_status(run_id, 2, "sqlite:///:memory:", rds)
+
+    assert len(captured) == 1, "update_db_status must be called exactly once"
+    db_url, seen_run_id, status, result_summary, error_msg, only_if_not_terminal = captured[0]
+    assert status == "cancelled", f"Expected status='cancelled', got {status!r}"
+    assert error_msg is None, f"Cancelled path must not set error_msg, got {error_msg!r}"
+    assert only_if_not_terminal is True
+
+    cancel_key = f"tino:backtest:cancel:{run_id}"
+    rds.delete.assert_awaited_once_with(cancel_key)
+
+
+async def test_fallback_db_status_returncode0_is_noop():
+    """returncode=0 (normal completion) must be a complete no-op.
+
+    The subprocess is responsible for writing its own terminal status.
+    The fallback must not call update_db_status or rds.delete.
+    """
+    import tinohelm.backtest.consumer as consumer_mod
+    from tinohelm.backtest.consumer import _fallback_db_status
+
+    update_called = []
+
+    def _mock_update(*args, **kwargs):
+        update_called.append((args, kwargs))
+
+    rds = _make_rds()
+
+    with patch.object(consumer_mod, "update_db_status", _mock_update):
+        await _fallback_db_status("run-normal", 0, "sqlite:///:memory:", rds)
+
+    assert len(update_called) == 0, (
+        "update_db_status must NOT be called when returncode=0"
+    )
+    rds.delete.assert_not_awaited()
