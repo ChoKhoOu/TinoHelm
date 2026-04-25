@@ -257,10 +257,18 @@ class BacktestOptimizer:
         end: date,
         *,
         timeout_s: float | None = None,
+        result_mode: str = "slim",
     ) -> dict[str, Any]:
         """Run a single backtest fold in a fresh subprocess via runner_cli --fold-config.
 
-        Returns {"statistics": metrics, "_fitness": <float>}.  Raises on failure.
+        result_mode="slim" (default): Returns {"statistics": metrics, "_fitness": <float>}.
+            Used by trial loops — only fitness + numeric metrics are needed.
+        result_mode="full": Returns the full sanitized BacktestRunner result dict directly
+            (contains equity_curve, daily_returns, monthly_returns, statistics, etc.).
+            Used by late-phase validation runs that need the complete result for
+            DSR computation, IS/OOS overlay charts, and slim_result() projection.
+
+        Raises on subprocess failure.
         """
         fold_cfg = {
             "strategy_path": str(self.strategy_path),
@@ -272,6 +280,7 @@ class BacktestOptimizer:
             "start": datetime(start.year, start.month, start.day).isoformat(),
             "end": datetime(end.year, end.month, end.day).isoformat(),
             "fitness_objective": self.fitness_objective,
+            "result_mode": result_mode,
         }
         if timeout_s is None:
             duration_days = max((end - start).days, 1)
@@ -300,6 +309,10 @@ class BacktestOptimizer:
             payload = json.loads(last_line)
             if payload.get("status") != "ok":
                 raise RuntimeError(f"fold failed: {payload.get('error', 'unknown')}")
+            if result_mode == "full":
+                # Return the full result dict directly — no re-wrapping.
+                # runner_cli has already sanitized NaN/Infinity.
+                return payload["result"]
             return {"statistics": payload.get("metrics", {}), "_fitness": payload.get("fitness")}
         finally:
             try:
@@ -612,23 +625,33 @@ class BacktestOptimizer:
                 ))
 
         # --- Validation backtest on held-out test period ---
+        # Uses full mode to get equity_curve/daily_returns/monthly_returns for:
+        # - DSR n_obs = len(daily_returns) computation (~L662)
+        # - slim_result(train_validation) IS/OOS equity overlay (RobustnessTab)
+        # - build_full_result validation= field (26+ fields needed by frontend)
         validation_result: dict[str, Any] | None = None
         if best_params:
             try:
                 val_params = dict(self.strategy_params)
                 val_params.update(best_params)
-                validation_result = self._run_backtest_subprocess(val_params, test_start, test_end)
+                validation_result = self._run_backtest_subprocess(
+                    val_params, test_start, test_end, result_mode="full",
+                )
             except Exception as exc:
                 logger.warning("Validation backtest failed: %s", exc)
                 validation_result = None
 
         # --- IS (train) validation backtest — simple split mode only ---
+        # Uses full mode so slim_result() can project equity_curve/monthly_returns
+        # for the IS side of the RobustnessTab IS vs OOS equity overlay chart.
         train_validation_result: dict[str, Any] | None = None
         if best_params and not use_walk_forward:
             try:
                 tv_params = dict(self.strategy_params)
                 tv_params.update(best_params)
-                train_validation_result = self._run_backtest_subprocess(tv_params, train_start, train_end)
+                train_validation_result = self._run_backtest_subprocess(
+                    tv_params, train_start, train_end, result_mode="full",
+                )
             except Exception as exc:
                 logger.warning("Train validation backtest failed: %s", exc)
                 train_validation_result = None

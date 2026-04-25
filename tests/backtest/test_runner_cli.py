@@ -308,3 +308,160 @@ def test_fold_config_failure(tmp_path, monkeypatch, capsys):
     assert payload["status"] == "fail"
     assert "error" in payload
     assert "fold exploded" in payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# T6: test_fold_config_full_mode_success
+# ---------------------------------------------------------------------------
+
+_FULL_FAKE_RESULTS = {
+    "statistics": {
+        "total_trades": 42,
+        "sharpe_ratio": 1.5,
+        "pnl_total": 1234.0,
+        "win_rate": 0.65,
+    },
+    "equity_curve": [
+        {"timestamp": "2025-01-01T00:00:00", "equity": 10000.0},
+        {"timestamp": "2025-01-02T00:00:00", "equity": 10200.0},
+    ],
+    "daily_returns": [0.0, 0.02, -0.005, 0.01],
+    "monthly_returns": [{"month": "2025-01", "return": 0.015}],
+    "trade_log": [{"trade_id": "t1", "pnl": 100.0}],
+}
+
+
+def test_fold_config_full_mode_success(tmp_path, monkeypatch, capsys):
+    """_run_fold_mode with result_mode='full' returns sanitized full result dict.
+
+    Assertions:
+      - exit code 0
+      - stdout is single-line JSON with status=ok
+      - payload["result"]["equity_curve"] is a non-empty list
+      - payload["result"]["daily_returns"] is a non-empty list
+      - payload["result"]["statistics"] is a dict
+    """
+    from tinohelm.backtest import runner_cli
+
+    fold_cfg = {
+        "strategy_path": "fake/strat.py:FakeStrategy",
+        "config_path": "fake/strat.py:FakeStrategyConfig",
+        "catalog_path": str(tmp_path / "catalog"),
+        "symbol": "BTCUSDT-PERP",
+        "interval": "1m",
+        "start": "2025-01-01T00:00:00",
+        "end": "2025-02-01T00:00:00",
+        "fitness_objective": "sharpe_ratio",
+        "result_mode": "full",
+    }
+    cfg_path = tmp_path / "fold_config_full.json"
+    cfg_path.write_text(json.dumps(fold_cfg))
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FULL_FAKE_RESULTS)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_fold_mode(str(cfg_path))
+
+    assert rc == 0, f"Expected exit code 0, got {rc}"
+
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+    assert len(lines) == 1, (
+        f"Full mode must emit exactly 1 stdout line, got {len(lines)}: {lines}"
+    )
+
+    payload = json.loads(lines[0])
+    assert payload["status"] == "ok", f"Expected status=ok, got {payload}"
+    assert "result" in payload, f"Full mode payload must have 'result' key, got {list(payload)}"
+
+    result = payload["result"]
+    assert isinstance(result.get("equity_curve"), list) and len(result["equity_curve"]) > 0, (
+        f"result['equity_curve'] must be a non-empty list, got: {result.get('equity_curve')}"
+    )
+    assert isinstance(result.get("daily_returns"), list) and len(result["daily_returns"]) > 0, (
+        f"result['daily_returns'] must be a non-empty list, got: {result.get('daily_returns')}"
+    )
+    assert isinstance(result.get("statistics"), dict), (
+        f"result['statistics'] must be a dict, got: {type(result.get('statistics'))}"
+    )
+    # Full mode must NOT have fitness/metrics keys (those are slim-mode only)
+    assert "fitness" not in payload, "Full mode payload must not contain 'fitness'"
+    assert "metrics" not in payload, "Full mode payload must not contain 'metrics'"
+
+
+# ---------------------------------------------------------------------------
+# T7: test_fold_config_full_mode_nan_sanitized
+# ---------------------------------------------------------------------------
+
+def test_fold_config_full_mode_nan_sanitized(tmp_path, monkeypatch, capsys):
+    """Full mode: NaN/Infinity values in BacktestRunner result are sanitized
+    to null in the stdout JSON (PostgreSQL JSONB rejects non-finite numbers).
+
+    Mock BacktestRunner.run returns a result with NaN in statistics and
+    Infinity in equity_curve — asserts the final JSON string contains neither
+    the literal 'NaN' nor 'Infinity'.
+    """
+    import math
+    from tinohelm.backtest import runner_cli
+
+    nan_results = {
+        "statistics": {
+            "sharpe_ratio": float("nan"),
+            "max_drawdown": float("inf"),
+            "total_trades": 5,
+        },
+        "equity_curve": [
+            {"timestamp": "2025-01-01T00:00:00", "equity": float("nan")},
+            {"timestamp": "2025-01-02T00:00:00", "equity": 10200.0},
+        ],
+        "daily_returns": [float("inf"), 0.01, float("-inf")],
+        "monthly_returns": [],
+    }
+
+    fold_cfg = {
+        "strategy_path": "fake/strat.py:FakeStrategy",
+        "config_path": None,
+        "catalog_path": str(tmp_path / "catalog"),
+        "symbol": "BTCUSDT-PERP",
+        "interval": "1m",
+        "start": "2025-01-01T00:00:00",
+        "end": "2025-02-01T00:00:00",
+        "fitness_objective": "sharpe_ratio",
+        "result_mode": "full",
+    }
+    cfg_path = tmp_path / "fold_config_nan.json"
+    cfg_path.write_text(json.dumps(fold_cfg))
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=nan_results)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_fold_mode(str(cfg_path))
+
+    assert rc == 0, f"Expected exit code 0, got {rc}"
+
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+    assert lines, "No stdout output"
+
+    raw_json = lines[-1]
+    # PostgreSQL JSONB compatibility: no literal NaN or Infinity in the JSON string
+    assert "NaN" not in raw_json, f"stdout JSON must not contain literal 'NaN': {raw_json[:200]}"
+    assert "Infinity" not in raw_json, (
+        f"stdout JSON must not contain literal 'Infinity': {raw_json[:200]}"
+    )
+
+    # Verify the sanitized values are null (not some other replacement)
+    payload = json.loads(raw_json)
+    result = payload["result"]
+    assert result["statistics"]["sharpe_ratio"] is None, (
+        "NaN sharpe_ratio must be sanitized to null"
+    )
+    assert result["statistics"]["max_drawdown"] is None, (
+        "Infinity max_drawdown must be sanitized to null"
+    )

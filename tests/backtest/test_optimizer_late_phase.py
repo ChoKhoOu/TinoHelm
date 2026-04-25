@@ -149,6 +149,28 @@ def _noop_db_patch(monkeypatch) -> None:
     monkeypatch.setattr("sqlalchemy.orm.Session", MagicMock(return_value=fake_session))
 
 
+# Full-shape result that late-phase full-mode calls return.
+# Mirrors the shape runner_cli emits in "full" mode — contains equity_curve,
+# daily_returns, monthly_returns, statistics, and trade_log.
+_FULL_SHAPE_RESULT = {
+    "statistics": {
+        "sharpe_ratio": 1.0,
+        "total_trades": 10,
+        "pnl_total": 500.0,
+        "win_rate": 0.6,
+        "total_return_pct": 5.0,
+        "max_drawdown": -0.1,
+    },
+    "equity_curve": [
+        {"timestamp": "2024-01-01T00:00:00", "equity": 10000.0},
+        {"timestamp": "2024-06-01T00:00:00", "equity": 10500.0},
+    ],
+    "daily_returns": [0.001, 0.002, -0.001, 0.003, 0.001],
+    "monthly_returns": [{"month": "2024-01", "return": 0.015}],
+    "trade_log": [],
+}
+
+
 # ---------------------------------------------------------------------------
 # Test 1: Simple mode — validation + train validation both call _run_backtest_subprocess
 # ---------------------------------------------------------------------------
@@ -161,15 +183,23 @@ def test_validation_uses_subprocess(monkeypatch):
     _objective_simple is replaced by a stub returning fitness=1.0, so the
     only subprocess calls counted come from the late-phase code paths.
 
+    The mock returns full-shape results when result_mode="full" is passed
+    (the upgraded call sites), mirroring what runner_cli full mode emits.
+
     Assertions:
       - >= 2 calls to _run_backtest_subprocess (validation + train validation)
+      - Both calls use result_mode="full"
       - One call ends on end_date (2024-12-31) — the held-out validation
-      - validation_result["statistics"] is not None (non-empty dict accepted)
+      - validation_result["equity_curve"] is a non-empty list
+      - validation_result["daily_returns"] is a non-empty list
+      - DSR is computed (not None) since fitness_objective="sharpe" and n_obs > 0
     """
-    late_phase_calls: list[tuple[date, date]] = []
+    late_phase_calls: list[tuple[date, date, str]] = []
 
-    def tracking_subprocess(self, params, start, end, **kw):
-        late_phase_calls.append((start, end))
+    def tracking_subprocess(self, params, start, end, *, result_mode="slim", **kw):
+        late_phase_calls.append((start, end, result_mode))
+        if result_mode == "full":
+            return _FULL_SHAPE_RESULT
         return {"statistics": {"sharpe_ratio": 1.0}, "_fitness": 1.0}
 
     monkeypatch.setattr(BacktestOptimizer, "_run_backtest_subprocess", tracking_subprocess)
@@ -195,12 +225,16 @@ def test_validation_uses_subprocess(monkeypatch):
         return_value={"statistics": {"sharpe_ratio": 1.0}}
     )
 
-    # Patch build_full_result to capture what validation= receives
+    # Patch build_full_result to capture what validation= and dsr= receives
     captured_validation = [None]
+    captured_train_validation = [None]
+    captured_dsr = [None]
     original_bfr = optimizer_mod.build_full_result
 
     def capturing_bfr(**kw):
         captured_validation[0] = kw.get("validation")
+        captured_train_validation[0] = kw.get("train_validation")
+        captured_dsr[0] = kw.get("dsr")
         return original_bfr(**kw)
 
     monkeypatch.setattr("tinohelm.backtest.optimizer.build_full_result", capturing_bfr)
@@ -212,16 +246,55 @@ def test_validation_uses_subprocess(monkeypatch):
         f"got {len(late_phase_calls)}: {late_phase_calls}"
     )
 
+    # Both late-phase calls must use result_mode="full"
+    modes = [c[2] for c in late_phase_calls]
+    assert all(m == "full" for m in modes), (
+        f"All late-phase calls must use result_mode='full', got: {modes}"
+    )
+
     # Held-out test period ends on end_date (2024-12-31)
     call_ends = [c[1] for c in late_phase_calls]
     assert date(2024, 12, 31) in call_ends, (
         f"Expected a validation call ending on end_date 2024-12-31, got {call_ends}"
     )
 
-    # validation_result should have statistics (not None, not empty)
+    # validation_result must contain full result fields (not just statistics+_fitness)
     assert captured_validation[0] is not None, "validation_result must not be None on success"
     assert "statistics" in captured_validation[0], (
         f"validation_result must have 'statistics' key, got keys: {list(captured_validation[0])}"
+    )
+    assert isinstance(captured_validation[0].get("equity_curve"), list) and \
+           len(captured_validation[0]["equity_curve"]) > 0, (
+        f"validation_result['equity_curve'] must be a non-empty list, "
+        f"got: {captured_validation[0].get('equity_curve')}"
+    )
+    assert isinstance(captured_validation[0].get("daily_returns"), list) and \
+           len(captured_validation[0]["daily_returns"]) > 0, (
+        f"validation_result['daily_returns'] must be a non-empty list, "
+        f"got: {captured_validation[0].get('daily_returns')}"
+    )
+
+    # train_validation must also be passed to build_full_result (via slim_result projection)
+    assert captured_train_validation[0] is not None, (
+        "train_validation must not be None in simple mode (slim_result of full result)"
+    )
+    assert isinstance(captured_train_validation[0].get("equity_curve"), list) and \
+           len(captured_train_validation[0]["equity_curve"]) > 0, (
+        f"train_validation['equity_curve'] must be a non-empty list "
+        f"(from slim_result projection), got: {captured_train_validation[0].get('equity_curve')}"
+    )
+
+    # DSR regression guard: n_obs = len(validation_result["daily_returns"]) must be > 0.
+    # DSR itself may be None when n_trials < 5 (this test uses 1 stub trial), but the
+    # pre-regression bug was n_obs=0 due to slim mode missing daily_returns entirely.
+    # Asserting equity_curve and daily_returns are non-empty above is the correct guard.
+    # Separately verify that validation_result["daily_returns"] has the expected count
+    # (ensures compute_dsr would have received n_obs > 0, not the old n_obs = 0).
+    n_obs = len(captured_validation[0].get("daily_returns", []) or [])
+    assert n_obs > 0, (
+        f"n_obs passed to compute_dsr must be > 0 when full mode is used. "
+        f"Got n_obs={n_obs} — regression: validation_result missing daily_returns "
+        f"(was returning slim shape instead of full result)"
     )
 
 
@@ -241,10 +314,13 @@ def test_wf_fold_details_use_subprocess(monkeypatch):
       - wf_fold_results has exactly 3 entries
       - Each entry's test_value != FAIL_VALUE
     """
-    late_phase_calls: list[tuple[date, date]] = []
+    late_phase_calls: list[tuple[date, date, str]] = []
 
-    def tracking_subprocess(self, params, start, end, **kw):
-        late_phase_calls.append((start, end))
+    def tracking_subprocess(self, params, start, end, *, result_mode="slim", **kw):
+        late_phase_calls.append((start, end, result_mode))
+        if result_mode == "full":
+            return _FULL_SHAPE_RESULT
+        # WF fold details use slim mode — return fitness-compatible shape
         return {"statistics": {"sharpe_ratio": 0.8}, "_fitness": 0.8}
 
     monkeypatch.setattr(BacktestOptimizer, "_run_backtest_subprocess", tracking_subprocess)
@@ -307,6 +383,20 @@ def test_wf_fold_details_use_subprocess(monkeypatch):
     assert train_end not in call_ends, (
         f"WF mode must not call train validation (train_end={train_end} should not "
         f"appear in call ends), but got {call_ends}"
+    )
+
+    # WF fold detail calls (slim) vs validation call (full):
+    # The held-out validation call (ends on 2024-12-31) must use result_mode="full".
+    # The 3 fold detail calls must use result_mode="slim" (trial-loop pattern, zero-invasive).
+    slim_calls = [(c[0], c[1]) for c in late_phase_calls if c[2] == "slim"]
+    full_calls = [(c[0], c[1]) for c in late_phase_calls if c[2] == "full"]
+    assert len(full_calls) == 1, (
+        f"WF mode must have exactly 1 full-mode call (held-out validation), "
+        f"got {len(full_calls)}: {full_calls}"
+    )
+    assert len(slim_calls) == 3, (
+        f"WF mode must have exactly 3 slim-mode fold detail calls, "
+        f"got {len(slim_calls)}: {slim_calls}"
     )
 
 

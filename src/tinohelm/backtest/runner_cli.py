@@ -257,12 +257,17 @@ def _load_job_payload(run_id: str, db_url: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def _run_fold_mode(fold_config_path: str) -> int:
-    """Execute a single walk-forward fold, return fitness via stdout JSON.
+    """Execute a single walk-forward fold, return result via stdout JSON.
 
     stdout protocol (single line, only output ever written to stdout):
-      success: {"status": "ok", "fitness": <float>, "metrics": {...}}
-      failure: {"status": "fail", "error": "<message>"}
+      slim mode (default):
+        success: {"status": "ok", "fitness": <float>, "metrics": {...}}
+        failure: {"status": "fail", "error": "<message>"}
+      full mode (result_mode="full" in fold config):
+        success: {"status": "ok", "result": <sanitized full BacktestRunner result>}
+        failure: {"status": "fail", "error": "<message>"}
 
+    The result_mode field in the fold config selects the protocol variant.
     All other logging goes to stderr via the logger configured in main().
     Returns exit code: 0 = success, 1 = failure.
     """
@@ -272,6 +277,8 @@ def _run_fold_mode(fold_config_path: str) -> int:
     except (OSError, json.JSONDecodeError) as exc:
         print(json.dumps({"status": "fail", "error": f"config read: {exc}"}), flush=True)
         return 1
+
+    result_mode = cfg_dict.get("result_mode", "slim")
 
     try:
         from tinohelm.backtest.runner import BacktestRunner
@@ -292,21 +299,30 @@ def _run_fold_mode(fold_config_path: str) -> int:
         )
 
         result = asyncio.run(runner.run())
-        fitness = extract_fitness(result, cfg_dict["fitness_objective"])
-        metrics = result.get("statistics", {})
 
-        # Only numeric values for slim stdout payload
-        print(
-            json.dumps({
-                "status": "ok",
-                "fitness": float(fitness),
-                "metrics": {
-                    k: v for k, v in metrics.items()
-                    if isinstance(v, (int, float))
-                },
-            }),
-            flush=True,
-        )
+        if result_mode == "full":
+            # Sanitize NaN/Infinity before serialization — PostgreSQL JSONB
+            # rejects non-finite numbers (see CLAUDE.md Data & Serialization).
+            sanitized = sanitize_for_json(result)
+            print(
+                json.dumps({"status": "ok", "result": sanitized}, default=str),
+                flush=True,
+            )
+        else:
+            # slim (default): only fitness + numeric metrics for trial loops
+            fitness = extract_fitness(result, cfg_dict["fitness_objective"])
+            metrics = result.get("statistics", {})
+            print(
+                json.dumps({
+                    "status": "ok",
+                    "fitness": float(fitness),
+                    "metrics": {
+                        k: v for k, v in metrics.items()
+                        if isinstance(v, (int, float))
+                    },
+                }),
+                flush=True,
+            )
         return 0
 
     except Exception as exc:
