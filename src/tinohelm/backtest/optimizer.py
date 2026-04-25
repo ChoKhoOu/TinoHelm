@@ -14,6 +14,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import subprocess
+import sys
+import tempfile
 from datetime import datetime, date
 from typing import Any
 
@@ -243,6 +247,80 @@ class BacktestOptimizer:
         return params
 
     # ------------------------------------------------------------------
+    # Subprocess backtest helper
+    # ------------------------------------------------------------------
+
+    def _run_backtest_subprocess(
+        self,
+        params: dict[str, Any],
+        start: date,
+        end: date,
+        *,
+        timeout_s: float | None = None,
+        result_mode: str = "slim",
+    ) -> dict[str, Any]:
+        """Run a single backtest fold in a fresh subprocess via runner_cli --fold-config.
+
+        result_mode="slim" (default): Returns {"statistics": metrics, "_fitness": <float>}.
+            Used by trial loops — only fitness + numeric metrics are needed.
+        result_mode="full": Returns the full sanitized BacktestRunner result dict directly
+            (contains equity_curve, daily_returns, monthly_returns, statistics, etc.).
+            Used by late-phase validation runs that need the complete result for
+            DSR computation, IS/OOS overlay charts, and slim_result() projection.
+
+        Raises on subprocess failure.
+        """
+        fold_cfg = {
+            "strategy_path": str(self.strategy_path),
+            "config_path": str(self.config_path) if self.config_path else None,
+            "params": params,
+            "catalog_path": str(self.catalog_path),
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "start": datetime(start.year, start.month, start.day).isoformat(),
+            "end": datetime(end.year, end.month, end.day).isoformat(),
+            "fitness_objective": self.fitness_objective,
+            "result_mode": result_mode,
+        }
+        if timeout_s is None:
+            duration_days = max((end - start).days, 1)
+            timeout_s = max(duration_days * 0.5, 60) + 60
+
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        try:
+            json.dump(fold_cfg, tmp)
+            tmp.flush()
+            tmp.close()
+            proc = subprocess.run(
+                [sys.executable, "-m", "tinohelm.backtest.runner_cli", "--fold-config", tmp.name],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"runner_cli exit {proc.returncode}: {proc.stderr[-500:]}")
+            # 取 stdout 最后非空行 → JSON parse
+            last_line = next(
+                (ln for ln in reversed(proc.stdout.splitlines()) if ln.strip()),
+                None,
+            )
+            if last_line is None:
+                raise RuntimeError("runner_cli produced no stdout")
+            payload = json.loads(last_line)
+            if payload.get("status") != "ok":
+                raise RuntimeError(f"fold failed: {payload.get('error', 'unknown')}")
+            if result_mode == "full":
+                # Return the full result dict directly — no re-wrapping.
+                # runner_cli has already sanitized NaN/Infinity.
+                return payload["result"]
+            return {"statistics": payload.get("metrics", {}), "_fitness": payload.get("fitness")}
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    # ------------------------------------------------------------------
     # Objective variants
     # ------------------------------------------------------------------
 
@@ -256,7 +334,7 @@ class BacktestOptimizer:
 
         When a shared engine is available (``_shared_engine``), reuses it via
         ``engine.reset()`` to avoid reloading data on every trial.  Falls back
-        to full ``_run_backtest()`` otherwise.
+        to full ``_run_backtest`` otherwise.
         """
         params = self._suggest_params(trial)
         try:
@@ -294,14 +372,10 @@ class BacktestOptimizer:
         fold_values: list[float] = []
 
         for step, (tr_start, tr_end, te_start, te_end) in enumerate(windows):
-            # Run backtest on the *test* period of this fold
+            # Run backtest on the *test* period of this fold via subprocess
             # (parameters were selected globally, not re-fit per fold)
             try:
-                result = _run_backtest(
-                    self.strategy_path, self.config_path, params,
-                    self.catalog_path, self.symbol, self.interval,
-                    te_start, te_end,
-                )
+                result = self._run_backtest_subprocess(params, te_start, te_end)
             except Exception as exc:
                 logger.warning(
                     "Trial %d fold %d failed: %s", trial.number, step, exc,
@@ -309,7 +383,7 @@ class BacktestOptimizer:
                 fold_values.append(FAIL_VALUE)
                 continue
 
-            value = extract_fitness(result, self.fitness_objective)
+            value = float(result.get("_fitness") or extract_fitness(result, self.fitness_objective))
             fold_values.append(value)
 
             # Report intermediate value for pruning
@@ -536,14 +610,13 @@ class BacktestOptimizer:
             for fold_idx, (tr_s, tr_e, te_s, te_e) in enumerate(wf_windows):
                 fold_value = FAIL_VALUE
                 try:
-                    fold_result = _run_backtest(
-                        self.strategy_path, self.config_path, merged_params,
-                        self.catalog_path, self.symbol, self.interval,
-                        te_s, te_e,
-                    )
-                    fold_value = extract_fitness(fold_result, self.fitness_objective)
+                    fold_result = self._run_backtest_subprocess(merged_params, te_s, te_e)
+                    fold_value = fold_result.get("_fitness")
+                    if fold_value is None:
+                        fold_value = extract_fitness(fold_result, self.fitness_objective)
                 except Exception as exc:
                     logger.warning("WF fold %d detail run failed: %s", fold_idx, exc)
+                    fold_value = FAIL_VALUE
                 wf_fold_results.append(build_walk_forward_fold_record(
                     fold_idx=fold_idx,
                     train_start=tr_s, train_end=tr_e,
@@ -552,32 +625,36 @@ class BacktestOptimizer:
                 ))
 
         # --- Validation backtest on held-out test period ---
+        # Uses full mode to get equity_curve/daily_returns/monthly_returns for:
+        # - DSR n_obs = len(daily_returns) computation (~L662)
+        # - slim_result(train_validation) IS/OOS equity overlay (RobustnessTab)
+        # - build_full_result validation= field (26+ fields needed by frontend)
         validation_result: dict[str, Any] | None = None
         if best_params:
             try:
                 val_params = dict(self.strategy_params)
                 val_params.update(best_params)
-                validation_result = _run_backtest(
-                    self.strategy_path, self.config_path, val_params,
-                    self.catalog_path, self.symbol, self.interval,
-                    test_start, test_end,
+                validation_result = self._run_backtest_subprocess(
+                    val_params, test_start, test_end, result_mode="full",
                 )
             except Exception as exc:
                 logger.warning("Validation backtest failed: %s", exc)
+                validation_result = None
 
         # --- IS (train) validation backtest — simple split mode only ---
+        # Uses full mode so slim_result() can project equity_curve/monthly_returns
+        # for the IS side of the RobustnessTab IS vs OOS equity overlay chart.
         train_validation_result: dict[str, Any] | None = None
         if best_params and not use_walk_forward:
             try:
                 tv_params = dict(self.strategy_params)
                 tv_params.update(best_params)
-                train_validation_result = _run_backtest(
-                    self.strategy_path, self.config_path, tv_params,
-                    self.catalog_path, self.symbol, self.interval,
-                    train_start, train_end,
+                train_validation_result = self._run_backtest_subprocess(
+                    tv_params, train_start, train_end, result_mode="full",
                 )
             except Exception as exc:
                 logger.warning("Train validation backtest failed: %s", exc)
+                train_validation_result = None
 
         # --- Parameter importance ---
         param_importances: dict[str, float] = {}

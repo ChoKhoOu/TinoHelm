@@ -15,10 +15,10 @@ import redis.asyncio as aioredis
 
 import httpx
 
-from tinohelm.api.deps import get_db, get_redis, get_settings_dep, get_process_manager, get_startup_time
+from tinohelm.api.deps import get_db, get_redis, get_settings_dep, get_node_controller, get_startup_time
 from tinohelm.core.audit import log_audit
 from tinohelm.core.config import Settings
-from tinohelm.core.process_manager import ProcessManager
+from tinohelm.core.node_controller import NodeController
 
 EXCHANGE_PING_URLS: list[tuple[str, str]] = [
     ("Binance", "https://fapi.binance.com/fapi/v1/ping"),
@@ -112,7 +112,7 @@ async def update_risk_limits(
 async def health_check(
     db: AsyncSession = Depends(get_db),
     rds: aioredis.Redis = Depends(get_redis),
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
 ) -> HealthResponse:
     """Health check: verify Postgres, Redis, and node status."""
     # Postgres
@@ -137,7 +137,7 @@ async def health_check(
         redis_health = ServiceHealth(status="error", detail="Connection failed")
 
     # Nodes
-    nodes = pm.get_status()
+    nodes = nc.get_status()
 
     overall = "healthy"
     if pg_health.status != "ok" or redis_health.status != "ok":

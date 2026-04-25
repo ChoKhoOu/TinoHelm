@@ -119,6 +119,7 @@ class TestSettingsDefaults:
 
     def test_backtest_defaults(self):
         s = BacktestSettings()
+        assert s.max_concurrent == 4
         assert s.max_workers == 2
 
     def test_risk_defaults(self):
@@ -136,6 +137,27 @@ class TestSettingsDefaults:
         assert isinstance(s.data, DataSettings)
         assert isinstance(s.backtest, BacktestSettings)
         assert isinstance(s.risk, RiskConfig)
+
+    def test_default_max_concurrent_is_4(self, clean_env):
+        """Backtest.max_concurrent defaults to 4."""
+        from tinohelm.core.config import get_settings
+        get_settings.cache_clear()
+        try:
+            s = get_settings()
+            assert s.backtest.max_concurrent == 4
+        finally:
+            get_settings.cache_clear()
+
+    def test_env_override_max_concurrent(self, monkeypatch, clean_env):
+        """TINO_BACKTEST__MAX_CONCURRENT env var overrides backtest.max_concurrent."""
+        from tinohelm.core.config import get_settings
+        monkeypatch.setenv("TINO_BACKTEST__MAX_CONCURRENT", "8")
+        get_settings.cache_clear()
+        try:
+            s = get_settings()
+            assert s.backtest.max_concurrent == 8
+        finally:
+            get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------

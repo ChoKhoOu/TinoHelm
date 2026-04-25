@@ -18,9 +18,8 @@ from tinohelm.api.routes import backtest, dashboard, data, factor, node, optimiz
 from tinohelm.api.ws import hub
 from tinohelm.core.bridge import EventBridge
 from tinohelm.core.config import get_settings
-from tinohelm.core.process_manager import ProcessManager
-from tinohelm.core.watchdog import Watchdog
-from tinohelm.backtest.worker import recover_interrupted_runs as recover_backtest_runs
+from tinohelm.core.node_controller import NodeController
+from tinohelm.backtest import consumer as bt_consumer
 from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker
 from tinohelm.factor.worker import recover_interrupted_jobs as recover_factor_jobs, start_factor_worker, stop_factor_worker
 from tinohelm.db.session import get_session_factory
@@ -53,21 +52,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     redis_client = aioredis.from_url(cfg.redis.url)
     deps.set_redis(redis_client)
 
-    # ProcessManager (uses sync redis internally)
-    pm = ProcessManager(
+    # NodeController (trading-node lifecycle publisher only — backtest
+    # worker pool moved to the async consumer pool below).
+    nc = NodeController(
         redis_url=cfg.redis.url,
         catalog_path=str(cfg.paths.catalog),
         artifacts_path=str(cfg.paths.artifacts),
         db_url=cfg.database.url,
     )
-    deps.set_process_manager(pm)
-
-    # Watchdog
-    watchdog = Watchdog(pm, redis_url=cfg.redis.url)
-    watchdog.start()
-
-    # Start backtest workers
-    pm.start_workers(cfg.backtest.max_workers)
+    deps.set_node_controller(nc)
 
     # Scan strategies directory and persist to DB
     strategies = scan_strategies(cfg.paths.strategies)
@@ -81,8 +74,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await bridge.start()
     deps.set_event_bridge(bridge)
 
-    # Recover stuck backtest runs (mark running → failed)
-    await recover_backtest_runs(redis_client)
+    # Recover stuck backtest runs (re-queue to Redis / legacy → failed)
+    await bt_consumer.recover_interrupted_runs(redis_client)
 
     # Data-fetch worker (async, in-process)
     await recover_interrupted_jobs(redis_client)
@@ -91,6 +84,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Factor worker (async, in-process)
     await recover_factor_jobs(redis_client)
     start_factor_worker(redis_url=cfg.redis.url)
+
+    # Backtest consumer pool (N long-running tasks; each launches a fresh
+    # runner_cli subprocess per job — fresh NT Rust runtime per run).
+    consumer_tasks, consumer_rds = await bt_consumer.start_consumers(
+        n=cfg.backtest.max_concurrent,
+        redis_url=cfg.redis.url,
+        catalog_path=str(cfg.paths.catalog),
+        artifacts_path=str(cfg.paths.artifacts),
+        db_url=cfg.database.url,
+    )
 
     logger.info("TinoHelm API ready")
 
@@ -104,8 +107,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from .routes.optimize import cleanup_optimizer_processes
     cleanup_optimizer_processes()
 
-    await watchdog.stop()
-    pm.shutdown_all()
+    await bt_consumer.stop_consumers(consumer_tasks, consumer_rds, timeout=30.0)
+    nc.shutdown()
     await bridge.stop()
     await redis_client.close()
 

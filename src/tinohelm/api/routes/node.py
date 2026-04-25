@@ -16,9 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import yaml
 
 from tinohelm.api._utils import load_redis_json
-from tinohelm.api.deps import get_db, get_process_manager, get_redis, get_settings_dep
+from tinohelm.api.deps import get_db, get_node_controller, get_redis, get_settings_dep
 from tinohelm.core.config import get_settings, Settings
-from tinohelm.core.process_manager import ProcessManager
+from tinohelm.core.node_controller import NodeController
 from tinohelm.db.models import Position
 
 logger = logging.getLogger(__name__)
@@ -55,11 +55,11 @@ class StrategyLifecycleRequest(BaseModel):
 @router.post("/kill")
 async def kill_switch(
     body: KillSwitchRequest,
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
 ) -> dict:
     """Execute an emergency kill switch."""
     try:
-        await asyncio.to_thread(pm.kill_switch, level=body.level, node_type=body.mode, strategy_id=body.strategy_id)
+        await asyncio.to_thread(nc.kill_switch, level=body.level, node_type=body.mode, strategy_id=body.strategy_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "ok", "level": body.level, "mode": body.mode}
@@ -68,12 +68,12 @@ async def kill_switch(
 @router.post("/lifecycle")
 async def lifecycle_command(
     body: LifecycleRequest,
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
 ) -> dict:
     """Execute a lifecycle command (pause/resume/flatten/halt/unhalt/shutdown)."""
     try:
         await asyncio.to_thread(
-            pm.lifecycle_command,
+            nc.lifecycle_command,
             action=body.action,
             node_type=body.mode,
             strategy_id=body.strategy_id,
@@ -138,12 +138,12 @@ async def list_strategies(
 @router.post("/strategy/start")
 async def start_strategy(
     body: StrategyLifecycleRequest,
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
 ) -> dict:
     """Start a strategy on the node."""
     try:
         await asyncio.to_thread(
-            pm.lifecycle_command,
+            nc.lifecycle_command,
             action="start_strategy",
             node_type=body.mode,
             strategy_name=body.name,
@@ -156,12 +156,12 @@ async def start_strategy(
 @router.post("/strategy/pause")
 async def pause_strategy(
     body: StrategyLifecycleRequest,
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
 ) -> dict:
     """Pause a running strategy."""
     try:
         await asyncio.to_thread(
-            pm.lifecycle_command,
+            nc.lifecycle_command,
             action="pause_strategy",
             node_type=body.mode,
             strategy_name=body.name,
@@ -174,12 +174,12 @@ async def pause_strategy(
 @router.post("/strategy/resume")
 async def resume_strategy(
     body: StrategyLifecycleRequest,
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
 ) -> dict:
     """Resume a paused strategy."""
     try:
         await asyncio.to_thread(
-            pm.lifecycle_command,
+            nc.lifecycle_command,
             action="resume_strategy",
             node_type=body.mode,
             strategy_name=body.name,
@@ -192,12 +192,12 @@ async def resume_strategy(
 @router.post("/strategy/flatten-stop")
 async def flatten_stop_strategy(
     body: StrategyLifecycleRequest,
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
 ) -> dict:
     """Flatten positions and stop a strategy."""
     try:
         await asyncio.to_thread(
-            pm.lifecycle_command,
+            nc.lifecycle_command,
             action="flatten_stop_strategy",
             node_type=body.mode,
             strategy_name=body.name,
@@ -247,11 +247,11 @@ async def subscriptions(
 
 @router.get("/status")
 async def node_status(
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Return the status of all managed nodes, backtest workers, and risk metrics."""
-    status = await asyncio.to_thread(pm.get_status)
+    """Return the status of all managed nodes and risk metrics."""
+    status = await asyncio.to_thread(nc.get_status)
 
     # Compute risk metrics from positions
     total_exposure = 0.0
@@ -326,14 +326,14 @@ async def update_paper_config(
 async def paper_reset(
     mode: Literal["sandbox", "live"] = "sandbox",
     restart: bool = Query(False, description="Restart node after reset"),
-    pm: ProcessManager = Depends(get_process_manager),
+    nc: NodeController = Depends(get_node_controller),
     db: AsyncSession = Depends(get_db),
     rds: aioredis.Redis = Depends(get_redis),
 ) -> dict:
     """Reset paper trading state: shutdown node, clear data, optionally restart."""
     # 1. Shutdown node
     try:
-        await asyncio.to_thread(pm.lifecycle_command, action="shutdown", node_type=mode)
+        await asyncio.to_thread(nc.lifecycle_command, action="shutdown", node_type=mode)
     except Exception:
         pass
 
@@ -369,7 +369,7 @@ async def paper_reset(
     if restart:
         await asyncio.sleep(2)
         try:
-            await asyncio.to_thread(pm.lifecycle_command, action="start", node_type=mode)
+            await asyncio.to_thread(nc.lifecycle_command, action="start", node_type=mode)
             result["restarted"] = True
         except Exception as e:
             result["restarted"] = False
