@@ -1,29 +1,41 @@
-"""Turnover stats for factor-based rebalancing.
+"""Turnover stats for factor-based rebalancing — polars-native.
 
-Migrated from ``research.analysis.compute_turnover``.  Produces
-``{daily, annualized, fee_drag_monthly}`` with the same math and guards
-(AC-13.2).
+Migrated from ``research.analysis.compute_turnover`` (legacy pandas).
+Produces ``{daily, annualized, fee_drag_monthly}`` with the same math
+and guards (AC-13.2 — drift ≤ 1e-6).
 
 Design notes
 ------------
 * Assumes daily rebalancing — annualised with 252 trading days.
 * Monthly fee-drag assumes 21 trading days/month and a 2-sided fill
   (``daily_turn * 2 * fee_rate * 21``).
-* Degenerate factors (constant values) yield ``pd.qcut`` NaN labels; we
-  drop those rows to avoid a false 100 % turnover reading.
+* Degenerate factors (constant values) yield :meth:`pl.Series.qcut`
+  collapsed bins; we drop those rows so the output is the canonical
+  ``{0, 0, 0}`` payload (avoids the "false 100 % turnover" pre-fix
+  regression that pandas ``NaN != NaN`` ``.mean()`` produced).
+* Quantile labels are remapped to the canonical ascending ordering
+  (``q=0`` → lowest factor values) — see
+  :func:`tinohelm.factor.evaluation.quantile._bucketize_canonical`.
+  Although the per-row turnover math is invariant under label
+  permutation (we only care whether the *label* changed between
+  consecutive days), reusing the same helper keeps the two modules
+  algorithmically aligned.
 """
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
+import polars as pl
+
+from tinohelm.factor.evaluation.ic import _build_paired
+from tinohelm.factor.evaluation.quantile import _bucketize_canonical
 
 
 _EMPTY_OUTPUT: dict[str, float] = {"daily": 0, "annualized": 0, "fee_drag_monthly": 0}
 
 
 def compute_turnover(
-    factor: pd.Series,
-    fwd_ret: pd.Series,
+    factor: pl.DataFrame,
+    fwd_ret: pl.DataFrame,
     n_quantiles: int = 5,
     fee_rate: float = 0.0004,
 ) -> dict[str, float]:
@@ -32,40 +44,49 @@ def compute_turnover(
     Returns
     -------
     dict
-        ``{"daily", "annualized", "fee_drag_monthly"}`` — same shape as
-        ``research.analysis.compute_turnover``.  Short input (< ``n_quantiles * 20``
-        pairs) or degenerate factors return the zero-output payload.
+        ``{"daily", "annualized", "fee_drag_monthly"}`` — same shape as the
+        legacy pandas implementation. Short input (< ``n_quantiles * 20``
+        pairs) or degenerate factors return the zero payload.
     """
-    paired = pd.DataFrame({"factor": factor, "fwd_ret": fwd_ret}).dropna()
-    paired = paired[np.isfinite(paired["factor"])]
+    paired = _build_paired(factor, fwd_ret)
 
-    if len(paired) < n_quantiles * 20:
+    if paired.height < n_quantiles * 20:
         return dict(_EMPTY_OUTPUT)
 
-    try:
-        paired["q"] = pd.qcut(paired["factor"], n_quantiles, labels=False, duplicates="drop")
-    except ValueError:
+    bucketed = _bucketize_canonical(paired, n_quantiles)
+    if bucketed is None:
         return dict(_EMPTY_OUTPUT)
 
-    # qcut returns NaN when too few unique values exist to form n_quantiles bins.
-    # NaN-vs-NaN comparison below would otherwise be True, falsely reporting
-    # 100% turnover for a degenerate (constant) factor.
-    paired = paired.dropna(subset=["q"])
-    if paired.empty:
-        return dict(_EMPTY_OUTPUT)
+    # Bucket each row into its calendar day, then walk consecutive days
+    # comparing per-row quantile labels via an inner join on the row position
+    # *within* a day. Legacy used pandas ``align(join="inner")`` on the time
+    # index inside the daily group — replicate that semantics here.
+    bucketed = bucketed.with_columns(
+        pl.col("ts").dt.truncate("1d").alias("day"),
+    )
+    # ``row_in_day`` enumerates rows within each day in chronological order.
+    bucketed = bucketed.sort(["day", "ts"]).with_columns(
+        pl.col("ts").cum_count().over("day").cast(pl.Int64).alias("row_in_day")
+    )
 
-    daily_groups = paired.groupby(pd.Grouper(freq="D"))
+    daily_groups = bucketed.partition_by("day", as_dict=True, maintain_order=True)
     turnovers: list[float] = []
-    prev_q = None
-    for _, group in daily_groups:
-        if len(group) == 0:
+    prev_q: pl.DataFrame | None = None
+    for _key, group in daily_groups.items():
+        if group.height == 0:
             continue
-        curr_q = group["q"]
+        curr_q = group.select(["row_in_day", "q"])
         if prev_q is not None:
-            aligned_prev, aligned_curr = prev_q.align(curr_q, join="inner")
-            if len(aligned_prev) > 0:
-                changed = (aligned_curr.values != aligned_prev.values).mean()
-                turnovers.append(changed)
+            joined = prev_q.rename({"q": "q_prev"}).join(
+                curr_q.rename({"q": "q_curr"}),
+                on="row_in_day",
+                how="inner",
+            )
+            if joined.height > 0:
+                changed_arr = joined.select(
+                    (pl.col("q_curr") != pl.col("q_prev")).cast(pl.Float64).alias("changed")
+                )["changed"].to_numpy()
+                turnovers.append(float(changed_arr.mean()))
         prev_q = curr_q
 
     daily_turn = float(np.mean(turnovers)) if turnovers else 0

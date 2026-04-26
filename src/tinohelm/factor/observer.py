@@ -16,9 +16,48 @@ from dataclasses import dataclass, field
 from typing import Any, Generator
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 _DEFAULT_LOGGER = logging.getLogger(__name__)
+
+# Column name conventions for the canonical wide-table panel layout shared
+# with :mod:`tinohelm.factor.types` (``Panel = pl.DataFrame``).
+_TS_COL: str = "ts"
+
+
+def _extract_value_matrix(panel: Any) -> tuple[np.ndarray, list[int]]:
+    """Return ``(values, shape)`` for a panel of any supported flavour.
+
+    ``values`` is a 2-D ``float64`` numpy array with all symbol cells.
+    ``shape`` is the ``[rows, cols]`` of the symbol matrix (excluding the
+    polars ``ts`` index column when present).
+
+    Supported inputs:
+
+    * :class:`polars.DataFrame` with a ``ts`` column + symbol columns.
+    * :class:`polars.DataFrame` without ``ts`` (every column is a symbol).
+    * Pandas ``DataFrame`` (duck-typed via ``.values``) — kept as a
+      backwards-compatible convenience for tests that still synthesise
+      panels with pandas.
+    """
+    if isinstance(panel, pl.DataFrame):
+        symbol_cols = [c for c in panel.columns if c != _TS_COL]
+        if not symbol_cols:
+            return np.empty((panel.height, 0), dtype=np.float64), [panel.height, 0]
+        # ``to_numpy`` drops the ts column by selecting only symbol cols.
+        matrix = panel.select(symbol_cols).to_numpy()
+        return matrix.astype(float, copy=False), [panel.height, len(symbol_cols)]
+
+    # Duck-typed pandas / numpy DataFrame fallback.  Avoid importing pandas
+    # at module top so the AC-6.1.1 grep stays at zero.
+    if hasattr(panel, "values") and hasattr(panel, "shape"):
+        values = np.asarray(panel.values, dtype=float)  # type: ignore[union-attr]
+        shape = list(panel.shape)  # type: ignore[union-attr]
+        return values, shape
+
+    raise TypeError(
+        f"record_output_stats: unsupported panel type {type(panel).__name__!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -217,25 +256,43 @@ class Observer:
     # Output statistics
     # ------------------------------------------------------------------
 
-    def record_output_stats(self, factor_name: str, panel: pd.DataFrame) -> None:
+    def record_output_stats(self, factor_name: str, panel: Any) -> None:
         """Compute and store output statistics for a factor's Panel.
 
         Statistics computed
         -------------------
-        - ``nan_rate``: proportion of NaN values across the whole panel
-          (``panel.isna().mean().mean()``)
-        - ``nonzero_rate``: proportion of non-NaN, non-zero values
-        - ``min``, ``max``, ``mean``, ``std``: scalar statistics (NaN-safe)
-        - ``shape``: ``(rows, cols)`` tuple
+        - ``nan_rate``: proportion of NaN/null values across all symbol cells.
+        - ``nonzero_rate``: proportion of non-null, non-zero values.
+        - ``min``, ``max``, ``mean``, ``std``: scalar statistics (NaN-safe).
+        - ``shape``: ``[rows, cols]`` tuple of the *symbol* matrix (the
+          internal ``ts`` column is excluded from the column count when
+          ``panel`` follows the polars wide-table contract).
 
         Parameters
         ----------
         factor_name:
             Identifier matching the factor's ``FactorSpec.name``.
         panel:
-            Output :class:`Panel` (time × symbol DataFrame).
+            Output :class:`Panel` (a :class:`polars.DataFrame` with a leading
+            ``ts`` column plus one column per symbol).  Pandas frames are
+            still accepted as a transitional convenience and converted via
+            duck-typing — keeps tests that build inputs with pandas working
+            without forcing this module to import pandas.
         """
-        values = panel.values.astype(float)
+        values, shape = _extract_value_matrix(panel)
+
+        if values.size == 0:
+            stats: dict[str, Any] = {
+                "nan_rate": 0.0,
+                "nonzero_rate": 0.0,
+                "min": None,
+                "max": None,
+                "mean": None,
+                "std": None,
+                "shape": shape,
+            }
+            self._output_stats[factor_name] = stats
+            return
 
         nan_rate = float(np.isnan(values).mean())
 
@@ -246,14 +303,14 @@ class Observer:
         nonzero_rate = float(nonzero_mask.sum() / total_cells) if total_cells > 0 else 0.0
 
         finite_vals = values[np.isfinite(values)]
-        stats: dict[str, Any] = {
+        stats = {
             "nan_rate": nan_rate,
             "nonzero_rate": nonzero_rate,
             "min": float(np.min(finite_vals)) if finite_vals.size > 0 else None,
             "max": float(np.max(finite_vals)) if finite_vals.size > 0 else None,
             "mean": float(np.mean(finite_vals)) if finite_vals.size > 0 else None,
             "std": float(np.std(finite_vals)) if finite_vals.size > 0 else None,
-            "shape": list(panel.shape),
+            "shape": shape,
         }
         self._output_stats[factor_name] = stats
 

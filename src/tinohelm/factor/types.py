@@ -2,36 +2,50 @@
 
 Design notes
 ------------
-- All types use ``@dataclass(frozen=True)`` for hashability and immutability.
-  The factor framework is pure-Python (no NT dependency), so ``@dataclass``
-  is preferred over ``msgspec.Struct`` which is used only in the NT-side code.
-- ``Panel`` is a type alias for ``pd.DataFrame`` rather than a wrapper class.
-  Wrapping DataFrame adds complexity without benefit for a pure-pandas framework;
-  downstream code uses DataFrame's full API directly.  The alias documents
-  intent: index = datetime, columns = symbol.
-- ``EvalResult`` fields are aligned with ``research/analysis.py``
-  ``compute_ic_summary`` + ``compute_half_life`` + ``compute_turnover`` outputs
-  (AC-7.2).  Field names are kept identical so s8 can migrate without touching
-  existing analysis functions.
-- ``code_hash`` in ``FactorSpec`` is a placeholder (computed by s2).  It
-  defaults to empty string so s1-only consumers don't need to supply it.
+- All types use ``@dataclass(frozen=True)`` for hashability and immutability
+  (except :class:`EvalResult`, which is mutable so callers can populate
+  fields incrementally during evaluation).  The factor framework is pure
+  Python (no NT dependency), so ``@dataclass`` is preferred over
+  ``msgspec.Struct`` which is used only in the NT-side code.
+- :data:`Panel` is a type alias for ``pl.DataFrame`` rather than a wrapper
+  class.  As of the polars migration the canonical wide-table layout is::
+
+      column ``ts``      (Datetime, length T)
+      columns symbol₁..N (Float64, factor scores or price fields)
+
+  Wrapping the DataFrame adds complexity without benefit; downstream code
+  uses polars' full API directly.
+- :class:`EvalResult` fields are aligned with ``research/analysis.py``
+  ``compute_ic_summary`` + ``compute_half_life`` + ``compute_turnover``
+  outputs.  Field names are kept identical so downstream code can migrate
+  without touching existing analysis functions.
+- ``code_hash`` in :class:`FactorSpec` is a placeholder (computed by the
+  hash-factor task).  It defaults to empty string so consumers don't need
+  to supply it.
+
+Walk-forward / segmentation extensions
+--------------------------------------
+:class:`WalkForwardSpec` and the new :class:`EvalConfig` fields
+(``universe_id``, ``neutralize``, ``walk_forward``, ``segments``) drive
+the López-de-Prado-style purged & embargoed CV pipeline introduced in
+the factor-framework rebuild (see ``3-tech-design.md`` §3.7).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-import pandas as pd
+import polars as pl
 
 
 # ---------------------------------------------------------------------------
-# Panel — time × symbol DataFrame
+# Panel — wide DataFrame indexed by ``ts`` plus N symbol columns
 # ---------------------------------------------------------------------------
 
-#: Two-dimensional panel: ``index`` is a ``DatetimeIndex``, ``columns`` are
-#: symbol strings (e.g. ``"BTCUSDT-PERP"``).  Values are factor scores or
-#: price fields, depending on context.
-Panel = pd.DataFrame
+#: Two-dimensional wide panel.  Layout: column ``ts`` (Datetime) plus N
+#: symbol columns (e.g. ``"BTCUSDT-PERP"``, ``"ETHUSDT-PERP"``).  Values are
+#: factor scores or price fields, depending on context.
+Panel = pl.DataFrame
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +67,7 @@ class InputSpec:
         non-bar sources.  ``None`` means the factor infers frequency from
         the evaluation config.
     dtype:
-        Expected numpy dtype string (e.g. ``"float64"``).  Used for
+        Expected numpy/polars dtype string (e.g. ``"float64"``).  Used for
         validation only; not enforced at runtime.
     required:
         Whether the field is mandatory.  Optional inputs can be ``None``
@@ -77,7 +91,7 @@ class OutputSpec:
     Attributes
     ----------
     dtype:
-        Numpy dtype string of the output values.
+        Numpy/polars dtype string of the output values.
     value_range:
         Optional ``(min, max)`` tuple documenting the expected output range.
         ``None`` means unbounded.  Example: ``(-1.0, 1.0)`` for a z-scored
@@ -114,17 +128,34 @@ class FactorSpec:
         Default lookback window in bars.  Must be >= 1.  Determines how much
         history must be loaded before the first valid output.
     input_specs:
-        Tuple of ``InputSpec`` objects describing all required/optional inputs.
+        Tuple of :class:`InputSpec` objects describing all required/optional
+        inputs.
     output_spec:
-        ``OutputSpec`` describing the produced signal.
+        :class:`OutputSpec` describing the produced signal.
     params:
         Default parameter dict (e.g. ``{"lookback": 20}``).  Mutable at
         eval time; this is the baseline.
     version:
         Semantic version string (e.g. ``"1.0.0"``).  Bump on logic changes.
     code_hash:
-        SHA-256 hex digest of the factor's source code.  Populated by s2
-        (hash_factor task); defaults to empty string until then.
+        SHA-256 hex digest of the factor's source code.  Populated by the
+        hash-factor task; defaults to empty string until then.
+    needs_backend:
+        Whether the kernel relies on an :class:`AbstractBackend` injected
+        operator set (vs. pure ``polars`` expressions).
+    experimental:
+        Factor requires data-layer support not yet implemented; kernel will
+        raise.  ``/api/factor/list`` filters these out by default.
+    deprecated:
+        Factor is being phased out.  Kept registerable for backwards-
+        compatible re-runs of historical eval results, but hidden from the
+        default factor catalogue and excluded from auto-generated multi-
+        factor reports.  Independent of :attr:`experimental`.
+    signal_compatible:
+        Whether the factor's output can be consumed directly by a
+        :class:`~tinohelm.signal.types.SignalSpec` kernel.  ``False`` means
+        the factor is research-only — exposed in the evaluation UI but never
+        offered as a signal source.
     """
 
     name: str
@@ -137,9 +168,47 @@ class FactorSpec:
     version: str = "1.0.0"
     code_hash: str = ""
     needs_backend: bool = False
-    # Factor requires data-layer support not yet implemented; kernel will raise.
-    # /api/factor/list filters these out by default.
     experimental: bool = False
+    deprecated: bool = False
+    signal_compatible: bool = True
+
+
+# ---------------------------------------------------------------------------
+# WalkForwardSpec — purged & embargoed walk-forward split configuration
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class WalkForwardSpec:
+    """Configuration for López-de-Prado-style walk-forward CV folds.
+
+    Each fold defines an in-sample (train) window followed by an
+    out-of-sample (test) window, with optional ``purge`` (rows dropped
+    from the tail of the train window to prevent leakage from labels
+    overlapping the test window) and ``embargo`` (gap between train and
+    test) buffers.
+
+    Attributes
+    ----------
+    train_bars:
+        Number of bars in each train window.  Must be >= 1.
+    test_bars:
+        Number of bars in each test window.  Must be >= 1.
+    embargo_bars:
+        Number of bars to leave blank between the end of train and the
+        start of test (the López-de-Prado *embargo*).  Default 0.
+    purge_bars:
+        Number of bars to remove from the tail of the train window
+        (the López-de-Prado *purge*).  Default 0.
+    step_bars:
+        Stride between consecutive folds, in bars.  ``None`` (default)
+        means use ``test_bars`` so folds do not overlap.
+    """
+
+    train_bars: int
+    test_bars: int
+    embargo_bars: int = 0
+    purge_bars: int = 0
+    step_bars: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +222,8 @@ class EvalConfig:
     Attributes
     ----------
     universe:
-        List of symbol strings to evaluate against (e.g.
-        ``["BTCUSDT-PERP", "ETHUSDT-PERP"]``).
+        Tuple of symbol strings to evaluate against (e.g.
+        ``("BTCUSDT-PERP", "ETHUSDT-PERP")``).
     start:
         Evaluation window start date/time string (ISO-8601).
     end:
@@ -166,12 +235,31 @@ class EvalConfig:
     cost_bps:
         Round-trip transaction cost in basis points.  Used by cost analysis.
     ic_freq:
-        Pandas offset string for IC grouping (``"D"`` = daily, ``"W"`` = weekly).
+        Pandas-compatible offset alias for IC grouping (``"D"`` = daily,
+        ``"W"`` = weekly).  Mapped to polars ``group_by_dynamic`` ``every``
+        argument by the IC evaluator.
     log_ret:
         Whether to compute log returns instead of simple returns.
     params:
-        Factor parameter overrides applied for this eval run.  Merged on top of
-        ``FactorSpec.params`` defaults.
+        Factor parameter overrides applied for this eval run.  Merged on top
+        of :attr:`FactorSpec.params` defaults.
+    universe_id:
+        Reference into the ``universes`` table — when present, the universe
+        snapshot tied to this id is the authoritative cell mask (PIT-aware).
+        ``None`` uses the inline :attr:`universe` symbol tuple.
+    neutralize:
+        Tuple of :class:`~tinohelm.aligner.exposure.ExposureProvider` names
+        applied as cross-section regression residuals before evaluation.
+        Empty tuple means no neutralization.  Names are resolved by
+        ``aligner/registry.resolve``.
+    walk_forward:
+        Optional :class:`WalkForwardSpec` driving purged & embargoed CV.
+        ``None`` runs the evaluator on the full window without folds.
+    segments:
+        Tuple of segmentation provider names (e.g. ``("btc_trend",
+        "vol_regime", "funding_level")``).  Each provider produces a
+        partition of timestamps which the evaluator slices through to
+        produce per-regime IC/PnL summaries.
     """
 
     universe: tuple[str, ...]
@@ -183,6 +271,10 @@ class EvalConfig:
     ic_freq: str = "D"
     log_ret: bool = False
     params: dict[str, Any] = field(default_factory=dict, compare=False, hash=False)
+    universe_id: int | None = None
+    neutralize: tuple[str, ...] = ()
+    walk_forward: WalkForwardSpec | None = None
+    segments: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +286,7 @@ class EvalResult:
     """Results from a factor evaluation run.
 
     Field names are aligned with ``research/analysis.py`` output to preserve
-    numerical consistency (AC-7.2 / AC-13.2):
+    numerical consistency:
 
     - ``ic_mean``, ``ic_std``, ``ir``, ``ic_tstat``, ``ic_positive_pct``,
       ``ic_max_abs`` — from ``compute_ic_summary``
@@ -205,14 +297,27 @@ class EvalResult:
     - ``quantile_pnl`` — ``avg_returns`` dict from ``compute_quantile_returns``
     - ``is_monotonic`` — monotonicity flag from ``compute_quantile_returns``
 
-    Extended fields populated by s8 evaluation pipeline (default-empty so s1-only
-    consumers are unaffected):
+    Extended fields populated by the evaluation pipeline (default-empty so
+    consumers without the new analytics still see a valid result):
 
     - ``quantile_cum_returns`` — sampled cumulative return series per quantile
-    - ``distribution_stats`` / ``distribution_histogram`` — from ``compute_distribution``
+    - ``distribution_stats`` / ``distribution_histogram`` — from
+      ``compute_distribution``
     - ``robustness`` — ``{shuffle, subsample, cross_symbol}`` from
       ``evaluate_full`` only
     - ``cost`` — edge waterfall dict from ``evaluate_full`` only
+    - ``oos_ic_series`` — per-fold IC summaries from
+      :class:`WalkForwardEvaluator` (each element is a dict with ``fold``,
+      ``train_start``, ``train_end``, ``test_start``, ``test_end``,
+      ``ic_mean``, ``ic_std``, ``sharpe``)
+    - ``segment_results`` — per-segment IC/PnL summaries keyed by segment
+      provider name, e.g. ``{"btc_trend": {"up": {...}, "down": {...}}}``
+    - ``neutralization_config`` — JSON-serialisable record of the providers
+      and parameters used for neutralization (e.g.
+      ``{"providers": ["btc_beta"], "rolling_window": 60, "method": "ols"}``)
+    - ``baseline_id`` — when comparing against a baseline run, the
+      ``factor_runs.id`` of the baseline (in-memory only; persisted via the
+      separate ``factor_runs.baseline_id`` column).
 
     Non-finite floats (NaN / Infinity) must never appear in any field — use
     ``None`` for undefined numeric values so PostgreSQL JSON columns don't
@@ -251,8 +356,8 @@ class EvalResult:
     # IC decay curve (list of {"lag": int, "ic": float})
     ic_decay: list[dict] = field(default_factory=list)
 
-    # Extended fields — populated by the s8 evaluation pipeline.
-    # Default to empty so s1-only consumers don't see any schema change.
+    # Extended fields — populated by the evaluation pipeline.
+    # Default to empty so existing consumers don't see any schema change.
 
     # Per-quantile cumulative return series (sampled) — list per Q label.
     quantile_cum_returns: dict[str, list[dict]] = field(default_factory=dict)
@@ -269,6 +374,28 @@ class EvalResult:
 
     # Cost/edge waterfall (populated by ``evaluate_full`` only).
     cost: dict[str, float] = field(default_factory=dict)
+
+    # Walk-forward / neutralization extensions.
+
+    #: Per-fold IC summary list produced by :class:`WalkForwardEvaluator`.
+    #: Each element is a dict with keys ``fold``, ``train_start``,
+    #: ``train_end``, ``test_start``, ``test_end``, ``ic_mean``, ``ic_std``,
+    #: ``sharpe``.  Empty when :attr:`EvalConfig.walk_forward` is ``None``.
+    oos_ic_series: list[dict] = field(default_factory=list)
+
+    #: Per-segment evaluation results keyed by segment provider name.  Each
+    #: value is a mapping ``{segment_label: {metric: value, ...}}``.  Empty
+    #: when :attr:`EvalConfig.segments` is empty.
+    segment_results: dict[str, dict] = field(default_factory=dict)
+
+    #: JSON-serialisable record of the neutralization configuration applied
+    #: during evaluation.  Empty when no neutralization was requested.
+    neutralization_config: dict[str, Any] = field(default_factory=dict)
+
+    #: Optional baseline run id used for in-memory comparison only — not
+    #: persisted on the result row itself (the dedicated
+    #: ``factor_runs.baseline_id`` column carries this).
+    baseline_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

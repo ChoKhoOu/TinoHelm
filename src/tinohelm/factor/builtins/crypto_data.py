@@ -1,14 +1,15 @@
 """Crypto on-chain / market-depth factors — oi_change, orderbook_imbalance_L1.
 
-Both kernels are marked ``experimental=True`` because ``DataLayer`` does not yet
-support the underlying sources (``open_interest``, ``quote_tick``).  Calling
-them via the orchestrator therefore raises ``NotImplementedError`` and the
-corresponding ``FactorRun`` is marked ``status='failed'`` — the silent empty
-Panel + ``rating=0`` behaviour that previously masked the missing support is
-now impossible.
+Both kernels are marked ``experimental=True`` and ``deprecated=True``: the
+``DataLayer`` does not yet support the underlying sources (``open_interest``
+for ``oi_change``; ``quote_tick`` for ``orderbook_imbalance_L1``).  Calling
+either kernel raises ``NotImplementedError`` so the orchestrator surfaces
+``FactorRun.status='failed'`` instead of silently emitting an empty Panel
+that would later collapse to ``rating=0``.
 
-When data-layer support lands, drop ``experimental=True`` and replace the
-``raise`` with the (already documented) formulas below.
+When data-layer support lands (s21), drop ``experimental=True`` /
+``deprecated=True`` and replace the ``raise`` with the documented formulas
+below.
 """
 from __future__ import annotations
 
@@ -22,22 +23,21 @@ from tinohelm.factor.types import Panel
     params={"lookback": 1},
     description="持仓量变化 — open_interest pct_change (pending DataLayer support)",
     experimental=True,
+    deprecated=True,
 )
 def oi_change(open_interest: Panel, params=None) -> Panel:
     """Open interest percentage change.
 
-    NOTE: Pending ``open_interest`` DataLayer support.  ``DataLayer._load_table``
-    does not know how to load ``source="open_interest"`` and silently returns an
-    empty Panel, which would otherwise surface to the user as ``rating=0`` with
-    no error.  Raising here forces ``FactorRun.status='failed'`` so the problem
-    is visible (matches the ``trade_imbalance`` pattern).
+    Pending ``open_interest`` DataLayer support; raising forces
+    ``FactorRun.status='failed'`` rather than silent empty output.
 
-    Formula (when open_interest is available):
+    Formula (when open_interest is available)::
+
         open_interest.pct_change(n)
     """
     raise NotImplementedError(
-        "oi_change requires open_interest DataLayer support which is not yet "
-        "implemented."
+        "oi_change is experimental and requires open_interest DataLayer "
+        "support which is not yet implemented (tracked under s21)."
     )
 
 
@@ -47,17 +47,19 @@ def oi_change(open_interest: Panel, params=None) -> Panel:
     params={},
     description="L1 委托不平衡 — (bid_vol - ask_vol) / (bid_vol + ask_vol) (pending DataLayer support)",
     experimental=True,
+    deprecated=True,
 )
 def orderbook_imbalance_L1(orderbook_imbalance: Panel, params=None) -> Panel:
     """L1 orderbook imbalance.
 
-    NOTE: Pending ``quote_tick`` DataLayer support.  Same rationale as
-    ``oi_change`` above — raising prevents the silent-empty-output failure mode.
+    Pending ``quote_tick`` DataLayer support; same rationale as
+    ``oi_change`` — raising prevents the silent-empty-output failure mode.
 
-    Formula (when quote_tick is available):
-        (bid_vol - ask_vol) / (bid_vol + ask_vol), already ∈ [-1, 1].
+    Formula (when quote_tick is available)::
+
+        (bid_vol - ask_vol) / (bid_vol + ask_vol),  already in [-1, 1]
     """
     raise NotImplementedError(
-        "orderbook_imbalance_L1 requires quote_tick DataLayer support which is "
-        "not yet implemented."
+        "orderbook_imbalance_L1 is experimental and requires quote_tick "
+        "DataLayer support which is not yet implemented (tracked under s21)."
     )

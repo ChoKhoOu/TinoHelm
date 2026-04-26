@@ -38,13 +38,15 @@ if the path does not exist.
 from __future__ import annotations
 
 import csv
+import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterator
-
-import pandas as pd
+from typing import TYPE_CHECKING, Iterator
 
 from tinohelm.core.paths import paths
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -71,25 +73,39 @@ def _parse_date(value: str | None) -> datetime | None:
     """
     if not value or not value.strip():
         return None
-    value = value.strip()
-    # pd.Timestamp handles all ISO-8601 variants and strips tz-info
-    ts = pd.Timestamp(value)
-    # Normalise to midnight naive datetime
-    return ts.replace(tzinfo=None).to_pydatetime().replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    cleaned = value.strip()
+    # ``datetime.fromisoformat`` (3.11+) handles ``YYYY-MM-DD``, full datetimes
+    # and ``+HH:MM`` offsets.  Trailing ``Z`` is normalised explicitly because
+    # the stdlib parser only accepted it in 3.11+ and we want to be robust.
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(cleaned)
+    except ValueError:
+        # Fall back to plain ``YYYY-MM-DD`` (covers exotic separators).
+        ts = datetime.strptime(cleaned, "%Y-%m-%d")
+    if ts.tzinfo is not None:
+        ts = ts.replace(tzinfo=None)
+    # Normalise to midnight naive datetime to match the legacy contract.
+    return ts.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _to_naive_datetime(ts: datetime | pd.Timestamp) -> datetime:
+def _to_naive_datetime(ts: datetime) -> datetime:
     """Convert *ts* to a timezone-naive ``datetime`` for comparison.
 
     Projects follow naive datetime convention; stripping tzinfo here prevents
     ``TypeError`` when comparing aware/naive datetimes.
+
+    Accepts plain :class:`datetime` *and* duck-typed pandas Timestamp instances
+    (legacy callers).  Pandas timestamps are detected by checking for the
+    ``to_pydatetime`` attribute that all real ``datetime`` subclasses on the
+    project's pandas pin (>= 2.0) provide.
     """
-    if isinstance(ts, pd.Timestamp):
-        return ts.replace(tzinfo=None).to_pydatetime()
+    if hasattr(ts, "to_pydatetime") and not type(ts).__module__.startswith("datetime"):
+        # Duck-typed pandas Timestamp.  Convert via ``to_pydatetime`` so we
+        # never import pandas at module top.
+        ts = ts.to_pydatetime()  # type: ignore[union-attr]
     if ts.tzinfo is not None:
-        # Strip tz without conversion (treat as-is, matching project convention)
         return ts.replace(tzinfo=None)
     return ts
 
@@ -263,6 +279,118 @@ class Universe:
         name = path.stem  # filename without extension, e.g. "binance_perp_top20"
         return cls(rows, name=name)
 
+    @classmethod
+    def from_db_row(cls, row: object) -> "Universe":
+        """Construct a ``Universe`` instance from a DB ORM row (``db.models.Universe``).
+
+        Reads ``pit_rules_json`` (a dict keyed by symbol with ``listing_date``
+        and optional ``delisting_date`` string values) and reconstructs the
+        internal ``_UniverseRow`` list used for PIT queries.
+
+        ``pit_rules_json`` format (stored by ``sync_from_csv``)::
+
+            {
+                "BTCUSDT-PERP": {"listing_date": "2020-01-01", "delisting_date": null},
+                "ETHUSDT-PERP": {"listing_date": "2020-03-01", "delisting_date": "2024-06-01"},
+            }
+
+        Parameters
+        ----------
+        row:
+            SQLAlchemy ORM ``Universe`` instance from ``db.models``.
+
+        Returns
+        -------
+        Universe
+            Populated instance ready for PIT queries.
+        """
+        pit_rules: dict = row.pit_rules_json or {}  # type: ignore[union-attr]
+        rows_list: list[_UniverseRow] = []
+        for symbol, rule in pit_rules.items():
+            listing_date = _parse_date(rule.get("listing_date", ""))
+            if listing_date is None:
+                # Gracefully default to epoch so isolation window never fires
+                listing_date = datetime(1970, 1, 1)
+            delisting_date = _parse_date(rule.get("delisting_date") or "")
+            rows_list.append(_UniverseRow(symbol, listing_date, delisting_date))
+        return cls(rows_list, name=row.name)  # type: ignore[union-attr]
+
+    @classmethod
+    async def sync_from_csv(
+        cls,
+        csv_path: Path,
+        db_session: "AsyncSession",
+    ) -> tuple["Universe", int]:
+        """Idempotent sync of a CSV file into the ``universes`` DB table.
+
+        Reads the CSV, computes a ``sha256`` hash of its content, then:
+
+        - If a row with the same ``source_csv_hash`` already exists → returns
+          the existing row without creating a duplicate.
+        - Otherwise → inserts a new row.
+
+        The ``pit_rules_json`` column is populated with a dict mapping each
+        symbol to its ``listing_date`` / ``delisting_date`` strings.
+
+        Parameters
+        ----------
+        csv_path:
+            Absolute path to the CSV file.  Raises ``FileNotFoundError`` if
+            the file does not exist.
+        db_session:
+            Active async SQLAlchemy session.  The caller is responsible for
+            committing / rolling back.
+
+        Returns
+        -------
+        (Universe, db_row_id)
+            The constructed ``Universe`` instance and the integer primary key
+            of the ``universes`` DB row.
+        """
+        from sqlalchemy import select
+        from tinohelm.db.models import Universe as UniverseORM
+
+        csv_path = Path(csv_path)
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Universe CSV not found: {csv_path}")
+
+        content_bytes = csv_path.read_bytes()
+        csv_hash = hashlib.sha256(content_bytes).hexdigest()
+
+        # Idempotent lookup by hash
+        existing = (await db_session.execute(
+            select(UniverseORM).where(UniverseORM.source_csv_hash == csv_hash)
+        )).scalar_one_or_none()
+
+        if existing is not None:
+            return cls.from_db_row(existing), existing.id
+
+        # Load CSV to build pit_rules_json
+        universe = cls.load_csv(csv_path)
+        pit_rules: dict[str, dict] = {}
+        for row_obj in universe._rows:
+            pit_rules[row_obj.symbol] = {
+                "listing_date": row_obj.listing_date.strftime("%Y-%m-%d"),
+                "delisting_date": (
+                    row_obj.delisting_date.strftime("%Y-%m-%d")
+                    if row_obj.delisting_date is not None
+                    else None
+                ),
+            }
+
+        db_row = UniverseORM(
+            name=universe.name,
+            source_csv_path=str(csv_path),
+            source_csv_hash=csv_hash,
+            min_history_bars=100,
+            new_coin_isolation_days=7,
+            pit_rules_json=pit_rules,
+        )
+        db_session.add(db_row)
+        await db_session.flush()  # populate db_row.id without committing
+
+        return universe, db_row.id
+
     # ------------------------------------------------------------------
     # PIT query
     # ------------------------------------------------------------------
@@ -289,7 +417,7 @@ class Universe:
             result[row.symbol] = (eligible_from, row.delisting_date)
         return result
 
-    def get_symbols_at(self, ts: datetime | pd.Timestamp) -> list[str]:
+    def get_symbols_at(self, ts: datetime) -> list[str]:
         """Return eligible symbols at a given point in time.
 
         Applies both PIT filtering and new-coin isolation (7-day window):
@@ -300,9 +428,9 @@ class Universe:
         Parameters
         ----------
         ts:
-            Query timestamp.  Both ``datetime`` and ``pd.Timestamp`` are
-            accepted.  Timezone-aware values have tzinfo stripped (naive
-            comparison, project convention).
+            Query timestamp.  Both ``datetime`` and duck-typed
+            pandas Timestamp are accepted.  Timezone-aware values have
+            tzinfo stripped (naive comparison, project convention).
 
         Returns
         -------

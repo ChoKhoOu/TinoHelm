@@ -1,64 +1,79 @@
 """Abstract backend interface for panel factor computation.
 
-All operators accept and return ``Panel`` (``pd.DataFrame`` with a
-``DatetimeIndex`` as index and symbol strings as columns).
+All operators accept and return :data:`~tinohelm.factor.types.Panel`
+(``polars.DataFrame`` with column ``ts`` of dtype Datetime plus N symbol
+columns of dtype Float64).
 
 Axis convention (project-wide)
 ------------------------------
 - ``axis=0`` — **cross-sectional** operation: same timestamp, across symbols.
   This is the standard quant convention for "ranking within the universe at
-  time *t*".  Internally maps to ``DataFrame.rank(axis=1, ...)`` because
-  pandas ``axis=1`` operates row-wise (i.e., across columns = symbols).
+  time *t*".  In the wide-table layout this means *across columns* in a
+  given row.
 - ``axis=1`` — **time-series** operation: same symbol, across time.
-  Maps to ``DataFrame.rank(axis=0, ...)``.
+  Operates *down* a single column.
 
 NaN handling
 ------------
 Each operator documents its NaN propagation policy.  The default is to
-delegate to pandas, which propagates NaN conservatively (NaN in → NaN out
-for most rolling/shift ops).
+delegate to polars, which propagates ``null`` conservatively (``null`` in →
+``null`` out for most rolling/shift ops).
+
+Protocol design
+---------------
+:class:`AbstractBackend` is a :class:`typing.Protocol` decorated with
+:func:`typing.runtime_checkable` so callers may use
+``isinstance(obj, AbstractBackend)`` to verify implementations
+structurally.  Existing callers that pass instances around as
+``AbstractBackend`` continue to work unchanged — concrete backends
+(:class:`~tinohelm.factor.backend.polars_backend.PolarsBackend`) do *not*
+need to inherit from this class explicitly.
 """
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from tinohelm.factor.types import Panel
 
 
-class AbstractBackend(ABC):
+@runtime_checkable
+class AbstractBackend(Protocol):
     """Minimal operator set for declarative factor computation.
 
-    All methods are pure (no side effects) and return a new ``Panel``.
+    All methods are pure (no side effects) and return a new :data:`Panel`.
     Implementations must not mutate the input ``panel``.
+
+    The class is a structural :class:`typing.Protocol` — any object exposing
+    these methods with compatible signatures satisfies it.  Decorated with
+    :func:`typing.runtime_checkable`, so :func:`isinstance` checks work at
+    runtime (used by tests and the engine to validate backend injections).
     """
 
     # ------------------------------------------------------------------
     # Time-series operators
     # ------------------------------------------------------------------
 
-    @abstractmethod
     def shift(self, panel: Panel, n: int) -> Panel:
         """Shift all values by ``n`` periods along the time axis.
 
         Equivalent to ``panel.shift(n)`` — positive *n* shifts values
-        forward (introduces NaN at the start), negative *n* shifts
-        backward (introduces NaN at the end).
+        forward (introduces ``null`` at the start), negative *n* shifts
+        backward (introduces ``null`` at the end).
 
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel (``ts`` + N symbol columns).
         n:
             Number of periods to shift.  May be negative.
 
         Returns
         -------
         Panel
-            Shifted panel with NaN in the first/last ``abs(n)`` rows.
+            Shifted panel with ``null`` in the first/last ``abs(n)`` rows.
         """
+        ...
 
-    @abstractmethod
     def rolling(
         self,
         panel: Panel,
@@ -71,34 +86,34 @@ class AbstractBackend(ABC):
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel (``ts`` + N symbol columns).
         window:
             Rolling window size in bars.  Must be >= 1.
         op:
             Aggregation function: ``"mean"``, ``"sum"``, ``"std"``,
             ``"min"``, or ``"max"``.
         min_periods:
-            Minimum number of non-NaN observations required to produce a
-            result.  If ``None``, defaults to ``window`` (pandas default).
+            Minimum number of non-null observations required to produce a
+            result.  If ``None``, defaults to ``window`` (polars default).
             Pass ``1`` to allow results with a single observation.
 
         Returns
         -------
         Panel
-            Rolling-aggregated panel.  First ``window - 1`` rows are NaN
-            when ``min_periods`` is ``None``.
+            Rolling-aggregated panel.  First ``window - 1`` rows are
+            ``null`` when ``min_periods`` is ``None``.
         """
+        ...
 
-    @abstractmethod
     def diff(self, panel: Panel, n: int = 1) -> Panel:
-        """Compute the first discrete difference along the time axis.
+        """Compute the *n*-th discrete difference along the time axis.
 
-        Equivalent to ``panel.diff(n)``.
+        Equivalent to ``panel.diff(n)``.  First *n* rows are ``null``.
 
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel.
         n:
             Periods to shift for computing the difference.  Default 1.
 
@@ -107,17 +122,18 @@ class AbstractBackend(ABC):
         Panel
             Differenced panel.
         """
+        ...
 
-    @abstractmethod
     def pct_change(self, panel: Panel, n: int = 1) -> Panel:
         """Compute percentage change along the time axis.
 
-        Equivalent to ``panel.pct_change(n)``.
+        Equivalent to ``panel.pct_change(n)``.  First *n* rows are
+        ``null``.
 
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel.
         n:
             Periods to shift for computing percentage change.  Default 1.
 
@@ -126,8 +142,8 @@ class AbstractBackend(ABC):
         Panel
             Percentage-change panel.
         """
+        ...
 
-    @abstractmethod
     def ewm(
         self,
         panel: Panel,
@@ -142,7 +158,7 @@ class AbstractBackend(ABC):
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel.
         span:
             Specify decay in terms of span (*com = (span - 1) / 2*).
         alpha:
@@ -155,12 +171,12 @@ class AbstractBackend(ABC):
         Panel
             EWM-aggregated panel.
         """
+        ...
 
     # ------------------------------------------------------------------
     # Cross-sectional / element-wise operators
     # ------------------------------------------------------------------
 
-    @abstractmethod
     def rank(
         self,
         panel: Panel,
@@ -173,18 +189,18 @@ class AbstractBackend(ABC):
         ~~~~~~~~~~~~~~~~~~~~~~~
         - ``axis=0`` (default) — **cross-sectional rank**: ranks across
           symbols at each timestamp.  For a universe of *N* symbols,
-          the rank vector at each row sums to *N* (or lies in ``[0, 1]``
-          when ``pct=True``).  Pandas equivalent: ``df.rank(axis=1)``.
+          the rank vector at each row spans ``1..N`` (or ``[0, 1]``
+          when ``pct=True``).
         - ``axis=1`` — **time-series rank**: ranks across time for each
-          symbol independently.  Pandas equivalent: ``df.rank(axis=0)``.
+          symbol independently.
 
-        NaN handling: NaN values are excluded from ranking (``na_option
-        = "keep"`` in pandas, which assigns NaN to NaN inputs).
+        NaN handling: ``null`` values are excluded from ranking and remain
+        ``null`` in the output.
 
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel.
         axis:
             0 = cross-sectional (across symbols), 1 = time-series
             (across time).
@@ -196,8 +212,8 @@ class AbstractBackend(ABC):
         Panel
             Ranked panel.  Values in ``[0, 1]`` when ``pct=True``.
         """
+        ...
 
-    @abstractmethod
     def clip(
         self,
         panel: Panel,
@@ -212,7 +228,7 @@ class AbstractBackend(ABC):
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel.
         low:
             Lower bound (inclusive).  ``None`` = no lower bound.
         high:
@@ -223,23 +239,24 @@ class AbstractBackend(ABC):
         Panel
             Clipped panel.
         """
+        ...
 
-    @abstractmethod
     def zscore(self, panel: Panel, axis: int = 0) -> Panel:
         """Standardize values to zero-mean, unit-variance.
 
         Applies the same axis convention as :meth:`rank`:
+
         - ``axis=0`` — cross-sectional z-score (standardize across
           symbols at each timestamp).
         - ``axis=1`` — time-series z-score (standardize across time for
           each symbol).
 
-        NaN values are excluded from mean/std computation.
+        ``null`` values are excluded from mean/std computation.
 
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel.
         axis:
             0 = cross-sectional, 1 = time-series.
 
@@ -248,36 +265,37 @@ class AbstractBackend(ABC):
         Panel
             Z-scored panel.
         """
+        ...
 
-    @abstractmethod
     def log(self, panel: Panel) -> Panel:
         """Element-wise natural logarithm.
 
-        NaN propagation: ``log(x)`` for ``x <= 0`` produces NaN (numpy
-        default behaviour).
+        NaN propagation: ``log(x)`` for ``x <= 0`` produces ``null`` /
+        ``NaN`` (numpy default behaviour).
 
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).  Values should be positive.
+            Input panel.  Values should be positive.
 
         Returns
         -------
         Panel
             Log-transformed panel.
         """
+        ...
 
-    @abstractmethod
     def abs(self, panel: Panel) -> Panel:
         """Element-wise absolute value.
 
         Parameters
         ----------
         panel:
-            Input panel (time × symbol).
+            Input panel.
 
         Returns
         -------
         Panel
             Absolute-value panel.
         """
+        ...

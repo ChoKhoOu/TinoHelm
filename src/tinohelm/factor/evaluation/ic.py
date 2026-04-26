@@ -1,37 +1,123 @@
-"""IC / RankIC / IR / t-stat / decay — migrated from ``research/analysis.py``.
+"""IC / RankIC / IR / t-stat / decay — polars-native (post pandas migration).
 
 Numerical contract
 ------------------
 Output values (``ic_mean``, ``ic_std``, ``ir``, ``ic_tstat``,
-``ic_positive_pct``, ``ic_max_abs``) must match
-``research.analysis.compute_ic_summary`` bit-for-bit up to the
-``round(..., N)`` rounding inherited from the legacy implementation
-(AC-13.2: regression diff < 1e-10).
+``ic_positive_pct``, ``ic_max_abs``) match the legacy pandas
+``research.analysis.compute_ic_summary`` implementation up to the same
+``round(..., N)`` rounding (AC-13.2 — drift ≤ 1e-6).
 
-The functions here still work on ``pd.Series`` for factor + forward-return
-pairs — the higher-level ``Evaluator`` takes care of flattening a
-``Panel`` (time × symbol) into series form before calling these.
+Input contract (post-polars)
+----------------------------
+``factor`` / ``fwd_ret`` / ``close`` are 2-column :class:`polars.DataFrame`
+instances with columns ``[ts, value]``:
+
+* ``ts``    — :class:`polars.Datetime` (nanos / micros) — paired by inner
+  join across factor / fwd. Multi-symbol stacked panels may carry
+  duplicate ``ts`` rows (one row per symbol per timestamp); duplicates
+  flow through ``group_by`` correctly (the daily bucket math doesn't care
+  whether a bucket comes from many symbols or one).
+* ``value`` — :class:`polars.Float64` — factor score, forward return, or
+  close price.
+
+The previous :func:`pd.Grouper(freq=...)` is mapped onto polars'
+:meth:`pl.col.dt.truncate` + :meth:`group_by` via :data:`_FREQ_MAP`.
 """
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
+import polars as pl
 from scipy.stats import spearmanr
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers — schema validation + frequency translation
+# ---------------------------------------------------------------------------
+
+_TS_COL: str = "ts"
+_VAL_COL: str = "value"
+
+# Map pandas-compatible offset aliases (used historically across the project)
+# onto polars duration strings consumed by ``dt.truncate``. Anything not in the
+# map falls back to the raw alias (which lets advanced callers pass ``"1h"`` /
+# ``"5m"`` etc. directly).
+_FREQ_MAP: dict[str, str] = {
+    "D": "1d",
+    "W": "1w",
+    "ME": "1mo",
+    "M": "1mo",
+    "H": "1h",
+    "h": "1h",
+    "T": "1m",
+    "min": "1m",
+}
+
+
+def _to_polars_freq(freq: str) -> str:
+    """Translate a pandas-compatible offset alias into a polars duration."""
+    return _FREQ_MAP.get(freq, freq)
+
+
+def _ensure_ts_value_frame(df: pl.DataFrame, name: str) -> pl.DataFrame:
+    """Validate input has ``[ts, value]`` columns; raise ``ValueError`` otherwise.
+
+    Returns the frame unchanged. Kept as a lightweight guard so the
+    sub-functions surface clear errors when callers pass malformed inputs.
+    """
+    if _TS_COL not in df.columns or _VAL_COL not in df.columns:
+        raise ValueError(
+            f"{name!r} expects columns [{_TS_COL!r}, {_VAL_COL!r}]; "
+            f"got: {df.columns!r}"
+        )
+    return df
 
 
 # ---------------------------------------------------------------------------
 # forward_returns — shared helper (used by ic.py + quantile.py + turnover.py)
 # ---------------------------------------------------------------------------
 
-def forward_returns(close: pd.Series, period: int, log_ret: bool = False) -> pd.Series:
-    """Compute forward returns.
+def forward_returns(
+    close: pl.DataFrame,
+    period: int,
+    log_ret: bool = False,
+) -> pl.DataFrame:
+    """Forward-return series.
 
-    ``fwd[t] = close[t+period] / close[t] - 1`` (or log-variant).  The last
-    ``period`` rows are ``NaN`` because the future bar isn't available.
+    ``fwd[t] = close[t+period] / close[t] - 1`` (or log variant). The last
+    ``period`` rows are ``null`` because the future bar isn't available.
+
+    Returns a fresh 2-col :class:`pl.DataFrame` with columns ``[ts, value]``.
+    The caller's frame is **not** mutated.
     """
+    _ensure_ts_value_frame(close, "forward_returns(close)")
     if log_ret:
-        return np.log(close.shift(-period) / close)
-    return close.shift(-period) / close - 1
+        expr = (pl.col(_VAL_COL).shift(-period) / pl.col(_VAL_COL)).log()
+    else:
+        expr = pl.col(_VAL_COL).shift(-period) / pl.col(_VAL_COL) - 1
+    return close.select([pl.col(_TS_COL), expr.alias(_VAL_COL)])
+
+
+# ---------------------------------------------------------------------------
+# Internal: build the joined-and-cleaned (ts, factor, fwd_ret) frame
+# ---------------------------------------------------------------------------
+
+def _build_paired(factor: pl.DataFrame, fwd_ret: pl.DataFrame) -> pl.DataFrame:
+    """Inner-join on ``ts`` and drop non-finite rows.
+
+    Output schema: ``[ts (Datetime), factor (Float64), fwd_ret (Float64)]``.
+    Equivalent of ``pandas DataFrame({"factor": ..., "fwd_ret": ...}).dropna()``
+    plus the historical ``np.isfinite`` guard.
+    """
+    _ensure_ts_value_frame(factor, "factor")
+    _ensure_ts_value_frame(fwd_ret, "fwd_ret")
+
+    paired = (
+        factor.rename({_VAL_COL: "factor"})
+        .join(fwd_ret.rename({_VAL_COL: "fwd_ret"}), on=_TS_COL, how="inner")
+        .drop_nulls()
+        .filter(pl.col("factor").is_finite() & pl.col("fwd_ret").is_finite())
+    )
+    return paired
 
 
 # ---------------------------------------------------------------------------
@@ -39,42 +125,54 @@ def forward_returns(close: pd.Series, period: int, log_ret: bool = False) -> pd.
 # ---------------------------------------------------------------------------
 
 def compute_ic_series(
-    factor: pd.Series,
-    fwd_ret: pd.Series,
+    factor: pl.DataFrame,
+    fwd_ret: pl.DataFrame,
     method: str = "spearman",
     freq: str = "D",
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Per-period Rank IC (Spearman by default).
 
-    Returns a DataFrame with columns ``[date, ic]``.  Groups with < 20 observations
-    or a non-finite IC are dropped.  If fewer than 30 valid pairs exist overall,
-    the function returns an empty frame (with the same columns) so downstream
-    ``compute_ic_summary`` can short-circuit to a zero summary.
+    Returns a 2-col DataFrame with columns ``[date (Utf8), ic (Float64)]``.
+    Groups with < 20 observations or a non-finite IC are dropped. If fewer
+    than 30 valid pairs exist overall, returns an empty frame (with the
+    canonical column order) so :func:`compute_ic_summary` short-circuits to
+    the zero summary.
     """
-    paired = pd.DataFrame({"factor": factor, "fwd_ret": fwd_ret}).dropna()
-    paired = paired[np.isfinite(paired["factor"]) & np.isfinite(paired["fwd_ret"])]
+    paired = _build_paired(factor, fwd_ret)
+    empty_schema = {"date": pl.Utf8, "ic": pl.Float64}
+    if paired.height < 30:
+        return pl.DataFrame(schema=empty_schema)
 
-    if len(paired) < 30:
-        return pd.DataFrame(columns=["date", "ic"])
+    bucket = pl.col(_TS_COL).dt.truncate(_to_polars_freq(freq)).alias("bucket")
+    paired_bucketed = paired.with_columns(bucket)
 
-    grouped = paired.groupby(pd.Grouper(freq=freq))
-    results = []
-    for dt, group in grouped:
-        if len(group) < 20:
+    results: list[dict] = []
+    # ``maintain_order=True`` → buckets emitted in chronological order, mirroring
+    # ``pd.Grouper`` iteration order (legacy regression-test contract).
+    for (bucket_dt,), group in paired_bucketed.group_by(["bucket"], maintain_order=True):
+        if group.height < 20:
             continue
         if method == "spearman":
-            ic, _ = spearmanr(group["factor"], group["fwd_ret"])
+            ic_arr = group.select(
+                pl.corr(pl.col("factor"), pl.col("fwd_ret"), method="spearman").alias("ic")
+            )
+            ic_val = ic_arr.item()
         else:
-            ic = group["factor"].corr(group["fwd_ret"])
-        if np.isfinite(ic):
-            results.append({
-                "date": dt.isoformat() if hasattr(dt, "isoformat") else str(dt),
-                "ic": round(ic, 6),
-            })
+            ic_arr = group.select(
+                pl.corr(pl.col("factor"), pl.col("fwd_ret"), method="pearson").alias("ic")
+            )
+            ic_val = ic_arr.item()
+        if ic_val is None or not np.isfinite(ic_val):
+            continue
+        # ``bucket_dt`` is a python datetime → ``isoformat`` mirrors legacy.
+        results.append({
+            "date": bucket_dt.isoformat() if hasattr(bucket_dt, "isoformat") else str(bucket_dt),
+            "ic": round(float(ic_val), 6),
+        })
 
     if not results:
-        return pd.DataFrame(columns=["date", "ic"])
-    return pd.DataFrame(results)
+        return pl.DataFrame(schema=empty_schema)
+    return pl.DataFrame(results, schema=empty_schema)
 
 
 # ---------------------------------------------------------------------------
@@ -91,28 +189,27 @@ _EMPTY_SUMMARY: dict[str, float] = {
 }
 
 
-def compute_ic_summary(ic_series: pd.DataFrame) -> dict[str, float]:
-    """Compute IC summary stats from IC series.
+def compute_ic_summary(ic_series: pl.DataFrame) -> dict[str, float]:
+    """Aggregate per-period IC values into a 6-key summary.
 
-    Returns a dict with exactly 6 keys: ``ic_mean``, ``ic_std``, ``ir``,
-    ``ic_tstat``, ``ic_positive_pct``, ``ic_max_abs``.  All values are rounded
-    to match the legacy ``research.analysis.compute_ic_summary`` implementation
-    (AC-13.2).
+    Contract preserved from the legacy pandas implementation:
+        * ``np.std`` uses ``ddof=0`` (population standard deviation).
+        * ``ic_positive_pct`` counts strict ``ic > 0`` (zeros do not count).
+        * ``ir`` / ``ic_tstat`` collapse to ``0`` when the std is below a
+          ``1e-12`` IEEE-noise floor (otherwise constant-value IC arrays
+          would emit 10^15-scale residue from the float representation of
+          ``0.1`` / ``0.3`` / ...).
     """
-    if ic_series.empty or "ic" not in ic_series.columns:
+    if ic_series.height == 0 or "ic" not in ic_series.columns:
         return dict(_EMPTY_SUMMARY)
 
-    ics = ic_series["ic"].values
+    ics = ic_series["ic"].to_numpy()
     if len(ics) == 0:
         return dict(_EMPTY_SUMMARY)
 
     mean_ic = float(np.mean(ics))
     std_ic = float(np.std(ics))
-    # Guard against IEEE float noise: np.std of identical values (e.g. [0.1]*N)
-    # leaks a ~1e-17 residue from the double-precision representation of 0.1,
-    # which would otherwise turn IR / t-stat into 10^15-scale garbage. IC
-    # values are rounded to 6 dp in compute_ic_series, so anything below 1e-12
-    # is provably within that rounding tolerance and must be treated as zero.
+    # IEEE noise floor — see legacy module comment for rationale.
     std_eff = std_ic if std_ic > 1e-12 else 0.0
     ir = mean_ic / std_eff if std_eff > 0 else 0
     ic_tstat = mean_ic / (std_eff / np.sqrt(len(ics))) if std_eff > 0 else 0
@@ -138,30 +235,34 @@ _DEFAULT_LAGS: tuple[int, ...] = (1, 2, 3, 5, 8, 13, 21, 34, 55, 89)
 
 
 def compute_ic_decay(
-    factor: pd.Series,
-    close: pd.Series,
+    factor: pl.DataFrame,
+    close: pl.DataFrame,
     lags: list[int] | None = None,
 ) -> list[dict]:
     """IC at multiple forward horizons (decay curve).
 
-    Output shape: ``[{"lag": int, "ic": float}, ...]``.  Lag-groups with
-    fewer than 30 paired observations emit ``ic=0`` (matches legacy).
+    Output shape: ``[{"lag": int, "ic": float}, ...]`` — same as legacy.
+    Lag groups with fewer than 30 paired observations emit ``ic=0``.
     """
+    _ensure_ts_value_frame(factor, "factor")
+    _ensure_ts_value_frame(close, "close")
     if lags is None:
         lags = list(_DEFAULT_LAGS)
 
-    results = []
+    results: list[dict] = []
     for lag in lags:
-        fwd = forward_returns(close, lag)
-        paired = pd.DataFrame({"f": factor, "r": fwd}).dropna()
-        paired = paired[np.isfinite(paired["f"]) & np.isfinite(paired["r"])]
-        if len(paired) < 30:
+        fwd_df = forward_returns(close, lag)
+        paired = _build_paired(factor, fwd_df)
+        if paired.height < 30:
             results.append({"lag": lag, "ic": 0})
             continue
-        ic, _ = spearmanr(paired["f"], paired["r"])
+        ic_arr = paired.select(
+            pl.corr(pl.col("factor"), pl.col("fwd_ret"), method="spearman").alias("ic")
+        )
+        ic_val = ic_arr.item()
         results.append({
             "lag": lag,
-            "ic": round(float(ic), 6) if np.isfinite(ic) else 0,
+            "ic": round(float(ic_val), 6) if ic_val is not None and np.isfinite(ic_val) else 0,
         })
 
     return results
@@ -172,12 +273,13 @@ def compute_ic_decay(
 # ---------------------------------------------------------------------------
 
 def compute_half_life(decay: list[dict]) -> int | None:
-    """Find half-life from decay curve (lag where |IC| drops to half of max).
+    """Find half-life from a decay curve.
 
-    Returns ``None`` if the curve is empty or the peak |IC| is below a
-    noise-floor threshold (< 0.001).  Otherwise returns the first lag whose
-    |IC| is ≤ half of the peak; falls back to the last lag if no such drop
-    is found.  Matches ``research.analysis.compute_half_life`` exactly.
+    Returns ``None`` if the curve is empty or the peak ``|IC|`` is below the
+    noise-floor threshold (< 0.001). Otherwise returns the first lag whose
+    ``|IC|`` is ≤ half of the peak; falls back to the last lag when no such
+    drop is found. Pure Python — works on the same plain-dict output shape
+    produced by :func:`compute_ic_decay`.
     """
     if not decay:
         return None

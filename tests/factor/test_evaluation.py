@@ -40,7 +40,9 @@ from tinohelm.factor.evaluation import (
     subsample_ic,
     summarize_shuffle_distribution,
 )
-from tinohelm.factor.evaluation.evaluator import _finite_or_none, _to_series
+import polars as pl
+
+from tinohelm.factor.evaluation.evaluator import _finite_or_none, _to_ts_value
 from tinohelm.factor.types import EvalConfig, EvalResult
 
 
@@ -113,7 +115,8 @@ def synth_100d_10sym():
 
 class TestICModule:
     def test_empty_ic_series_returns_zero_summary(self):
-        empty = pd.DataFrame(columns=["date", "ic"])
+        # Polars-native input — schema must match the canonical ``[date, ic]``.
+        empty = pl.DataFrame(schema={"date": pl.Utf8, "ic": pl.Float64})
         out = compute_ic_summary(empty)
         assert out == {
             "ic_mean": 0,
@@ -125,12 +128,16 @@ class TestICModule:
         }
 
     def test_short_paired_returns_empty_ic(self):
+        # 20 paired bars are below the 30-pair short-circuit floor.
         idx = pd.date_range("2024-01-01", periods=20, freq="1h")
-        factor = pd.Series(np.arange(20, dtype=float), index=idx)
-        fwd = pd.Series(np.arange(20, dtype=float), index=idx)
+        factor_pd = pd.Series(np.arange(20, dtype=float), index=idx)
+        fwd_pd = pd.Series(np.arange(20, dtype=float), index=idx)
+        # Convert pandas Series → 2-col polars frame to match the new contract.
+        factor = pl.DataFrame({"ts": list(idx.to_pydatetime()), "value": factor_pd.tolist()})
+        fwd = pl.DataFrame({"ts": list(idx.to_pydatetime()), "value": fwd_pd.tolist()})
         ic = compute_ic_series(factor, fwd, freq="D")
-        assert ic.empty
-        assert list(ic.columns) == ["date", "ic"]
+        assert ic.height == 0
+        assert ic.columns == ["date", "ic"]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -141,17 +148,17 @@ class TestICModule:
 class TestQuantileModule:
     def test_short_series_returns_empty(self):
         idx = pd.date_range("2024-01-01", periods=50, freq="1h")
-        out = compute_quantile_returns(
-            pd.Series(np.arange(50, dtype=float), index=idx),
-            pd.Series(np.arange(50, dtype=float), index=idx),
-            n_quantiles=5,
-        )
+        ts_list = list(idx.to_pydatetime())
+        factor = pl.DataFrame({"ts": ts_list, "value": np.arange(50, dtype=float).tolist()})
+        fwd = pl.DataFrame({"ts": ts_list, "value": np.arange(50, dtype=float).tolist()})
+        out = compute_quantile_returns(factor, fwd, n_quantiles=5)
         assert out == {"avg_returns": {}, "cum_returns": {}, "is_monotonic": False}
 
     def test_degenerate_factor_returns_empty(self):
         idx = pd.date_range("2024-01-01", periods=200, freq="1h")
-        factor = pd.Series([1.0] * 200, index=idx)
-        fwd = pd.Series(np.arange(200, dtype=float), index=idx)
+        ts_list = list(idx.to_pydatetime())
+        factor = pl.DataFrame({"ts": ts_list, "value": [1.0] * 200})
+        fwd = pl.DataFrame({"ts": ts_list, "value": np.arange(200, dtype=float).tolist()})
         out = compute_quantile_returns(factor, fwd, n_quantiles=5)
         assert out == {"avg_returns": {}, "cum_returns": {}, "is_monotonic": False}
 
@@ -163,7 +170,8 @@ class TestQuantileModule:
 
 class TestDistributionModule:
     def test_short_returns_empty(self):
-        out = compute_distribution(pd.Series([1.0, 2.0, 3.0]))
+        # Polars Series — only 3 finite values → below the 10-value gate.
+        out = compute_distribution(pl.Series("v", [1.0, 2.0, 3.0]))
         assert out == {"histogram": [], "stats": {}}
 
 
@@ -175,8 +183,9 @@ class TestDistributionModule:
 class TestTurnoverModule:
     def test_degenerate_returns_zero(self):
         idx = pd.date_range("2024-01-01", periods=200, freq="1h")
-        factor = pd.Series([1.0] * 200, index=idx)
-        fwd = pd.Series(np.arange(200, dtype=float), index=idx)
+        ts_list = list(idx.to_pydatetime())
+        factor = pl.DataFrame({"ts": ts_list, "value": [1.0] * 200})
+        fwd = pl.DataFrame({"ts": ts_list, "value": np.arange(200, dtype=float).tolist()})
         out = compute_turnover(factor, fwd, n_quantiles=5)
         assert out == {"daily": 0, "annualized": 0, "fee_drag_monthly": 0}
 
@@ -230,8 +239,9 @@ class TestCostModule:
 class TestRobustnessModule:
     def test_shuffle_short_circuits_small_input(self):
         idx = pd.date_range("2024-01-01", periods=50, freq="1h")
-        factor = pd.Series(np.arange(50, dtype=float), index=idx)
-        fwd = pd.Series(np.arange(50, dtype=float), index=idx)
+        ts_list = list(idx.to_pydatetime())
+        factor = pl.DataFrame({"ts": ts_list, "value": np.arange(50, dtype=float).tolist()})
+        fwd = pl.DataFrame({"ts": ts_list, "value": np.arange(50, dtype=float).tolist()})
         out = shuffle_test(factor, fwd, n_iter=10, max_workers=1)
         assert out == {
             "real_ic": 0,
@@ -371,27 +381,43 @@ class TestNaNScrubbing:
 
 
 class TestPanelFlattening:
-    def test_to_series_passthrough(self):
-        s = pd.Series([1, 2, 3])
-        assert _to_series(s) is s
+    """Tests for ``_to_ts_value`` — the post-polars panel flattener.
 
-    def test_to_series_single_column_df(self):
+    The helper now returns a 2-col ``[ts, value]`` :class:`pl.DataFrame`
+    instead of a flat ``pd.Series``. Pandas inputs are still accepted via
+    duck-typed conversion (so the orchestrator can keep passing pandas
+    Series until the data layer migrates).
+    """
+
+    def test_to_ts_value_passthrough_for_two_col_polars_frame(self):
+        df = pl.DataFrame({"ts": [1, 2, 3], "value": [1.0, 2.0, 3.0]})
+        out = _to_ts_value(df)
+        assert out is df
+
+    def test_to_ts_value_pandas_series_converts_to_polars_frame(self):
+        s = pd.Series([1.0, 2.0, 3.0])
+        out = _to_ts_value(s)
+        assert isinstance(out, pl.DataFrame)
+        assert out.columns == ["ts", "value"]
+        assert out["value"].to_list() == [1.0, 2.0, 3.0]
+
+    def test_to_ts_value_pandas_single_column_df_converts(self):
         df = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
-        out = _to_series(df)
-        assert isinstance(out, pd.Series)
-        pd.testing.assert_series_equal(out, df["a"])
+        out = _to_ts_value(df)
+        assert isinstance(out, pl.DataFrame)
+        assert out["value"].to_list() == [1.0, 2.0, 3.0]
 
-    def test_to_series_multi_column_panel_flattens(self, panel_close):
-        out = _to_series(panel_close)
-        assert isinstance(out, pd.Series)
-        # Flattened length = bars × symbols
-        assert len(out) == panel_close.shape[0] * panel_close.shape[1]
-        # Index is flat DatetimeIndex (not MultiIndex)
-        assert not isinstance(out.index, pd.MultiIndex)
+    def test_to_ts_value_multi_column_panel_flattens(self, panel_close):
+        out = _to_ts_value(panel_close)
+        assert isinstance(out, pl.DataFrame)
+        # Flattened length = bars × symbols (one row per (ts, symbol) cell).
+        assert out.height == panel_close.shape[0] * panel_close.shape[1]
+        # 2-col output: ``ts`` + ``value``.
+        assert out.columns == ["ts", "value"]
 
-    def test_to_series_unsupported_type_raises(self):
+    def test_to_ts_value_unsupported_type_raises(self):
         with pytest.raises(TypeError):
-            _to_series("not a series")
+            _to_ts_value("not a series")
 
 
 # ──────────────────────────────────────────────────────────────────────

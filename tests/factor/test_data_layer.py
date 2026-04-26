@@ -9,17 +9,26 @@ Coverage
 - Missing catalog data returns empty Series (no exception)
 - load() groups DataRequests by field_name → dict with one key per field
 - load_aligned() convenience function aligns funding onto bar index
+
+Polars contract
+---------------
+``DataLayer.load`` returns ``dict[str, polars.DataFrame]`` panels with the
+canonical layout ``[ts, sym1, sym2, ...]`` (Datetime[ns] + Float64 columns).
+Internal Series helpers (``_load_funding_rate`` etc.) return 2-column
+``[ts, value]`` polars frames.  These tests exercise that contract — the
+pre-polars pandas API has been retired.
 """
 from __future__ import annotations
 
 import csv
 import json
+import math
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
 from tinohelm.factor.data_layer import DataLayer, _parse_ts, load_aligned
@@ -106,6 +115,16 @@ def _stub_make_instrument(monkeypatch):
     )
 
 
+def _ts_list(panel: pl.DataFrame) -> list[datetime]:
+    """Return the panel's ``ts`` column as a list of ``datetime``."""
+    return panel["ts"].to_list()
+
+
+def _sym_values(panel: pl.DataFrame, symbol: str) -> list[float | None]:
+    """Return panel[symbol] as a Python list (None for nulls)."""
+    return panel[symbol].to_list()
+
+
 # ---------------------------------------------------------------------------
 # Base timestamps (fixed reference: 2021-05-03 00:00:00 UTC in nanoseconds)
 # ---------------------------------------------------------------------------
@@ -148,10 +167,12 @@ class TestBarClose:
 
         assert "close" in panels
         panel = panels["close"]
+        assert isinstance(panel, pl.DataFrame)
+        assert "ts" in panel.columns
         assert "BTCUSDT-PERP" in panel.columns
-        assert len(panel) == 5
+        assert panel.height == 5
         np.testing.assert_allclose(
-            panel["BTCUSDT-PERP"].values, closes, rtol=1e-4
+            panel["BTCUSDT-PERP"].to_numpy(), closes, rtol=1e-4
         )
 
     def test_two_symbols_close_shape(self, tmp_path: Path, monkeypatch):
@@ -179,8 +200,9 @@ class TestBarClose:
 
         assert "close" in panels
         panel = panels["close"]
-        assert set(panel.columns) == {"BTCUSDT-PERP", "ETHUSDT-PERP"}
-        assert len(panel) >= 4
+        non_ts_cols = {c for c in panel.columns if c != "ts"}
+        assert non_ts_cols == {"BTCUSDT-PERP", "ETHUSDT-PERP"}
+        assert panel.height >= 4
 
 
 # ---------------------------------------------------------------------------
@@ -217,22 +239,23 @@ class TestFundingRate:
         uni = Universe.load_csv(uni_path)
         return catalog_path, funding_dir, uni, ts_ns
 
-    def test_load_funding_json_returns_series(self, tmp_path: Path, monkeypatch):
+    def test_load_funding_json_returns_frame(self, tmp_path: Path, monkeypatch):
         _stub_make_instrument(monkeypatch)
         catalog_path, funding_dir, uni, _ = self._base_setup(tmp_path)
         dl = DataLayer(uni, catalog_root=catalog_path, funding_dir=funding_dir)
 
-        series = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
-        assert isinstance(series, pd.Series)
-        assert len(series) == 2
-        assert series.iloc[0] == pytest.approx(0.0001)
+        frame = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
+        assert isinstance(frame, pl.DataFrame)
+        assert frame.columns == ["ts", "value"]
+        assert frame.height == 2
+        assert frame["value"].to_list()[0] == pytest.approx(0.0001)
 
     def test_funding_aligned_onto_bar_index_as_of_delay(self, tmp_path: Path, monkeypatch):
         """The first bar (at T0) should NOT see the T0 funding rate (as-of delay).
 
         The rate published at T0=00:00 only becomes visible at T0+8h (next period).
         So bars at T0 through T0+8h-1min should show the *previous* (shifted) value,
-        which is NaN for the very first period.
+        which is null for the very first period.
         """
         _stub_make_instrument(monkeypatch)
         catalog_path, funding_dir, uni, ts_ns = self._base_setup(tmp_path)
@@ -240,22 +263,24 @@ class TestFundingRate:
 
         _8h_ms = 8 * 3600 * 1000
         t0_ms = _T0_NS // 1_000_000
-        funding_series = pd.Series(
-            [0.0001, 0.0002],
-            index=pd.DatetimeIndex([
-                pd.Timestamp(t0_ms, unit="ms"),
-                pd.Timestamp(t0_ms + _8h_ms, unit="ms"),
-            ]),
-            name="BTCUSDT-PERP",
-        )
-        bar_index = pd.DatetimeIndex([pd.Timestamp(ts, unit="ns") for ts in ts_ns])
 
-        aligned = dl._align_funding_onto_bar_index(funding_series, bar_index)
+        funding_ts = [
+            datetime(1970, 1, 1) + timedelta(milliseconds=t0_ms),
+            datetime(1970, 1, 1) + timedelta(milliseconds=t0_ms + _8h_ms),
+        ]
+        funding_series = pl.DataFrame(
+            {"ts": funding_ts, "value": [0.0001, 0.0002]},
+            schema={"ts": pl.Datetime("ns"), "value": pl.Float64},
+        )
+
+        bar_ts = [datetime(1970, 1, 1) + timedelta(microseconds=ts // 1_000) for ts in ts_ns]
+        aligned = dl._align_funding_onto_bar_index(funding_series, bar_ts)
 
         # After shift(1), the T0 rate becomes visible only at T0+8h.
-        # Bars before the T0+8h funding rate => NaN (because shift makes T0 rate invisible)
-        assert pd.isna(aligned.iloc[0]), (
-            f"First bar at T0 should be NaN (rate not yet visible), got {aligned.iloc[0]}"
+        # Bars before the T0+8h funding rate => null.
+        first_value = aligned["value"].to_list()[0]
+        assert first_value is None, (
+            f"First bar at T0 should be null (rate not yet visible), got {first_value}"
         )
 
     def test_load_aligned_includes_funding_key(self, tmp_path: Path, monkeypatch):
@@ -271,12 +296,12 @@ class TestFundingRate:
 
         assert "close" in result
         assert "funding_rate" in result
-        assert isinstance(result["funding_rate"], pd.DataFrame)
+        assert isinstance(result["funding_rate"], pl.DataFrame)
         assert "BTCUSDT-PERP" in result["funding_rate"].columns
         # funding panel shape must match bar index length
-        assert len(result["funding_rate"]) == len(result["close"])
+        assert result["funding_rate"].height == result["close"].height
 
-    def test_missing_funding_json_returns_empty_series(self, tmp_path: Path, monkeypatch):
+    def test_missing_funding_json_returns_empty_frame(self, tmp_path: Path, monkeypatch):
         _stub_make_instrument(monkeypatch)
         catalog_path = tmp_path / "catalog"
         catalog_path.mkdir()
@@ -287,9 +312,9 @@ class TestFundingRate:
         uni = Universe.load_csv(uni_path)
         dl = DataLayer(uni, catalog_root=catalog_path, funding_dir=funding_dir)
 
-        series = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
-        assert isinstance(series, pd.Series)
-        assert len(series) == 0
+        frame = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
+        assert isinstance(frame, pl.DataFrame)
+        assert frame.is_empty()
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +325,7 @@ class TestPITFiltering:
     """Symbols in new-coin isolation period are NaN, not removed."""
 
     def test_new_coin_cells_are_nan(self, tmp_path: Path, monkeypatch):
-        """Symbol listed 6 days ago (inside isolation) → all cells NaN."""
+        """Symbol listed 6 days ago (inside isolation) → all cells null."""
         _stub_make_instrument(monkeypatch)
 
         catalog_path = tmp_path / "catalog"
@@ -327,17 +352,17 @@ class TestPITFiltering:
         panels = dl.load(reqs)
 
         panel = panels["close"]
-        # ETH in isolation → all rows are NaN
-        assert panel["ETHUSDT-PERP"].isna().all(), (
-            "ETH in new-coin isolation should be NaN"
+        # ETH in isolation → all values are null
+        eth_nulls = panel["ETHUSDT-PERP"].null_count()
+        assert eth_nulls == panel.height, (
+            "ETH in new-coin isolation should be all null"
         )
-        # BTC outside isolation → no NaN
-        assert not panel["BTCUSDT-PERP"].isna().any(), (
-            "BTC outside isolation should not be NaN"
-        )
+        # BTC outside isolation → no null
+        btc_nulls = panel["BTCUSDT-PERP"].null_count()
+        assert btc_nulls == 0, "BTC outside isolation should not have nulls"
 
     def test_symbol_visible_after_isolation_clears(self, tmp_path: Path, monkeypatch):
-        """Symbol listed exactly 7 days before first bar → not NaN."""
+        """Symbol listed exactly 7 days before first bar → not null."""
         _stub_make_instrument(monkeypatch)
 
         catalog_path = tmp_path / "catalog"
@@ -360,12 +385,12 @@ class TestPITFiltering:
 
         panel = panels["close"]
         # Isolation clears exactly at listing_date + 7d; value must be visible
-        assert not panel["ETHUSDT-PERP"].isna().any(), (
+        assert panel["ETHUSDT-PERP"].null_count() == 0, (
             "ETH isolation should have cleared at T0 (7 days after listing)"
         )
 
     def test_pit_preserves_panel_shape(self, tmp_path: Path, monkeypatch):
-        """PIT filtering sets cells to NaN but does NOT drop rows or columns."""
+        """PIT filtering sets cells to null but does NOT drop rows or columns."""
         _stub_make_instrument(monkeypatch)
 
         catalog_path = tmp_path / "catalog"
@@ -392,8 +417,9 @@ class TestPITFiltering:
         panel = panels["close"]
 
         # Shape must have both columns and all rows
-        assert set(panel.columns) == {"BTCUSDT-PERP", "ETHUSDT-PERP"}
-        assert len(panel) == n_bars
+        non_ts = {c for c in panel.columns if c != "ts"}
+        assert non_ts == {"BTCUSDT-PERP", "ETHUSDT-PERP"}
+        assert panel.height == n_bars
 
 
 # ---------------------------------------------------------------------------
@@ -425,8 +451,9 @@ class TestParallelLoad:
 
         assert "close" in panels
         panel = panels["close"]
-        assert set(panel.columns) == set(symbols)
-        assert len(panel) == 5
+        non_ts = {c for c in panel.columns if c != "ts"}
+        assert non_ts == set(symbols)
+        assert panel.height == 5
 
     def test_partial_failure_does_not_crash(self, tmp_path: Path, monkeypatch):
         """If one symbol has no data, others still load successfully."""
@@ -453,7 +480,7 @@ class TestParallelLoad:
         # Must not raise
         panels = dl.load(reqs)
         panel = panels["close"]
-        # BTC has data; ETH is all NaN or absent
+        # BTC has data; ETH is all null or absent
         assert "BTCUSDT-PERP" in panel.columns
 
 
@@ -521,8 +548,8 @@ class TestLookbackWarmup:
         # User window: skip the first 10 bars.  With lookback=5 the loader must
         # reach back 5 bars earlier, so the Panel should start 5 minutes before
         # the user-specified start, giving kernels the warmup they need.
-        user_start = pd.Timestamp(_T0_NS + 10 * _1MIN_NS, unit="ns")
-        user_end = pd.Timestamp(_T0_NS + 20 * _1MIN_NS, unit="ns")
+        user_start = datetime(1970, 1, 1) + timedelta(microseconds=(_T0_NS + 10 * _1MIN_NS) // 1_000)
+        user_end = datetime(1970, 1, 1) + timedelta(microseconds=(_T0_NS + 20 * _1MIN_NS) // 1_000)
 
         req = DataRequest(
             symbol="BTCUSDT-PERP",
@@ -534,15 +561,16 @@ class TestLookbackWarmup:
         panels = dl.load(req, start=user_start, end=user_end)
         panel = panels["close"]
 
-        assert not panel.empty
+        assert not panel.is_empty()
         # The panel's first timestamp must be <= user_start - 5 minutes
-        expected_warmup_start = user_start - pd.Timedelta(minutes=5)
-        assert panel.index[0] <= expected_warmup_start, (
+        expected_warmup_start = user_start - timedelta(minutes=5)
+        ts_values = _ts_list(panel)
+        assert ts_values[0] <= expected_warmup_start, (
             f"Expected panel to include warmup rows starting at or before "
-            f"{expected_warmup_start}, got {panel.index[0]}"
+            f"{expected_warmup_start}, got {ts_values[0]}"
         )
         # And must still cover the user window
-        assert panel.index[-1] >= user_end - pd.Timedelta(minutes=1)
+        assert ts_values[-1] >= user_end - timedelta(minutes=1)
 
     def test_lookback_zero_does_not_expand_start(self, tmp_path: Path, monkeypatch):
         """When lookback=0 the panel must start at or after ``start`` — no shift."""
@@ -561,8 +589,8 @@ class TestLookbackWarmup:
         uni = Universe.load_csv(uni_path)
         dl = DataLayer(uni, catalog_root=catalog_path)
 
-        user_start = pd.Timestamp(_T0_NS + 10 * _1MIN_NS, unit="ns")
-        user_end = pd.Timestamp(_T0_NS + 20 * _1MIN_NS, unit="ns")
+        user_start = datetime(1970, 1, 1) + timedelta(microseconds=(_T0_NS + 10 * _1MIN_NS) // 1_000)
+        user_end = datetime(1970, 1, 1) + timedelta(microseconds=(_T0_NS + 20 * _1MIN_NS) // 1_000)
 
         req = DataRequest(
             symbol="BTCUSDT-PERP",
@@ -574,22 +602,24 @@ class TestLookbackWarmup:
         panels = dl.load(req, start=user_start, end=user_end)
         panel = panels["close"]
 
-        assert not panel.empty
-        assert panel.index[0] >= user_start
+        assert not panel.is_empty()
+        assert _ts_list(panel)[0] >= user_start
 
 
 class TestParseTs:
     def test_iso_string(self):
         ts = _parse_ts("2021-01-01T00:00:00")
-        assert isinstance(ts, pd.Timestamp)
-        assert ts == pd.Timestamp("2021-01-01")
+        assert isinstance(ts, datetime)
+        assert ts == datetime(2021, 1, 1)
 
-    def test_timestamp_passthrough(self):
-        ts = pd.Timestamp("2021-06-01")
+    def test_datetime_passthrough(self):
+        ts = datetime(2021, 6, 1)
         result = _parse_ts(ts)
         assert result == ts
 
     def test_tz_aware_stripped(self):
-        ts = pd.Timestamp("2021-01-01T00:00:00+00:00")
+        # ``datetime.fromisoformat`` accepts the ``+00:00`` offset.
+        ts = "2021-01-01T00:00:00+00:00"
         result = _parse_ts(ts)
         assert result.tzinfo is None
+        assert result == datetime(2021, 1, 1)

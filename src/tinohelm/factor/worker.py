@@ -194,21 +194,25 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         # ----------------------------------------------------------------
         throttle = PercentStepThrottle(step=PROGRESS_DB_STEP)
 
-        async def _progress(pct: int, msg: str = "") -> None:
+        async def _progress(pct: int, msg: str = "", *, stage: str | None = None) -> None:
             payload = json.dumps({
                 "run_id": run_id,
                 "factor_name": factor_name,
                 "progress": pct,
                 "message": msg,
+                "stage": stage,
             })
             await rds.publish(progress_channel, payload)
             await rds.setex(progress_channel, 86400, str(pct))
-            if throttle.should_write(pct):
+            update_values: dict = {"progress": pct} if throttle.should_write(pct) else {}
+            if stage is not None:
+                update_values["progress_stage"] = stage
+            if update_values:
                 async with factory() as db2:
                     await db2.execute(
                         update(FactorRun)
                         .where(FactorRun.id == run_id)
-                        .values(progress=pct)
+                        .values(**update_values)
                     )
                     await db2.commit()
 
@@ -217,9 +221,9 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         # ----------------------------------------------------------------
         loop = asyncio.get_running_loop()
 
-        def _sync_progress(pct: int, msg: str = "") -> None:
+        def _sync_progress(pct: int, msg: str = "", *, stage: str | None = None) -> None:
             """Bridge: schedule async progress update from a worker thread."""
-            asyncio.run_coroutine_threadsafe(_progress(pct, msg), loop)
+            asyncio.run_coroutine_threadsafe(_progress(pct, msg, stage=stage), loop)
 
         eval_result = await asyncio.to_thread(
             _run_orchestrator,
@@ -301,7 +305,7 @@ def _run_orchestrator(
     calls :meth:`Orchestrator.run`.  Imported lazily to keep worker module
     importable even when heavy deps (pandas, numpy) are absent in test env.
     """
-    from tinohelm.factor.backend.pandas_backend import PandasBackend
+    from tinohelm.factor.backend.polars_backend import PolarsBackend
     from tinohelm.factor.cache import FactorCache
     from tinohelm.factor.data_layer import DataLayer
     from tinohelm.factor.engine.orchestrator import Orchestrator
@@ -326,7 +330,7 @@ def _run_orchestrator(
 
     data_layer = DataLayer(universe_obj, catalog_root=pathlib.Path(catalog_path))
 
-    backend = PandasBackend()
+    backend = PolarsBackend()
     evaluator = Evaluator()
 
     # Cache — use settings.paths.factor_cache (no hardcoded path).
@@ -336,12 +340,12 @@ def _run_orchestrator(
     # The Observer's span mechanism drives coarse-grained step events.
     observer = Observer()
 
-    # Emit progress at major pipeline stages via Observer hook.
-    # stage_pct maps span name → approximate percent on entry.
-    _STAGE_PCT: dict[str, int] = {
-        "data_load": 10,
-        "kernel_exec": 40,
-        "evaluate": 70,
+    # Emit 4-stage progress events via Observer span hook.
+    # Maps observer span name → (pct, stage_label) on span entry.
+    _STAGE_MAP: dict[str, tuple[int, str]] = {
+        "data_load":   (10, "aligning"),
+        "kernel_exec": (40, "computing"),
+        "evaluate":    (70, "evaluating"),
     }
 
     original_start_span = observer.start_span
@@ -350,9 +354,10 @@ def _run_orchestrator(
 
     @contextlib.contextmanager
     def _instrumented_span(name: str, **tags):
-        pct = _STAGE_PCT.get(name)
-        if pct is not None:
-            progress_cb(pct, name)
+        entry = _STAGE_MAP.get(name)
+        if entry is not None:
+            pct, stage = entry
+            progress_cb(pct, name, stage=stage)
         with original_start_span(name, **tags) as ctx:
             yield ctx
 
@@ -388,7 +393,10 @@ def _run_orchestrator(
         full=full,
     )
 
-    progress_cb(100, "Done")
+    # Stage 4: persisting — emitted here so the async layer (step 6 in
+    # _process_job) can write progress_stage="persisting" to DB before the
+    # final completed update.
+    progress_cb(95, "Persisting results", stage="persisting")
     return result
 
 

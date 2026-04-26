@@ -38,10 +38,9 @@ it's threaded into the ``DataRequest`` objects this module generates.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
-import pandas as pd
+from joblib import Parallel, delayed
 
 from tinohelm.factor.backend.base import AbstractBackend
 from tinohelm.factor.cache import FactorCache
@@ -461,37 +460,41 @@ class Orchestrator:
                     s for s in specs_needing_compute if s.name in kernel_map
                 ]
 
-                # Fan out via a local ThreadPoolExecutor. We cannot use the
-                # Scheduler directly because its _select_inputs raises on
-                # missing fields which we want to capture per-factor here.
+                # Fan out via joblib.Parallel (threading backend keeps thread
+                # semantics identical to the old ThreadPoolExecutor while
+                # enabling joblib's smarter load-balancing and progress hooks).
+                # We use backend="threading" rather than "loky" because factor
+                # kernels may be local closures (e.g. in tests) which are not
+                # picklable across a process boundary.
                 n_workers = (
                     max_workers if max_workers is not None else max(1, len(specs_with_kernels))
                 )
 
-                # Record kernel_exec spans in main thread order; actual
-                # execution is concurrent.
+                # Record kernel_exec spans; actual execution is concurrent.
                 with self._observer.start_span("kernel_exec", n_factors=len(specs_with_kernels)):
-                    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                        future_to_spec = {
-                            pool.submit(
-                                _run_one_kernel, spec, kernel_map[spec.name], data, self._backend
-                            ): spec
-                            for spec in specs_with_kernels
-                        }
-                        for future in as_completed(future_to_spec):
-                            spec = future_to_spec[future]
-                            try:
-                                panel = future.result()
-                                factor_values_map[spec.name] = panel
-                            except Exception as exc:  # noqa: BLE001
-                                errors_map[spec.name] = (
-                                    f"{type(exc).__name__}: {exc}"
-                                )
-                                logger.warning(
-                                    "batch_run: factor %r raised %s",
-                                    spec.name,
-                                    errors_map[spec.name],
-                                )
+                    raw_results = Parallel(
+                        n_jobs=n_workers,
+                        backend="threading",
+                        return_exceptions=True,
+                    )(
+                        delayed(_run_one_kernel)(
+                            spec, kernel_map[spec.name], data, self._backend
+                        )
+                        for spec in specs_with_kernels
+                    )
+
+                    for spec, outcome in zip(specs_with_kernels, raw_results):
+                        if isinstance(outcome, BaseException):
+                            errors_map[spec.name] = (
+                                f"{type(outcome).__name__}: {outcome}"
+                            )
+                            logger.warning(
+                                "batch_run: factor %r raised %s",
+                                spec.name,
+                                errors_map[spec.name],
+                            )
+                        else:
+                            factor_values_map[spec.name] = outcome
 
             # 5. Evaluate each successful factor + cache store ------------
             for spec in specs_to_compute:
