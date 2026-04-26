@@ -10,17 +10,24 @@ Validates ``Orchestrator.batch_run``:
 
 As in ``test_e2e_single.py`` we bypass Parquet I/O via a minimal DataLayer
 stub so the test is NT-free and fast.
+
+Polars contract
+---------------
+``Scheduler._call_kernel`` requires kernels to return :class:`polars.DataFrame`
+panels in the canonical wide-table layout (``ts`` column + symbol columns).
+Test fixtures construct synthetic panels directly with polars to match.
 """
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
-from tinohelm.factor.backend.pandas_backend import PandasBackend
+from tinohelm.factor.backend import PolarsBackend
 from tinohelm.factor.cache import FactorCache
 from tinohelm.factor.data_layer import DataLayer
 from tinohelm.factor.decorator import factor
@@ -41,29 +48,51 @@ _START: str = "2024-01-01"
 _END: str = "2024-02-01"
 
 
+def _make_timestamps(n: int) -> list[datetime]:
+    base = datetime(2024, 1, 1)
+    return [base + timedelta(hours=i) for i in range(n)]
+
+
 @pytest.fixture
 def close_panel() -> Panel:
     rng = np.random.default_rng(123)
-    idx = pd.date_range(_START, periods=_N_BARS, freq="1h")
+    timestamps = _make_timestamps(_N_BARS)
     returns = rng.normal(0, 0.005, (_N_BARS, len(SYMBOLS)))
     prices = 100.0 * np.cumprod(1 + returns, axis=0)
-    return pd.DataFrame(prices, index=idx, columns=list(SYMBOLS))
+    payload: dict[str, list] = {"ts": timestamps}
+    for j, sym in enumerate(SYMBOLS):
+        payload[sym] = prices[:, j].tolist()
+    schema = {"ts": pl.Datetime("us")}
+    schema.update({sym: pl.Float64 for sym in SYMBOLS})
+    return pl.DataFrame(payload, schema=schema)
 
 
 @pytest.fixture
 def volume_panel() -> Panel:
     rng = np.random.default_rng(7)
-    idx = pd.date_range(_START, periods=_N_BARS, freq="1h")
-    return pd.DataFrame(
-        rng.uniform(100, 500, (_N_BARS, len(SYMBOLS))),
-        index=idx,
-        columns=list(SYMBOLS),
-    )
+    timestamps = _make_timestamps(_N_BARS)
+    volumes = rng.uniform(100, 500, (_N_BARS, len(SYMBOLS)))
+    payload: dict[str, list] = {"ts": timestamps}
+    for j, sym in enumerate(SYMBOLS):
+        payload[sym] = volumes[:, j].tolist()
+    schema = {"ts": pl.Datetime("us")}
+    schema.update({sym: pl.Float64 for sym in SYMBOLS})
+    return pl.DataFrame(payload, schema=schema)
 
 
 # ---------------------------------------------------------------------------
 # DataLayer stub that counts load() calls
 # ---------------------------------------------------------------------------
+
+def _coerce_to_dt(value) -> datetime:
+    """Coerce ISO strings / datetimes to a tz-naive ``datetime``."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    if hasattr(value, "to_pydatetime"):
+        ts = value.to_pydatetime()
+        return ts.replace(tzinfo=None) if ts.tzinfo else ts
+    return datetime.fromisoformat(str(value))
+
 
 class _StubDataLayer(DataLayer):
     def __init__(self, panels: dict[str, Panel]) -> None:
@@ -76,11 +105,21 @@ class _StubDataLayer(DataLayer):
         for field_name, panel in self._panels.items():
             sl = panel
             if start is not None:
-                sl = sl.loc[pd.Timestamp(start):]
+                start_ts = _coerce_to_dt(start)
+                sl = sl.filter(pl.col("ts") >= pl.lit(start_ts))
             if end is not None:
-                sl = sl.loc[:pd.Timestamp(end)]
-            out[field_name] = sl.copy()
+                end_ts = _coerce_to_dt(end)
+                sl = sl.filter(pl.col("ts") <= pl.lit(end_ts))
+            out[field_name] = sl.clone()
         return out
+
+
+# ---------------------------------------------------------------------------
+# Helpers — polars factor kernel patterns
+# ---------------------------------------------------------------------------
+
+def _value_cols(panel: Panel) -> list[str]:
+    return [c for c in panel.columns if c != "ts"]
 
 
 # ---------------------------------------------------------------------------
@@ -89,17 +128,25 @@ class _StubDataLayer(DataLayer):
 
 @factor(category="动量", lookback=5)
 def momentum_5(close: Panel) -> Panel:
-    return close.pct_change(5)
+    cols = _value_cols(close)
+    return close.with_columns([pl.col(c).pct_change(5).alias(c) for c in cols])
 
 
 @factor(category="动量", lookback=10)
 def momentum_10(close: Panel) -> Panel:
-    return close.pct_change(10)
+    cols = _value_cols(close)
+    return close.with_columns([pl.col(c).pct_change(10).alias(c) for c in cols])
 
 
 @factor(category="波动", lookback=20)
 def volatility_20(close: Panel) -> Panel:
-    return close.pct_change().rolling(20).std()
+    cols = _value_cols(close)
+    return close.with_columns(
+        [
+            pl.col(c).pct_change().rolling_std(window_size=20).alias(c)
+            for c in cols
+        ]
+    )
 
 
 @factor(category="bad", lookback=3)
@@ -136,8 +183,8 @@ def data_layer(close_panel: Panel, volume_panel: Panel) -> _StubDataLayer:
 
 
 @pytest.fixture
-def backend() -> PandasBackend:
-    return PandasBackend()
+def backend() -> PolarsBackend:
+    return PolarsBackend()
 
 
 @pytest.fixture
@@ -172,7 +219,7 @@ def config() -> EvalConfig:
 def orchestrator(
     registry: Registry,
     data_layer: _StubDataLayer,
-    backend: PandasBackend,
+    backend: PolarsBackend,
     evaluator: Evaluator,
     cache: FactorCache,
     observer: Observer,
@@ -307,7 +354,7 @@ class TestParallelExecution:
         self,
         registry: Registry,
         data_layer: _StubDataLayer,
-        backend: PandasBackend,
+        backend: PolarsBackend,
         evaluator: Evaluator,
         cache: FactorCache,
         observer: Observer,
@@ -318,7 +365,10 @@ class TestParallelExecution:
 
         def _slow_factor_kernel(close: Panel) -> Panel:
             time.sleep(sleep_s)
-            return close.pct_change(3)
+            cols = _value_cols(close)
+            return close.with_columns(
+                [pl.col(c).pct_change(3).alias(c) for c in cols]
+            )
 
         for name in ("slow_a", "slow_b", "slow_c"):
             spec = FactorSpec(
@@ -419,7 +469,7 @@ class TestNoCacheBatch:
         self,
         registry: Registry,
         data_layer: _StubDataLayer,
-        backend: PandasBackend,
+        backend: PolarsBackend,
         evaluator: Evaluator,
         observer: Observer,
         config: EvalConfig,

@@ -229,7 +229,6 @@ def test_explore_returns_summary(client):
     with (
         patch("tinohelm.factor.registry.Registry") as MockRegistry,
         patch("tinohelm.factor.data_layer.DataLayer"),
-        patch("tinohelm.factor.backend.pandas_backend.PandasBackend"),
         patch("tinohelm.factor.evaluation.evaluator.Evaluator"),
         patch("tinohelm.factor.cache.FactorCache"),
         patch("tinohelm.factor.observer.Observer"),

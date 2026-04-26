@@ -18,16 +18,23 @@ Coverage
 6. Unknown factor name raises :class:`KeyError`.
 7. ``full=True`` goes through :meth:`Evaluator.evaluate_full` (populates
    robustness + cost fields).
+
+Polars contract
+---------------
+``Scheduler._call_kernel`` requires kernels to return :class:`polars.DataFrame`
+panels in the canonical wide-table layout (``ts`` column + symbol columns).
+Test fixtures construct synthetic panels directly with polars to match.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
-from tinohelm.factor.backend.pandas_backend import PandasBackend
+from tinohelm.factor.backend import PolarsBackend
 from tinohelm.factor.cache import FactorCache
 from tinohelm.factor.data_layer import DataLayer
 from tinohelm.factor.decorator import factor
@@ -39,7 +46,7 @@ from tinohelm.factor.types import EvalConfig, EvalResult, FactorSpec, Panel
 
 
 # ---------------------------------------------------------------------------
-# Synthetic data fixtures
+# Synthetic data fixtures (polars wide-table panels)
 # ---------------------------------------------------------------------------
 
 SYMBOLS: tuple[str, ...] = ("SYM00", "SYM01", "SYM02")
@@ -48,31 +55,53 @@ _START: str = "2024-01-01"
 _END: str = "2024-02-01"
 
 
+def _make_timestamps(n: int) -> list[datetime]:
+    base = datetime(2024, 1, 1)
+    return [base + timedelta(hours=i) for i in range(n)]
+
+
 @pytest.fixture
 def close_panel() -> Panel:
-    """Deterministic synthetic close-price Panel (time × 3 symbols)."""
+    """Deterministic synthetic close-price polars Panel (time × 3 symbols)."""
     rng = np.random.default_rng(123)
-    idx = pd.date_range(_START, periods=_N_BARS, freq="1h")
+    timestamps = _make_timestamps(_N_BARS)
     # Random walk — ensures realistic cross-symbol variation for quantile bins.
     returns = rng.normal(0, 0.005, (_N_BARS, len(SYMBOLS)))
     prices = 100.0 * np.cumprod(1 + returns, axis=0)
-    return pd.DataFrame(prices, index=idx, columns=list(SYMBOLS))
+    payload: dict[str, list] = {"ts": timestamps}
+    for j, sym in enumerate(SYMBOLS):
+        payload[sym] = prices[:, j].tolist()
+    schema = {"ts": pl.Datetime("us")}
+    schema.update({sym: pl.Float64 for sym in SYMBOLS})
+    return pl.DataFrame(payload, schema=schema)
 
 
 @pytest.fixture
 def volume_panel() -> Panel:
     rng = np.random.default_rng(7)
-    idx = pd.date_range(_START, periods=_N_BARS, freq="1h")
-    return pd.DataFrame(
-        rng.uniform(100, 500, (_N_BARS, len(SYMBOLS))),
-        index=idx,
-        columns=list(SYMBOLS),
-    )
+    timestamps = _make_timestamps(_N_BARS)
+    volumes = rng.uniform(100, 500, (_N_BARS, len(SYMBOLS)))
+    payload: dict[str, list] = {"ts": timestamps}
+    for j, sym in enumerate(SYMBOLS):
+        payload[sym] = volumes[:, j].tolist()
+    schema = {"ts": pl.Datetime("us")}
+    schema.update({sym: pl.Float64 for sym in SYMBOLS})
+    return pl.DataFrame(payload, schema=schema)
 
 
 # ---------------------------------------------------------------------------
 # DataLayer stub — bypasses Parquet I/O
 # ---------------------------------------------------------------------------
+
+def _coerce_to_dt(value) -> datetime:
+    """Coerce ISO strings / datetimes to a tz-naive ``datetime``."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    if hasattr(value, "to_pydatetime"):
+        ts = value.to_pydatetime()
+        return ts.replace(tzinfo=None) if ts.tzinfo else ts
+    return datetime.fromisoformat(str(value))
+
 
 class _StubDataLayer(DataLayer):
     """Minimal ``DataLayer`` subclass that returns pre-supplied panels.
@@ -92,15 +121,14 @@ class _StubDataLayer(DataLayer):
         # Slice to the requested window so downstream eval matches the range
         out: dict[str, Panel] = {}
         for field_name, panel in self._panels.items():
-            if start is not None or end is not None:
-                sl = panel
-                if start is not None:
-                    sl = sl.loc[pd.Timestamp(start):]
-                if end is not None:
-                    sl = sl.loc[:pd.Timestamp(end)]
-                out[field_name] = sl.copy()
-            else:
-                out[field_name] = panel.copy()
+            sl = panel
+            if start is not None:
+                start_ts = _coerce_to_dt(start)
+                sl = sl.filter(pl.col("ts") >= pl.lit(start_ts))
+            if end is not None:
+                end_ts = _coerce_to_dt(end)
+                sl = sl.filter(pl.col("ts") <= pl.lit(end_ts))
+            out[field_name] = sl.clone()
         return out
 
 
@@ -114,15 +142,23 @@ def _register_factor(registry: Registry, func, spec: FactorSpec) -> None:
     registry._kernel_cache[spec.name] = func
 
 
+def _value_cols(panel: Panel) -> list[str]:
+    return [c for c in panel.columns if c != "ts"]
+
+
 # A simple declarative factor used by every test below.
 @factor(category="动量", lookback=5, description="5-bar percent change")
 def ret_5(close: Panel) -> Panel:
-    return close.pct_change(5)
+    cols = _value_cols(close)
+    return close.with_columns([pl.col(c).pct_change(5).alias(c) for c in cols])
 
 
 @factor(category="波动", lookback=10)
 def vol_10(close: Panel) -> Panel:
-    return close.rolling(10).std()
+    cols = _value_cols(close)
+    return close.with_columns(
+        [pl.col(c).rolling_std(window_size=10).alias(c) for c in cols]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +179,8 @@ def data_layer(close_panel: Panel, volume_panel: Panel) -> _StubDataLayer:
 
 
 @pytest.fixture
-def backend() -> PandasBackend:
-    return PandasBackend()
+def backend() -> PolarsBackend:
+    return PolarsBackend()
 
 
 @pytest.fixture
@@ -179,7 +215,7 @@ def config() -> EvalConfig:
 def orchestrator(
     registry: Registry,
     data_layer: _StubDataLayer,
-    backend: PandasBackend,
+    backend: PolarsBackend,
     evaluator: Evaluator,
     cache: FactorCache,
     observer: Observer,
@@ -380,7 +416,7 @@ class TestNoCacheOrchestrator:
         self,
         registry: Registry,
         data_layer: _StubDataLayer,
-        backend: PandasBackend,
+        backend: PolarsBackend,
         evaluator: Evaluator,
         observer: Observer,
         config: EvalConfig,
@@ -408,7 +444,7 @@ class TestAutoObserver:
         self,
         registry: Registry,
         data_layer: _StubDataLayer,
-        backend: PandasBackend,
+        backend: PolarsBackend,
         evaluator: Evaluator,
         cache: FactorCache,
         config: EvalConfig,

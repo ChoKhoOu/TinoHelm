@@ -13,19 +13,25 @@ Coverage
 - Result dict contains output for each successful factor.
 - Multi-layer plan: layer 1 executes after layer 0.
 - kernel_map parameter routes to the correct callable.
+
+Polars contract
+---------------
+``Scheduler._call_kernel`` requires kernels to return :class:`polars.DataFrame`
+panels in the canonical wide-table layout (``ts`` column + symbol columns).
+Test fixtures construct synthetic panels directly with polars to match.
 """
 from __future__ import annotations
 
 import time
-from typing import Any
+from datetime import datetime, timedelta
 
-import pandas as pd
+import polars as pl
 import pytest
 
-from tinohelm.factor.backend.pandas_backend import PandasBackend
-from tinohelm.factor.engine.planner import Plan, Planner
+from tinohelm.factor.backend import PolarsBackend
+from tinohelm.factor.engine.planner import Plan
 from tinohelm.factor.engine.scheduler import Scheduler
-from tinohelm.factor.types import DataRequest, FactorSpec, InputSpec, Panel
+from tinohelm.factor.types import FactorSpec, InputSpec, Panel
 
 
 # ---------------------------------------------------------------------------
@@ -37,10 +43,20 @@ FREQ = "1-MINUTE"
 
 
 def _make_panel(n_rows: int = 10, symbols: list[str] | None = None) -> Panel:
-    """Create a minimal time × symbol DataFrame for testing."""
+    """Create a minimal time × symbol polars Panel for testing.
+
+    Layout matches the Scheduler contract: column ``ts`` (Datetime) plus N
+    symbol columns of dtype Float64.
+    """
     syms = symbols or SYMBOLS
-    idx = pd.date_range("2025-01-01", periods=n_rows, freq="1min")
-    return pd.DataFrame(1.0, index=idx, columns=syms)
+    base_ts = datetime(2025, 1, 1)
+    timestamps = [base_ts + timedelta(minutes=i) for i in range(n_rows)]
+    payload: dict[str, list] = {"ts": timestamps}
+    for sym in syms:
+        payload[sym] = [1.0] * n_rows
+    schema = {"ts": pl.Datetime("us")}
+    schema.update({sym: pl.Float64 for sym in syms})
+    return pl.DataFrame(payload, schema=schema)
 
 
 def _make_spec(
@@ -67,6 +83,11 @@ def _make_plan(specs: list[FactorSpec]) -> Plan:
     )
 
 
+def _identity_kernel(close: Panel) -> Panel:
+    """Return ``close`` unchanged — picklable + polars-typed."""
+    return close.clone()
+
+
 # ---------------------------------------------------------------------------
 # Parallel execution timing test (AC requirement)
 # ---------------------------------------------------------------------------
@@ -74,7 +95,7 @@ def _make_plan(specs: list[FactorSpec]) -> Plan:
 class TestParallelExecution:
     def test_three_factors_run_in_parallel(self):
         """3 factors each sleep 0.2 s → total < 0.5 s (not 0.6 s serial)."""
-        backend = PandasBackend()
+        backend = PolarsBackend()
         scheduler = Scheduler()
 
         close_panel = _make_panel()
@@ -89,7 +110,7 @@ class TestParallelExecution:
 
         def slow_kernel(close: Panel) -> Panel:
             time.sleep(0.2)
-            return close * 1.0
+            return close.clone()
 
         kernel_map = {
             "factor_a": slow_kernel,
@@ -120,7 +141,7 @@ class TestParallelExecution:
 
 class TestFailureIsolation:
     def setup_method(self):
-        self.backend = PandasBackend()
+        self.backend = PolarsBackend()
         self.scheduler = Scheduler()
         self.data = {"close": _make_panel(), "volume": _make_panel()}
 
@@ -133,7 +154,8 @@ class TestFailureIsolation:
         plan = _make_plan(specs)
 
         def good_kernel(close: Panel) -> Panel:
-            return close * 2.0
+            symbol_cols = [c for c in close.columns if c != "ts"]
+            return close.with_columns([(pl.col(c) * 2.0).alias(c) for c in symbol_cols])
 
         def bad_kernel(close: Panel) -> Panel:
             raise RuntimeError("intentional test failure")
@@ -148,7 +170,7 @@ class TestFailureIsolation:
         )
 
         assert "good_factor" in results
-        assert isinstance(results["good_factor"], pd.DataFrame)
+        assert isinstance(results["good_factor"], pl.DataFrame)
         assert "bad_factor" in results["errors"]
         assert "RuntimeError" in results["errors"]["bad_factor"]
 
@@ -159,7 +181,7 @@ class TestFailureIsolation:
             plan,
             data={"close": _make_panel()},
             backend=self.backend,
-            kernel_map={"ok": lambda close: close},
+            kernel_map={"ok": _identity_kernel},
         )
         assert "errors" in results
 
@@ -170,7 +192,7 @@ class TestFailureIsolation:
             plan,
             data={"close": _make_panel()},
             backend=self.backend,
-            kernel_map={"ok": lambda close: close * 1.0},
+            kernel_map={"ok": _identity_kernel},
         )
         assert results["errors"] == {}
 
@@ -180,7 +202,7 @@ class TestFailureIsolation:
         plan = _make_plan([spec])
 
         def kernel(volume: Panel) -> Panel:
-            return volume
+            return volume.clone()
 
         results = self.scheduler.execute(
             plan,
@@ -199,7 +221,7 @@ class TestFailureIsolation:
 
         # Kernel only uses close; volume not passed but that's fine for optional
         def kernel(close: Panel) -> Panel:
-            return close
+            return close.clone()
 
         results = self.scheduler.execute(
             plan,
@@ -237,7 +259,7 @@ class TestFailureIsolation:
 class TestMissingKernel:
     def test_no_kernel_recorded_as_error(self):
         """Factor with no kernel in kernel_map (and no __factor_func__) → error."""
-        backend = PandasBackend()
+        backend = PolarsBackend()
         scheduler = Scheduler()
         spec = _make_spec("orphan_factor", ["close"])
         plan = _make_plan([spec])
@@ -259,7 +281,7 @@ class TestMissingKernel:
 class TestMultiLayerExecution:
     def test_two_layers_execute_in_order(self):
         """Layer 0 results appear before layer 1 is executed."""
-        backend = PandasBackend()
+        backend = PolarsBackend()
         scheduler = Scheduler()
 
         execution_order: list[str] = []
@@ -278,7 +300,7 @@ class TestMultiLayerExecution:
         def make_recording_kernel(name: str):
             def kernel(close: Panel) -> Panel:
                 execution_order.append(name)
-                return close * 1.0
+                return close.clone()
             return kernel
 
         kernel_map = {
@@ -301,7 +323,7 @@ class TestMultiLayerExecution:
 
 class TestKernelMap:
     def test_kernel_map_routes_correctly(self):
-        backend = PandasBackend()
+        backend = PolarsBackend()
         scheduler = Scheduler()
         close_panel = _make_panel()
 
@@ -312,7 +334,7 @@ class TestKernelMap:
 
         def my_kernel(close: Panel) -> Panel:
             sentinel[0] = True
-            return close
+            return close.clone()
 
         results = scheduler.execute(
             plan,
@@ -325,21 +347,25 @@ class TestKernelMap:
         assert "my_factor" in results
 
     def test_result_is_dataframe(self):
-        backend = PandasBackend()
+        backend = PolarsBackend()
         scheduler = Scheduler()
         close_panel = _make_panel()
 
         spec = _make_spec("factor_x", ["close"])
         plan = _make_plan([spec])
 
+        def doubler(close: Panel) -> Panel:
+            symbol_cols = [c for c in close.columns if c != "ts"]
+            return close.with_columns([(pl.col(c) * 2.0).alias(c) for c in symbol_cols])
+
         results = scheduler.execute(
             plan,
             data={"close": close_panel},
             backend=backend,
-            kernel_map={"factor_x": lambda close: close * 2.0},
+            kernel_map={"factor_x": doubler},
         )
 
-        assert isinstance(results["factor_x"], pd.DataFrame)
+        assert isinstance(results["factor_x"], pl.DataFrame)
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +374,7 @@ class TestKernelMap:
 
 class TestEmptyPlan:
     def test_empty_plan_returns_only_errors_key(self):
-        backend = PandasBackend()
+        backend = PolarsBackend()
         scheduler = Scheduler()
         plan = Plan(data_requests=[], layers=[])
 
