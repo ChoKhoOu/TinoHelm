@@ -127,7 +127,7 @@ class Orchestrator:
         loading.  Must already be configured with a :class:`Universe`.
     backend:
         :class:`~tinohelm.factor.backend.base.AbstractBackend` implementation
-        (typically :class:`~tinohelm.factor.backend.pandas_backend.PandasBackend`).
+        (typically :class:`~tinohelm.factor.backend.polars_backend.PolarsBackend`).
     evaluator:
         :class:`~tinohelm.factor.evaluation.evaluator.Evaluator` instance.
     cache:
@@ -471,11 +471,15 @@ class Orchestrator:
                 )
 
                 # Record kernel_exec spans; actual execution is concurrent.
+                # ``_run_one_kernel`` returns ``BaseException`` instead of
+                # raising so that one factor failing does not abort the
+                # whole ``Parallel`` batch (joblib 1.5 dropped the
+                # ``return_exceptions`` kwarg — failure isolation is
+                # implemented in the worker function instead).
                 with self._observer.start_span("kernel_exec", n_factors=len(specs_with_kernels)):
                     raw_results = Parallel(
                         n_jobs=n_workers,
                         backend="threading",
-                        return_exceptions=True,
                     )(
                         delayed(_run_one_kernel)(
                             spec, kernel_map[spec.name], data, self._backend
@@ -570,13 +574,27 @@ def _run_one_kernel(
     kernel: Callable,
     data: dict[str, Panel],
     backend: AbstractBackend,
-) -> Panel:
+) -> Panel | BaseException:
     """Worker-thread entry that pairs _select_inputs + _call_kernel.
 
     Kept at module level so it pickles cleanly for any future
     :class:`ProcessPoolExecutor` migration.
+
+    Failure isolation contract
+    --------------------------
+    Returns a :class:`BaseException` instance instead of raising when the
+    kernel fails.  joblib 1.5 dropped support for the ``return_exceptions``
+    kwarg, so exceptions raised inside ``Parallel`` workers now propagate
+    through ``Parallel.__call__`` and abort the whole batch.  Catching here
+    keeps the behaviour the call-site in :meth:`Orchestrator.batch_run`
+    already expects (it inspects each outcome with
+    ``isinstance(outcome, BaseException)``) and preserves the design's
+    failure-isolation guarantee.
     """
-    return _call_kernel(spec, kernel, data, backend)
+    try:
+        return _call_kernel(spec, kernel, data, backend)
+    except BaseException as exc:  # noqa: BLE001 — by design: isolate per-factor failures
+        return exc
 
 
 __all__ = ["Orchestrator"]
