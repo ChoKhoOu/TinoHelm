@@ -117,7 +117,7 @@ export interface EvalResultPayload {
 export interface FactorReportResponse {
   run_id: string;
   factor_name: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   progress?: number;
   error?: string | null;
   result?: EvalResultPayload;

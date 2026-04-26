@@ -22,6 +22,15 @@ export type WsEventPayload = {
   symbol?: string;
   data_type?: string;
   summary?: { sharpe_ratio?: number; [key: string]: unknown };
+  // signal events
+  signal_name?: string;
+  sharpe?: number;
+  // cost deviation events
+  fill_id?: string;
+  instrument_id?: string;
+  expected_bps?: number;
+  actual_bps?: number;
+  deviation_bps?: number;
   [key: string]: unknown;
 };
 
@@ -54,6 +63,9 @@ export const ROUTING_TABLE: Record<string, RouteConfig> = {
   "data.fetch.failed":    { channel: "toast", type: "error",   dedupeKey: (e) => e.job_id ?? "" },
   "factor.completed":     { channel: "toast", type: "success", dedupeKey: (e) => e.run_id ?? "" },
   "factor.failed":        { channel: "toast", type: "error",   dedupeKey: (e) => e.run_id ?? "" },
+  "signal.completed":     { channel: "toast", type: "success", dedupeKey: (e) => `signal-completed-${e.run_id ?? ""}` },
+  "signal.failed":        { channel: "toast", type: "error",   dedupeKey: (e) => `signal-failed-${e.run_id ?? ""}` },
+  "signal.cost.deviation":{ channel: "toast", type: "warning", dedupeKey: (e) => `cost-dev-${e.fill_id ?? ""}`, dedupeWindowMs: 10000 },
   "strategy.started":     { channel: "toast", type: "info" },
   "strategy.stopped":     { channel: "toast", type: "info" },
   "connection.degraded":  { channel: "toast", type: "warning", dedupeKey: (e) => e.exchange ?? "", dedupeWindowMs: 30000 },
@@ -128,6 +140,30 @@ export function formatToastMessage(eventType: string, event: object): { title: s
       return {
         title: `${e.factor_name ?? "因子"} 评估失败 ${id ? `· ${id}` : ""}`,
         description: e.error ?? undefined,
+      };
+    }
+    case "signal.completed": {
+      const id = (e.run_id ?? "").slice(0, 6);
+      const sharpe = typeof e.sharpe === "number" ? e.sharpe.toFixed(2) : null;
+      return {
+        title: `${e.signal_name ?? "Signal"} 完成 ${id ? `· ${id}` : ""}`,
+        description: sharpe != null ? `Sharpe ${sharpe}` : undefined,
+      };
+    }
+    case "signal.failed": {
+      const id = (e.run_id ?? "").slice(0, 6);
+      return {
+        title: `${e.signal_name ?? "Signal"} 失败 ${id ? `· ${id}` : ""}`,
+        description: e.error ?? undefined,
+      };
+    }
+    case "signal.cost.deviation": {
+      const devBps = typeof e.deviation_bps === "number" ? e.deviation_bps.toFixed(1) : "?";
+      const expBps = typeof e.expected_bps === "number" ? e.expected_bps.toFixed(1) : "?";
+      const actBps = typeof e.actual_bps === "number" ? e.actual_bps.toFixed(1) : "?";
+      return {
+        title: `成本偏离 · ${e.instrument_id ?? ""}`,
+        description: `偏差 ${devBps}bps（预期 ${expBps}bps，实际 ${actBps}bps）`,
       };
     }
     case "strategy.started":

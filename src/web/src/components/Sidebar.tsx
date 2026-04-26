@@ -6,7 +6,7 @@ import Link from "next/link";
 import {
   LayoutDashboard, FlaskConical, Activity, Brain,
   Database, BarChart3, Eye, ArrowUpDown, Settings2, Settings,
-  ChevronLeft, ChevronRight, Hexagon,
+  ChevronLeft, ChevronRight, Hexagon, GitCompare, Layers,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipTrigger,
@@ -21,6 +21,8 @@ const navGroups: { title: string; items: NavItem[] }[] = [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
       { href: "/backtest", label: "Backtests", icon: FlaskConical },
       { href: "/factor", label: "Factor Research", icon: Hexagon },
+      { href: "/factor/compare", label: "Factor Compare", icon: GitCompare },
+      { href: "/signal", label: "Signals", icon: Layers },
     ],
   },
   {
