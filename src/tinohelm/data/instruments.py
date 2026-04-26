@@ -40,6 +40,11 @@ def _funding_info_cache_file() -> Path:
     """Path to the fundingInfo JSON cache (resolved at call time)."""
     return paths.get("data_cache") / "funding_info_cache.json"
 
+
+def _circulating_supply_cache_file() -> Path:
+    """Path to the circulating supply JSON cache (resolved at call time)."""
+    return paths.get("data_cache") / "circulating_supply_cache.json"
+
 # Known NT currency constants (import once, map for fast lookup)
 _KNOWN_CURRENCIES: dict[str, Any] | None = None
 
@@ -276,6 +281,193 @@ def fetch_funding_info(testnet: bool = False) -> dict[str, int]:
         )
 
     return intervals
+
+
+# ---------------------------------------------------------------------------
+# Circulating supply fetching & caching
+# ---------------------------------------------------------------------------
+
+# Fallback constants for well-known symbols when the Binance bapi endpoint
+# is unavailable.  Values are approximate circulating supply as of 2026-04.
+_CIRCULATING_SUPPLY_FALLBACK: dict[str, float] = {
+    "BTCUSDT": 19_700_000.0,
+    "ETHUSDT": 120_000_000.0,
+    "BNBUSDT": 155_000_000.0,
+    "SOLUSDT": 460_000_000.0,
+    "XRPUSDT": 57_000_000_000.0,
+}
+
+# Binance bapi composite endpoint — returns a list of products with ``cs``
+# (circulating supply) field for each asset.
+_BINANCE_COMPOSITE_PRODUCTS_URL = (
+    "https://www.binance.com/bapi/asset/v1/public/asset-service/product/get-products"
+)
+
+
+def fetch_circulating_supply(symbol: str) -> float:
+    """Fetch circulating supply for a symbol with 24 h file-cache.
+
+    Parameters
+    ----------
+    symbol:
+        Any of ``"BTCUSDT-PERP"``, ``"BTCUSDT-PERP.BINANCE"``, ``"BTCUSDT"``,
+        etc.  The function normalises it to the plain Binance API symbol
+        (e.g. ``"BTCUSDT"``) before lookups.
+
+    Returns
+    -------
+    float
+        Circulating supply (number of coins/tokens in circulation).
+
+    Cache
+    -----
+    ``~/.tino/data/circulating_supply_cache.json``:
+
+    .. code-block:: json
+
+        {
+            "BTCUSDT": {"supply": 19700000.0, "fetched_at": "2026-04-26T08:30:00Z"},
+            ...
+        }
+
+    Algorithm
+    ---------
+    1. Read cache file.
+    2. If cache entry exists and ``fetched_at`` is within 24 h → return cached.
+    3. Otherwise call Binance bapi composite endpoint → parse ``cs`` field
+       → write cache → return.
+    4. If HTTP fails but a stale cache entry exists → return stale + warning.
+    5. If HTTP fails and no cache entry → try fallback constant → raise if absent.
+    """
+    binance_sym = strip_to_binance_api_symbol(symbol)
+    cache_file = _circulating_supply_cache_file()
+
+    # --- Step 1–2: Check cache ---
+    cache: dict[str, dict] = {}
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Corrupt circulating supply cache; ignoring")
+            cache = {}
+
+    entry = cache.get(binance_sym)
+    if entry is not None:
+        try:
+            fetched_at_str = entry["fetched_at"]
+            # Parse ISO-8601 string to epoch seconds for comparison
+            from datetime import datetime, timezone
+            fetched_dt = datetime.fromisoformat(fetched_at_str.replace("Z", "+00:00"))
+            age_seconds = (
+                datetime.now(timezone.utc) - fetched_dt
+            ).total_seconds()
+            if age_seconds < _CACHE_TTL_SECONDS:
+                logger.debug(
+                    "Using cached circulating supply for %s (age %.0f s)",
+                    binance_sym,
+                    age_seconds,
+                )
+                return float(entry["supply"])
+            logger.debug(
+                "Circulating supply cache expired for %s (age %.0f s > %d s)",
+                binance_sym,
+                age_seconds,
+                _CACHE_TTL_SECONDS,
+            )
+        except (KeyError, ValueError, TypeError):
+            logger.warning("Malformed cache entry for %s; refetching", binance_sym)
+
+    # --- Step 3: Fetch from Binance bapi composite endpoint ---
+    supply: float | None = None
+    try:
+        import httpx
+
+        logger.info(
+            "Fetching circulating supply from %s", _BINANCE_COMPOSITE_PRODUCTS_URL
+        )
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.get(_BINANCE_COMPOSITE_PRODUCTS_URL)
+            resp.raise_for_status()
+            data = resp.json()
+
+        # Response shape: {"data": [{"s": "BTCUSDT", "cs": 19700000.0, ...}, ...]}
+        products: list[dict] = data.get("data", [])
+        for product in products:
+            # Match on the symbol without -PERP suffix
+            if product.get("s", "").upper() == binance_sym:
+                raw_cs = product.get("cs")
+                if raw_cs is not None:
+                    supply = float(raw_cs)
+                    break
+
+        if supply is None:
+            logger.warning(
+                "Symbol %s not found in bapi composite response; "
+                "falling back to hardcoded constant",
+                binance_sym,
+            )
+
+    except Exception:
+        logger.warning(
+            "Failed to fetch circulating supply for %s from %s",
+            binance_sym,
+            _BINANCE_COMPOSITE_PRODUCTS_URL,
+            exc_info=True,
+        )
+
+    if supply is None:
+        # --- Step 4: Stale cache fallback ---
+        if entry is not None:
+            logger.warning(
+                "HTTP failed for %s; returning stale cached supply", binance_sym
+            )
+            return float(entry["supply"])
+
+        # --- Step 5: Hardcoded fallback ---
+        fallback = _CIRCULATING_SUPPLY_FALLBACK.get(binance_sym)
+        if fallback is not None:
+            logger.warning(
+                "Using hardcoded fallback supply for %s: %s", binance_sym, fallback
+            )
+            return fallback
+
+        raise ValueError(
+            f"Could not determine circulating supply for {binance_sym!r}: "
+            f"HTTP fetch failed and no fallback constant available."
+        )
+
+    # --- Write updated cache (atomic) ---
+    from datetime import datetime, timezone
+
+    cache[binance_sym] = {
+        "supply": supply,
+        "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    cache_dir = paths.get("data_cache")
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(cache_dir), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(cache, f, ensure_ascii=False)
+            os.replace(tmp_path, str(cache_file))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        logger.debug(
+            "Wrote circulating supply cache for %s (supply=%s)",
+            binance_sym,
+            supply,
+        )
+    except OSError:
+        logger.warning(
+            "Could not write circulating supply cache to %s", cache_file
+        )
+
+    return supply
 
 
 def _find_symbol_info(

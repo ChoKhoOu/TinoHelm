@@ -43,7 +43,8 @@ class PathRegistry:
       ``logs``, ``funding_rates``, ``data_cache``, ``factor_cache``.
     * Derived fields (computed from a base field + subpath):
       ``factors_dir`` = ``research / "factors"``;
-      ``universes_dir`` = ``research / "universes"``.
+      ``universes_dir`` = ``research / "universes"``;
+      ``signals_dir`` = ``research / "signals"``.
 
     Unknown fields raise :class:`PathConfigError`.  Tests can install
     temporary values via :meth:`override` and reset with
@@ -77,6 +78,7 @@ class PathRegistry:
     _DERIVED_FIELDS: ClassVar[dict[str, tuple[str, str]]] = {
         "factors_dir": ("research", "factors"),
         "universes_dir": ("research", "universes"),
+        "signals_dir": ("research", "signals"),
     }
 
     def __init__(self) -> None:
