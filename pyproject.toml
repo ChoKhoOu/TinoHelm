@@ -35,7 +35,9 @@ test = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-x -q --tb=short"
+# Note: -x is intentionally NOT here so CI can run the full suite without first-failure
+# short-circuit. Local devs who want fail-fast can pass `pytest -x` explicitly.
+addopts = "-q --tb=short"
 asyncio_mode = "auto"
 filterwarnings = [
     "ignore::DeprecationWarning:nautilus_trader.*",
