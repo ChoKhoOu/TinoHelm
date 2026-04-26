@@ -10,13 +10,23 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection
 
+# Module-level integration marker — these tests require a real PostgreSQL instance
+# and a working alembic CLI (subprocess). CI without DB service must filter them out
+# via `-m "not integration"`.
+pytestmark = pytest.mark.integration
+
 DB_URL = "postgresql+asyncpg://tinohelm:tinohelm_secret@localhost:5432/tinohelm"
+
+# Repo root resolved from this file's location: <repo>/tests/db/test_migration_012.py
+# parents[0]=<repo>/tests/db, parents[1]=<repo>/tests, parents[2]=<repo>
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ── 7 required indexes per AC-3 ──
 EXPECTED_INDEXES = {
@@ -51,7 +61,7 @@ def _run_alembic(*args: str) -> None:
         [sys.executable, "-m", "alembic"] + list(args),
         capture_output=True,
         text=True,
-        cwd="/Users/ouzhuohao/TinoHelm",
+        cwd=str(_REPO_ROOT),
     )
     assert result.returncode == 0, (
         f"alembic {' '.join(args)} failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"

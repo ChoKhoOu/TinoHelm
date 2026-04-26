@@ -26,6 +26,12 @@ import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+# Module-level integration marker — sync_from_csv / from_db_row tests (1-4) need a
+# real PostgreSQL instance with the migrated schema. The API mock tests (5-6) do not
+# strictly need DB but are kept under the same marker so the whole module is gated
+# uniformly behind `-m "not integration"` in environments without DB infrastructure.
+pytestmark = pytest.mark.integration
+
 DB_URL = "postgresql+asyncpg://tinohelm:tinohelm_secret@localhost:5432/tinohelm"
 
 
