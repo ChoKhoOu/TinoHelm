@@ -21,3 +21,7 @@ RISK_GUARD_FLATTEN = "risk.guard.flatten"
 LIFECYCLE_PAUSE = "lifecycle.pause"      # Usage: f"{LIFECYCLE_PAUSE}.{strategy_id}"
 LIFECYCLE_RESUME = "lifecycle.resume"    # Usage: f"{LIFECYCLE_RESUME}.{strategy_id}"
 LIFECYCLE_FLATTEN = "lifecycle.flatten"
+
+# Signal cost monitoring (MetricsActor -> Redis PubSub)
+# Redis channel format: f"tino:{node_type}:{SIGNAL_COST_DEVIATION}"
+SIGNAL_COST_DEVIATION = "signal.cost.deviation"
