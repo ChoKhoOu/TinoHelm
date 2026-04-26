@@ -287,10 +287,88 @@ class FactorRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # ── 012 new columns ──
+    baseline_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    oos_ic_series: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    neutralization_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    universe_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("universes.id", ondelete="SET NULL"), nullable=True)
+    signal_spec_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    segment_results: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    progress_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)  # aligning/computing/evaluating/persisting
+
+    universe: Mapped["Universe | None"] = relationship("Universe", back_populates="factor_runs", foreign_keys="[FactorRun.universe_id]")
 
     __table_args__ = (
         Index("ix_factor_runs_factor_name", "factor_name"),
         Index("ix_factor_runs_status", "status"),
+        Index("ix_factor_runs_baseline", "baseline_id"),
+        Index("ix_factor_runs_universe", "universe_id"),
+    )
+
+
+class SignalRun(Base):
+    """Signal evaluation run — mirrors factor_runs pattern for signal kernel evaluation."""
+    __tablename__ = "signal_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    signal_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    factor_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="queued", server_default="queued", nullable=False)
+    config: Mapped[dict] = mapped_column(JSON, nullable=False)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    progress_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)  # aligning/computing/evaluating/persisting
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    universe_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("universes.id", ondelete="SET NULL"), nullable=True)
+
+    universe: Mapped["Universe | None"] = relationship("Universe", back_populates="signal_runs", foreign_keys="[SignalRun.universe_id]")
+
+    __table_args__ = (
+        Index("ix_signal_runs_signal_name", "signal_name"),
+        Index("ix_signal_runs_factor_ref", "factor_ref"),
+        Index("ix_signal_runs_status", "status"),
+    )
+
+
+class Universe(Base):
+    """Universe-as-first-class-object — PIT-aware symbol list for factor/signal evaluation."""
+    __tablename__ = "universes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    source_csv_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_csv_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    min_history_bars: Mapped[int] = mapped_column(Integer, nullable=False, server_default="100")
+    new_coin_isolation_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="7")
+    pit_rules_json: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    factor_runs: Mapped[list["FactorRun"]] = relationship("FactorRun", back_populates="universe", foreign_keys="[FactorRun.universe_id]")
+    signal_runs: Mapped[list["SignalRun"]] = relationship("SignalRun", back_populates="universe", foreign_keys="[SignalRun.universe_id]")
+
+    __table_args__ = (
+        Index("ix_universes_name", "name", unique=True),
+    )
+
+
+class ExposuresCache(Base):
+    """Cached exposure values for btc_beta / log_mcap providers."""
+    __tablename__ = "exposures_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider_name: Mapped[str] = mapped_column(String(40), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(40), nullable=False)
+    ts_event_ns: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_exposures_cache_lookup", "provider_name", "symbol", "ts_event_ns", unique=True),
     )
 
 
