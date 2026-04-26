@@ -1,14 +1,17 @@
-"""Unit tests — ``tinohelm.factor.evaluation.robustness`` (pure/NT-free helpers).
+"""Unit tests — ``tinohelm.factor.evaluation.robustness`` (polars-native).
 
 Covers only the deterministic pure helpers:
 
 * ``summarize_shuffle_distribution(real_ic, shuffle_ics, bins=50)`` —
   histogram + p-value payload builder, wire-format contract for the
-  shuffle-significance chart.
+  shuffle-significance chart. Pure numpy under the hood — unchanged
+  by the polars migration.
 * ``subsample_ic(factor, fwd_ret, freq)`` — periodic IC buckets for the
-  robustness card.
+  robustness card. Now consumes 2-col ``[ts, value]`` :class:`pl.DataFrame`
+  inputs; per-bucket Spearman is computed via :func:`pl.corr` with
+  ``method="spearman"``.
 * ``_single_shuffle_ic((factor_vals, fwd_vals, seed))`` — single-shuffle
-  worker function (pure, deterministic under fixed seed).
+  worker function (numpy arrays in, deterministic under fixed seed).
 * Module constants ``SHUFFLE_MIN_OBSERVATIONS`` and
   ``SHUFFLE_SIGNIFICANCE_THRESHOLD`` must not drift silently.
 
@@ -20,10 +23,10 @@ Pure, deterministic, NT-free, < 100 ms.
 """
 from __future__ import annotations
 
-import math
+import datetime as dt
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
 from tinohelm.factor.evaluation.robustness import (
@@ -33,6 +36,21 @@ from tinohelm.factor.evaluation.robustness import (
     subsample_ic,
     summarize_shuffle_distribution,
 )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Shared helpers
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _hourly_ts(n: int, start: dt.datetime = dt.datetime(2024, 1, 1)) -> pl.Series:
+    """Build an N-row hourly :class:`pl.Datetime` index for fixtures."""
+    return pl.datetime_range(
+        start=start,
+        end=start + dt.timedelta(hours=n - 1),
+        interval="1h",
+        eager=True,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -161,9 +179,11 @@ class TestSummarizeShuffleDistribution:
 class TestSubsampleIc:
     def _make_correlated(self, n: int, seed: int = 0):
         rng = np.random.default_rng(seed)
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-        factor = pd.Series(rng.normal(0, 1, n), index=idx)
-        fwd = pd.Series(0.5 * factor.values + rng.normal(0, 0.3, n), index=idx)
+        ts = _hourly_ts(n)
+        factor_arr = rng.normal(0, 1, n)
+        fwd_arr = 0.5 * factor_arr + rng.normal(0, 0.3, n)
+        factor = pl.DataFrame({"ts": ts, "value": factor_arr.tolist()})
+        fwd = pl.DataFrame({"ts": ts, "value": fwd_arr.tolist()})
         return factor, fwd
 
     def test_returns_list_of_dicts_with_period_and_ic(self):
@@ -173,22 +193,27 @@ class TestSubsampleIc:
             assert set(entry.keys()) == {"period", "ic"}
 
     def test_empty_input_returns_empty_list(self):
-        factor = pd.Series([], dtype=float, index=pd.DatetimeIndex([]))
-        fwd = pd.Series([], dtype=float, index=pd.DatetimeIndex([]))
+        empty_ts = pl.Series("ts", [], dtype=pl.Datetime)
+        factor = pl.DataFrame({"ts": empty_ts, "value": pl.Series("value", [], dtype=pl.Float64)})
+        fwd = pl.DataFrame({"ts": empty_ts, "value": pl.Series("value", [], dtype=pl.Float64)})
         assert subsample_ic(factor, fwd) == []
 
     def test_small_groups_below_20_are_skipped(self):
-        # 30 hourly bars spread across 2 months — each bucket < 20.
-        # Use explicit sparse timestamps: 10 hourly samples in January, 10 in
-        # February, 10 in March → every monthly group has 10 < 20 → all dropped.
-        ts = []
-        for month_start in ["2024-01-15", "2024-02-15", "2024-03-15"]:
-            start = pd.Timestamp(month_start)
-            ts.extend(start + pd.Timedelta(hours=h) for h in range(10))
-        idx = pd.DatetimeIndex(ts)
+        # 30 hourly bars spread across 3 months — each bucket has 10 < 20.
+        # Use explicit sparse timestamps: 10 hourly samples in January,
+        # 10 in February, 10 in March → every monthly group has 10 < 20 →
+        # all dropped.
+        ts_list = []
+        for month_start in [
+            dt.datetime(2024, 1, 15),
+            dt.datetime(2024, 2, 15),
+            dt.datetime(2024, 3, 15),
+        ]:
+            ts_list.extend(month_start + dt.timedelta(hours=h) for h in range(10))
+        ts = pl.Series("ts", ts_list)
         rng = np.random.default_rng(5)
-        factor = pd.Series(rng.normal(0, 1, 30), index=idx)
-        fwd = pd.Series(rng.normal(0, 1, 30), index=idx)
+        factor = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, 30).tolist()})
+        fwd = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, 30).tolist()})
         assert subsample_ic(factor, fwd, freq="ME") == []
 
     def test_period_formatted_as_yyyy_mm(self):
@@ -207,9 +232,9 @@ class TestSubsampleIc:
     def test_perfect_correlation_within_each_period_yields_ic_1(self):
         # fwd is a monotone transform of factor on every bar → Spearman IC = 1.
         n = 2400  # ~100 days hourly
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-        factor = pd.Series(np.arange(n, dtype=float), index=idx)
-        fwd = factor.copy()
+        ts = _hourly_ts(n)
+        factor = pl.DataFrame({"ts": ts, "value": np.arange(n, dtype=float).tolist()})
+        fwd = pl.DataFrame({"ts": ts, "value": np.arange(n, dtype=float).tolist()})
         out = subsample_ic(factor, fwd, freq="ME")
         assert len(out) > 0
         for entry in out:
@@ -217,15 +242,18 @@ class TestSubsampleIc:
 
     def test_nan_ic_group_is_skipped(self):
         # A period where factor is constant → spearman returns NaN → skipped.
-        # Use 2 months where January has variable, February has constant.
-        idx = pd.date_range("2024-01-01", periods=1400, freq="1h")
+        # Use 2 months where January has variable, February+March has constant.
+        n = 1400
+        ts = _hourly_ts(n)
         rng = np.random.default_rng(7)
-        factor_vals = rng.normal(0, 1, 1400)
+        factor_vals = rng.normal(0, 1, n).tolist()
         # Pin February onwards to a constant.
-        cutover = (idx >= pd.Timestamp("2024-02-01")).argmax()
-        factor_vals[cutover:] = 5.0
-        factor = pd.Series(factor_vals, index=idx)
-        fwd = pd.Series(rng.normal(0, 1, 1400), index=idx)
+        cutover_ts = dt.datetime(2024, 2, 1)
+        for i, t in enumerate(ts.to_list()):
+            if t >= cutover_ts:
+                factor_vals[i] = 5.0
+        factor = pl.DataFrame({"ts": ts, "value": factor_vals})
+        fwd = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, n).tolist()})
         out = subsample_ic(factor, fwd, freq="ME")
         # February entry is dropped (NaN), January entry remains.
         periods = {e["period"] for e in out}
@@ -234,12 +262,16 @@ class TestSubsampleIc:
     def test_filters_nan_and_inf_pairs(self):
         # Blow out 90 % of rows with NaN/Inf; the remainder still monthly-binned.
         n = 1400
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+        ts = _hourly_ts(n)
         rng = np.random.default_rng(8)
-        factor = pd.Series(rng.normal(0, 1, n), index=idx)
-        fwd = pd.Series(rng.normal(0, 1, n), index=idx)
-        factor.iloc[:500] = np.nan
-        fwd.iloc[500:1000] = np.inf
+        f_vals = rng.normal(0, 1, n).tolist()
+        r_vals = rng.normal(0, 1, n).tolist()
+        for i in range(500):
+            f_vals[i] = float("nan")
+        for i in range(500, 1000):
+            r_vals[i] = float("inf")
+        factor = pl.DataFrame({"ts": ts, "value": f_vals})
+        fwd = pl.DataFrame({"ts": ts, "value": r_vals})
         # Must not raise; must produce at most January + February buckets.
         out = subsample_ic(factor, fwd, freq="ME")
         assert isinstance(out, list)
@@ -307,4 +339,16 @@ class TestPureDiscipline:
                 if not line.startswith((" ", "\t")):
                     assert "nautilus" not in stripped, (
                         f"top-level NT import leaked into pure robustness module: {line}"
+                    )
+
+    def test_source_does_not_import_pandas_at_module_top(self):
+        # Polars-only contract — AC-1 of the s09 migration.
+        import tinohelm.factor.evaluation.robustness as mod
+        src = open(mod.__file__, encoding="utf-8").read()
+        for line in src.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")) and not stripped.startswith("#"):
+                if not line.startswith((" ", "\t")):
+                    assert "pandas" not in stripped, (
+                        f"top-level pandas import leaked into evaluation module: {line}"
                     )

@@ -1,9 +1,9 @@
-"""Unit tests — ``tinohelm.factor.evaluation.ic``.
+"""Unit tests — ``tinohelm.factor.evaluation.ic`` (polars-native).
 
 Locks the numerical contract of the 5 IC primitives
 (``forward_returns`` / ``compute_ic_series`` / ``compute_ic_summary`` /
 ``compute_ic_decay`` / ``compute_half_life``) against a zero-tolerance
-drift requirement:
+drift requirement (drift ≤ 1e-6 vs. legacy pandas implementation):
 
 * Schema (dict keys, DataFrame columns, element shape) is pinned.
 * Every rounding precision baked into the legacy implementation is
@@ -16,14 +16,18 @@ drift requirement:
   ``0`` when ``std == 0``, ``isoformat`` is the date-column encoder —
   are each pinned by a dedicated test.
 
+The previous fixtures used ``pd.Series`` with a DatetimeIndex; the new
+polars contract uses 2-col :class:`pl.DataFrame` ``[ts, value]``.
+
 Pure-logic, deterministic (fixed seeds), NT-free, < 200 ms total.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
 from tinohelm.factor.evaluation.ic import (
@@ -38,47 +42,71 @@ from tinohelm.factor.evaluation.ic import (
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Shared helpers
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _hourly_ts(n: int, start: dt.datetime = dt.datetime(2024, 1, 1)) -> pl.Series:
+    """Build an N-row hourly :class:`pl.Datetime` index for fixtures."""
+    return pl.datetime_range(
+        start=start,
+        end=start + dt.timedelta(hours=n - 1),
+        interval="1h",
+        eager=True,
+    )
+
+
+def _make_frame(values, ts: pl.Series | None = None) -> pl.DataFrame:
+    """Convenience constructor: build a 2-col ``[ts, value]`` polars frame."""
+    arr = np.asarray(values, dtype=float)
+    if ts is None:
+        ts = _hourly_ts(len(arr))
+    return pl.DataFrame({"ts": ts, "value": arr.tolist()})
+
+
+# ──────────────────────────────────────────────────────────────────────
 # forward_returns
 # ──────────────────────────────────────────────────────────────────────
 
 
 class TestForwardReturns:
-    def test_simple_returns_shape_and_nan_tail(self):
-        close = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0])
+    def test_simple_returns_shape_and_null_tail(self):
+        close = _make_frame([100.0, 101.0, 102.0, 103.0, 104.0])
         out = forward_returns(close, period=1)
-        # Last row must be NaN (no future bar).
-        assert math.isnan(out.iloc[-1])
+        # Last row must be null (no future bar).
+        assert out["value"][-1] is None
         # Rolling shift means first N-1 rows are valid numbers.
         expected = [1 / 100, 1 / 101, 1 / 102, 1 / 103]
         for i, exp in enumerate(expected):
-            assert math.isclose(out.iloc[i], exp, rel_tol=1e-12)
+            assert math.isclose(out["value"][i], exp, rel_tol=1e-12)
 
     def test_log_returns_are_natural_log(self):
-        close = pd.Series([100.0, 110.0, 121.0])
+        close = _make_frame([100.0, 110.0, 121.0])
         out = forward_returns(close, period=1, log_ret=True)
-        assert math.isclose(out.iloc[0], math.log(110 / 100), rel_tol=1e-12)
-        assert math.isclose(out.iloc[1], math.log(121 / 110), rel_tol=1e-12)
-        assert math.isnan(out.iloc[-1])
+        assert math.isclose(out["value"][0], math.log(110 / 100), rel_tol=1e-12)
+        assert math.isclose(out["value"][1], math.log(121 / 110), rel_tol=1e-12)
+        assert out["value"][-1] is None
 
     def test_period_gt_one_shifts_by_exactly_period(self):
-        close = pd.Series([1.0, 2.0, 4.0, 8.0, 16.0])
+        close = _make_frame([1.0, 2.0, 4.0, 8.0, 16.0])
         # fwd[0] = close[3]/close[0] - 1 = 8/1 - 1 = 7.0
         out = forward_returns(close, period=3)
-        assert math.isclose(out.iloc[0], 7.0)
-        assert math.isnan(out.iloc[-1])
-        assert math.isnan(out.iloc[-2])
-        assert math.isnan(out.iloc[-3])
+        assert math.isclose(out["value"][0], 7.0)
+        assert out["value"][-1] is None
+        assert out["value"][-2] is None
+        assert out["value"][-3] is None
 
-    def test_preserves_datetime_index(self):
-        idx = pd.date_range("2024-01-01", periods=10, freq="1h")
-        close = pd.Series(np.linspace(100, 110, 10), index=idx)
+    def test_preserves_ts_column(self):
+        ts = _hourly_ts(10)
+        close = pl.DataFrame({"ts": ts, "value": np.linspace(100, 110, 10).tolist()})
         out = forward_returns(close, period=2)
-        assert out.index.equals(idx)
+        # ``ts`` is preserved row-wise.
+        assert out["ts"].to_list() == close["ts"].to_list()
 
-    def test_period_longer_than_series_yields_all_nan(self):
-        close = pd.Series([100.0, 101.0, 102.0])
+    def test_period_longer_than_series_yields_all_null(self):
+        close = _make_frame([100.0, 101.0, 102.0])
         out = forward_returns(close, period=5)
-        assert out.isna().all()
+        assert all(v is None for v in out["value"].to_list())
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -89,16 +117,18 @@ class TestForwardReturns:
 class TestComputeIcSeries:
     def _make_corr_pair(self, n: int, noise: float = 0.1, seed: int = 0):
         rng = np.random.default_rng(seed)
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-        factor = pd.Series(rng.normal(0, 1, n), index=idx)
-        fwd = pd.Series(0.5 * factor.values + rng.normal(0, noise, n), index=idx)
+        ts = _hourly_ts(n)
+        factor_arr = rng.normal(0, 1, n)
+        fwd_arr = 0.5 * factor_arr + rng.normal(0, noise, n)
+        factor = pl.DataFrame({"ts": ts, "value": factor_arr.tolist()})
+        fwd = pl.DataFrame({"ts": ts, "value": fwd_arr.tolist()})
         return factor, fwd
 
     def test_short_pair_below_30_returns_empty_frame(self):
         factor, fwd = self._make_corr_pair(29)
         out = compute_ic_series(factor, fwd)
-        assert out.empty
-        assert list(out.columns) == ["date", "ic"]
+        assert out.height == 0
+        assert out.columns == ["date", "ic"]
 
     def test_exactly_30_paired_does_not_short_circuit(self):
         factor, fwd = self._make_corr_pair(30)
@@ -106,37 +136,45 @@ class TestComputeIcSeries:
         # May still be empty if the per-group (< 20) filter drops everything,
         # but the function must not trip the early-exit; columns stay the
         # canonical ["date", "ic"] either way.
-        assert list(out.columns) == ["date", "ic"]
+        assert out.columns == ["date", "ic"]
 
     def test_nan_and_inf_are_dropped_before_count_threshold(self):
         factor, fwd = self._make_corr_pair(100, seed=1)
         # Blow up 90 rows with NaN/Inf — only 10 valid, below the 30-pair floor.
-        factor.iloc[10:] = np.nan
-        fwd.iloc[50:] = np.inf
+        factor_vals = factor["value"].to_list()
+        for i in range(10, 100):
+            factor_vals[i] = float("nan")
+        fwd_vals = fwd["value"].to_list()
+        for i in range(50, 100):
+            fwd_vals[i] = float("inf")
+        factor = pl.DataFrame({"ts": factor["ts"], "value": factor_vals})
+        fwd = pl.DataFrame({"ts": fwd["ts"], "value": fwd_vals})
         out = compute_ic_series(factor, fwd)
-        assert out.empty
+        assert out.height == 0
 
     def test_daily_frequency_group_floor_is_20(self):
         # 19 paired obs per day → every daily group below the < 20 filter.
-        # Arrange: 4 days × 19 hourly bars each (skip hours 19-23) → 76 obs
-        # total, > 30 so the outer short-circuit doesn't fire, but each daily
-        # group has < 20 and must be dropped.
+        # 4 days × 19 hourly bars each (skip hours 19-23) → 76 obs total
+        # > 30 so the outer short-circuit doesn't fire, but each daily group
+        # has < 20 and must be dropped.
         rng = np.random.default_rng(2)
         stamps = []
         for day in range(4):
-            start = pd.Timestamp("2024-01-01") + pd.Timedelta(days=day)
-            stamps.extend(start + pd.Timedelta(hours=h) for h in range(19))
-        idx = pd.DatetimeIndex(stamps)
-        factor = pd.Series(rng.normal(0, 1, len(idx)), index=idx)
-        fwd = pd.Series(rng.normal(0, 1, len(idx)), index=idx)
+            start = dt.datetime(2024, 1, 1) + dt.timedelta(days=day)
+            stamps.extend(start + dt.timedelta(hours=h) for h in range(19))
+        ts = pl.Series("ts", stamps)
+        factor = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, len(stamps)).tolist()})
+        fwd = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, len(stamps)).tolist()})
         out = compute_ic_series(factor, fwd, freq="D")
-        assert out.empty
+        assert out.height == 0
 
     def test_perfect_monotone_pair_yields_ic_exactly_1(self):
         factor, fwd = self._make_corr_pair(200, seed=5)
-        fwd = factor.copy()  # perfect correlation
+        # Override fwd to be a perfect monotone of factor — Spearman IC should
+        # be 1.0 every daily bucket.
+        fwd = pl.DataFrame({"ts": factor["ts"], "value": factor["value"].to_list()})
         out = compute_ic_series(factor, fwd, freq="D")
-        assert not out.empty
+        assert out.height > 0
         # Every daily rank IC should be 1.0 (rounded).
         assert (out["ic"] == 1.0).all()
 
@@ -144,41 +182,46 @@ class TestComputeIcSeries:
         factor, fwd = self._make_corr_pair(500, noise=0.3, seed=7)
         out = compute_ic_series(factor, fwd, freq="D")
         # Every non-zero ic row must have at most 6 decimal places of precision.
-        for ic in out["ic"].tolist():
+        for ic in out["ic"].to_list():
             assert round(ic, 6) == ic
 
     def test_date_column_is_isoformat(self):
         factor, fwd = self._make_corr_pair(400, seed=9)
         out = compute_ic_series(factor, fwd, freq="D")
-        assert not out.empty
-        # Each row's date must parse as ISO 8601.
-        for date_str in out["date"].tolist():
-            pd.Timestamp(date_str)  # will raise if unparsable
-            assert "T" in date_str or date_str.endswith("00:00:00")
+        assert out.height > 0
+        # Each row's date must parse via the standard ``datetime.fromisoformat``.
+        for date_str in out["date"].to_list():
+            # ``T`` separator is the canonical ISO 8601 indicator.
+            assert "T" in date_str
+            # And it round-trips through fromisoformat.
+            dt.datetime.fromisoformat(date_str)
 
     def test_pearson_method_differs_from_spearman_on_rank_sensitive_data(self):
         rng = np.random.default_rng(11)
         n = 500
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+        ts = _hourly_ts(n)
         base = rng.normal(0, 1, n)
         # Non-linear monotone transform — Spearman sees 1.0, Pearson doesn't.
-        factor = pd.Series(base, index=idx)
-        fwd = pd.Series(np.sign(base) * base**2, index=idx)
+        factor = pl.DataFrame({"ts": ts, "value": base.tolist()})
+        fwd_vals = (np.sign(base) * base ** 2).tolist()
+        fwd = pl.DataFrame({"ts": ts, "value": fwd_vals})
         sp = compute_ic_series(factor, fwd, method="spearman", freq="D")
         pe = compute_ic_series(factor, fwd, method="pearson", freq="D")
+        assert sp.height > 0 and pe.height > 0
         # At least one daily group should disagree.
-        assert not sp.empty and not pe.empty
-        assert not sp["ic"].equals(pe["ic"])
+        assert sp["ic"].to_list() != pe["ic"].to_list()
 
     def test_non_finite_ic_rows_are_dropped(self):
         # All-constant factor within daily groups → spearman returns NaN → skipped.
-        idx = pd.date_range("2024-01-01", periods=200, freq="1h")
-        factor = pd.Series([1.0] * 200, index=idx)
+        ts = _hourly_ts(200)
+        factor = pl.DataFrame({"ts": ts, "value": [1.0] * 200})
         rng = np.random.default_rng(13)
-        fwd = pd.Series(rng.normal(0, 1, 200), index=idx)
+        fwd = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, 200).tolist()})
         out = compute_ic_series(factor, fwd, freq="D")
         # Either empty or no non-finite remnants.
-        assert out["ic"].apply(np.isfinite).all() or out.empty
+        if out.height > 0:
+            for v in out["ic"].to_list():
+                assert np.isfinite(v)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -188,18 +231,19 @@ class TestComputeIcSeries:
 
 class TestComputeIcSummary:
     def test_empty_frame_returns_zero_summary_copy(self):
-        out = compute_ic_summary(pd.DataFrame(columns=["date", "ic"]))
+        empty = pl.DataFrame(schema={"date": pl.Utf8, "ic": pl.Float64})
+        out = compute_ic_summary(empty)
         assert out == _EMPTY_SUMMARY
         # Must be a fresh dict — caller mutations must not poison the module global.
         out["ic_mean"] = 999
         assert _EMPTY_SUMMARY["ic_mean"] == 0
 
     def test_frame_without_ic_column_returns_zero_summary(self):
-        out = compute_ic_summary(pd.DataFrame({"date": ["2024-01-01"]}))
+        out = compute_ic_summary(pl.DataFrame({"date": ["2024-01-01"]}))
         assert out == _EMPTY_SUMMARY
 
     def test_schema_has_exactly_six_keys(self):
-        ic_df = pd.DataFrame({"date": ["2024-01-01"], "ic": [0.1]})
+        ic_df = pl.DataFrame({"date": ["2024-01-01"], "ic": [0.1]})
         out = compute_ic_summary(ic_df)
         assert set(out.keys()) == {
             "ic_mean", "ic_std", "ir", "ic_positive_pct", "ic_max_abs", "ic_tstat",
@@ -207,7 +251,7 @@ class TestComputeIcSummary:
 
     def test_std_uses_ddof_zero_population_convention(self):
         # np.std with ddof=0 of [0, 2] → 1.0 (population std); sample std is sqrt(2) ≈ 1.414.
-        ic_df = pd.DataFrame({"date": ["d1", "d2"], "ic": [0.0, 2.0]})
+        ic_df = pl.DataFrame({"date": ["d1", "d2"], "ic": [0.0, 2.0]})
         out = compute_ic_summary(ic_df)
         assert out["ic_std"] == 1.0  # rounded to 6 dp still 1.0
         # IR = mean / population-std = 1.0 / 1.0 = 1.0 (rounded to 4 dp).
@@ -219,7 +263,7 @@ class TestComputeIcSummary:
         # in IEEE 754 double — ``np.std([0.1]*N)`` leaks a ~1e-17 residue that
         # must be treated as zero so the IR guard doesn't produce a 10^15-scale
         # blow-up. See ic.py::compute_ic_summary for the tolerance constant.
-        ic_df = pd.DataFrame({"date": ["d1", "d2", "d3"], "ic": [0.1, 0.1, 0.1]})
+        ic_df = pl.DataFrame({"date": ["d1", "d2", "d3"], "ic": [0.1, 0.1, 0.1]})
         out = compute_ic_summary(ic_df)
         assert out["ir"] == 0
         assert out["ic_tstat"] == 0
@@ -232,24 +276,24 @@ class TestComputeIcSummary:
         # Other non-representable float values also exercise the guard —
         # [0.3]*N, [0.7]*N all exhibit tiny residue under np.std.
         for val in (0.3, 0.7, 1.1, -0.2):
-            ic_df = pd.DataFrame({"date": ["a", "b", "c", "d"], "ic": [val] * 4})
+            ic_df = pl.DataFrame({"date": ["a", "b", "c", "d"], "ic": [val] * 4})
             out = compute_ic_summary(ic_df)
             assert out["ir"] == 0, f"IR leak for constant ICs of {val}"
             assert out["ic_tstat"] == 0, f"t-stat leak for constant ICs of {val}"
 
     def test_positive_pct_is_strictly_greater_than_zero(self):
         # Rows equal to exactly 0 must NOT count as positive.
-        ic_df = pd.DataFrame({"date": ["d1", "d2", "d3", "d4"], "ic": [0.0, 0.0, 1.0, -1.0]})
+        ic_df = pl.DataFrame({"date": ["d1", "d2", "d3", "d4"], "ic": [0.0, 0.0, 1.0, -1.0]})
         out = compute_ic_summary(ic_df)
         assert out["ic_positive_pct"] == 0.25  # only the 1.0 counts
 
     def test_max_abs_reports_largest_absolute_value(self):
-        ic_df = pd.DataFrame({"date": ["d1", "d2", "d3"], "ic": [-0.9, 0.1, 0.5]})
+        ic_df = pl.DataFrame({"date": ["d1", "d2", "d3"], "ic": [-0.9, 0.1, 0.5]})
         out = compute_ic_summary(ic_df)
         assert out["ic_max_abs"] == 0.9
 
     def test_precision_rounding_mean_std_max_to_6dp(self):
-        ic_df = pd.DataFrame({
+        ic_df = pl.DataFrame({
             "date": ["d1", "d2", "d3"],
             "ic": [0.123456789, 0.234567891, 0.345678912],
         })
@@ -260,7 +304,7 @@ class TestComputeIcSummary:
         assert out["ic_max_abs"] == 0.345679
 
     def test_precision_rounding_ir_4dp_tstat_2dp_pct_4dp(self):
-        ic_df = pd.DataFrame({
+        ic_df = pl.DataFrame({
             "date": ["d1", "d2", "d3", "d4"],
             "ic": [0.1, 0.2, 0.3, -0.05],
         })
@@ -272,7 +316,7 @@ class TestComputeIcSummary:
 
     def test_tstat_matches_mean_over_std_err(self):
         # ICs with known mean / std:  [1, -1, 1, -1] → mean 0, std 1, tstat 0.
-        ic_df = pd.DataFrame({"date": list("abcd"), "ic": [1.0, -1.0, 1.0, -1.0]})
+        ic_df = pl.DataFrame({"date": list("abcd"), "ic": [1.0, -1.0, 1.0, -1.0]})
         out = compute_ic_summary(ic_df)
         assert out["ic_mean"] == 0
         assert out["ic_std"] == 1.0
@@ -292,9 +336,9 @@ class TestComputeIcDecay:
     def test_default_lags_produce_one_entry_each(self):
         rng = np.random.default_rng(1)
         n = 500
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-        factor = pd.Series(rng.normal(0, 1, n), index=idx)
-        close = pd.Series(100 + np.cumsum(rng.normal(0, 0.3, n)), index=idx)
+        ts = _hourly_ts(n)
+        factor = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, n).tolist()})
+        close = pl.DataFrame({"ts": ts, "value": (100 + np.cumsum(rng.normal(0, 0.3, n))).tolist()})
         out = compute_ic_decay(factor, close)
         assert len(out) == len(_DEFAULT_LAGS)
         assert [d["lag"] for d in out] == list(_DEFAULT_LAGS)
@@ -302,17 +346,17 @@ class TestComputeIcDecay:
     def test_custom_lags_replace_defaults_entirely(self):
         rng = np.random.default_rng(2)
         n = 200
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-        factor = pd.Series(rng.normal(0, 1, n), index=idx)
-        close = pd.Series(100 + np.cumsum(rng.normal(0, 0.3, n)), index=idx)
+        ts = _hourly_ts(n)
+        factor = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, n).tolist()})
+        close = pl.DataFrame({"ts": ts, "value": (100 + np.cumsum(rng.normal(0, 0.3, n))).tolist()})
         out = compute_ic_decay(factor, close, lags=[2, 7])
         assert [d["lag"] for d in out] == [2, 7]
 
     def test_short_paired_emits_ic_zero_but_keeps_lag(self):
-        # Only 30 bars — fwd = close.shift(-89) has all NaN → < 30 paired.
-        idx = pd.date_range("2024-01-01", periods=30, freq="1h")
-        factor = pd.Series(np.arange(30, dtype=float), index=idx)
-        close = pd.Series(np.linspace(100, 110, 30), index=idx)
+        # Only 30 bars — fwd = close.shift(-89) has all null → < 30 paired.
+        ts = _hourly_ts(30)
+        factor = pl.DataFrame({"ts": ts, "value": np.arange(30, dtype=float).tolist()})
+        close = pl.DataFrame({"ts": ts, "value": np.linspace(100, 110, 30).tolist()})
         out = compute_ic_decay(factor, close)
         # The last lags (89, 55, ...) should all degrade to ic=0 (int).
         for d in out:
@@ -322,9 +366,9 @@ class TestComputeIcDecay:
     def test_each_row_has_only_lag_and_ic_keys(self):
         rng = np.random.default_rng(3)
         n = 300
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-        factor = pd.Series(rng.normal(0, 1, n), index=idx)
-        close = pd.Series(100 + np.cumsum(rng.normal(0, 0.3, n)), index=idx)
+        ts = _hourly_ts(n)
+        factor = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, n).tolist()})
+        close = pl.DataFrame({"ts": ts, "value": (100 + np.cumsum(rng.normal(0, 0.3, n))).tolist()})
         out = compute_ic_decay(factor, close, lags=[1, 5])
         for d in out:
             assert set(d.keys()) == {"lag", "ic"}
@@ -332,9 +376,9 @@ class TestComputeIcDecay:
     def test_ic_rounded_to_6dp(self):
         rng = np.random.default_rng(4)
         n = 400
-        idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-        factor = pd.Series(rng.normal(0, 1, n), index=idx)
-        close = pd.Series(100 + np.cumsum(rng.normal(0, 0.3, n)), index=idx)
+        ts = _hourly_ts(n)
+        factor = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, n).tolist()})
+        close = pl.DataFrame({"ts": ts, "value": (100 + np.cumsum(rng.normal(0, 0.3, n))).tolist()})
         out = compute_ic_decay(factor, close, lags=[3])
         ic_val = out[0]["ic"]
         if ic_val != 0:
@@ -342,9 +386,9 @@ class TestComputeIcDecay:
 
     def test_empty_lags_list_returns_empty_result(self):
         rng = np.random.default_rng(5)
-        idx = pd.date_range("2024-01-01", periods=200, freq="1h")
-        close = pd.Series(100 + np.cumsum(rng.normal(0, 0.3, 200)), index=idx)
-        factor = pd.Series(rng.normal(0, 1, 200), index=idx)
+        ts = _hourly_ts(200)
+        close = pl.DataFrame({"ts": ts, "value": (100 + np.cumsum(rng.normal(0, 0.3, 200))).tolist()})
+        factor = pl.DataFrame({"ts": ts, "value": rng.normal(0, 1, 200).tolist()})
         out = compute_ic_decay(factor, close, lags=[])
         assert out == []
 
