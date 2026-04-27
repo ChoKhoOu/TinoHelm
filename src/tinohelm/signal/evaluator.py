@@ -155,6 +155,33 @@ class SignalEvaluator:
                 cost_drag=0.0,
             )
 
+        # -- Drop trailing rows where every return is NaN ------------------
+        # forward-return panels produced by close.shift(-1)/close-1 always
+        # have a fully-NaN last row (no future bar exists).  nansum would
+        # silently treat that row as 0 gross PnL while turnover/cost are
+        # still charged → systematic bias in Sharpe, MDD, cost_drag, n_periods.
+        valid_rows = np.where(np.isfinite(returns).any(axis=1))[0]
+        if len(valid_rows) < T:
+            last_valid = int(valid_rows[-1]) + 1 if len(valid_rows) > 0 else 0
+            weights = weights[:last_valid]
+            returns = returns[:last_valid]
+            T = last_valid
+
+        # Re-check after trimming.
+        if T == 0:
+            return SignalEvalResult(
+                sharpe=0.0,
+                mdd=0.0,
+                turnover_annualized=0.0,
+                capacity_score=0.0,
+                tail_loss_p99=0.0,
+                net_pnl_curve=[],
+                gross_pnl_curve=[],
+                total_return=0.0,
+                n_periods=0,
+                cost_drag=0.0,
+            )
+
         # -- Gross period returns ------------------------------------------
         # nansum treats NaN weights as 0-contribution.
         gross = np.nansum(weights * returns, axis=1)  # (T,)

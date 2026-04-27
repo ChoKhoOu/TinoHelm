@@ -350,3 +350,73 @@ def test_rebate_reduces_cost() -> None:
     # Cost drag should be proportional: rebate reduces per-side cost by 2bps
     expected_ratio = (5.0 - 2.0) / 5.0
     assert abs(result_rb.cost_drag / result_no.cost_drag - expected_ratio) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — trailing all-NaN return rows are excluded from T/turnover/cost
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_nan_return_rows_excluded() -> None:
+    """尾部全 NaN 的 returns 行不应该计入 T/turnover/cost.
+
+    Scenario: T=5 rows; row index 4 has all-NaN returns (forward-return
+    panel's natural last row from close.shift(-1)/close-1).
+
+    Expected behaviour after the fix
+    ---------------------------------
+    - n_periods == 4  (the NaN row is trimmed before any calculation)
+    - Weights, turnover, and cost are computed only over rows 0-3.
+    - cost_drag equals the cost computed from the 4 valid rows only.
+    """
+    T_full = 5
+    T_valid = 4
+    N = 2
+    ts = list(range(T_full))
+
+    # Constant weights: s1=0.6, s2=0.4 for all 5 rows.
+    weight_panel = pl.DataFrame(
+        {"ts": ts, "s1": [0.6] * T_full, "s2": [0.4] * T_full}
+    )
+
+    # Rows 0-3 have valid returns; row 4 is all NaN (forward-return tail).
+    s1_rets = [0.01, -0.005, 0.008, 0.003, float("nan")]
+    s2_rets = [0.005, 0.002, -0.003, 0.007, float("nan")]
+    returns_panel = pl.DataFrame({"ts": ts, "s1": s1_rets, "s2": s2_rets})
+
+    cost = CostModel(name="custom", fee_bps_per_side=5.0, slippage_bps_per_side=2.0)
+
+    result = SignalEvaluator(periods_per_year=252).evaluate(
+        weight_panel, returns_panel, cost
+    )
+
+    # n_periods must equal T_valid (trailing NaN row stripped).
+    assert result.n_periods == T_valid, (
+        f"expected n_periods={T_valid}, got {result.n_periods}"
+    )
+
+    # PnL curves have exactly T_valid elements.
+    assert len(result.net_pnl_curve) == T_valid
+    assert len(result.gross_pnl_curve) == T_valid
+
+    # Compute expected cost_drag manually over 4 valid rows.
+    # Constant weights → zero delta at t=1,2,3; entry at t=0 = Σ|w[0]|.
+    # turnover_per_period = [1.0, 0.0, 0.0, 0.0]
+    # cost_rate = (5 + 2 - 0) / 10_000 = 0.0007
+    cost_rate = (5.0 + 2.0) / 10_000.0
+    expected_cost_drag = (0.6 + 0.4) * cost_rate  # only the entry turnover = 1.0
+    assert abs(result.cost_drag - expected_cost_drag) < 1e-12, (
+        f"cost_drag mismatch: expected {expected_cost_drag}, got {result.cost_drag}"
+    )
+
+    # Gross PnL: 4 valid periods.
+    expected_gross = [
+        0.6 * 0.01 + 0.4 * 0.005,    # 0.006 + 0.002 = 0.008
+        0.6 * -0.005 + 0.4 * 0.002,  # -0.003 + 0.0008 = -0.0022
+        0.6 * 0.008 + 0.4 * -0.003,  # 0.0048 - 0.0012 = 0.0036
+        0.6 * 0.003 + 0.4 * 0.007,   # 0.0018 + 0.0028 = 0.0046
+    ]
+    cum_gross_expected = float(sum(expected_gross))
+    assert abs(result.gross_pnl_curve[-1] - cum_gross_expected) < 1e-12, (
+        f"gross_pnl_curve[-1] mismatch: expected {cum_gross_expected}, got {result.gross_pnl_curve[-1]}"
+    )
