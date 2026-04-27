@@ -360,11 +360,30 @@ class SignalDrivenStrategy(Strategy):
             # Step 4 — extract latest row as target_weights.
             new_weights = self._extract_latest_weights(weight_panel)
 
-            # Step 5 — submit diffs.
-            self._submit_diff(new_weights, bars)
+            # Step 4b — stale-position guard: any symbol that appeared in
+            # the previous rebalance but is absent from *new_weights* (due
+            # to kernel NaN output, PIT universe contraction, or a data
+            # hole) must receive an explicit target=0.0 so that
+            # OrderManager.execute_diff sees it and issues a close order.
+            # Without this, _extract_latest_weights silently skips NaN
+            # columns and the old position is never flattened.
+            merged_weights: dict[str, float] = {
+                symbol: 0.0
+                for symbol in self.target_weights
+                if symbol not in new_weights
+            }
+            merged_weights.update(new_weights)
 
-            # Bookkeeping.
-            self.target_weights = new_weights
+            # Step 5 — submit diffs.
+            self._submit_diff(merged_weights, bars)
+
+            # Bookkeeping: persist merged_weights so that any 0.0-padded
+            # symbol (whose close order may not have filled yet) remains
+            # visible to the next rebalance and keeps receiving a
+            # target=0.0 until the position is actually flat.
+            # OrderManager.execute_diff is diff-idempotent for already-flat
+            # positions (target=0, current=0 → diff=0 → no order).
+            self.target_weights = merged_weights
             self.last_rebalance_ts_ns = ts_ns
         except (
             ValueError,

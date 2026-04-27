@@ -915,6 +915,96 @@ class TestCrossSectionReadyExecutesKernelAndSubmits:
         # last_rebalance_ts_ns unchanged.
         assert s.last_rebalance_ts_ns == 1_700_000_000_000_000_000
 
+    def test_stale_symbol_receives_zero_target_when_absent_from_kernel(self):
+        """Stale-position guard: symbol in previous target but absent from kernel output.
+
+        Regression for the NaN / PIT universe contraction bug:
+        _extract_latest_weights silently skips NaN columns, so if symbol B
+        was in the previous rebalance's target but the kernel emits NaN for B
+        this period, B will be absent from new_weights and
+        OrderManager.execute_diff will never visit it → the real position
+        is never closed.
+
+        Fix: before calling _submit_diff, symbols that were in the previous
+        self.target_weights but are absent from new_weights are injected
+        with target=0.0, causing OrderManager to compute diff = 0 - current_qty
+        and issue a close order.
+
+        Scenario:
+          Previous period: target = {A: 0.5, B: 0.3}  (both positions open)
+          This period:     kernel emits NaN for B → new_weights = {A: 0.5}
+          Expected:        merged_weights = {A: 0.5, B: 0.0}
+                           → OrderManager receives B with target=0.0
+                           → close order submitted for B
+        """
+        spec = _basic_signal_spec()
+        s = _make_strategy_for_unit_test(
+            signal_spec=spec, cache_history_len=100, factor_lookback=20
+        )
+
+        btc_inst = _stub_instrument("BTCUSDT-PERP")
+        eth_inst = _stub_instrument("ETHUSDT-PERP")
+        s._instruments_by_short_symbol = {
+            "BTCUSDT-PERP": btc_inst,
+            "ETHUSDT-PERP": eth_inst,
+        }
+        # Simulate a previous rebalance in which both symbols had targets.
+        s.target_weights = {"BTCUSDT-PERP": 0.5, "ETHUSDT-PERP": 0.3}
+
+        # BTC has no open position (entering fresh this period).
+        # ETH holds an open position that must be closed when target goes to 0.
+        s.portfolio.net_position.side_effect = (
+            lambda iid, *a, **kw: 0.01 if "ETH" in str(iid) else 0.0
+        )
+        s._order_manager = OrderManager(s)
+
+        # This period: kernel output for BTC = 0.5, ETH = NaN (skipped by
+        # _extract_latest_weights → absent from new_weights).
+        # We bypass the real kernel chain by having _compute_factor_panel return
+        # the weight panel directly, and wire _kernel as identity so the
+        # weight_panel flows through unchanged.
+        weight_panel_this_period = pl.DataFrame(
+            {
+                "ts": [1_700_000_000_000_000_000],
+                "BTCUSDT-PERP": [0.5],   # valid weight this period
+                "ETHUSDT-PERP": [None],  # NaN → skipped by _extract_latest_weights
+            },
+            schema={"ts": pl.Int64, "BTCUSDT-PERP": pl.Float64, "ETHUSDT-PERP": pl.Float64},
+        )
+        # _compute_factor_panel returns the panel; _kernel is identity so the
+        # same panel is used as weight_panel.  This avoids real kernel
+        # constraints that would collapse both weights to 0 for a 1-symbol
+        # input.
+        s._compute_factor_panel = lambda ts_ns, bars: weight_panel_this_period  # type: ignore[method-assign]
+        s._kernel = lambda panel, params, constraints: panel  # type: ignore[method-assign]
+
+        bars = {
+            "BTCUSDT-PERP": _bar("BTCUSDT-PERP", 1_700_000_000_000_000_000, 50_000.0),
+            "ETHUSDT-PERP": _bar("ETHUSDT-PERP", 1_700_000_000_000_000_000, 3_000.0),
+        }
+        s._on_cross_section_ready(1_700_000_000_000_000_000, bars)
+
+        # BTC: target_qty = 0.5 * 10_000 / 50_000 = 0.1; current=0 → BUY 0.1
+        btc_inst.make_qty.assert_called_once()
+        called_btc = btc_inst.make_qty.call_args[0][0]
+        assert called_btc == pytest.approx(0.1, rel=1e-9)
+
+        # ETH: stale-position guard injected target=0.0; current_qty=0.01.
+        # diff = 0 - 0.01 = -0.01 → SELL 0.01 (close order).
+        eth_inst.make_qty.assert_called_once()
+        called_eth = eth_inst.make_qty.call_args[0][0]
+        assert called_eth == pytest.approx(0.01, rel=1e-9)
+
+        # Total: 2 orders (BTC open + ETH close).
+        assert s.submit_order.call_count == 2
+
+        # ETHUSDT-PERP persisted in target_weights as 0.0 so that if the
+        # position is still open next period, another close order is issued.
+        assert "ETHUSDT-PERP" in s.target_weights
+        assert s.target_weights["ETHUSDT-PERP"] == pytest.approx(0.0)
+        # BTC target reflects the kernel output.
+        assert s.target_weights["BTCUSDT-PERP"] == pytest.approx(0.5, rel=1e-9)
+
 
 # =============================================================================
 # Layer 1 — narrowed exception handling in _on_cross_section_ready
