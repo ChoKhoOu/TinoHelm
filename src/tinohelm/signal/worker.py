@@ -128,18 +128,23 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
         recovered = result.rowcount or 0
         await db.commit()
 
-        queued_ids = (
+        queued_runs = (
             await db.execute(
-                select(SignalRun.id)
+                select(SignalRun.id, SignalRun.signal_name, SignalRun.config)
                 .where(SignalRun.status == "queued")
                 .order_by(SignalRun.created_at.asc())
             )
-        ).scalars().all()
+        ).all()
 
-        if queued_ids:
+        if queued_runs:
             await rds.delete(QUEUE_KEY)
-            for run_id in queued_ids:
-                await rds.rpush(QUEUE_KEY, run_id)
+            for run_id, signal_name, config in queued_runs:
+                payload = json.dumps({
+                    "run_id": run_id,
+                    "signal_name": signal_name,
+                    "config": config or {},
+                })
+                await rds.rpush(QUEUE_KEY, payload)
 
     if recovered:
         logger.info("Recovered %d interrupted signal run(s)", recovered)

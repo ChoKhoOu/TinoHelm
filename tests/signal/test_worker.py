@@ -672,12 +672,12 @@ async def test_start_stop_signal_worker_lifecycle():
 
 
 # ---------------------------------------------------------------------------
-# Recovery — running → queued + LPUSH onto Redis
+# Recovery — running → queued + full JSON payloads onto Redis
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_recover_interrupted_jobs_flips_running_to_queued():
-    """recover_interrupted_jobs flips running rows to queued + re-enqueues."""
+    """recover_interrupted_jobs flips running rows to queued + re-enqueues payloads."""
     from tinohelm.signal.worker import recover_interrupted_jobs
 
     rds = AsyncMock()
@@ -699,9 +699,12 @@ async def test_recover_interrupted_jobs_flips_running_to_queued():
             return MagicMock(rowcount=2)
         # The SELECT for queued ids.
         select_calls.append(stmt)
-        scalar_result = MagicMock()
-        scalar_result.scalars.return_value.all.return_value = ["r1", "r2"]
-        return scalar_result
+        row_result = MagicMock()
+        row_result.all.return_value = [
+            ("r1", "sig_a", {"periods_per_year": 365}),
+            ("r2", "sig_b", {"periods_per_year": 252, "trace_id": "t2"}),
+        ]
+        return row_result
 
     session = AsyncMock()
     session.execute = _execute
@@ -718,6 +721,19 @@ async def test_recover_interrupted_jobs_flips_running_to_queued():
     assert captured_updates, "expected one UPDATE flipping running → queued"
     rds.delete.assert_called_with("tino:signal:queue")
     assert rds.rpush.await_count == 2
+    payloads = [json.loads(call.args[1]) for call in rds.rpush.await_args_list]
+    assert payloads == [
+        {
+            "run_id": "r1",
+            "signal_name": "sig_a",
+            "config": {"periods_per_year": 365},
+        },
+        {
+            "run_id": "r2",
+            "signal_name": "sig_b",
+            "config": {"periods_per_year": 252, "trace_id": "t2"},
+        },
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -181,8 +181,7 @@ class Aligner:
         if ts_series.dtype not in (pl.Datetime, pl.Date):
             return panel
 
-        # Convert ts to Python datetime list once for efficiency
-        ts_list: list[datetime] = ts_series.cast(pl.Datetime).to_list()
+        ts_expr = pl.col("ts").cast(pl.Datetime)
 
         exprs: list[pl.Expr] = []
         for sym in symbols:
@@ -193,21 +192,19 @@ class Aligner:
                 exprs.append(pl.col(sym))
                 continue
 
-            # Build a boolean mask Series: True where the cell should be null
-            mask_null = [False] * len(ts_list)
-            for i, ts in enumerate(ts_list):
-                if ts is None:
-                    continue
+            # Build the PIT mask from the ``ts`` column expression itself.
+            # Avoid binding an external Series/list to the expression: PIT
+            # correctness must follow the row's timestamp even if Polars
+            # changes eager/lazy execution or row-order internals.
+            mask_expr = pl.lit(False)
+            if eligible_from is not None:
                 # eligible_from is listing_date + 7 days (already computed by universe)
-                if eligible_from is not None and ts < eligible_from:
-                    mask_null[i] = True
-                    continue
-                if delisting_date is not None and ts >= delisting_date:
-                    mask_null[i] = True
+                mask_expr = mask_expr | (ts_expr < pl.lit(eligible_from))
+            if delisting_date is not None:
+                mask_expr = mask_expr | (ts_expr >= pl.lit(delisting_date))
 
-            mask_series = pl.Series("_mask", mask_null)
             exprs.append(
-                pl.when(mask_series).then(None).otherwise(pl.col(sym)).alias(sym)
+                pl.when(mask_expr).then(None).otherwise(pl.col(sym)).alias(sym)
             )
 
         return panel.with_columns(exprs)
