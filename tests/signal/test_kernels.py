@@ -155,7 +155,9 @@ class TestTopKLongShort:
         assert out["C"][1] == pytest.approx(-1.0)
 
     def test_too_few_valid_returns_zero_row(self):
-        """When < 2k valid values, row is left at 0."""
+        """When < 2k valid values, finite cells get weight 0; NaN/null cells
+        remain NaN (NaN = "asset not in PIT universe", must not be coerced to 0).
+        """
         panel = pl.DataFrame(
             {
                 "ts": _hourly_ts(1),
@@ -168,8 +170,12 @@ class TestTopKLongShort:
         out = top_k_long_short(
             panel, params={"k": 1}, constraints=_DEFAULT_CONSTRAINTS
         )
-        # Need k=1 long + k=1 short = 2 valid; only 1 valid → all zero.
-        assert all(out[c][0] == 0.0 for c in ["A", "B", "C", "D"])
+        # Need k=1 long + k=1 short = 2 valid; only 1 valid → A gets 0.
+        assert out["A"][0] == pytest.approx(0.0)
+        # B, C, D were null/NaN → must remain NaN (not coerced to 0).
+        assert np.isnan(out["B"][0])
+        assert np.isnan(out["C"][0])
+        assert np.isnan(out["D"][0])
 
     def test_invalid_k_raises(self):
         panel = _sample_panel(T=2, N=4)
@@ -232,7 +238,9 @@ class TestQuantileLongShort:
             )
 
     def test_too_few_valid_returns_zero_row(self):
-        """When valid count < quantiles, row stays zero."""
+        """When valid count < quantiles, finite cells get weight 0; NaN/null cells
+        remain NaN (NaN = "asset not in PIT universe", must not be coerced to 0).
+        """
         panel = pl.DataFrame(
             {
                 "ts": _hourly_ts(1),
@@ -247,8 +255,12 @@ class TestQuantileLongShort:
             params={"quantiles": 5},
             constraints=_DEFAULT_CONSTRAINTS,
         )
-        for c in ["A", "B", "C", "D"]:
-            assert out[c][0] == 0.0
+        # 2 valid < 5 quantiles → A and B get 0 (finite but not selected).
+        assert out["A"][0] == pytest.approx(0.0)
+        assert out["B"][0] == pytest.approx(0.0)
+        # C, D were null/NaN → must remain NaN (not coerced to 0).
+        assert np.isnan(out["C"][0])
+        assert np.isnan(out["D"][0])
 
 
 # ---------------------------------------------------------------------------
@@ -805,4 +817,119 @@ class TestNormalizeConvergenceWarning:
             )
         assert not any(
             "failed to converge" in r.message for r in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
+# Regression: NaN / PIT-universe preservation in top_k and quantile kernels.
+#
+# Bug: ``zeros_like`` initialisation coerced NaN (= "asset not in PIT
+# universe") to 0.  After the fix, weight cells that correspond to NaN factor
+# cells must remain NaN throughout — not 0 — so the downstream
+# ``_extract_latest_weights`` skips them and the evaluator does not count
+# them as a flat signal.
+# ---------------------------------------------------------------------------
+
+
+class TestKernelNaNPreservation:
+    """Verify that NaN factor cells produce NaN weight cells, not 0."""
+
+    def _nan_panel(self) -> pl.DataFrame:
+        """Panel with NaN in some cells (not null — simulates DataLayer PIT)."""
+        ts = _hourly_ts(3)
+        return pl.DataFrame(
+            {
+                "ts": ts,
+                # Row 0: SYM_D is NaN (not in universe at t=0).
+                # Rows 1-2: all finite — enough for k=1.
+                "SYM_A": [0.10, 0.50, 0.20],
+                "SYM_B": [0.30, 0.10, -0.30],
+                "SYM_C": [-0.20, -0.40, 0.40],
+                "SYM_D": [float("nan"), 0.20, float("nan")],
+            }
+        )
+
+    def test_top_k_nan_cell_is_nan_in_output(self):
+        """top_k_long_short: NaN input cell → NaN weight cell (not 0).
+
+        Row 0 has SYM_D = NaN.  With k=1, rows 1-2 have enough valid values
+        for signal; row 0 also has 3 valid values (A/B/C) so k=1 fires.
+        In all rows, SYM_D NaN cells must stay NaN in the weight output.
+        """
+        panel = self._nan_panel()
+        constraints = {
+            "gross_exposure": 2.0,
+            "net_exposure": 1.0,
+            "max_position": 1.0,
+        }
+        out = top_k_long_short(panel, params={"k": 1}, constraints=constraints)
+
+        # SYM_D row 0 was NaN → weight must be NaN, not 0.
+        assert np.isnan(out["SYM_D"][0]), (
+            f"SYM_D[0] should be NaN (non-universe cell), got {out['SYM_D'][0]}"
+        )
+        # SYM_D row 2 was NaN → weight must be NaN.
+        assert np.isnan(out["SYM_D"][2]), (
+            f"SYM_D[2] should be NaN (non-universe cell), got {out['SYM_D'][2]}"
+        )
+        # SYM_D row 1 was finite → weight is a normal number (not NaN).
+        assert np.isfinite(out["SYM_D"][1]) or out["SYM_D"][1] == pytest.approx(0.0), (
+            f"SYM_D[1] should be finite, got {out['SYM_D'][1]}"
+        )
+
+    def test_top_k_nan_cell_distinct_from_zero_weight(self):
+        """Ensure that a NaN weight cell is not equal to 0.0.
+
+        This guards the downstream bug: a 0 weight is interpreted as
+        "target flat" by the order manager; a NaN weight must be skipped.
+        """
+        panel = self._nan_panel()
+        constraints = {
+            "gross_exposure": 2.0,
+            "net_exposure": 1.0,
+            "max_position": 1.0,
+        }
+        out = top_k_long_short(panel, params={"k": 1}, constraints=constraints)
+        # Explicitly confirm it is NOT 0.0.
+        assert out["SYM_D"][0] != 0.0, (
+            "SYM_D[0] must be NaN (not 0.0) — 0 would be treated as a flat order"
+        )
+
+    def test_quantile_nan_cell_is_nan_in_output(self):
+        """quantile_long_short: NaN input cell → NaN weight cell (not 0)."""
+        panel = self._nan_panel()
+        constraints = {
+            "gross_exposure": 2.0,
+            "net_exposure": 1.0,
+            "max_position": 1.0,
+        }
+        out = quantile_long_short(
+            panel,
+            params={"quantiles": 3, "long_q": 2, "short_q": 0},
+            constraints=constraints,
+        )
+        # SYM_D row 0 was NaN → weight must be NaN, not 0.
+        assert np.isnan(out["SYM_D"][0]), (
+            f"SYM_D[0] should be NaN (non-universe cell), got {out['SYM_D'][0]}"
+        )
+        # SYM_D row 2 was NaN → weight must be NaN.
+        assert np.isnan(out["SYM_D"][2]), (
+            f"SYM_D[2] should be NaN (non-universe cell), got {out['SYM_D'][2]}"
+        )
+
+    def test_quantile_nan_cell_distinct_from_zero_weight(self):
+        """A NaN weight cell from quantile kernel must not equal 0.0."""
+        panel = self._nan_panel()
+        constraints = {
+            "gross_exposure": 2.0,
+            "net_exposure": 1.0,
+            "max_position": 1.0,
+        }
+        out = quantile_long_short(
+            panel,
+            params={"quantiles": 3},
+            constraints=constraints,
+        )
+        assert out["SYM_D"][0] != 0.0, (
+            "SYM_D[0] must be NaN (not 0.0) — 0 would be treated as a flat order"
         )
