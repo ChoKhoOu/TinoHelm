@@ -347,6 +347,7 @@ class TestBatchCache:
 # Tests — parallel execution
 # ---------------------------------------------------------------------------
 
+@pytest.mark.performance
 class TestParallelExecution:
     """Kernel concurrency — three slow factors complete faster than serial."""
 

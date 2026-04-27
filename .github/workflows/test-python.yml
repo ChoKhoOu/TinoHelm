@@ -32,4 +32,4 @@ jobs:
           pip install -e ".[test]"
 
       - name: Run tests
-        run: python -m pytest tests/ -q --tb=short -m "not integration"
+        run: python -m pytest tests/ -q --tb=short -m "not integration and not performance"

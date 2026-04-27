@@ -44,6 +44,7 @@ filterwarnings = [
 ]
 markers = [
     "integration: marks tests that require real infrastructure (DB, Redis, subprocess)",
+    "performance: wall-clock performance benchmarks — flaky on shared CI runners, run locally via pytest -m performance",
 ]
 
 [tool.setuptools.packages.find]

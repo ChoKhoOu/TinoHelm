@@ -221,6 +221,7 @@ class TestCorrFilterRemovesCorrelatedCandidates:
 # 4. test_parallel_speedup
 # ---------------------------------------------------------------------------
 
+@pytest.mark.performance
 class TestParallelSpeedup:
     def test_parallel_speedup(self):
         """8 combos × 0.25s each → serial ≈ 2.0s; parallel (n_jobs=4) ≤ 0.6 × serial.

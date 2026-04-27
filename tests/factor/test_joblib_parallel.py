@@ -113,6 +113,7 @@ def test_orchestrator_uses_joblib_parallel():
 # Test: 12-factor speedup — parallel ≤ serial × 0.5
 # ---------------------------------------------------------------------------
 
+@pytest.mark.performance
 def test_joblib_parallel_speedup_12_factors():
     """12 slow factors (0.05s sleep each) complete ≤ 50% of serial baseline.
 
