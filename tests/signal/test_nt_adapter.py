@@ -366,6 +366,133 @@ class TestOrderManager:
         kwargs = strategy.order_factory.market.call_args.kwargs
         assert kwargs["order_side"] == OrderSide.SELL
 
+    # ------------------------------------------------------------------
+    # Sign-flip two-stage protocol (HEDGING-safe + Binance Hedge Mode)
+    # ------------------------------------------------------------------
+
+    def test_sign_flip_emits_close_position_then_reopen(self):
+        """current long + negative target → close_position(reduce_only=True) + new SELL.
+
+        Under HEDGING a naive single-order diff leaks a double-sided
+        exposure because NT's execution engine allocates a fresh
+        ``position_id`` when none is provided on the order.  The fix
+        detects ``current_qty * target_qty < 0`` and splits into a
+        flatten leg (via ``Strategy.close_position``) followed by a
+        fresh open leg sized to ``abs(target_qty)``.
+        """
+        from nautilus_trader.model.enums import OrderSide
+
+        strategy = _stub_strategy(
+            net_position_per_id={"BTCUSDT-PERP.BINANCE": 0.01},  # long 0.01 BTC
+        )
+        # Stub one open LONG position for this instrument.
+        open_pos = MagicMock(name="OpenLongPosition")
+        open_pos.id = MagicMock(name="PositionId-LONG-01")
+        strategy.cache.positions_open.return_value = [open_pos]
+        strategy.id = MagicMock(name="StrategyId")
+
+        inst = _stub_instrument("BTCUSDT-PERP")
+        om = OrderManager(strategy)
+        # target_w=-0.10 @ price=50_000 / equity=10_000 → target_qty=-0.02
+        # current=+0.01 → sign-flip → flatten 0.01 long + open 0.02 short
+        submitted = om.execute_diff(
+            target_weights={"BTCUSDT-PERP": -0.10},
+            instruments={"BTCUSDT-PERP": inst},
+            equity=10_000.0,
+            prices={"BTCUSDT-PERP": 50_000.0},
+        )
+
+        # positions_open filtered by (instrument_id, strategy_id).
+        strategy.cache.positions_open.assert_called_once()
+        ppk = strategy.cache.positions_open.call_args.kwargs
+        assert ppk.get("instrument_id") is inst.id
+        assert ppk.get("strategy_id") is strategy.id
+
+        # Stage 1: close_position called once with reduce_only=True on
+        # the open position.  NT's close_position internally submits a
+        # reduce-only MarketOrder with position_id=open_pos.id and
+        # order_side = Order.closing_side_c(position.side) — we rely on
+        # NT's contract for both.
+        strategy.close_position.assert_called_once()
+        cp_args, cp_kwargs = strategy.close_position.call_args
+        assert cp_args[0] is open_pos
+        assert cp_kwargs.get("reduce_only") is True
+
+        # Stage 2: a fresh OPEN order (not reduce-only, no position_id)
+        # with side matching target sign (-ve target → SELL) and qty
+        # = abs(target_qty) = 0.02.
+        strategy.order_factory.market.assert_called_once()
+        om_kwargs = strategy.order_factory.market.call_args.kwargs
+        assert om_kwargs["order_side"] == OrderSide.SELL
+        # make_qty must be called on abs(target_qty), not the merged diff.
+        make_qty_arg = inst.make_qty.call_args[0][0]
+        assert make_qty_arg == pytest.approx(0.02, rel=1e-9)
+
+        # submitted list: flatten leg + open leg (len >= 2).
+        assert len(submitted) >= 2
+
+    def test_sign_flip_below_min_step_flatten_only(self):
+        """sign-flip but |target_qty| < min_step → flatten only, no reopen."""
+        strategy = _stub_strategy(
+            net_position_per_id={"BTCUSDT-PERP.BINANCE": 0.01},  # long
+        )
+        open_pos = MagicMock(name="OpenLongPosition")
+        open_pos.id = MagicMock(name="PositionId-LONG-01")
+        strategy.cache.positions_open.return_value = [open_pos]
+        strategy.id = MagicMock(name="StrategyId")
+
+        inst = _stub_instrument("BTCUSDT-PERP", size_increment=0.01)
+        om = OrderManager(strategy)
+        # target_w=-0.001 @ 50_000 / 10_000 → target_qty=-0.0002 (< 0.01)
+        submitted = om.execute_diff(
+            target_weights={"BTCUSDT-PERP": -0.001},
+            instruments={"BTCUSDT-PERP": inst},
+            equity=10_000.0,
+            prices={"BTCUSDT-PERP": 50_000.0},
+        )
+
+        # Close still runs because the flatten leg is mandatory.
+        strategy.close_position.assert_called_once()
+        # But no new OPEN order is created.
+        strategy.order_factory.market.assert_not_called()
+        inst.make_qty.assert_not_called()
+        # submitted contains only the flatten leg(s).
+        assert len(submitted) == 1
+
+    def test_non_flip_large_same_sign_diff_stays_single_order(self):
+        """current +0.01 → target +0.03 (same sign): original single-order flow.
+
+        We must NOT route through the sign-flip branch when the two
+        quantities share a sign — it would produce a spurious close +
+        over-sized reopen.
+        """
+        from nautilus_trader.model.enums import OrderSide
+
+        strategy = _stub_strategy(
+            net_position_per_id={"BTCUSDT-PERP.BINANCE": 0.01},  # long 0.01
+        )
+        strategy.cache.positions_open.return_value = []
+        strategy.id = MagicMock(name="StrategyId")
+        inst = _stub_instrument("BTCUSDT-PERP")
+        om = OrderManager(strategy)
+        # target_w=0.15 / 10_000 / 50_000 → target_qty=0.03, diff=+0.02
+        submitted = om.execute_diff(
+            target_weights={"BTCUSDT-PERP": 0.15},
+            instruments={"BTCUSDT-PERP": inst},
+            equity=10_000.0,
+            prices={"BTCUSDT-PERP": 50_000.0},
+        )
+
+        # No flatten path taken.
+        strategy.close_position.assert_not_called()
+        # Single BUY order, sized to the signed diff (0.02), not target.
+        strategy.order_factory.market.assert_called_once()
+        kwargs = strategy.order_factory.market.call_args.kwargs
+        assert kwargs["order_side"] == OrderSide.BUY
+        make_qty_arg = inst.make_qty.call_args[0][0]
+        assert make_qty_arg == pytest.approx(0.02, rel=1e-9)
+        assert len(submitted) == 1
+
 
 # =============================================================================
 # SignalDrivenStrategy (stub-driven) tests

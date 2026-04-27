@@ -520,3 +520,42 @@ def test_full_backtest_engine_e2e():
         f"BUY/SELL asymmetry {asymmetry:.2%} (BUY={len(buys)}, "
         f"SELL={len(sells)}) — expected near-balanced for k=1 long/short."
     )
+
+    # ------------------------------------------------------------------
+    # 7. Sign-flip two-stage protocol regression gate.
+    # ------------------------------------------------------------------
+    # Under HEDGING, OrderManager now detects ``current * target < 0``
+    # and splits the diff into a reduce-only ``close_position`` leg
+    # followed by a fresh open leg.  Without this split every sign-flip
+    # stacked a brand-new position (NT's execution engine allocates a
+    # fresh ``position_id`` for any unassigned order under HEDGING),
+    # and a 60-bar run produced ~70+ stale open positions.  With the
+    # fix, sign-flip stacking is eliminated — any residual open
+    # positions come from same-sign top-up diffs (an orthogonal
+    # architectural constraint of HEDGING not addressed here).
+    #
+    # Regression threshold: pre-fix baseline was **72 open positions**
+    # for this fixture (measured empirically with the fix reverted).
+    # Post-fix observed ~10.  We set the gate at ≤ 30 to catch a
+    # meaningful regression (≥ 40% of baseline) without being brittle
+    # to minor fill-timing shifts.
+    open_positions = cache.positions_open()
+    assert len(open_positions) <= 30, (
+        f"sign-flip stacking regression: {len(open_positions)} open "
+        f"positions at engine end (baseline pre-fix = 72, "
+        f"post-fix observed ~10).  This indicates OrderManager is "
+        f"no longer issuing reduce-only close_position legs on "
+        f"sign flips."
+    )
+    # Reduce-only coverage: every sign-flip produces exactly one
+    # reduce-only order per flattened position.  Observed ~60 in the
+    # fixture; assert the mechanism is wired (>= 10) without pinning
+    # a brittle exact count.
+    reduce_only_orders = [
+        o for o in cache.orders() if getattr(o, "is_reduce_only", False)
+    ]
+    assert len(reduce_only_orders) >= 10, (
+        f"expected reduce-only close_position orders on sign flips; "
+        f"got {len(reduce_only_orders)} — is the two-stage protocol "
+        f"in OrderManager.execute_diff firing?"
+    )
