@@ -14,14 +14,34 @@ For every timestamp row we enforce::
 
 The three are not independent — shifting net toward zero can push some
 weights outside ``±max_position``, and scaling gross down can change net.
-The implementation iterates per row in the following order:
+The implementation projects each row onto the feasible set by iterating::
 
-1. Per-asset clip to ``±max_position``.
-2. If ``|net|`` exceeds the cap, shift each weight by a constant so the
-   net moves to ``±net_exposure`` (the closer-to-zero side).
-3. If gross exceeds the cap, scale all weights uniformly down.
-4. Re-clip per-asset to ``±max_position`` (step 2 may have pushed cells
-   beyond the per-asset bound).
+    clip → smart_net_shift → gross_scale → clip
+
+until all three constraints hold within a numerical tolerance, or the
+iteration cap is reached.
+
+The "smart" net shift is the key fix over a naive uniform shift: when the
+sum needs to move toward zero, only cells that still have headroom in the
+relevant direction absorb the correction.  A naive uniform shift over all
+cells would push already-saturated cells outside ``±max_position``, the
+following clip would re-saturate them, and the next pass would loop on
+the same residual indefinitely.
+
+Saturation example (with naive single-pass algorithm)::
+
+    weights      = [2, 2, 2, -1]   max_position=0.5  gross=10  net=0
+    after clip   = [0.5, 0.5, 0.5, -0.5]              # sum = +1
+    naive shift  = +1/4 = 0.25 subtracted everywhere
+    →            = [0.25, 0.25, 0.25, -0.75]          # sum = 0  but |w|=0.75>0.5
+    final clip   = [0.25, 0.25, 0.25, -0.5]           # sum = +0.25  (BUG: net residual)
+
+Smart shift only acts on cells that have room to move::
+
+    excess > 0 (subtract to reduce net):
+        eligible = {i : w[i] > -max_position}
+    excess < 0 (add to raise net):
+        eligible = {i : w[i] <  max_position}
 
 NaN values are preserved (they represent "asset not in universe at this
 timestamp" and must not be coerced to 0).  Rows with all-NaN inputs pass
@@ -29,16 +49,27 @@ through untouched.
 
 Notes
 -----
-The two-pass clip (steps 1 and 4) is intentional.  After step 2's net
-shift, some cells may have grown in magnitude.  A single final clip at
-the end would not cap them in time for step 3's gross calculation, which
-relies on the post-clip absolute sum.  Empirically the loop converges in
-one iteration because the shift in step 2 is bounded.
+The projection converges within ``max_iter=20`` iterations under
+smart-shift; if the loop fails to converge (very rare, only when all
+remaining headroom is exactly zero), a warning is emitted via
+:mod:`logging` and a final hard-guard pass guarantees the per-asset and
+gross caps even though the net cap may carry a small residual.  We never
+raise — production live-trading paths catch and silence
+:func:`normalize_to_constraints` errors via the strategy's
+``_on_cross_section_ready`` ``try/except``, and an exception here would
+strand the whole strategy.
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import polars as pl
+
+logger = logging.getLogger(__name__)
+
+_PROJECTION_MAX_ITER = 20
+_PROJECTION_TOL = 1e-6
 
 
 def split_factor_panel(factor_panel: pl.DataFrame) -> tuple[pl.Series, np.ndarray, list[str]]:
@@ -103,6 +134,123 @@ def build_weight_panel(
     return pl.DataFrame(data)
 
 
+def _project_box_gross_net_row(
+    valid: np.ndarray,
+    *,
+    gross_cap: float,
+    net_cap: float,
+    max_pos: float,
+    max_iter: int | None = None,
+    tol: float | None = None,
+) -> tuple[np.ndarray, bool]:
+    """Project a 1-D weight row onto the (box ∩ gross ∩ net) feasible set.
+
+    The three constraints are not jointly satisfiable in a single
+    closed-form pass when some weights are saturated against the box
+    constraint ``±max_pos``.  We use the "smart-shift" cyclic-projection
+    scheme described in the module docstring:
+
+    1. Box-clip every cell to ``[-max_pos, +max_pos]``.
+    2. If ``|sum|`` exceeds ``net_cap``, distribute the corrective shift
+       only across cells that still have headroom in the relevant
+       direction (cells already saturated against the bound on the side
+       we'd push them further into are skipped — a uniform shift across
+       all cells is what causes the original convergence bug).
+    3. If ``Σ|w|`` exceeds ``gross_cap``, scale uniformly down.
+    4. Box-clip again (step 2's shift may have driven non-saturated cells
+       past the box; step 3's scale-down might also need follow-up).
+
+    Iterate up to ``max_iter`` rounds.  Convergence is declared when all
+    three constraints hold within ``tol`` simultaneously.
+
+    Parameters
+    ----------
+    valid:
+        Finite-only 1-D weights (caller has already removed NaN cells).
+    gross_cap, net_cap, max_pos:
+        The three constraint thresholds.
+    max_iter:
+        Maximum number of projection passes.
+    tol:
+        Numerical tolerance for the convergence check.
+
+    Returns
+    -------
+    tuple[np.ndarray, bool]
+        ``(projected_weights, converged)``.  When ``converged`` is
+        False, the caller should emit a warning; the returned weights
+        still satisfy the box and gross caps (a final hard-guard pass
+        is applied) but the net cap may carry a small residual.
+    """
+    # Read constants fresh from the module so monkeypatch in tests works.
+    if max_iter is None:
+        max_iter = _PROJECTION_MAX_ITER
+    if tol is None:
+        tol = _PROJECTION_TOL
+
+    w = valid.astype(np.float64, copy=True)
+
+    converged = False
+    for _ in range(max_iter):
+        # Step 1 (box clip).
+        w = np.clip(w, -max_pos, max_pos)
+
+        # Step 2 (smart net shift).
+        net = float(np.sum(w))
+        if abs(net) > net_cap + tol:
+            target_net = float(np.sign(net)) * net_cap
+            excess = net - target_net  # signed: same sign as net.
+            if excess > 0:
+                # Need to subtract: only cells above -max_pos can absorb.
+                eligible = w > -max_pos + tol
+            else:
+                # Need to add: only cells below +max_pos can absorb.
+                eligible = w < max_pos - tol
+            n_eligible = int(np.sum(eligible))
+            if n_eligible > 0:
+                shift = excess / n_eligible
+                w[eligible] -= shift
+            # else: no headroom anywhere — leave w alone, next clip is
+            # idempotent, the loop will exit via the convergence check or
+            # via max_iter exhaustion (the warn path).
+
+        # Step 3 (gross scale-down).
+        gross = float(np.sum(np.abs(w)))
+        if gross > gross_cap + tol and gross > 0:
+            w *= gross_cap / gross
+
+        # Step 4 (box clip again — step 2 may have pushed eligible cells
+        # past the bound; step 3's down-scaling occasionally lands a cell
+        # marginally outside numeric precision).
+        w = np.clip(w, -max_pos, max_pos)
+
+        # Convergence check.
+        new_net = float(np.sum(w))
+        new_gross = float(np.sum(np.abs(w)))
+        new_max = float(np.max(np.abs(w))) if w.size > 0 else 0.0
+        if (
+            abs(new_net) <= net_cap + tol
+            and new_gross <= gross_cap + tol
+            and new_max <= max_pos + tol
+        ):
+            converged = True
+            break
+
+    if not converged:
+        # Hard guard: even if the smart-shift loop failed to drive |net|
+        # below net_cap (rare — happens only when every remaining cell is
+        # exactly saturated against the bound on the side we'd push it),
+        # we MUST still satisfy the box and gross caps so callers like
+        # OrderManager.execute_diff don't blindly send oversized orders.
+        w = np.clip(w, -max_pos, max_pos)
+        gross = float(np.sum(np.abs(w)))
+        if gross > gross_cap and gross > 0:
+            w *= gross_cap / gross
+            w = np.clip(w, -max_pos, max_pos)
+
+    return w, converged
+
+
 def normalize_to_constraints(
     weights: np.ndarray,
     *,
@@ -130,7 +278,10 @@ def normalize_to_constraints(
     -------
     np.ndarray
         Same shape as ``weights``.  Values respect all three bounds
-        within ``1e-6`` numerical tolerance.  NaNs are preserved
+        within ``1e-6`` numerical tolerance (under all realistic inputs;
+        if the cyclic projection fails to converge, the per-asset and
+        gross caps are still guaranteed by a final hard-guard pass and a
+        warning is logged via :mod:`logging`).  NaNs are preserved
         positionally.
 
     Raises
@@ -167,13 +318,6 @@ def normalize_to_constraints(
             f"weights must be 2-D (T, N), got shape {out.shape!r}"
         )
 
-    # Step 1: per-asset clip preserving NaN positions.
-    # np.clip does not propagate NaN through the bounds, so we mask first.
-    finite_mask = np.isfinite(out)
-    out_finite = out[finite_mask]
-    out_finite = np.clip(out_finite, -max_position, max_position)
-    out[finite_mask] = out_finite
-
     T = out.shape[0]
     for t in range(T):
         row = out[t, :]
@@ -182,25 +326,26 @@ def normalize_to_constraints(
             # All NaN — pass through.
             continue
 
-        valid = row[valid_mask].copy()
-
-        # Step 2: enforce |net| ≤ net_exposure by uniform shift.
-        net = float(np.sum(valid))
-        if abs(net) > net_exposure:
-            target_net = float(np.sign(net)) * net_exposure
-            # Shift = (current_net - target_net) / k  applied to every cell.
-            shift = (net - target_net) / valid.size
-            valid -= shift
-
-        # Step 3: enforce Σ|wᵢ| ≤ gross_exposure by uniform scale-down.
-        gross = float(np.sum(np.abs(valid)))
-        if gross > gross_exposure and gross > 0:
-            valid *= gross_exposure / gross
-
-        # Step 4: re-clip per-asset (step 2 shifts may push cells beyond
-        # ±max_position even after step 3's down-scaling).
-        valid = np.clip(valid, -max_position, max_position)
-
-        out[t, valid_mask] = valid
+        valid = row[valid_mask]
+        projected, converged = _project_box_gross_net_row(
+            valid,
+            gross_cap=gross_exposure,
+            net_cap=net_exposure,
+            max_pos=max_position,
+        )
+        if not converged:
+            logger.warning(
+                "normalize_to_constraints: row %d failed to converge in "
+                "%d iterations (gross=%.6g, net=%.6g, max_pos=%.6g, "
+                "input_n=%d); applied hard-guard fallback (per-asset and "
+                "gross caps enforced; net cap may carry residual)",
+                t,
+                _PROJECTION_MAX_ITER,
+                gross_exposure,
+                net_exposure,
+                max_position,
+                int(valid.size),
+            )
+        out[t, valid_mask] = projected
 
     return out

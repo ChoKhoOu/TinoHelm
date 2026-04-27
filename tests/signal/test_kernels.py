@@ -13,13 +13,20 @@ Coverage
   the ``"ts"`` first column is preserved verbatim.
 - :func:`normalize_to_constraints` enforces all three caps under direct
   unit tests with edge cases (NaN preservation, zero-row pass-through,
-  per-asset clipping).
+  per-asset clipping, and the saturation+shift interaction that broke
+  the original single-pass algorithm).
 - Kernel parameter validation (``k > 0``, ``power > 0``,
   ``lower <= upper``, ``clip > 0``).
+- Cross-kernel fuzzing — 1000 random rows per kernel must satisfy all
+  three caps to ensure no kernel parametrization slips past the
+  projection.
+- Convergence-warning behaviour — if the projection's iteration cap is
+  exhausted, a warning is emitted via :mod:`logging` (no exception).
 """
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 import numpy as np
 import polars as pl
@@ -33,6 +40,7 @@ from tinohelm.signal import (
     top_k_long_short,
     zscore_clip,
 )
+from tinohelm.signal import kernel as _kernel_module
 
 
 # ---------------------------------------------------------------------------
@@ -529,3 +537,272 @@ class TestNormalizeToConstraints:
                 net_exposure=0.0,
                 max_position=0.5,
             )
+
+
+# ---------------------------------------------------------------------------
+# Saturation + shift regression — the original single-pass algorithm
+# silently violated |Σw| ≤ net_exposure when step-1 clip saturated cells
+# on one side; the smart-shift cyclic projection fixes this.
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeSaturationShift:
+    def test_saturation_upper_side_net_zero(self):
+        """``[2,2,2,-1] + max=0.5 + net=0`` was the canonical bug repro.
+
+        Naive single-sweep produced ``[+0.25,+0.25,+0.25,-0.5]`` (net=+0.25).
+        Smart-shift projects onto the feasible set: cell 3 is already
+        saturated at -max_position, so it's excluded from the shift; the
+        remaining 1.0 of net excess is distributed across the 3 upper-side
+        cells → ``[+1/6, +1/6, +1/6, -0.5]`` with net = 0.
+        """
+        weights = np.array([[2.0, 2.0, 2.0, -1.0]])
+        out = normalize_to_constraints(
+            weights, gross_exposure=10.0, net_exposure=0.0, max_position=0.5
+        )
+        assert abs(float(np.sum(out[0]))) <= 1e-6
+        assert float(np.max(np.abs(out[0]))) <= 0.5 + 1e-9
+        assert float(np.sum(np.abs(out[0]))) <= 10.0 + 1e-6
+
+    def test_saturation_lower_side_net_zero(self):
+        """Mirror of the upper-side case — net excess pushes weights up."""
+        weights = np.array([[-2.0, -2.0, -2.0, 1.0]])
+        out = normalize_to_constraints(
+            weights, gross_exposure=10.0, net_exposure=0.0, max_position=0.5
+        )
+        assert abs(float(np.sum(out[0]))) <= 1e-6
+        assert float(np.max(np.abs(out[0]))) <= 0.5 + 1e-9
+        assert float(np.sum(np.abs(out[0]))) <= 10.0 + 1e-6
+
+    def test_threshold_signed_imbalanced_long_short_count(self):
+        """End-to-end: ``threshold_signed`` with imbalanced long/short
+        counts must still satisfy all three caps after normalization.
+
+        With ``long_weight=1.0, short_weight=-1.0`` and 4-of-5 cells
+        crossing the upper threshold (1 short), the raw weights are
+        ``[1, 1, 1, 1, -1]`` (net=+3, gross=5).  The original algorithm
+        clipped to ``[0.5, 0.5, 0.5, 0.5, -0.5]`` (net=+1.5), shifted
+        uniformly by 1.5/5=0.3 → ``[0.2, 0.2, 0.2, 0.2, -0.8]``, then the
+        final clip became ``[0.2, 0.2, 0.2, 0.2, -0.5]`` (net=+0.3, BUG).
+        Smart-shift converges to a feasible point.
+        """
+        panel = pl.DataFrame(
+            {
+                "ts": _hourly_ts(1),
+                "A": [1.0],   # > upper
+                "B": [1.0],   # > upper
+                "C": [1.0],   # > upper
+                "D": [1.0],   # > upper
+                "E": [-1.0],  # < lower
+            }
+        )
+        constraints = {
+            "gross_exposure": 5.0,
+            "net_exposure": 0.0,  # market-neutral
+            "max_position": 0.5,
+        }
+        out = threshold_signed(
+            panel,
+            params={
+                "upper": 0.5,
+                "lower": -0.5,
+                "long_weight": 1.0,
+                "short_weight": -1.0,
+            },
+            constraints=constraints,
+        )
+        _assert_constraints(out, constraints)
+
+    def test_well_formed_input_unchanged(self):
+        """Rows already satisfying all three caps must pass through
+        unchanged (smart-shift's stationary point equals the identity)."""
+        weights = np.array([[0.3, -0.2, 0.1, 0.0]])  # net=+0.2, gross=0.6
+        out = normalize_to_constraints(
+            weights, gross_exposure=1.0, net_exposure=0.5, max_position=0.5
+        )
+        np.testing.assert_allclose(out[0], weights[0])
+
+
+# ---------------------------------------------------------------------------
+# Fuzz: 1000 random rows × 5 kernels.  Every output row must satisfy
+# Σ|w|≤gross, |Σw|≤net, |wᵢ|≤max within 1e-6 tolerance.
+# ---------------------------------------------------------------------------
+
+
+class TestKernelFuzz:
+    """1000-row fuzz across each kernel — the projector must never let a
+    constraint violation through, regardless of input distribution or
+    kernel parameter."""
+
+    @pytest.mark.parametrize("seed", [101, 202, 303, 404, 505])
+    def test_threshold_signed_fuzz(self, seed: int):
+        rng = np.random.default_rng(seed)
+        rows = 200  # 5 seeds × 200 = 1000 rows
+        N = int(rng.integers(2, 31))
+        panel_data: dict[str, object] = {"ts": _hourly_ts(rows)}
+        for i in range(N):
+            panel_data[f"S{i:02d}"] = rng.normal(
+                loc=rng.uniform(-1.0, 1.0),
+                scale=rng.uniform(0.1, 2.0),
+                size=rows,
+            ).tolist()
+        panel = pl.DataFrame(panel_data)
+        constraints = {
+            "gross_exposure": float(rng.uniform(0.5, 5.0)),
+            "net_exposure": float(rng.uniform(0.0, 1.0)),
+            "max_position": float(rng.uniform(0.1, 1.0)),
+        }
+        out = threshold_signed(
+            panel,
+            params={
+                "upper": float(rng.uniform(-0.2, 0.8)),
+                "lower": float(rng.uniform(-0.8, -0.2)),
+                "long_weight": float(rng.uniform(0.1, 2.0)),
+                "short_weight": -float(rng.uniform(0.1, 2.0)),
+            },
+            constraints=constraints,
+        )
+        _assert_constraints(out, constraints)
+
+    @pytest.mark.parametrize("seed", [11, 22, 33, 44, 55])
+    def test_top_k_long_short_fuzz(self, seed: int):
+        rng = np.random.default_rng(seed)
+        rows = 200
+        N = int(rng.integers(4, 31))
+        panel_data: dict[str, object] = {"ts": _hourly_ts(rows)}
+        for i in range(N):
+            panel_data[f"S{i:02d}"] = rng.standard_normal(rows).tolist()
+        panel = pl.DataFrame(panel_data)
+        constraints = {
+            "gross_exposure": float(rng.uniform(0.5, 5.0)),
+            "net_exposure": float(rng.uniform(0.0, 1.0)),
+            "max_position": float(rng.uniform(0.1, 1.0)),
+        }
+        k = int(rng.integers(1, max(2, N // 2 + 1)))
+        out = top_k_long_short(panel, params={"k": k}, constraints=constraints)
+        _assert_constraints(out, constraints)
+
+    @pytest.mark.parametrize("seed", [111, 222, 333, 444, 555])
+    def test_quantile_long_short_fuzz(self, seed: int):
+        rng = np.random.default_rng(seed)
+        rows = 200
+        N = int(rng.integers(5, 31))
+        panel_data: dict[str, object] = {"ts": _hourly_ts(rows)}
+        for i in range(N):
+            panel_data[f"S{i:02d}"] = rng.standard_normal(rows).tolist()
+        panel = pl.DataFrame(panel_data)
+        constraints = {
+            "gross_exposure": float(rng.uniform(0.5, 5.0)),
+            "net_exposure": float(rng.uniform(0.0, 1.0)),
+            "max_position": float(rng.uniform(0.1, 1.0)),
+        }
+        quantiles = int(rng.integers(2, 6))
+        out = quantile_long_short(
+            panel,
+            params={"quantiles": quantiles},
+            constraints=constraints,
+        )
+        _assert_constraints(out, constraints)
+
+    @pytest.mark.parametrize("seed", [777, 888, 999, 1010, 1111])
+    def test_zscore_clip_fuzz(self, seed: int):
+        rng = np.random.default_rng(seed)
+        rows = 200
+        N = int(rng.integers(2, 31))
+        panel_data: dict[str, object] = {"ts": _hourly_ts(rows)}
+        for i in range(N):
+            # Heavy-tailed → zscore clip will saturate, exercising the
+            # projection's saturation handling.
+            panel_data[f"S{i:02d}"] = (
+                rng.standard_normal(rows) * 5.0
+            ).tolist()
+        panel = pl.DataFrame(panel_data)
+        constraints = {
+            "gross_exposure": float(rng.uniform(0.5, 5.0)),
+            "net_exposure": float(rng.uniform(0.0, 1.0)),
+            "max_position": float(rng.uniform(0.1, 1.0)),
+        }
+        out = zscore_clip(
+            panel,
+            params={"clip": float(rng.uniform(1.0, 5.0))},
+            constraints=constraints,
+        )
+        _assert_constraints(out, constraints)
+
+    @pytest.mark.parametrize("seed", [13, 26, 39, 52, 65])
+    def test_rank_to_weight_fuzz(self, seed: int):
+        rng = np.random.default_rng(seed)
+        rows = 200
+        N = int(rng.integers(2, 31))
+        panel_data: dict[str, object] = {"ts": _hourly_ts(rows)}
+        for i in range(N):
+            panel_data[f"S{i:02d}"] = rng.standard_normal(rows).tolist()
+        panel = pl.DataFrame(panel_data)
+        constraints = {
+            "gross_exposure": float(rng.uniform(0.5, 5.0)),
+            "net_exposure": float(rng.uniform(0.0, 1.0)),
+            "max_position": float(rng.uniform(0.1, 1.0)),
+        }
+        out = rank_to_weight(
+            panel,
+            params={"power": float(rng.uniform(0.5, 3.0))},
+            constraints=constraints,
+        )
+        _assert_constraints(out, constraints)
+
+
+# ---------------------------------------------------------------------------
+# Convergence warning — if the projection cap is artificially small the
+# loop logs a warning rather than raising; downstream live-trading paths
+# depend on this non-throwing contract.
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeConvergenceWarning:
+    def test_warns_when_iteration_cap_exhausted(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Force a non-converging case by capping the projector at 0
+        iterations.  The cyclic loop never runs; the hard-guard fallback
+        applies, and a warning is logged for each violating row."""
+        # max_iter=0 means the loop body never executes → converged stays
+        # False even on trivially-feasible inputs that *would* satisfy
+        # the caps after one pass.  This is the cleanest way to exercise
+        # the warn-and-fallback code path without writing unrealistic
+        # zero-headroom weights.
+        monkeypatch.setattr(_kernel_module, "_PROJECTION_MAX_ITER", 0)
+
+        weights = np.array([[2.0, 2.0, 2.0, -1.0]])
+        with caplog.at_level(logging.WARNING, logger="tinohelm.signal.kernel"):
+            out = normalize_to_constraints(
+                weights,
+                gross_exposure=10.0,
+                net_exposure=0.0,
+                max_position=0.5,
+            )
+
+        # Warning fired (no raise).
+        assert any(
+            "failed to converge" in r.message for r in caplog.records
+        ), f"expected convergence warning, got: {[r.message for r in caplog.records]!r}"
+
+        # Hard-guard still enforced box and gross caps.
+        assert float(np.max(np.abs(out[0]))) <= 0.5 + 1e-9
+        assert float(np.sum(np.abs(out[0]))) <= 10.0 + 1e-6
+
+    def test_no_warning_on_well_formed_input(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """Inputs satisfying all three caps must converge in a single
+        loop iteration (no warning)."""
+        weights = np.array([[0.3, -0.2, 0.1, 0.0]])
+        with caplog.at_level(logging.WARNING, logger="tinohelm.signal.kernel"):
+            normalize_to_constraints(
+                weights,
+                gross_exposure=1.0,
+                net_exposure=0.5,
+                max_position=0.5,
+            )
+        assert not any(
+            "failed to converge" in r.message for r in caplog.records
+        )
