@@ -718,3 +718,85 @@ async def test_recover_interrupted_jobs_flips_running_to_queued():
     assert captured_updates, "expected one UPDATE flipping running → queued"
     rds.delete.assert_called_with("tino:signal:queue")
     assert rds.rpush.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Source routing — market_cap must NOT fall through to "bar"
+# ---------------------------------------------------------------------------
+
+def test_load_aligned_panels_routes_market_cap_to_market_cap_source():
+    """market_cap field must be routed to source='market_cap', never 'bar'.
+
+    Regression guard for the bug where _load_aligned_panels hard-coded
+    ``source = "funding_rate" if field == "funding_rate" else "bar"``,
+    which incorrectly routed market_cap → bar → DataLayer read failure.
+    """
+    from unittest.mock import patch, call
+    import datetime as _dt
+
+    import polars as pl
+
+    from tinohelm.factor.types import FactorSpec, InputSpec
+    from tinohelm.signal.types import SignalSpec
+    from tinohelm.signal.worker import _load_aligned_panels
+
+    syms = ("BTCUSDT-PERP",)
+    ts = pl.Series("ts", [_dt.datetime(2024, 1, 1, h) for h in range(3)])
+    synthetic_panel = pl.DataFrame({
+        "ts": ts,
+        "BTCUSDT-PERP": [1.0e10, 1.1e10, 1.2e10],
+    })
+
+    factor_spec = FactorSpec(
+        name="fake_logmcap",
+        category="size",
+        description="",
+        lookback=1,
+        input_specs=(InputSpec(field_name="market_cap"),),
+    )
+
+    captured_requests: list = []
+
+    def _fake_load(requests, start=None, end=None):
+        captured_requests.extend(requests)
+        # Return only the fields that were requested so the kernel
+        # never sees unexpected keyword arguments (close is loaded
+        # separately via close_requests).
+        fields = {r.field_name for r in requests}
+        return {f: synthetic_panel for f in fields}
+
+    spec = SignalSpec(
+        name="test_mcap",
+        factor_ref="fake_logmcap@1.0.0",
+        method="top_k_long_short",
+        weighting="equal",
+        rebalance_freq="1h",
+        universe_ref="test_universe",
+    )
+    config = {
+        "universe_symbols": list(syms),
+        "start": "2024-01-01",
+        "end": "2024-01-02",
+    }
+
+    def _fake_kernel(market_cap, params=None):
+        return market_cap
+
+    with (
+        patch("tinohelm.factor.registry.Registry.scan", return_value=None),
+        patch("tinohelm.factor.registry.Registry.get_kernel", return_value=_fake_kernel),
+        patch("tinohelm.factor.registry.Registry.get_spec", return_value=factor_spec),
+        patch(
+            "tinohelm.factor.data_layer.DataLayer.load",
+            side_effect=lambda reqs, start=None, end=None: _fake_load(reqs, start=start, end=end),
+        ),
+    ):
+        _load_aligned_panels(spec, config)
+
+    # Every DataRequest for market_cap must use source="market_cap".
+    mcap_requests = [r for r in captured_requests if r.field_name == "market_cap"]
+    assert mcap_requests, "expected at least one DataRequest for market_cap"
+    for req in mcap_requests:
+        assert req.source == "market_cap", (
+            f"market_cap field routed to source={req.source!r}, expected 'market_cap'"
+        )

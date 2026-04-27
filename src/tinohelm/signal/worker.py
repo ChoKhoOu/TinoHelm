@@ -68,6 +68,7 @@ from tinohelm.signal.kernels import (
     top_k_long_short,
     zscore_clip,
 )
+from tinohelm.factor.engine.planner import _infer_source
 from tinohelm.signal.types import SignalSpec
 from tinohelm.signal.utils import signal_spec_from_dict
 
@@ -545,19 +546,20 @@ def _load_aligned_panels(
     requests: list[DataRequest] = []
     for field_name in input_fields:
         for sym in pit_symbols:
+            source = _infer_source(field_name)
+            if source is None:
+                raise ValueError(
+                    f"_load_aligned_panels: cannot infer DataLayer source "
+                    f"for field {field_name!r} — add it to "
+                    f"tinohelm.factor.engine.planner._infer_source()"
+                )
             requests.append(
                 DataRequest(
                     symbol=sym,
                     field_name=field_name,
                     frequency=freq,
                     lookback=int(factor_spec.lookback),
-                    # DataRequest.source default is "bar" — correct for
-                    # OHLCV fields.  Non-OHLCV factors route via the
-                    # DataLayer's source dispatch (funding_rate/etc).
-                    source=(
-                        "funding_rate" if field_name == "funding_rate"
-                        else "bar"
-                    ),
+                    source=source,
                 )
             )
     panels = data_layer.load(requests, start=start, end=end)
