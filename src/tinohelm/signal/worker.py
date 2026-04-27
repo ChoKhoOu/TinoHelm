@@ -410,13 +410,30 @@ def _load_aligned_panels(
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Load factor + future-returns panels for the signal pipeline.
 
-    This module deliberately does **not** own the factor-data loading
-    logic.  It is overridden in tests via patching, and in production it
-    will be wired into :class:`tinohelm.factor.engine.orchestrator.Orchestrator`
-    once the signal-orchestrator integration task lands (see acceptance
-    criteria 3-4 of s16).  For now it raises NotImplementedError so a
-    misconfigured production deployment fails fast rather than silently
-    producing zero-weight panels.
+    Production implementation
+    -------------------------
+    1. Resolve the factor kernel + :class:`FactorSpec` from
+       :class:`tinohelm.factor.registry.Registry`.
+    2. Use :class:`tinohelm.factor.universe.Universe.from_symbols` to
+       wrap the PIT-resolved symbol list stored in
+       ``config["universe_symbols"]`` (populated by
+       :mod:`tinohelm.api.routes.signal`) — no CSV re-read, no second
+       PIT pass.
+    3. Build a :class:`DataLayer` against ``catalog_root`` and issue
+       :class:`DataRequest` entries for every ``input_spec`` the factor
+       declares, clipped to the ``[start, end]`` window from ``config``.
+    4. Call the factor kernel with the resulting panels — the kernel
+       signature matches :mod:`tinohelm.factor.builtins` (panels as
+       keyword arguments + a ``params`` kwarg).
+    5. Compute ``future_returns`` as a per-symbol 1-period shift of close:
+       ``r_t = close_{t+1} / close_t - 1``.  This matches what the
+       :class:`SignalEvaluator` expects (``inner-join on ts``; NaN tails
+       are safely dropped inside the evaluator).
+
+    The frequency for data loading is derived from
+    :attr:`SignalSpec.rebalance_freq` via the shared ``INTERVAL_MAP``
+    contract — same mapping used by :mod:`tinohelm.strategy.loader_helpers`
+    so research + live + signal stays consistent.
 
     Parameters
     ----------
@@ -424,27 +441,171 @@ def _load_aligned_panels(
         The reconstructed :class:`SignalSpec` (drives ``factor_ref``,
         ``rebalance_freq``, ``universe_ref``).
     config:
-        The raw ``signal_runs.config`` dict (carries ``start`` / ``end``
-        and ``periods_per_year`` knobs).
+        The raw ``signal_runs.config`` dict (carries ``start`` / ``end``,
+        ``universe_symbols`` / ``instrument_ids`` / ``periods_per_year``).
 
     Returns
     -------
     tuple[pl.DataFrame, pl.DataFrame]
         ``(factor_panel, future_returns)`` — both with a ``"ts"`` column
-        plus N symbol columns.
+        plus N symbol columns.  Symbols in ``future_returns`` are always
+        the TinoHelm short form (``"BTCUSDT-PERP"``) so the
+        :class:`SignalEvaluator` inner-joins them against the factor
+        panel cleanly.
 
     Raises
     ------
-    NotImplementedError
-        Always raised in production until the orchestrator integration is
-        complete.  Tests patch this function with a fixture that returns
-        synthetic panels.
+    ValueError
+        The config is missing the universe_symbols list (legacy rows)
+        or the factor is not in the registry.  Callers translate this
+        into a ``status="failed"`` write.
     """
-    raise NotImplementedError(
-        "signal worker factor-panel loading is not yet wired to the "
-        "factor orchestrator; integration is tracked separately. Tests "
-        "monkey-patch tinohelm.signal.worker._load_aligned_panels."
+    # Imports kept function-local so the module stays importable in
+    # environments where only the stub is needed (unit tests patch this
+    # function before calling ``_process_job``).
+    from pathlib import Path
+
+    from tinohelm.core.paths import paths as _paths
+    from tinohelm.factor.data_layer import DataLayer
+    from tinohelm.factor.registry import Registry as FactorRegistry
+    from tinohelm.factor.types import DataRequest
+    from tinohelm.factor.universe import Universe
+    from tinohelm.strategy.loader_helpers import parse_interval
+
+    # ----------------------------------------------------------------
+    # 1. Resolve factor kernel + FactorSpec from the registry
+    # ----------------------------------------------------------------
+    factor_name = (spec.factor_ref or "").split("@", 1)[0]
+    if not factor_name:
+        raise ValueError(
+            "SignalSpec.factor_ref is empty; cannot resolve a factor kernel"
+        )
+    registry = FactorRegistry()
+    registry.scan()
+    factor_kernel = registry.get_kernel(factor_name)
+    factor_spec = registry.get_spec(factor_name)
+    if factor_kernel is None or factor_spec is None:
+        raise ValueError(
+            f"Factor {factor_name!r} not found in registry — signal "
+            "config points at a factor that was removed or never scanned."
+        )
+
+    # ----------------------------------------------------------------
+    # 2. Build Universe from the persisted PIT symbol list
+    # ----------------------------------------------------------------
+    pit_symbols = config.get("universe_symbols") or []
+    if not pit_symbols:
+        # Defensive: the /run endpoint always persists this list.  A
+        # missing list means the run predates universe resolution —
+        # the worker refuses to silently fall back to CSV scanning
+        # because that would mask the upstream contract violation.
+        raise ValueError(
+            "signal_runs.config is missing 'universe_symbols'; the run "
+            "was created before /api/signal/run enforced universe "
+            "resolution.  Re-create the run via POST /api/signal/run."
+        )
+    universe = Universe.from_symbols(tuple(pit_symbols))
+
+    # ----------------------------------------------------------------
+    # 3. Frequency derivation — rebalance_freq → INTERVAL_MAP key
+    # ----------------------------------------------------------------
+    # ``parse_interval`` maps "1H" → "1-HOUR" (NT wire format); DataLayer
+    # wants the short-form INTERVAL_MAP key ("1h").  The rebalance_freq
+    # is already in short form by convention (see signal.md §2), just
+    # lowercased for the data layer.
+    freq = (spec.rebalance_freq or "1h").lower()
+    # Validate the short form parses — fall back to 1h otherwise to
+    # match ``_parse_rebalance_to_ns`` in the API route.
+    parsed = parse_interval(freq)
+    if parsed == "1-MINUTE" and freq not in ("1m",):
+        logger.warning(
+            "_load_aligned_panels: rebalance_freq %r not in INTERVAL_MAP, "
+            "falling back to '1h'", spec.rebalance_freq,
+        )
+        freq = "1h"
+
+    # ----------------------------------------------------------------
+    # 4. Build DataLayer + issue per-input DataRequests
+    # ----------------------------------------------------------------
+    catalog_root = Path(config.get("catalog_path") or str(_paths.get("catalog")))
+    data_layer = DataLayer(universe=universe, catalog_root=catalog_root)
+
+    start = config.get("start")
+    end = config.get("end")
+
+    # When input_specs is empty (user fixture skipping the auto-detection)
+    # fall back to ``close`` — matches ``compute_latest_factor_panel``.
+    input_fields = (
+        [s.field_name for s in factor_spec.input_specs]
+        if factor_spec.input_specs
+        else ["close"]
     )
+    # DataLayer groups by (field, frequency, source) so listing every
+    # symbol per field is fine — it fans out the ThreadPoolExecutor.
+    requests: list[DataRequest] = []
+    for field_name in input_fields:
+        for sym in pit_symbols:
+            requests.append(
+                DataRequest(
+                    symbol=sym,
+                    field_name=field_name,
+                    frequency=freq,
+                    lookback=int(factor_spec.lookback),
+                    # DataRequest.source default is "bar" — correct for
+                    # OHLCV fields.  Non-OHLCV factors route via the
+                    # DataLayer's source dispatch (funding_rate/etc).
+                    source=(
+                        "funding_rate" if field_name == "funding_rate"
+                        else "bar"
+                    ),
+                )
+            )
+    panels = data_layer.load(requests, start=start, end=end)
+
+    # ----------------------------------------------------------------
+    # 5. Run the factor kernel
+    # ----------------------------------------------------------------
+    # Kernel signature: ``kernel(**panels_by_field, params=...)`` — same
+    # convention as :class:`tinohelm.factor.engine.scheduler.Scheduler`.
+    merged_params: dict = dict(factor_spec.params or {})
+    factor_panel = factor_kernel(**panels, params=merged_params)
+
+    # ----------------------------------------------------------------
+    # 6. Future returns — close_{t+1} / close_t - 1
+    # ----------------------------------------------------------------
+    # Always reload close independently so future_returns are defined
+    # even when the factor itself doesn't need close (e.g. funding-rate
+    # factors).  Reuses the same DataLayer + window to stay PIT-aligned.
+    close_requests = [
+        DataRequest(
+            symbol=sym,
+            field_name="close",
+            frequency=freq,
+            lookback=0,  # no warmup for the eval panel
+            source="bar",
+        )
+        for sym in pit_symbols
+    ]
+    close_panel = data_layer.load(close_requests, start=start, end=end).get(
+        "close"
+    )
+    if close_panel is None or close_panel.is_empty():
+        raise ValueError(
+            "DataLayer returned an empty close panel for the signal run "
+            "window; cannot compute future returns"
+        )
+    symbol_cols = [c for c in close_panel.columns if c != "ts"]
+    # Shift each symbol column by -1 (future close) and divide by current.
+    future_returns = close_panel.with_columns(
+        [
+            (
+                (pl.col(c).shift(-1) / pl.col(c)) - 1.0
+            ).alias(c)
+            for c in symbol_cols
+        ]
+    )
+
+    return factor_panel, future_returns
 
 
 # ---------------------------------------------------------------------------

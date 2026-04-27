@@ -490,6 +490,151 @@ def test_resolve_kernel_returns_callable_for_each_method():
 
 
 # ---------------------------------------------------------------------------
+# PR #140 — _load_aligned_panels is wired to the factor DataLayer
+# ---------------------------------------------------------------------------
+
+def test_load_aligned_panels_invokes_datalayer_and_kernel():
+    """Production wiring: _load_aligned_panels drives Registry + DataLayer + kernel.
+
+    Verifies the panel loader is no longer a stub — it resolves the
+    factor kernel from the registry, builds a DataLayer against the PIT
+    symbol list persisted in ``config["universe_symbols"]``, and
+    computes ``future_returns = close.shift(-1)/close - 1``.
+
+    The factor kernel is mocked to return a deterministic 3-timestamp
+    panel so the assertion does not depend on the real ``ret_N`` output.
+    """
+    from unittest.mock import patch
+    import datetime as _dt
+
+    import polars as pl
+
+    from tinohelm.factor.types import FactorSpec, InputSpec
+    from tinohelm.signal.types import SignalSpec
+    from tinohelm.signal.worker import _load_aligned_panels
+
+    syms = ("BTCUSDT-PERP", "ETHUSDT-PERP")
+    ts = pl.Series(
+        "ts",
+        [_dt.datetime(2024, 1, 1, h) for h in range(3)],
+    )
+    synthetic_close = pl.DataFrame({
+        "ts": ts,
+        "BTCUSDT-PERP": [100.0, 110.0, 121.0],
+        "ETHUSDT-PERP": [50.0, 55.0, 60.5],
+    })
+
+    # Fake factor — InputSpec("close") so the DataLayer only loads close.
+    factor_spec = FactorSpec(
+        name="fake_momentum",
+        category="momentum",
+        description="",
+        lookback=2,
+        input_specs=(InputSpec(field_name="close"),),
+    )
+
+    def _fake_kernel(close, params=None):
+        # Return the close panel unchanged so we can assert shape.
+        # Matches the ret_N signature: ``def ret_N(close: Panel, params=None)``.
+        return close
+
+    # DataLayer.load returns the same close panel whether it's asked for
+    # the factor input or the future-returns loader.
+    def _fake_load(requests, start=None, end=None):
+        return {"close": synthetic_close}
+
+    spec = SignalSpec(
+        name="test",
+        factor_ref="fake_momentum@1.0.0",
+        method="top_k_long_short",
+        weighting="equal",
+        rebalance_freq="1h",
+        universe_ref="test_universe",
+    )
+    config = {
+        "universe_symbols": list(syms),
+        "start": "2024-01-01",
+        "end": "2024-01-02",
+    }
+
+    # Patch the registry + DataLayer so the test does not touch disk.
+    with (
+        patch(
+            "tinohelm.factor.registry.Registry.scan",
+            return_value=None,
+        ),
+        patch(
+            "tinohelm.factor.registry.Registry.get_kernel",
+            return_value=_fake_kernel,
+        ),
+        patch(
+            "tinohelm.factor.registry.Registry.get_spec",
+            return_value=factor_spec,
+        ),
+        patch(
+            "tinohelm.factor.data_layer.DataLayer.load",
+            side_effect=lambda reqs, start=None, end=None: _fake_load(
+                reqs, start=start, end=end
+            ),
+        ),
+    ):
+        factor_panel, future_returns = _load_aligned_panels(spec, config)
+
+    # Factor panel is whatever the kernel returned (our synthetic close).
+    assert set(factor_panel.columns) == {"ts", *syms}
+    assert factor_panel.height == 3
+
+    # Future returns shape matches and the last row is all NaN (shift(-1)).
+    assert set(future_returns.columns) == {"ts", *syms}
+    assert future_returns.height == 3
+    last_row = future_returns.tail(1)
+    for s in syms:
+        assert last_row[s].item() is None
+
+    # First-row future return = close[1]/close[0] - 1.  For BTC: 110/100-1=0.10.
+    first_row = future_returns.head(1)
+    assert abs(first_row["BTCUSDT-PERP"].item() - 0.10) < 1e-9
+    assert abs(first_row["ETHUSDT-PERP"].item() - 0.10) < 1e-9
+
+
+def test_load_aligned_panels_rejects_missing_universe_symbols():
+    """Legacy run without universe_symbols → ValueError (surfaces as failed)."""
+    from tinohelm.signal.types import SignalSpec
+    from tinohelm.signal.worker import _load_aligned_panels
+
+    spec = SignalSpec(
+        name="test",
+        factor_ref="some_factor@1.0.0",
+        method="top_k_long_short",
+        weighting="equal",
+        rebalance_freq="1h",
+        universe_ref="x",
+    )
+    # No universe_symbols key — simulates a legacy pre-resolution row.
+    config = {"start": "2024-01-01", "end": "2024-01-02"}
+
+    # Patch registry lookups to succeed so the ValueError comes from the
+    # missing-universe branch, not the missing-factor branch.
+    from unittest.mock import patch
+    from tinohelm.factor.types import FactorSpec
+
+    factor_spec = FactorSpec(name="some_factor", category="x", lookback=1)
+    with (
+        patch("tinohelm.factor.registry.Registry.scan", return_value=None),
+        patch(
+            "tinohelm.factor.registry.Registry.get_kernel",
+            return_value=lambda **kw: None,
+        ),
+        patch(
+            "tinohelm.factor.registry.Registry.get_spec",
+            return_value=factor_spec,
+        ),
+    ):
+        with pytest.raises(ValueError, match="universe_symbols"):
+            _load_aligned_panels(spec, config)
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle helpers
 # ---------------------------------------------------------------------------
 
