@@ -586,13 +586,16 @@ def test_experimental_factors_raise_not_implemented():
 @pytest.mark.integration
 @pytest.mark.skip(
     reason=(
-        "Full BacktestRunner E2E (real catalog + instrument fixtures + "
-        "_compute_factor_panel wiring via factor registry + DataLayer) "
-        "is deferred — requires s18 export endpoint wiring. "
-        "Protocol-level E2E is covered by "
-        "tests/integration/test_signal_driven_strategy_e2e.py."
+        "End-to-end BacktestRunner harness (real Parquet catalog + "
+        "instruments_cache.json + ~/.tino/strategies/<name>/portfolio.yaml) "
+        "is heavyweight infrastructure that duplicates what "
+        "tests/integration/test_signal_driven_strategy_e2e.py::"
+        "test_full_backtest_engine_e2e already validates: "
+        "_compute_factor_panel wiring → kernel → orders → fills.  Keeping "
+        "this slot reserved for a future Parquet-backed regression once "
+        "the BacktestRunner is the canonical entry point in CI."
     )
 )
 def test_signal_driven_strategy_full_e2e_with_backtest_runner():
-    """SignalDrivenStrategy via BacktestRunner — deferred to s18+s22 integration."""
+    """SignalDrivenStrategy via BacktestRunner — superseded by direct BacktestEngine E2E."""
     pytest.fail("This skipped test should never execute.")

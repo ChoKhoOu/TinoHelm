@@ -168,7 +168,15 @@ def _on_cross_section_ready(self, ts_ns: int, bars: dict[str, Bar]) -> None:
 
     # 2. 因子 panel 计算
     factor_panel = self._compute_factor_panel(ts_ns, bars)
-    # ⚠ 默认 raise NotImplementedError，需子类覆写或测试 monkey-patch
+    # 默认实现（自 PR #140 起）：从 self.cache.bars(bar_type) 取最近
+    # effective_warmup 根 bar，构造 polars 宽表（[ts, sym1, sym2, ...]）
+    # 并调用 factor 注册表中的真实 kernel。仅支持 OHLCV-only 因子；
+    # 需要 funding_rate / open_interest / quote_tick / trade_tick 等
+    # 非 bar 数据的因子由 /api/signal/export 端点拒绝（HTTP 400），
+    # 或由用户提供自定义 strategy_class 子类覆写本方法。
+    # 异常处理：仅捕获域错误（ValueError / KeyError / Arithmetic*），
+    # 程序错误（NotImplementedError / AttributeError / TypeError）会向上
+    # 抛出，便于 fail-fast 而非静默吞错。
 
     # 3. kernel 调用
     weight_panel = self._kernel(
@@ -272,6 +280,24 @@ pending = sync.pending_timestamps()  # list[int]（已排序）
 ## 9. portfolio.yaml 示例（/api/signal/export 导出格式）
 
 `/api/signal/export/{signal_run_id}` 生成以下 `portfolio.yaml`，可直接放入 `~/.tino/strategies/` 运行：
+
+### 9.1 兼容性约束（自 PR #140）
+
+* 默认 `strategy_class = "tinohelm.nt_adapter.signal_driven_strategy:SignalDrivenStrategy"`。
+* 默认实现的 `_compute_factor_panel` 仅能从 NT bar cache 解析 OHLCV
+  字段（`open` / `high` / `low` / `close` / `volume`）。
+* 如果 signal 的因子需要非 OHLCV 字段（`funding_rate` / `open_interest` /
+  `orderbook_imbalance` / `trade_qty` / `trade_side` 等），export 端点
+  会以 `HTTP 400` 拒绝导出。
+* 通过 query 参数 `?strategy_class=mypkg.strats:MyCustomSignalStrategy`
+  传入用户自定义子类时，校验跳过——调用方负责在子类中覆写
+  `_compute_factor_panel`，从合适数据源构造 panel。
+* `factor_lookback` 字段必须 ≥ 该因子在 `@factor` 装饰器中声明的
+  `lookback`，否则 panel 会因长度不足导致 kernel 输出全 NaN。
+  推荐做法：让 `factor_lookback` 由 export 端点根据 registry 自动填充
+  （这是默认行为，无需手动指定）。
+
+### 9.2 示例
 
 ```yaml
 # ~/.tino/strategies/momentum_top3/portfolio.yaml

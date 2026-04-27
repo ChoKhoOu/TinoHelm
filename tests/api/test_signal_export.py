@@ -94,10 +94,31 @@ def _mock_run(
     return row
 
 
-def _mock_factor_registry(lookback: int):
-    """Return a (registry_class_mock, registry_instance_mock) pair."""
+def _mock_factor_registry(lookback: int, input_field_names: tuple[str, ...] = ()):
+    """Return a (registry_class_mock, registry_instance_mock) pair.
+
+    ``input_field_names`` defaults to ``()`` which keeps the old test
+    behaviour: an "empty"-like input_specs that
+    :func:`factor_uses_only_bar_fields` treats as compatible.  Pass
+    ``("close",)`` etc. to assert OHLCV-only validation, or pass
+    ``("funding_rate",)`` to exercise the rejection path.
+    """
     factor_spec = MagicMock()
     factor_spec.lookback = lookback
+    if input_field_names:
+        # Build real-shaped InputSpec stand-ins so factor_uses_only_bar_fields
+        # can read .field_name without falling back to MagicMock auto-attrs.
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class _StubInputSpec:
+            field_name: str
+
+        factor_spec.input_specs = tuple(
+            _StubInputSpec(field_name=fn) for fn in input_field_names
+        )
+    # Else: leave factor_spec.input_specs as a MagicMock — iterable-as-empty
+    # so the OHLCV check is a no-op (matches the legacy contract).
 
     registry_instance = MagicMock()
     registry_instance.get_spec.return_value = factor_spec
@@ -308,3 +329,172 @@ def test_parse_rebalance_to_ns_empty_falls_back_to_1h():
 
 def test_parse_rebalance_to_ns_invalid_falls_back_to_1h():
     assert _parse_rebalance_to_ns("invalid") == 3_600_000_000_000
+
+
+# ---------------------------------------------------------------------------
+# 7. strategy_class query param + OHLCV-input validation (Layer 2 contract)
+# ---------------------------------------------------------------------------
+
+def test_export_accepts_custom_strategy_class(client):
+    """``?strategy_class=...`` overrides the default class path."""
+    run = _mock_run(factor_ref="ret_5@1.0.0", extra_warmup_bars=0)
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    registry_class, _ = _mock_factor_registry(lookback=5)
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    with patch("tinohelm.factor.registry.Registry", registry_class):
+        try:
+            resp = client.get(
+                "/api/signal/export/test-run-id"
+                "?strategy_class=mypkg.strats:CustomSignalStrategy"
+            )
+        finally:
+            test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["strategy_class"] == "mypkg.strats:CustomSignalStrategy"
+
+
+def test_export_accepts_default_when_factor_uses_ohlcv_only(client):
+    """Default strategy_class + OHLCV factor → 200 with default class."""
+    run = _mock_run(factor_ref="ret_N@1.0.0", extra_warmup_bars=0)
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    # ret_N(close: Panel) — only `close` is needed.
+    registry_class, _ = _mock_factor_registry(
+        lookback=20, input_field_names=("close",)
+    )
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    with patch("tinohelm.factor.registry.Registry", registry_class):
+        try:
+            resp = client.get("/api/signal/export/test-run-id")
+        finally:
+            test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["strategy_class"] == (
+        "tinohelm.nt_adapter.signal_driven_strategy:SignalDrivenStrategy"
+    )
+
+
+def test_export_rejects_default_when_factor_needs_funding_rate(client):
+    """Default strategy_class + funding_rate factor → 400 with detail."""
+    run = _mock_run(factor_ref="funding_rate_level@1.0.0", extra_warmup_bars=0)
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    registry_class, _ = _mock_factor_registry(
+        lookback=1, input_field_names=("funding_rate",)
+    )
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    with patch("tinohelm.factor.registry.Registry", registry_class):
+        try:
+            resp = client.get("/api/signal/export/test-run-id")
+        finally:
+            test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "funding_rate" in detail
+    # The detail must point users at the escape hatches.
+    assert "?strategy_class=" in detail or "strategy_class" in detail
+
+
+def test_export_rejects_default_when_factor_needs_open_interest(client):
+    """Default strategy_class + open_interest factor → 400."""
+    run = _mock_run(factor_ref="oi_change@1.0.0", extra_warmup_bars=0)
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    registry_class, _ = _mock_factor_registry(
+        lookback=2, input_field_names=("open_interest",)
+    )
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    with patch("tinohelm.factor.registry.Registry", registry_class):
+        try:
+            resp = client.get("/api/signal/export/test-run-id")
+        finally:
+            test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 400
+    assert "open_interest" in resp.json()["detail"]
+
+
+def test_export_custom_strategy_skips_ohlcv_validation(client):
+    """Custom strategy_class bypasses OHLCV validation (caller's responsibility)."""
+    run = _mock_run(factor_ref="oi_change@1.0.0", extra_warmup_bars=0)
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    registry_class, _ = _mock_factor_registry(
+        lookback=2, input_field_names=("open_interest",)
+    )
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    with patch("tinohelm.factor.registry.Registry", registry_class):
+        try:
+            resp = client.get(
+                "/api/signal/export/test-run-id"
+                "?strategy_class=mypkg.strats:OIAwareStrategy"
+            )
+        finally:
+            test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 200
+    assert resp.json()["strategy_class"] == "mypkg.strats:OIAwareStrategy"
+
+
+def test_export_default_strategy_passes_when_factor_missing_in_registry(client):
+    """Backwards compat: factor not in registry + default class → 200 (graceful degrade).
+
+    The factor lookup may legitimately fail in user fixtures that rely on
+    runtime monkey-patching.  We don't reject this case so existing
+    deployment workflows keep working; the live strategy still fails fast
+    inside ``_compute_factor_panel`` if the factor is genuinely missing.
+    """
+    run = _mock_run(factor_ref="user_custom@1.0.0", extra_warmup_bars=7)
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    registry_instance = MagicMock()
+    registry_instance.get_spec.return_value = None
+    registry_class = MagicMock(return_value=registry_instance)
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    with patch("tinohelm.factor.registry.Registry", registry_class):
+        try:
+            resp = client.get("/api/signal/export/test-run-id")
+        finally:
+            test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["strategy_class"] == (
+        "tinohelm.nt_adapter.signal_driven_strategy:SignalDrivenStrategy"
+    )

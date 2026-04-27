@@ -443,6 +443,7 @@ class _SignalDrivenStrategyStub:
     _extract_latest_weights = SignalDrivenStrategy._extract_latest_weights
     _on_cross_section_ready = SignalDrivenStrategy._on_cross_section_ready
     _submit_diff = SignalDrivenStrategy._submit_diff
+    _compute_equity = SignalDrivenStrategy._compute_equity
     _resolve_signal_spec = SignalDrivenStrategy._resolve_signal_spec
     _symbol_short = staticmethod(SignalDrivenStrategy._symbol_short)
 
@@ -579,6 +580,27 @@ class TestSignalDrivenStrategyWarmup:
         }
         s._effective_warmup = 20
         s._enforce_warmup()  # must not raise
+
+    def test_enforce_warmup_skipped_when_cache_empty(self):
+        """Backtest mode: cache is empty at on_start; bars stream in later.
+
+        The gate must be a no-op so backtests can run.  Runtime warmup
+        is still enforced inside _compute_factor_panel via min_history.
+        """
+        from nautilus_trader.model.data import BarType
+
+        spec = _basic_signal_spec(extra_warmup=0)
+        s = _make_strategy_for_unit_test(
+            signal_spec=spec, cache_history_len=0, factor_lookback=20
+        )
+        s._bar_types = {
+            "BTCUSDT-PERP": BarType.from_str(
+                "BTCUSDT-PERP.BINANCE-1-HOUR-LAST-EXTERNAL"
+            ),
+        }
+        s._effective_warmup = 20
+        # Empty cache → no-op (backtest start regime), must NOT raise.
+        s._enforce_warmup()
 
     def test_explicit_warmup_below_derived_raises_in_on_start_logic(self):
         """If config.warmup_bars is set and < derived → on_start would raise.
@@ -764,3 +786,261 @@ class TestCrossSectionReadyExecutesKernelAndSubmits:
         s.submit_order.assert_not_called()
         # last_rebalance_ts_ns unchanged.
         assert s.last_rebalance_ts_ns == 1_700_000_000_000_000_000
+
+
+# =============================================================================
+# Layer 1 — narrowed exception handling in _on_cross_section_ready
+# =============================================================================
+
+
+class TestCrossSectionReadyExceptionDiscipline:
+    """Domain errors (ValueError/KeyError/Arithmetic*) → log + return.
+    Programming errors (NotImplementedError/AttributeError/TypeError) → propagate.
+
+    The previous behaviour caught ``Exception`` indiscriminately, which
+    masked the ``NotImplementedError`` raised by the stub
+    ``_compute_factor_panel`` and silently produced empty target weights.
+    """
+
+    @pytest.fixture()
+    def base_strategy(self):
+        spec = _basic_signal_spec()
+        s = _make_strategy_for_unit_test(
+            signal_spec=spec, cache_history_len=100, factor_lookback=20
+        )
+        from tinohelm.signal.kernels import top_k_long_short
+
+        s._kernel = top_k_long_short
+        s._instruments_by_short_symbol = {
+            "BTCUSDT-PERP": _stub_instrument("BTCUSDT-PERP"),
+        }
+        s._order_manager = OrderManager(s)
+        return s
+
+    def test_value_error_in_factor_panel_is_caught(self, base_strategy):
+        """ValueError → log.error called, no orders submitted, last_rebalance_ts unchanged."""
+        s = base_strategy
+
+        def _raises_value(ts_ns, bars):
+            raise ValueError("synthetic domain error in kernel inputs")
+
+        s._compute_factor_panel = _raises_value  # type: ignore[method-assign]
+
+        bars = {"BTCUSDT-PERP": _bar("BTCUSDT-PERP", 1_700_000_000_000_000_000, 50_000.0)}
+        # Must NOT raise.
+        s._on_cross_section_ready(1_700_000_000_000_000_000, bars)
+        s.log.error.assert_called()
+        s.submit_order.assert_not_called()
+        assert s.last_rebalance_ts_ns == 0  # unchanged
+
+    def test_key_error_is_caught(self, base_strategy):
+        s = base_strategy
+
+        def _raises_key(ts_ns, bars):
+            raise KeyError("missing column")
+
+        s._compute_factor_panel = _raises_key  # type: ignore[method-assign]
+        bars = {"BTCUSDT-PERP": _bar("BTCUSDT-PERP", 1_700_000_000_000_000_000, 50_000.0)}
+        s._on_cross_section_ready(1_700_000_000_000_000_000, bars)
+        s.log.error.assert_called()
+        s.submit_order.assert_not_called()
+
+    def test_zero_division_is_caught(self, base_strategy):
+        s = base_strategy
+
+        def _raises_zerodiv(ts_ns, bars):
+            return 1 / 0  # ZeroDivisionError
+
+        s._compute_factor_panel = _raises_zerodiv  # type: ignore[method-assign]
+        bars = {"BTCUSDT-PERP": _bar("BTCUSDT-PERP", 1_700_000_000_000_000_000, 50_000.0)}
+        s._on_cross_section_ready(1_700_000_000_000_000_000, bars)
+        s.log.error.assert_called()
+
+    def test_not_implemented_error_propagates(self, base_strategy):
+        """The whole point of layer 1 — the stub ``raise`` must surface."""
+        s = base_strategy
+
+        def _raises_nie(ts_ns, bars):
+            raise NotImplementedError(
+                "_compute_factor_panel must be supplied"
+            )
+
+        s._compute_factor_panel = _raises_nie  # type: ignore[method-assign]
+        bars = {"BTCUSDT-PERP": _bar("BTCUSDT-PERP", 1_700_000_000_000_000_000, 50_000.0)}
+        with pytest.raises(NotImplementedError):
+            s._on_cross_section_ready(1_700_000_000_000_000_000, bars)
+        # The error should NOT be logged silently.
+        s.log.error.assert_not_called()
+
+    def test_attribute_error_propagates(self, base_strategy):
+        """AttributeError = programming error (typo, missing method) → propagate."""
+        s = base_strategy
+
+        def _raises_attr(ts_ns, bars):
+            return "not_a_dataframe".nonexistent_method()  # type: ignore[attr-defined]
+
+        s._compute_factor_panel = _raises_attr  # type: ignore[method-assign]
+        bars = {"BTCUSDT-PERP": _bar("BTCUSDT-PERP", 1_700_000_000_000_000_000, 50_000.0)}
+        with pytest.raises(AttributeError):
+            s._on_cross_section_ready(1_700_000_000_000_000_000, bars)
+
+    def test_type_error_propagates(self, base_strategy):
+        """TypeError = programming error → propagate."""
+        s = base_strategy
+
+        def _raises_type(ts_ns, bars):
+            raise TypeError("expected DataFrame, got str")
+
+        s._compute_factor_panel = _raises_type  # type: ignore[method-assign]
+        bars = {"BTCUSDT-PERP": _bar("BTCUSDT-PERP", 1_700_000_000_000_000_000, 50_000.0)}
+        with pytest.raises(TypeError):
+            s._on_cross_section_ready(1_700_000_000_000_000_000, bars)
+
+
+# =============================================================================
+# Layer 3 — base class _compute_factor_panel runs the factor kernel
+# =============================================================================
+
+
+class TestComputeFactorPanelBase:
+    """The base class _compute_factor_panel pulls bars from cache and runs kernel.
+
+    These tests exercise the production path that previously raised
+    NotImplementedError as a stub.  We swap in a fake factor kernel so
+    we don't depend on the global registry.
+    """
+
+    @staticmethod
+    def _make_close_bars(symbol: str, n: int = 30, step_ns: int = 60_000_000_000):
+        """Build n bars with strictly increasing close prices.
+
+        Returns a list in **NT cache order**: newest at index 0.  Each
+        Bar exposes ``ts_init``, ``open/high/low/close/volume`` as plain
+        Python floats so :func:`tinohelm.nt_adapter.factor_panel.
+        _series_from_bars` can read them via ``getattr``.
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class _SimpleBar:
+            ts_init: int
+            open: float
+            high: float
+            low: float
+            close: float
+            volume: float
+
+        base_ts = 1_700_000_000_000_000_000
+        bars: list[_SimpleBar] = []
+        for i in range(n):
+            ts = base_ts + i * step_ns
+            close = 100.0 + i  # monotonic so pct_change is well-defined
+            bars.append(
+                _SimpleBar(
+                    ts_init=ts,
+                    open=close - 0.5,
+                    high=close + 0.5,
+                    low=close - 1.0,
+                    close=close,
+                    volume=1000.0,
+                )
+            )
+        # NT cache returns newest-first via deque.appendleft.
+        return list(reversed(bars))
+
+    def _wire_strategy(self, lookback: int = 5):
+        """Build a stub strategy with cache.bars(...) wired to fake bars."""
+        from nautilus_trader.model.data import BarType
+        from tinohelm.factor.types import FactorSpec, InputSpec
+
+        spec_signal = _basic_signal_spec()
+        s = _make_strategy_for_unit_test(
+            signal_spec=spec_signal, cache_history_len=30, factor_lookback=lookback
+        )
+        # Wire bar_types as on_start would.
+        s._bar_types = {
+            "BTCUSDT-PERP": BarType.from_str(
+                "BTCUSDT-PERP.BINANCE-1-HOUR-LAST-EXTERNAL"
+            ),
+            "ETHUSDT-PERP": BarType.from_str(
+                "ETHUSDT-PERP.BINANCE-1-HOUR-LAST-EXTERNAL"
+            ),
+        }
+        s._effective_warmup = lookback
+
+        # Per-symbol bar list (newest-first, like NT cache).
+        bars_btc = self._make_close_bars("BTCUSDT-PERP", n=30)
+        bars_eth = self._make_close_bars("ETHUSDT-PERP", n=30)
+
+        def _cache_bars(bar_type):
+            inst = str(bar_type.instrument_id).split(".", 1)[0]
+            if "BTC" in inst:
+                return bars_btc
+            return bars_eth
+
+        s.cache.bars.side_effect = _cache_bars
+
+        # Wire factor kernel + spec — pretend the registry resolved a
+        # ret_N-style factor that takes only ``close``.
+        captured_inputs: dict = {}
+
+        def _fake_kernel(close, params=None):
+            captured_inputs["close_panel"] = close
+            captured_inputs["params"] = params
+            # Return the input panel verbatim — it's a valid factor_panel
+            # shape for downstream tests.
+            return close.clone()
+
+        s._factor_kernel = _fake_kernel
+        s._factor_spec = FactorSpec(
+            name="ret_N",
+            category="动量",
+            lookback=lookback,
+            input_specs=(InputSpec(field_name="close"),),
+            params={"lookback": lookback},
+        )
+        return s, captured_inputs
+
+    def test_compute_factor_panel_calls_kernel_with_close_panel(self):
+        """Default _compute_factor_panel runs the kernel with a close-only panel."""
+        # Use the real method bound from SignalDrivenStrategy.
+        s, captured = self._wire_strategy(lookback=5)
+        s._compute_factor_panel = SignalDrivenStrategy._compute_factor_panel.__get__(s)
+
+        bars = {
+            "BTCUSDT-PERP": object(),  # bars dict in callback unused for this code path
+            "ETHUSDT-PERP": object(),
+        }
+        result = s._compute_factor_panel(1_700_000_000_000_000_000, bars)
+
+        assert result is not None
+        assert "BTCUSDT-PERP" in result.columns
+        assert "ETHUSDT-PERP" in result.columns
+        assert "ts" in result.columns
+        # Kernel must have been called with a polars DataFrame keyed by
+        # ``close`` (the field_name from FactorSpec.input_specs).
+        assert captured["close_panel"] is not None
+        assert "BTCUSDT-PERP" in captured["close_panel"].columns
+        assert captured["params"] == {"lookback": 5}
+
+    def test_compute_factor_panel_returns_none_when_unresolved(self):
+        """When _factor_kernel is None, we log + return None (don't crash)."""
+        s, _ = self._wire_strategy(lookback=5)
+        s._factor_kernel = None
+        s._factor_spec = None
+        s._compute_factor_panel = SignalDrivenStrategy._compute_factor_panel.__get__(s)
+
+        result = s._compute_factor_panel(1_700_000_000_000_000_000, {})
+        assert result is None
+        s.log.error.assert_called()
+
+    def test_compute_factor_panel_returns_none_when_history_short(self):
+        """Insufficient bars per symbol → None (skip rebalance)."""
+        s, _ = self._wire_strategy(lookback=5)
+        # Override cache.bars to return fewer than warmup.
+        short_bars = self._make_close_bars("any", n=2)
+        s.cache.bars.side_effect = lambda bt: short_bars
+
+        s._compute_factor_panel = SignalDrivenStrategy._compute_factor_panel.__get__(s)
+        result = s._compute_factor_panel(1_700_000_000_000_000_000, {})
+        assert result is None

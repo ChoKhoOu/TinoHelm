@@ -536,10 +536,85 @@ def _parse_rebalance_to_ns(rebalance_freq: str) -> int:
     return int(prefix) * _REBALANCE_UNITS[suffix]
 
 
+_DEFAULT_STRATEGY_CLASS = (
+    "tinohelm.nt_adapter.signal_driven_strategy:SignalDrivenStrategy"
+)
+
+
+def _validate_strategy_class_for_signal(
+    strategy_class: str,
+    factor_spec,
+    factor_name: str,
+) -> None:
+    """Reject exports that would never trade.
+
+    Two failure modes guarded:
+
+    1. Caller used the default :class:`SignalDrivenStrategy` but the
+       referenced factor is unrunnable on the live path because it
+       requires non-OHLCV inputs that ``cache.bars`` cannot satisfy
+       (funding_rate / open_interest / quote_tick / trade_tick).
+    2. Caller used the default :class:`SignalDrivenStrategy` but the
+       factor is not registered at all (pre-existing graceful-degrade
+       path is still allowed — log only, do not reject — to preserve
+       backwards compatibility with tests).
+
+    Raises
+    ------
+    HTTPException
+        ``400`` when the export would produce a strategy that never
+        trades.  The detail message names the offending fields so the
+        operator can fix the signal (or supply a custom subclass via
+        ``?strategy_class=...``).
+    """
+    if strategy_class != _DEFAULT_STRATEGY_CLASS:
+        # Custom subclass: caller takes responsibility for wiring its own
+        # _compute_factor_panel.  We trust it and skip validation.
+        return
+
+    if factor_spec is None:
+        # Graceful-degradation case retained for backwards compatibility:
+        # tests may reference factors that aren't in the registry but
+        # legitimately rely on monkey-patching at runtime.  Log only.
+        return
+
+    # Lazy import — keeps the API route module light at startup time.
+    from tinohelm.nt_adapter.factor_panel import factor_uses_only_bar_fields
+
+    if not factor_uses_only_bar_fields(factor_spec):
+        unsupported = sorted(
+            spec.field_name for spec in factor_spec.input_specs
+            if spec.field_name not in ("close", "open", "high", "low", "volume")
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot export signal: factor {factor_name!r} requires "
+                f"non-OHLCV inputs {unsupported} which the default "
+                f"SignalDrivenStrategy cannot resolve from cache.bars.  "
+                "Either switch to a factor whose inputs are limited to "
+                "OHLCV (open/high/low/close/volume), or supply a custom "
+                "?strategy_class=<module>:<Class> that overrides "
+                "_compute_factor_panel for this data source."
+            ),
+        )
+
+
 @router.get("/export/{run_id}")
 async def export_run(
     run_id: str,
     db: AsyncSession = Depends(get_db),
+    strategy_class: str = Query(
+        default=_DEFAULT_STRATEGY_CLASS,
+        description=(
+            "Fully qualified strategy class path "
+            "(format: ``module.path:ClassName``).  Defaults to the built-in "
+            "SignalDrivenStrategy.  When the default is used the endpoint "
+            "validates that the upstream factor is runnable from "
+            "OHLCV-only inputs; non-default values are trusted (caller is "
+            "responsible for the custom subclass's _compute_factor_panel)."
+        ),
+    ),
 ) -> dict:
     """Export a completed :class:`SignalRun` as portfolio.yaml-compatible JSON.
 
@@ -549,13 +624,21 @@ async def export_run(
 
     Key additions over the ``/report`` endpoint:
 
-    * ``strategy_class`` — fixed import path for :class:`SignalDrivenStrategy`.
+    * ``strategy_class`` — fixed import path for :class:`SignalDrivenStrategy`,
+      overridable via the ``strategy_class`` query parameter.
     * Server-side ``warmup_bars`` derivation:
       ``factor.lookback + signal_spec.extra_warmup_bars``.  The factor
       lookback is resolved via :class:`tinohelm.factor.registry.Registry`
       using the ``factor_ref`` stored in ``signal_runs.config``; the derived
       value is written into both ``config.warmup_bars`` and the ``metadata``
       block so callers can audit the derivation.
+    * Server-side OHLCV-input validation:
+      when ``strategy_class`` is the default :class:`SignalDrivenStrategy`,
+      we refuse to export signals whose factor needs non-OHLCV inputs
+      (funding_rate / open_interest / quote_tick / trade_tick) because the
+      live path cannot satisfy them from ``cache.bars``.  Returning 400 at
+      this boundary prevents the previous silent-failure mode where the
+      strategy ran but never traded.
     * ``metadata`` — attribution fields (``exported_from_run_id``,
       ``factor_lookback``, ``extra_warmup_bars``, ``warmup_bars_derived``).
     """
@@ -591,6 +674,9 @@ async def export_run(
     except Exception as exc:
         logger.warning("export_run: factor registry scan failed: %s", exc)
         factor_spec = None
+
+    # Layer-2 contract guard — reject exports the live path can't honour.
+    _validate_strategy_class_for_signal(strategy_class, factor_spec, factor_name)
 
     if factor_spec is not None:
         factor_lookback: int = int(factor_spec.lookback)
@@ -630,9 +716,7 @@ async def export_run(
     }
 
     return {
-        "strategy_class": (
-            "tinohelm.nt_adapter.signal_driven_strategy:SignalDrivenStrategy"
-        ),
+        "strategy_class": strategy_class,
         "config": {
             "signal_name": run.signal_name,
             "instrument_ids": config.get("instrument_ids", []),
