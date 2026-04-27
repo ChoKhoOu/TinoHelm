@@ -36,6 +36,23 @@ _ROLLING_FACTORIES: dict[
 }
 
 
+def _mask_nonfinite_to_null(col: pl.Expr) -> pl.Expr:
+    """Return *col* with NaN / ±inf replaced by ``null``.
+
+    DataLayer uses ``float('nan')`` to mark "symbol not in PIT universe" or
+    rolling warmup rows that have not yet matured.  Polars treats NaN as a
+    valid ``Float64`` value — ``is_not_null()`` does **not** exclude it, so
+    cross-sectional aggregations (rank, zscore) that use ``over("ts")`` would
+    include NaN cells and contaminate the result.
+
+    This helper is called once at the start of each cross-sectional branch
+    to turn every non-finite cell into a proper ``null`` before any
+    ``.over()`` aggregation runs.  The contract "null in → null out" is
+    preserved because the NaN stays null through the round-trip.
+    """
+    return pl.when(col.is_finite()).then(col).otherwise(None)
+
+
 class PolarsBackend:
     """Polars backend for panel factor operators.
 
@@ -219,15 +236,25 @@ class PolarsBackend:
             # Time-series rank — operate down each column independently.
             # Polars ``Expr.rank`` propagates ``null`` automatically and the
             # method ``"average"`` matches pandas' default rank semantics.
+            # Mask NaN/inf → null before ranking so that non-finite warmup
+            # values are excluded from the per-column rank and the pct
+            # denominator (is_finite counts only valid floats, not NaN).
             method = "average"
+            # First mask non-finite values to null in the input panel so
+            # that rank propagates null correctly for NaN cells.
+            masked = panel.with_columns(
+                [_mask_nonfinite_to_null(pl.col(c)).alias(c) for c in cols]
+            )
             exprs = [
                 pl.col(c).rank(method=method, descending=False).cast(pl.Float64).alias(c)
                 for c in cols
             ]
-            ranked = panel.with_columns(exprs)
+            ranked = masked.with_columns(exprs)
             if not pct:
                 return ranked
-            # Convert to percentile by dividing by the per-column non-null count.
+            # Convert to percentile by dividing by the per-column finite count
+            # from the *original masked* panel (after null-masking, is_not_null
+            # correctly counts only finite values).
             pct_exprs: list[pl.Expr] = []
             for c in cols:
                 cnt_expr = pl.col(c).is_not_null().sum().cast(pl.Float64)
@@ -235,7 +262,12 @@ class PolarsBackend:
             return ranked.with_columns(pct_exprs)
 
         # Cross-sectional rank (axis=0): unpivot → rank.over("ts") → pivot back.
-        long = panel.unpivot(
+        # Mask NaN/inf → null before unpivoting so that non-finite cells are
+        # excluded from the cross-sectional rank and pct denominator.
+        masked_panel = panel.with_columns(
+            [_mask_nonfinite_to_null(pl.col(c)).alias(c) for c in cols]
+        )
+        long = masked_panel.unpivot(
             index=[_TS_COL],
             on=cols,
             variable_name="__symbol",
@@ -310,7 +342,13 @@ class PolarsBackend:
             return panel.with_columns(exprs)
 
         # Cross-sectional zscore via unpivot/pivot with ``over("ts")``.
-        long = panel.unpivot(
+        # Mask NaN/inf → null before unpivoting so that non-finite cells are
+        # excluded from mean/std computation and produce null output (not
+        # NaN-contaminated values across the entire cross-section).
+        masked_panel = panel.with_columns(
+            [_mask_nonfinite_to_null(pl.col(c)).alias(c) for c in cols]
+        )
+        long = masked_panel.unpivot(
             index=[_TS_COL],
             on=cols,
             variable_name="__symbol",

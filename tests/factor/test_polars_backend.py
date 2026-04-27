@@ -99,6 +99,41 @@ def panel_with_null() -> pl.DataFrame:
     return df
 
 
+@pytest.fixture
+def panel_with_nan() -> pl.DataFrame:
+    """Panel where some cells carry NaN (not null) — simulates DataLayer PIT
+    universe markers and rolling warmup missingness.
+
+    ``BTC`` is NaN at row 0 (not in universe at ts=0).
+    ``SOL`` is NaN at row 5 (warmup not yet matured).
+    All other cells are valid finite floats.
+    """
+    ts = pl.datetime_range(
+        start=dt.datetime(2024, 1, 1),
+        end=dt.datetime(2024, 1, 20),
+        interval="1d",
+        eager=True,
+    )
+    data: dict[str, list[float]] = {"ts": ts.to_list()}
+    for j, sym in enumerate(SYMBOL_COLS):
+        data[sym] = [100.0 + 5.0 * j + 1.0 * i + 0.1 * (i * j) for i in range(T_BARS)]
+    df = pl.DataFrame(data)
+    # Inject NaN (not null) via arithmetic — Polars preserves NaN as Float64.
+    df = df.with_columns(
+        pl.when(pl.int_range(0, T_BARS).cast(pl.Int64) == 0)
+        .then(pl.lit(float("nan")))
+        .otherwise(pl.col("BTC"))
+        .alias("BTC")
+    )
+    df = df.with_columns(
+        pl.when(pl.int_range(0, T_BARS).cast(pl.Int64) == 5)
+        .then(pl.lit(float("nan")))
+        .otherwise(pl.col("SOL"))
+        .alias("SOL")
+    )
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Protocol / runtime_checkable
 # ---------------------------------------------------------------------------
@@ -394,6 +429,42 @@ class TestRankCrossSectional:
         # Other cells remain valid.
         assert result["BTC"][0] is not None
 
+    def test_rank_cross_section_nan_excluded_as_non_universe(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """NaN cells (DataLayer PIT / warmup markers) must be treated the same
+        as null: excluded from cross-sectional ranking and producing null output.
+
+        Regression: previously Polars treated NaN as a valid Float64, which
+        caused it to be ranked (as the lowest value) and contaminated the pct
+        denominator, giving wrong ranks to valid symbols on the same row.
+        """
+        result = backend.rank(panel_with_nan, axis=0, pct=True)
+        # BTC row 0 was NaN — output must be null, not a numeric rank.
+        assert result["BTC"][0] is None, (
+            f"BTC[0] (NaN input) must be null, got {result['BTC'][0]}"
+        )
+        # SOL row 5 was NaN — output must be null.
+        assert result["SOL"][5] is None, (
+            f"SOL[5] (NaN input) must be null, got {result['SOL'][5]}"
+        )
+        # At row 0, BTC is NaN so only 4 symbols are in the cross-section.
+        # All valid symbols at row 0 must have pct ranks in (0, 1].
+        for col in SYMBOL_COLS:
+            if col == "BTC":
+                continue
+            v = result[col][0]
+            assert v is not None and 0.0 < v <= 1.0, (
+                f"{col}[0]: expected valid pct rank in (0,1], got {v}"
+            )
+        # Pct denominator at row 0 must be 4 (not 5), so the highest rank is 1.0.
+        # In our monotone fixture ETH < SOL < BNB < XRP at every row (j ordering).
+        assert result["XRP"][0] == pytest.approx(1.0, rel=1e-12), (
+            f"XRP[0] should be 1.0 (rank 4/4), got {result['XRP'][0]}"
+        )
+
 
 class TestRankTimeSeries:
     """``axis=1`` ranks each symbol's history independently.
@@ -426,6 +497,36 @@ class TestRankTimeSeries:
         cross = backend.rank(panel, axis=0, pct=True)
         time = backend.rank(panel, axis=1, pct=True)
         assert not cross.equals(time)
+
+    def test_rank_time_series_nan_excluded_from_pct_denominator(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """NaN at BTC[0] must produce null output and must not inflate the
+        per-column pct denominator from 19 (valid) to 20 (all rows).
+
+        Regression: ``is_not_null().sum()`` returned 20 for NaN columns
+        because NaN is not null in Polars, causing pct values to be off
+        by factor 19/20.
+        """
+        result = backend.rank(panel_with_nan, axis=1, pct=True)
+        # BTC row 0 is NaN — output must be null.
+        assert result["BTC"][0] is None, (
+            f"BTC[0] (NaN input) must be null, got {result['BTC'][0]}"
+        )
+        # BTC has 19 valid values (rows 1-19).  The highest-valued row (index 19)
+        # must have pct = 19/19 = 1.0.
+        assert result["BTC"][-1] == pytest.approx(1.0, rel=1e-12), (
+            f"BTC[-1] should be 1.0 (rank 19/19), got {result['BTC'][-1]}"
+        )
+        # SOL has 19 valid values (rows 0-4, 6-19); pct of last row = 1.0.
+        assert result["SOL"][5] is None, (
+            f"SOL[5] (NaN input) must be null, got {result['SOL'][5]}"
+        )
+        assert result["SOL"][-1] == pytest.approx(1.0, rel=1e-12), (
+            f"SOL[-1] should be 1.0 (rank 19/19), got {result['SOL'][-1]}"
+        )
 
 
 class TestRankInvalidAxis:
@@ -463,6 +564,45 @@ class TestZscoreCrossSectional:
             var = sum((v - mean) ** 2 for v in row_vals) / (len(row_vals) - 1)
             std = math.sqrt(var)
             assert std == pytest.approx(1.0, rel=1e-10)
+
+
+class TestZscoreCrossSectionalNaN:
+    """Cross-sectional zscore with NaN cells (DataLayer PIT / warmup markers)."""
+
+    def test_zscore_cross_section_nan_produces_null_output(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """NaN input → null output; valid cells on the same row use the
+        correct (NaN-excluded) mean and std.
+
+        Regression: previously NaN propagated through ``mean().over("ts")``
+        and ``std().over("ts")``, turning the entire cross-section into NaN.
+        """
+        result = backend.zscore(panel_with_nan, axis=0)
+        # BTC row 0 is NaN — must be null in output, not NaN.
+        assert result["BTC"][0] is None, (
+            f"BTC[0] (NaN input) must be null, got {result['BTC'][0]}"
+        )
+        # SOL row 5 is NaN — must be null.
+        assert result["SOL"][5] is None, (
+            f"SOL[5] (NaN input) must be null, got {result['SOL'][5]}"
+        )
+        # Valid cells on row 0 (ETH, SOL, BNB, XRP — 4 symbols) must be finite.
+        for col in SYMBOL_COLS:
+            if col == "BTC":
+                continue
+            v = result[col][0]
+            assert v is not None and math.isfinite(v), (
+                f"{col}[0]: expected finite zscore, got {v}"
+            )
+        # Cross-section mean of valid cells at row 0 must be ~0.
+        row0_vals = [result[col][0] for col in SYMBOL_COLS if col != "BTC"]
+        row0_mean = sum(row0_vals) / len(row0_vals)  # type: ignore[arg-type]
+        assert row0_mean == pytest.approx(0.0, abs=1e-10), (
+            f"Row 0 cross-section mean (excl. BTC NaN) should be ~0, got {row0_mean}"
+        )
 
 
 class TestZscoreTimeSeries:
