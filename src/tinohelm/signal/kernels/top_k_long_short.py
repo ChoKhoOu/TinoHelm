@@ -67,7 +67,10 @@ def top_k_long_short(
 
     ts_col, factor_arr, sym_cols = split_factor_panel(factor_panel)
     T, N = factor_arr.shape
-    weights = np.zeros_like(factor_arr)
+    # Preserve NaN cells from the input: NaN means "asset not in PIT universe
+    # at this timestamp".  Initialise with NaN and zero-out only finite cells
+    # so that normalize_to_constraints sees NaN (not 0) for non-universe assets.
+    weights = np.where(np.isfinite(factor_arr), 0.0, factor_arr)
 
     for t in range(T):
         row = factor_arr[t, :]
