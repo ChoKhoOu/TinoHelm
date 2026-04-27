@@ -235,7 +235,7 @@ class OrderManager:
                         continue
 
                     reduce_orders = self._reduce_open_positions(
-                        instrument, abs_diff
+                        instrument, abs_diff, current_qty
                     )
                     submitted.extend(reduce_orders)
                 continue
@@ -339,6 +339,7 @@ class OrderManager:
         self,
         instrument: Any,
         reduce_amount: float,
+        current_qty: float,
     ) -> list[Any]:
         """Partially close open positions on *instrument* by *reduce_amount*.
 
@@ -346,10 +347,12 @@ class OrderManager:
         that NT's HEDGING execution engine correctly reduces the designated
         position rather than opening a new one.
 
-        The algorithm greedily iterates open positions and closes as much
-        of each as needed until *reduce_amount* is exhausted.  In the
-        normal case there is exactly one open position per instrument per
-        strategy, so only one order is emitted.
+        The algorithm greedily iterates open positions whose direction
+        matches ``current_qty`` and closes as much of each as needed until
+        *reduce_amount* is exhausted.  Filtering by the current net sign is
+        essential under ``OmsType.HEDGING``: a same-instrument short leg may
+        coexist with a long leg, and reducing a net-long target must never
+        close the short first (that would increase net-long exposure).
 
         Parameters
         ----------
@@ -359,6 +362,12 @@ class OrderManager:
         reduce_amount:
             The unsigned quantity to reduce in total across all open
             positions.  Caller must ensure ``reduce_amount > 0``.
+        current_qty:
+            Signed current net quantity from ``portfolio.net_position``.
+            Only positions with the same sign are eligible for partial
+            reduce.  Full flatten / sign-flip uses
+            :meth:`_flatten_open_positions` instead and still closes every
+            open leg.
 
         Returns
         -------
@@ -393,34 +402,33 @@ class OrderManager:
 
         remaining = reduce_amount
         min_step = self._min_qty_step(instrument)
+        current_sign = 1.0 if current_qty > 0 else -1.0
 
         for position in positions or []:
             if remaining < min_step:
                 break
+
+            pos_signed = self._position_signed_qty(position)
+            if pos_signed == 0.0 or pos_signed * current_sign <= 0:
+                logger.debug(
+                    "OrderManager._reduce_open_positions: skip position %s "
+                    "with sign %.8f while reducing current sign %.0f",
+                    getattr(position, "id", "<unknown>"),
+                    pos_signed,
+                    current_sign,
+                )
+                continue
 
             # How much of this position can we close?
             pos_qty: float
             try:
                 pos_qty = float(position.quantity)
             except Exception:  # pragma: no cover
-                pos_qty = abs(float(getattr(position, "signed_qty", remaining)))
+                pos_qty = abs(pos_signed) if pos_signed != 0.0 else remaining
 
             close_this = min(pos_qty, remaining)
             if close_this < min_step:
                 continue
-
-            # Determine the closing side from the position's sign.
-            try:
-                pos_signed = float(getattr(position, "signed_qty", 0.0))
-            except Exception:
-                pos_signed = 0.0
-            # Fallback: infer from position.side attribute string.
-            if pos_signed == 0.0:
-                side_str = str(getattr(position, "side", "")).upper()
-                if "LONG" in side_str or "BUY" in side_str:
-                    pos_signed = 1.0
-                elif "SHORT" in side_str or "SELL" in side_str:
-                    pos_signed = -1.0
 
             # Closing side is opposite to position direction.
             close_side = OrderSide.SELL if pos_signed > 0 else OrderSide.BUY
@@ -438,6 +446,36 @@ class OrderManager:
             remaining -= close_this
 
         return reduced
+
+    @staticmethod
+    def _position_signed_qty(position: Any) -> float:
+        """Best-effort signed quantity for an NT Position or test stub."""
+        signed_qty = getattr(position, "signed_qty", None)
+        # A bare MagicMock auto-creates ``signed_qty`` even when the test did
+        # not set it; ``float(MagicMock()) == 1.0`` would incorrectly mark an
+        # unknown/side-only position as long.  Treat mock children as missing
+        # so the side-based fallback below can run.
+        if type(signed_qty).__module__ != "unittest.mock":
+            try:
+                return float(signed_qty)
+            except (TypeError, ValueError):
+                pass
+
+        # Fallback: infer sign from position.side and magnitude from
+        # position.quantity when signed_qty is not present on a test stub.
+        side_str = str(getattr(position, "side", "")).upper()
+        if "LONG" in side_str or "BUY" in side_str:
+            sign = 1.0
+        elif "SHORT" in side_str or "SELL" in side_str:
+            sign = -1.0
+        else:
+            return 0.0
+
+        try:
+            qty = abs(float(getattr(position, "quantity", 1.0)))
+        except (TypeError, ValueError):
+            qty = 1.0
+        return sign * qty
 
     # ------------------------------------------------------------------
     # Internal helpers

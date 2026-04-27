@@ -402,6 +402,64 @@ def test_run_rejects_non_object_method_params(client, temp_signal_module):
     mock_rds.lpush.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("extra_signal_args", "detail"),
+    [
+        ('weighting="ic_weighted",', "unsupported signal weighting"),
+        ("turnover_budget=0.25,", "turnover_budget is not enforced"),
+    ],
+)
+def test_run_rejects_unenforced_signal_spec_knobs(
+    client, tmp_path, extra_signal_args, detail
+):
+    """``/run`` rejects config fields the worker would otherwise ignore."""
+    from tinohelm.core.paths import paths as _paths
+
+    signals_dir = tmp_path / "unsupported_signals"
+    signals_dir.mkdir()
+    (signals_dir / "unsupported_sig.py").write_text(
+        "from tinohelm.signal import signal\n"
+        "@signal(\n"
+        "    name='unsupported_sig',\n"
+        "    factor_ref='ret_N@1.0.0',\n"
+        "    method='top_k_long_short',\n"
+        "    rebalance_freq='1D',\n"
+        "    universe_ref='top10_perp',\n"
+        f"    {extra_signal_args}\n"
+        ")\n"
+        "def k(factor_panel): return factor_panel\n"
+    )
+    _paths.override("signals_dir", signals_dir)
+
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    mock_session = _make_run_db_session(_make_universe_row())
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={"signal_name": "unsupported_sig", "universe_id": 42},
+        )
+    finally:
+        _paths.reset_overrides()
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 422, resp.text
+    assert detail in resp.json()["detail"]
+    mock_session.add.assert_not_called()
+    mock_rds.lpush.assert_not_called()
+
+
 def test_run_resolves_universe_from_universe_id(client, temp_signal_module):
     """``/run`` looks up universe by id (primary path) and writes instrument_ids."""
     mock_rds = AsyncMock()

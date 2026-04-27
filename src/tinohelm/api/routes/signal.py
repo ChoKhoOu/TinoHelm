@@ -349,6 +349,7 @@ async def run_signal(
         build_bar_type_template,
         resolve_universe_to_instrument_ids,
     )
+    from tinohelm.signal.utils import validate_supported_signal_execution
 
     registry = SignalRegistry()
     registry.scan()
@@ -358,6 +359,10 @@ async def run_signal(
             status_code=404,
             detail=f"Signal '{req.signal_name}' not found in registry",
         )
+    try:
+        validate_supported_signal_execution(spec)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Resolve universe → PIT symbols + NT instrument_ids
@@ -779,6 +784,20 @@ async def export_run(
         )
 
     config: dict = run.config or {}
+    from tinohelm.signal.utils import (
+        signal_spec_from_dict,
+        validate_supported_signal_execution,
+    )
+
+    try:
+        validate_supported_signal_execution(
+            signal_spec_from_dict(run.signal_name, config)
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot export SignalRun {run_id!r}: {exc}",
+        ) from exc
 
     # ------------------------------------------------------------------
     # Server-side warmup_bars derivation

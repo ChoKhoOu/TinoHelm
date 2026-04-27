@@ -70,7 +70,10 @@ from tinohelm.signal.kernels import (
 )
 from tinohelm.factor.engine.planner import _infer_source
 from tinohelm.signal.types import SignalSpec
-from tinohelm.signal.utils import signal_spec_from_dict
+from tinohelm.signal.utils import (
+    signal_spec_from_dict,
+    validate_supported_signal_execution,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +298,7 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         # 5. Build SignalSpec for kernel + evaluator dispatch
         # ----------------------------------------------------------------
         spec = signal_spec_from_dict(signal_name, config_dict)
+        validate_supported_signal_execution(spec)
         periods_per_year = int(
             config_dict.get("periods_per_year", _DEFAULT_PERIODS_PER_YEAR)
         )
@@ -508,6 +512,15 @@ def _load_aligned_panels(
         raise ValueError(
             f"Factor {factor_name!r} not found in registry — signal "
             "config points at a factor that was removed or never scanned."
+        )
+    needs_backend = getattr(factor_spec, "needs_backend", False)
+    if type(needs_backend).__module__ == "unittest.mock":
+        needs_backend = False
+    if needs_backend:
+        raise ValueError(
+            f"Signal worker does not support backend-first factor "
+            f"{factor_name!r} yet; choose a non-backend factor or run it "
+            "through the factor scheduler first."
         )
 
     # ----------------------------------------------------------------

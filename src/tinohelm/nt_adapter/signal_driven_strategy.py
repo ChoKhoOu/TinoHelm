@@ -53,7 +53,10 @@ from nautilus_trader.trading.strategy import Strategy
 
 from tinohelm.factor.types import FactorSpec
 from tinohelm.signal.types import SignalSpec
-from tinohelm.signal.utils import signal_spec_from_dict
+from tinohelm.signal.utils import (
+    signal_spec_from_dict,
+    validate_supported_signal_execution,
+)
 from tinohelm.signal.kernels import (
     quantile_long_short,
     rank_to_weight,
@@ -204,6 +207,7 @@ class SignalDrivenStrategy(Strategy):
         """Resolve spec, derive warmup, validate cache, subscribe bars."""
         # 1. Load SignalSpec.
         self.signal_spec = self._resolve_signal_spec()
+        validate_supported_signal_execution(self.signal_spec)
 
         # 2. Resolve kernel callable from method slug.
         method = self.signal_spec.method

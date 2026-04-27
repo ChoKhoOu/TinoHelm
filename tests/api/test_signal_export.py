@@ -282,6 +282,33 @@ def test_export_400_for_queued_status(client):
     assert resp.status_code == 400
 
 
+@pytest.mark.parametrize(
+    ("override", "detail"),
+    [
+        ({"weighting": "risk_parity"}, "unsupported signal weighting"),
+        ({"turnover_budget": 0.25}, "turnover_budget is not enforced"),
+    ],
+)
+def test_export_rejects_unenforced_signal_spec_knobs(client, override, detail):
+    """Export must not ship a live config whose research knobs were ignored."""
+    run = _mock_run()
+    run.config.update(override)
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    try:
+        resp = client.get("/api/signal/export/test-run-id")
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 400, resp.text
+    assert detail in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # 5. Graceful degradation when factor not in registry
 # ---------------------------------------------------------------------------

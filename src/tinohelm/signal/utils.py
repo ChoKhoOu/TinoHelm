@@ -8,6 +8,22 @@ from __future__ import annotations
 from tinohelm.signal.types import CostModel, SignalSpec
 
 
+def validate_supported_signal_execution(spec: SignalSpec) -> None:
+    """Raise if a SignalSpec uses execution knobs not wired into kernels yet.
+
+    ``SignalSpec`` already exposes future weighting regimes and a turnover
+    budget field so configs can be forward-compatible, but the current signal
+    worker and default NT strategy only execute the kernel's native
+    equal-weight output plus gross/net/max-position constraints.  Failing
+    loudly at run/export/start boundaries is safer than completing a run
+    whose reported config was silently ignored.
+    """
+    if spec.weighting != "equal":
+        raise ValueError(f"unsupported signal weighting: {spec.weighting}")
+    if spec.turnover_budget is not None:
+        raise ValueError("turnover_budget is not enforced yet")
+
+
 def signal_spec_from_dict(name: str, config: dict) -> SignalSpec:
     """Reconstruct a :class:`SignalSpec` from a flat config dict.
 
@@ -66,4 +82,4 @@ def signal_spec_from_dict(name: str, config: dict) -> SignalSpec:
     )
 
 
-__all__ = ["signal_spec_from_dict"]
+__all__ = ["signal_spec_from_dict", "validate_supported_signal_execution"]

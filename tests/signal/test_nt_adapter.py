@@ -624,6 +624,56 @@ class TestOrderManager:
 
         assert len(submitted) == 1
 
+    def test_partial_reduce_long_skips_opposite_hedge_leg(self):
+        """HEDGING partial reduce must only close legs matching current net sign.
+
+        Regression for PR #140 review: if a same-instrument SHORT leg is
+        returned before the LONG leg while the portfolio net is long, closing
+        the short with BUY reduce-only would increase net-long exposure.  A
+        partial long reduce must skip the short and bind the SELL reduce-only
+        order to the long position id.
+        """
+        from nautilus_trader.model.enums import OrderSide
+
+        strategy = _stub_strategy(
+            net_position_per_id={"BTCUSDT-PERP.BINANCE": 0.02},  # net long
+        )
+        short_pos = MagicMock(name="OpenShortPosition")
+        short_pos.id = MagicMock(name="PositionId-SHORT-01")
+        short_pos.quantity = 0.03
+        short_pos.signed_qty = -0.03
+
+        long_pos = MagicMock(name="OpenLongPosition")
+        long_pos.id = MagicMock(name="PositionId-LONG-01")
+        long_pos.quantity = 0.02
+        long_pos.signed_qty = 0.02
+
+        # Deliberately return the opposite hedge leg first.
+        strategy.cache.positions_open.return_value = [short_pos, long_pos]
+        strategy.id = MagicMock(name="StrategyId")
+
+        inst = _stub_instrument("BTCUSDT-PERP")
+        om = OrderManager(strategy)
+        submitted = om.execute_diff(
+            target_weights={"BTCUSDT-PERP": 0.05},  # target_qty=+0.01
+            instruments={"BTCUSDT-PERP": inst},
+            equity=10_000.0,
+            prices={"BTCUSDT-PERP": 50_000.0},
+        )
+
+        strategy.close_position.assert_not_called()
+        strategy.order_factory.market.assert_called_once()
+        om_kwargs = strategy.order_factory.market.call_args.kwargs
+        assert om_kwargs["order_side"] == OrderSide.SELL
+        assert om_kwargs.get("reduce_only") is True
+        assert inst.make_qty.call_args[0][0] == pytest.approx(0.01, rel=1e-9)
+
+        strategy.submit_order.assert_called_once()
+        _, so_kwargs = strategy.submit_order.call_args
+        assert so_kwargs.get("position_id") is long_pos.id
+        assert so_kwargs.get("position_id") is not short_pos.id
+        assert len(submitted) == 1
+
     def test_partial_same_sign_reduce_short(self):
         """current=-0.02, target=-0.01 → partial reduce 0.01 via reduce-only BUY.
 

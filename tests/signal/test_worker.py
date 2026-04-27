@@ -408,6 +408,43 @@ async def test_failed_job_marks_status_and_error(
     assert "exploded" in failed_events[0]["error"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"weighting": "ic_weighted"}, "unsupported signal weighting"),
+        ({"turnover_budget": 0.25}, "turnover_budget is not enforced"),
+    ],
+)
+async def test_worker_rejects_unenforced_signal_spec_knobs(
+    mock_rds, captured_session_factory, override, message
+):
+    """Weighting/turnover fields must fail loudly instead of being ignored."""
+    factory, _session, captured, _run = captured_session_factory
+    cfg = _default_config()
+    cfg.update(override)
+
+    panel_loader = MagicMock(side_effect=AssertionError("must not align"))
+    with (
+        patch("tinohelm.signal.worker.get_session_factory", return_value=factory),
+        patch("tinohelm.signal.worker.aioredis.from_url", return_value=mock_rds),
+        patch("tinohelm.signal.worker._load_aligned_panels", panel_loader),
+    ):
+        from tinohelm.signal.worker import _process_job
+
+        await _process_job(_make_payload(config=cfg), "redis://localhost:6379")
+
+    panel_loader.assert_not_called()
+    failed_writes = [
+        p
+        for p in captured
+        if p.get("status") == "failed" and message in (p.get("error") or "")
+    ]
+    assert failed_writes, (
+        f"expected unsupported spec to fail with {message!r}, got: {captured}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Happy-path completion event
 # ---------------------------------------------------------------------------
@@ -637,6 +674,50 @@ def test_load_aligned_panels_rejects_missing_universe_symbols():
         ),
     ):
         with pytest.raises(ValueError, match="universe_symbols"):
+            _load_aligned_panels(spec, config)
+
+
+def test_load_aligned_panels_rejects_backend_first_factor():
+    """Signal worker should explicitly reject backend-first factor kernels."""
+    from unittest.mock import patch
+
+    from tinohelm.factor.types import FactorSpec, InputSpec
+    from tinohelm.signal.types import SignalSpec
+    from tinohelm.signal.worker import _load_aligned_panels
+
+    factor_spec = FactorSpec(
+        name="backend_factor",
+        category="test",
+        lookback=1,
+        input_specs=(InputSpec(field_name="close"),),
+        needs_backend=True,
+    )
+    spec = SignalSpec(
+        name="test_backend_factor",
+        factor_ref="backend_factor@1.0.0",
+        method="top_k_long_short",
+        weighting="equal",
+        rebalance_freq="1h",
+        universe_ref="test_universe",
+    )
+    config = {
+        "universe_symbols": ["BTCUSDT-PERP"],
+        "start": "2024-01-01",
+        "end": "2024-01-02",
+    }
+
+    with (
+        patch("tinohelm.factor.registry.Registry.scan", return_value=None),
+        patch(
+            "tinohelm.factor.registry.Registry.get_kernel",
+            return_value=lambda backend, close: close,
+        ),
+        patch(
+            "tinohelm.factor.registry.Registry.get_spec",
+            return_value=factor_spec,
+        ),
+    ):
+        with pytest.raises(ValueError, match="backend-first factor"):
             _load_aligned_panels(spec, config)
 
 
