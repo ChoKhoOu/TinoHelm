@@ -270,9 +270,49 @@ def load_components(
     health_actor._command_deque = command_actor._pending_commands
     node.trader.add_actor(health_actor)
 
-    # 5. MetricsActor — equity snapshots
+    # 5. MetricsActor — equity snapshots + (optional) commission deviation monitor
+    #
+    # ``expected_commission_bps_per_side`` controls whether MetricsActor
+    # publishes ``signal.commission.deviation`` events.  Resolution order:
+    #   1. ``node_config["metrics"]["expected_commission_bps_per_side"]`` — explicit override
+    #   2. Environment variable ``TINO_METRICS__EXPECTED_COMMISSION_BPS_PER_SIDE`` — operator override
+    #   3. ``0.0`` (monitor disabled — emits one-time INFO log)
+    #
+    # TODO(commission-monitor-wire-up): Once the SignalSpec.cost_model registry
+    # endpoint exposes a per-strategy expected fee, source the value from there
+    # so each running strategy gets its own threshold.  See PR followup issue
+    # "Extend live commission monitor to full fee+slippage−rebate".
+    metrics_cfg_dict = config.get("metrics", {}) or {}
+    expected_commission_bps = float(
+        metrics_cfg_dict.get(
+            "expected_commission_bps_per_side",
+            os.environ.get("TINO_METRICS__EXPECTED_COMMISSION_BPS_PER_SIDE", 0.0),
+        )
+    )
+    deviation_threshold_bps = float(
+        metrics_cfg_dict.get(
+            "deviation_threshold_bps",
+            os.environ.get("TINO_METRICS__DEVIATION_THRESHOLD_BPS", 5.0),
+        )
+    )
+    if expected_commission_bps <= 0.0:
+        logger.info(
+            "MetricsActor: commission deviation monitor DISABLED "
+            "(set node_config['metrics']['expected_commission_bps_per_side'] > 0 "
+            "or TINO_METRICS__EXPECTED_COMMISSION_BPS_PER_SIDE env var to enable)"
+        )
+    else:
+        logger.info(
+            "MetricsActor: commission deviation monitor ENABLED "
+            "(expected=%.2f bps, threshold=%.2f bps)",
+            expected_commission_bps, deviation_threshold_bps,
+        )
     metrics_actor = MetricsActor(config=MetricsActorConfig(
-        redis_url=full_redis_url, node_type=node_type, db_url=db_url,
+        redis_url=full_redis_url,
+        node_type=node_type,
+        db_url=db_url,
+        expected_commission_bps_per_side=expected_commission_bps,
+        deviation_threshold_bps=deviation_threshold_bps,
     ))
     node.trader.add_actor(metrics_actor)
 

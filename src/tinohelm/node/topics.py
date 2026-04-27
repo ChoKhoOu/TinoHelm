@@ -22,6 +22,17 @@ LIFECYCLE_PAUSE = "lifecycle.pause"      # Usage: f"{LIFECYCLE_PAUSE}.{strategy_
 LIFECYCLE_RESUME = "lifecycle.resume"    # Usage: f"{LIFECYCLE_RESUME}.{strategy_id}"
 LIFECYCLE_FLATTEN = "lifecycle.flatten"
 
-# Signal cost monitoring (MetricsActor -> Redis PubSub)
-# Redis channel format: f"tino:{node_type}:{SIGNAL_COST_DEVIATION}"
+# Signal commission monitoring (MetricsActor -> Redis PubSub)
+# Redis channel format: f"tino:{node_type}:{SIGNAL_COMMISSION_DEVIATION}"
+#
+# Scope: This monitor only validates *exchange commission per fill*. It does
+# NOT include slippage or maker rebate — see :class:`tinohelm.signal.types.CostModel`
+# for the full research-side cost definition (fee + slippage − rebate).
+# Tracked as follow-up: extending live monitor to full fee+slippage−rebate
+# requires expected_px context + venue rebate data source.
+SIGNAL_COMMISSION_DEVIATION = "signal.commission.deviation"
+
+# DEPRECATED: alias for SIGNAL_COMMISSION_DEVIATION. Removed after one
+# release cycle. Subscribers should migrate to SIGNAL_COMMISSION_DEVIATION /
+# the ``signal.commission.deviation`` channel suffix.
 SIGNAL_COST_DEVIATION = "signal.cost.deviation"

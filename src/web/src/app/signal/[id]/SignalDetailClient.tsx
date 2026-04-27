@@ -617,6 +617,14 @@ function CostTab({ spec, result }: CostTabProps) {
           />
         </div>
       </div>
+
+      <div className="rounded-md border bg-card p-3 text-xs text-muted-foreground leading-relaxed">
+        <strong className="text-foreground font-medium">研究 vs Live 范围说明：</strong>
+        {" "}研究侧 Cost Drag 使用完整的 fee + slippage − rebate 模型估算（上方 3 项）；
+        Live commission monitor（<code className="font-mono text-[0.7rem]">signal.commission.deviation</code>）
+        仅验证交易所手续费偏离，不包含 slippage 或 rebate。
+        Slippage / rebate 的实测对比是 follow-up 工作。
+      </div>
     </div>
   );
 }

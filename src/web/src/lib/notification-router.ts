@@ -25,12 +25,17 @@ export type WsEventPayload = {
   // signal events
   signal_name?: string;
   sharpe?: number;
-  // cost deviation events
+  // commission deviation events (canonical: signal.commission.deviation)
   fill_id?: string;
   instrument_id?: string;
+  metric?: string;                  // "commission_only"
+  expected_commission_bps?: number;
+  actual_commission_bps?: number;
+  deviation_bps?: number;
+  // DEPRECATED legacy aliases (signal.cost.deviation) — retained for one
+  // release cycle so transitional payloads keep working.
   expected_bps?: number;
   actual_bps?: number;
-  deviation_bps?: number;
   [key: string]: unknown;
 };
 
@@ -65,7 +70,11 @@ export const ROUTING_TABLE: Record<string, RouteConfig> = {
   "factor.failed":        { channel: "toast", type: "error",   dedupeKey: (e) => e.run_id ?? "" },
   "signal.completed":     { channel: "toast", type: "success", dedupeKey: (e) => `signal-completed-${e.run_id ?? ""}` },
   "signal.failed":        { channel: "toast", type: "error",   dedupeKey: (e) => `signal-failed-${e.run_id ?? ""}` },
-  "signal.cost.deviation":{ channel: "toast", type: "warning", dedupeKey: (e) => `cost-dev-${e.fill_id ?? ""}`, dedupeWindowMs: 10000 },
+  "signal.commission.deviation": { channel: "toast", type: "warning", dedupeKey: (e) => `commission-dev-${e.fill_id ?? ""}`, dedupeWindowMs: 10000 },
+  // DEPRECATED: signal.cost.deviation kept for one release cycle. Subscribers
+  // should migrate to signal.commission.deviation. The runtime warning is
+  // emitted in formatToastMessage() the first time this event is observed.
+  "signal.cost.deviation":     { channel: "toast", type: "warning", dedupeKey: (e) => `commission-dev-${e.fill_id ?? ""}`, dedupeWindowMs: 10000 },
   "strategy.started":     { channel: "toast", type: "info" },
   "strategy.stopped":     { channel: "toast", type: "info" },
   "connection.degraded":  { channel: "toast", type: "warning", dedupeKey: (e) => e.exchange ?? "", dedupeWindowMs: 30000 },
@@ -80,6 +89,9 @@ export const ROUTING_TABLE: Record<string, RouteConfig> = {
 
 /** Dedupe tracking: eventKey → last timestamp */
 const _dedupeCache = new Map<string, number>();
+
+/** One-time deprecation warning tracking (per session). */
+const _loggedDeprecationKeys = new Set<string>();
 
 /** Check if an event should be deduped (returns true if it should be SKIPPED) */
 export function shouldDedupe(eventType: string, event: object): boolean {
@@ -157,13 +169,32 @@ export function formatToastMessage(eventType: string, event: object): { title: s
         description: e.error ?? undefined,
       };
     }
+    case "signal.commission.deviation":
     case "signal.cost.deviation": {
+      // signal.cost.deviation is DEPRECATED — payloads emitted by MetricsActor
+      // include both *_commission_bps and the legacy *_bps aliases.  Prefer
+      // the canonical fields and fall back to the aliases for older publishers.
+      if (eventType === "signal.cost.deviation" && typeof console !== "undefined") {
+        // One-time deprecation warning per session per dedupe key.
+        const dedupeId = `cost-dev-warn-${e.fill_id ?? ""}`;
+        if (!_loggedDeprecationKeys.has(dedupeId)) {
+          _loggedDeprecationKeys.add(dedupeId);
+          console.warn(
+            "[notification-router] signal.cost.deviation is DEPRECATED; " +
+            "publishers should switch to signal.commission.deviation."
+          );
+        }
+      }
       const devBps = typeof e.deviation_bps === "number" ? e.deviation_bps.toFixed(1) : "?";
-      const expBps = typeof e.expected_bps === "number" ? e.expected_bps.toFixed(1) : "?";
-      const actBps = typeof e.actual_bps === "number" ? e.actual_bps.toFixed(1) : "?";
+      const expBps = typeof e.expected_commission_bps === "number"
+        ? e.expected_commission_bps.toFixed(1)
+        : typeof e.expected_bps === "number" ? e.expected_bps.toFixed(1) : "?";
+      const actBps = typeof e.actual_commission_bps === "number"
+        ? e.actual_commission_bps.toFixed(1)
+        : typeof e.actual_bps === "number" ? e.actual_bps.toFixed(1) : "?";
       return {
-        title: `成本偏离 · ${e.instrument_id ?? ""}`,
-        description: `偏差 ${devBps}bps（预期 ${expBps}bps，实际 ${actBps}bps）`,
+        title: `手续费偏离 · ${e.instrument_id ?? ""}`,
+        description: `偏差 ${devBps}bps（预期 ${expBps}bps，实际 ${actBps}bps；仅监控交易所手续费）`,
       };
     }
     case "strategy.started":
