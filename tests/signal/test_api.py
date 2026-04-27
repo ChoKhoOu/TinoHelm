@@ -259,6 +259,45 @@ def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
     assert "config" in payload
 
 
+def test_run_marks_failed_when_enqueue_fails(client, temp_signal_module):
+    """Commit-then-LPUSH failure must not leave a stranded queued run."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(side_effect=RuntimeError("redis down"))
+    mock_session = _make_run_db_session(_make_universe_row())
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={
+                "signal_name": "my_user_signal",
+                "universe_id": 42,
+            },
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"] == "failed to enqueue signal run"
+
+    mock_session.add.assert_called_once()
+    inserted = mock_session.add.call_args[0][0]
+    assert inserted.status == "failed"
+    assert "enqueue failed: RuntimeError: redis down" in inserted.error
+    assert inserted.finished_at is not None
+    assert inserted.progress_stage is None
+    assert mock_session.commit.await_count == 2
+
+
 def test_run_config_merge_preserves_server_owned_fields(client, temp_signal_module):
     """Caller config cannot overwrite PIT universe / factor snapshot fields."""
     mock_rds = AsyncMock()

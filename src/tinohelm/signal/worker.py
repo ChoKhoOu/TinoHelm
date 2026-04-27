@@ -144,7 +144,11 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
                     "signal_name": signal_name,
                     "config": config or {},
                 })
-                await rds.rpush(QUEUE_KEY, payload)
+                # Queue contract is LPUSH producers + BRPOP consumer.  With
+                # rows selected created_at ASC, LPUSHing in that same order
+                # leaves the oldest job at the right side of the list, so
+                # BRPOP resumes queued runs chronologically.
+                await rds.lpush(QUEUE_KEY, payload)
 
     if recovered:
         logger.info("Recovered %d interrupted signal run(s)", recovered)

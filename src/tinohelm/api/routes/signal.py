@@ -23,7 +23,7 @@ import dataclasses
 import json
 import logging
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
 
@@ -451,7 +451,20 @@ async def run_signal(
         "signal_name": req.signal_name,
         "config": config_payload,
     })
-    await rds.lpush(QUEUE_KEY, queue_payload)
+    try:
+        await rds.lpush(QUEUE_KEY, queue_payload)
+    except Exception as exc:
+        err = f"enqueue failed: {type(exc).__name__}: {exc}"
+        logger.exception("Failed to enqueue signal run %s", run_id)
+        run.status = "failed"
+        run.error = err
+        run.finished_at = datetime.now(UTC).replace(tzinfo=None)
+        run.progress_stage = None
+        await db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail="failed to enqueue signal run",
+        ) from exc
 
     logger.info(
         "Signal run %s enqueued: %s (universe_id=%s, %d symbols)",

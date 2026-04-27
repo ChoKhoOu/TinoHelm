@@ -683,12 +683,12 @@ async def test_start_stop_signal_worker_lifecycle():
 
 @pytest.mark.asyncio
 async def test_recover_interrupted_jobs_flips_running_to_queued():
-    """recover_interrupted_jobs flips running rows to queued + re-enqueues payloads."""
+    """recover_interrupted_jobs re-enqueues full payloads in FIFO pop order."""
     from tinohelm.signal.worker import recover_interrupted_jobs
 
     rds = AsyncMock()
     rds.delete = AsyncMock()
-    rds.rpush = AsyncMock()
+    rds.lpush = AsyncMock()
 
     captured_updates: list[dict] = []
     select_calls: list = []
@@ -726,8 +726,8 @@ async def test_recover_interrupted_jobs_flips_running_to_queued():
     assert recovered == 2
     assert captured_updates, "expected one UPDATE flipping running → queued"
     rds.delete.assert_called_with("tino:signal:queue")
-    assert rds.rpush.await_count == 2
-    payloads = [json.loads(call.args[1]) for call in rds.rpush.await_args_list]
+    assert rds.lpush.await_count == 2
+    payloads = [json.loads(call.args[1]) for call in rds.lpush.await_args_list]
     assert payloads == [
         {
             "run_id": "r1",
@@ -740,6 +740,14 @@ async def test_recover_interrupted_jobs_flips_running_to_queued():
             "config": {"periods_per_year": 252, "trace_id": "t2"},
         },
     ]
+
+    # Simulate the Redis list shape produced by LPUSH, then the worker's
+    # BRPOP consumption.  The recovered jobs must still run oldest → newest.
+    redis_list: list[str] = []
+    for call in rds.lpush.await_args_list:
+        redis_list.insert(0, call.args[1])
+    brpop_run_ids = [json.loads(redis_list.pop())["run_id"] for _ in range(len(redis_list))]
+    assert brpop_run_ids == ["r1", "r2"]
 
 
 # ---------------------------------------------------------------------------
