@@ -493,6 +493,146 @@ class TestOrderManager:
         assert make_qty_arg == pytest.approx(0.02, rel=1e-9)
         assert len(submitted) == 1
 
+    # ------------------------------------------------------------------
+    # Reduce / flatten-to-zero paths (HEDGING same-direction reduce)
+    # ------------------------------------------------------------------
+
+    def test_flatten_to_zero_uses_close_position(self):
+        """current=+0.01, target=0 → full flatten via close_position, no reopen.
+
+        diff = 0 - 0.01 = -0.01.  diff * current < 0 and abs(diff) >= abs(current)
+        → full-flatten branch.  target=0 < min_step → no reopen order.
+        A plain market SELL without position_id must NOT be emitted; that
+        would open a new short under HEDGING, leaving the original long open.
+        """
+        strategy = _stub_strategy(
+            net_position_per_id={"BTCUSDT-PERP.BINANCE": 0.01},  # long 0.01
+        )
+        open_pos = MagicMock(name="OpenLongPosition")
+        open_pos.id = MagicMock(name="PositionId-LONG-01")
+        strategy.cache.positions_open.return_value = [open_pos]
+        strategy.id = MagicMock(name="StrategyId")
+
+        inst = _stub_instrument("BTCUSDT-PERP")
+        om = OrderManager(strategy)
+        # target_w=0 → target_qty=0, diff=-0.01
+        submitted = om.execute_diff(
+            target_weights={"BTCUSDT-PERP": 0.0},
+            instruments={"BTCUSDT-PERP": inst},
+            equity=10_000.0,
+            prices={"BTCUSDT-PERP": 50_000.0},
+        )
+
+        # Flatten leg fired: close_position called with reduce_only=True.
+        strategy.close_position.assert_called_once()
+        cp_args, cp_kwargs = strategy.close_position.call_args
+        assert cp_args[0] is open_pos
+        assert cp_kwargs.get("reduce_only") is True
+
+        # No new open order: target=0 is below min_step.
+        strategy.order_factory.market.assert_not_called()
+        inst.make_qty.assert_not_called()
+
+        # submitted list: one flatten sentinel (the position itself, from the
+        # production path where close_position doesn't expose the order object).
+        assert len(submitted) == 1
+
+    def test_partial_same_sign_reduce_long(self):
+        """current=+0.02, target=+0.01 → partial reduce 0.01 via reduce-only order.
+
+        diff = 0.01 - 0.02 = -0.01.  diff * current < 0 and abs(diff=0.01)
+        < abs(current=0.02) → partial-reduce branch.
+        A reduce-only market SELL with position_id must be emitted; the
+        position_id routes the order to the correct existing long so NT
+        HEDGING does not open a new short.
+        """
+        from nautilus_trader.model.enums import OrderSide
+
+        strategy = _stub_strategy(
+            net_position_per_id={"BTCUSDT-PERP.BINANCE": 0.02},  # long 0.02
+        )
+        open_pos = MagicMock(name="OpenLongPosition")
+        open_pos.id = MagicMock(name="PositionId-LONG-01")
+        open_pos.quantity = 0.02  # position holds 0.02 BTC
+        open_pos.signed_qty = 0.02  # positive → long
+        strategy.cache.positions_open.return_value = [open_pos]
+        strategy.id = MagicMock(name="StrategyId")
+
+        inst = _stub_instrument("BTCUSDT-PERP")
+        om = OrderManager(strategy)
+        # target_w=0.05 @ 10_000/50_000 → target_qty=0.01; current=0.02 → diff=-0.01
+        submitted = om.execute_diff(
+            target_weights={"BTCUSDT-PERP": 0.05},
+            instruments={"BTCUSDT-PERP": inst},
+            equity=10_000.0,
+            prices={"BTCUSDT-PERP": 50_000.0},
+        )
+
+        # close_position must NOT be called — it would close the entire position.
+        strategy.close_position.assert_not_called()
+
+        # A single reduce-only SELL order sized to abs(diff)=0.01 with
+        # position_id bound to the open position.
+        strategy.order_factory.market.assert_called_once()
+        om_kwargs = strategy.order_factory.market.call_args.kwargs
+        assert om_kwargs["order_side"] == OrderSide.SELL
+        assert om_kwargs.get("reduce_only") is True
+        make_qty_arg = inst.make_qty.call_args[0][0]
+        assert make_qty_arg == pytest.approx(0.01, rel=1e-9)
+
+        # submit_order called with position_id kwarg bound to the position.
+        strategy.submit_order.assert_called_once()
+        so_args, so_kwargs = strategy.submit_order.call_args
+        assert so_kwargs.get("position_id") is open_pos.id
+
+        assert len(submitted) == 1
+
+    def test_partial_same_sign_reduce_short(self):
+        """current=-0.02, target=-0.01 → partial reduce 0.01 via reduce-only BUY.
+
+        diff = -0.01 - (-0.02) = +0.01.  diff * current = +0.01 * -0.02 < 0
+        and abs(diff=0.01) < abs(current=0.02) → partial-reduce branch.
+        Closing side for a short position is BUY.
+        """
+        from nautilus_trader.model.enums import OrderSide
+
+        strategy = _stub_strategy(
+            net_position_per_id={"BTCUSDT-PERP.BINANCE": -0.02},  # short 0.02
+        )
+        open_pos = MagicMock(name="OpenShortPosition")
+        open_pos.id = MagicMock(name="PositionId-SHORT-01")
+        open_pos.quantity = 0.02   # unsigned position size
+        open_pos.signed_qty = -0.02  # negative → short
+        strategy.cache.positions_open.return_value = [open_pos]
+        strategy.id = MagicMock(name="StrategyId")
+
+        inst = _stub_instrument("BTCUSDT-PERP")
+        om = OrderManager(strategy)
+        # target_w=-0.05 @ 10_000/50_000 → target_qty=-0.01; current=-0.02 → diff=+0.01
+        submitted = om.execute_diff(
+            target_weights={"BTCUSDT-PERP": -0.05},
+            instruments={"BTCUSDT-PERP": inst},
+            equity=10_000.0,
+            prices={"BTCUSDT-PERP": 50_000.0},
+        )
+
+        # close_position must NOT be called.
+        strategy.close_position.assert_not_called()
+
+        # A reduce-only BUY order (closing side for a short), sized to 0.01.
+        strategy.order_factory.market.assert_called_once()
+        om_kwargs = strategy.order_factory.market.call_args.kwargs
+        assert om_kwargs["order_side"] == OrderSide.BUY
+        assert om_kwargs.get("reduce_only") is True
+        make_qty_arg = inst.make_qty.call_args[0][0]
+        assert make_qty_arg == pytest.approx(0.01, rel=1e-9)
+
+        strategy.submit_order.assert_called_once()
+        _, so_kwargs = strategy.submit_order.call_args
+        assert so_kwargs.get("position_id") is open_pos.id
+
+        assert len(submitted) == 1
+
 
 # =============================================================================
 # SignalDrivenStrategy (stub-driven) tests
@@ -551,6 +691,7 @@ class _SignalDrivenStrategyStub:
         self.cache = MagicMock()
         self.cache.bars.return_value = [object()] * cache_history_len
         self.cache.instrument.return_value = _stub_instrument("BTCUSDT-PERP")
+        self.cache.positions_open.return_value = []
         self.log = MagicMock()
         self.account = MagicMock()
         self.account.balance_total.return_value.as_double.return_value = 10_000.0
@@ -558,6 +699,7 @@ class _SignalDrivenStrategyStub:
         self.portfolio.net_position.return_value = 0.0
         self.order_factory = MagicMock()
         self.submit_order = MagicMock()
+        self.close_position = MagicMock()
         self.subscribe_bars = MagicMock()
 
     # --- Pure-Python methods bound from SignalDrivenStrategy ----------
@@ -956,6 +1098,18 @@ class TestCrossSectionReadyExecutesKernelAndSubmits:
         s.portfolio.net_position.side_effect = (
             lambda iid, *a, **kw: 0.01 if "ETH" in str(iid) else 0.0
         )
+        # Provide an open position for ETH so _flatten_open_positions can
+        # call close_position on it (the reduce path triggered by target=0).
+        eth_open_pos = MagicMock(name="ETHOpenLongPosition")
+        eth_open_pos.id = MagicMock(name="PositionId-ETH-LONG-01")
+        s.id = MagicMock(name="StrategyId")
+
+        def _positions_open_stub(venue=None, instrument_id=None, strategy_id=None):
+            if instrument_id is not None and "ETH" in str(instrument_id):
+                return [eth_open_pos]
+            return []
+
+        s.cache.positions_open.side_effect = _positions_open_stub
         s._order_manager = OrderManager(s)
 
         # This period: kernel output for BTC = 0.5, ETH = NaN (skipped by
@@ -990,13 +1144,21 @@ class TestCrossSectionReadyExecutesKernelAndSubmits:
         assert called_btc == pytest.approx(0.1, rel=1e-9)
 
         # ETH: stale-position guard injected target=0.0; current_qty=0.01.
-        # diff = 0 - 0.01 = -0.01 → SELL 0.01 (close order).
-        eth_inst.make_qty.assert_called_once()
-        called_eth = eth_inst.make_qty.call_args[0][0]
-        assert called_eth == pytest.approx(0.01, rel=1e-9)
+        # diff = 0 - 0.01 = -0.01.  diff * current = -0.0001 < 0, and
+        # abs(diff=0.01) >= abs(current=0.01), so the full-flatten path
+        # fires: close_position(eth_open_pos, reduce_only=True) is called
+        # and target=0 is below min_step so no reopen order is issued.
+        # make_qty must NOT be called for ETH (close_position handles that
+        # internally via NT; no explicit market order is constructed here).
+        eth_inst.make_qty.assert_not_called()
+        s.close_position.assert_called_once()
+        cp_args, cp_kwargs = s.close_position.call_args
+        assert cp_args[0] is eth_open_pos
+        assert cp_kwargs.get("reduce_only") is True
 
-        # Total: 2 orders (BTC open + ETH close).
-        assert s.submit_order.call_count == 2
+        # BTC submit_order called once; ETH close is via close_position (not
+        # submit_order directly from OrderManager), so total submit_order = 1.
+        assert s.submit_order.call_count == 1
 
         # ETHUSDT-PERP persisted in target_weights as 0.0 so that if the
         # position is still open next period, another close order is issued.

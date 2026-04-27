@@ -91,32 +91,40 @@ class OrderManager:
             Submitted order objects (also forwarded to
             ``strategy.submit_order``).  Returned for test assertions.
 
-        Sign-flip two-stage protocol
-        ----------------------------
-        Under NT ``OmsType.HEDGING`` a single market order whose signed
-        diff magnitude implies a *flatten + reopen* across zero must NOT
-        be emitted as one unified order.  NT's execution engine will
-        treat an order without an explicit ``position_id`` as a fresh
-        position (``_determine_hedging_position_id`` in
-        ``execution/engine.pyx``), so the old position is never closed
-        and the gross exposure stacks instead of flipping.  The Binance
-        Hedge Mode adapter additionally rejects such orders outright
-        because it derives LONG/SHORT routing from the position_id
-        suffix (``PyCondition.not_none(position_id)``).
+        Reduce / flatten / sign-flip protocol (HEDGING-safe)
+        -------------------------------------------------------
+        Under NT ``OmsType.HEDGING`` any plain market order that lacks an
+        explicit ``position_id`` is treated as a *new* position by
+        ``_determine_hedging_position_id`` in ``execution/engine.pyx``.
+        The Binance Hedge Mode adapter additionally derives LONG/SHORT
+        routing from the position_id suffix and rejects orders without
+        one.  Therefore **any order that reduces an existing position
+        must carry a position_id** — we cannot emit a bare sell into an
+        existing long.
 
-        Fix: when ``current_qty * target_qty < 0`` we split the move
-        into two legs —
+        The reduce-detect condition is ``diff_qty * current_qty < 0``
+        (i.e. the required change is in the *opposite* direction to the
+        holding), which covers three cases:
 
-        1. Close every open :class:`Position` on this instrument for
-           this strategy via :meth:`Strategy.close_position` (NT emits
-           a reduce-only MarketOrder with ``position_id=position.id``
-           and ``order_side = Order.closing_side_c(position.side)``).
-        2. Open the new target with a fresh market order sized to
-           ``abs(target_qty)`` and side matching the sign of
-           ``target_qty``.
+        * **Flatten-to-zero** (``current=+1, target=0``): diff=-1, same
+          condition as sign-flip but target is flat.
+        * **Partial reduce** (``current=+1, target=+0.5``): diff=-0.5,
+          reduce 0.5 units off the existing long.
+        * **Sign-flip** (``current=+1, target=-0.5``): diff=-1.5, fully
+          close the long then open a short of 0.5.
 
-        Non-flip paths (same-sign deltas or opening from flat) keep
-        the original single-order flow.
+        Sub-dispatch on ``abs(diff) vs abs(current)``:
+
+        * ``abs(diff) >= abs(current)`` → **full flatten** via
+          :meth:`_flatten_open_positions`, then optionally reopen with a
+          fresh market order sized to ``abs(target_qty)`` if
+          ``abs(target_qty) >= min_step``.
+        * ``abs(diff) < abs(current)`` → **partial reduce** via
+          :meth:`_reduce_open_positions`, issuing reduce-only market
+          orders with ``position_id`` bound to the open position(s).
+
+        Same-sign adds (``diff * current >= 0``) and opens-from-flat
+        (``current == 0``) keep the original single-order flow.
         """
         # Lazy NT imports — keeps the module importable in unit tests.
         from nautilus_trader.model.enums import OrderSide, TimeInForce
@@ -145,38 +153,72 @@ class OrderManager:
 
             current_qty = self._get_current_qty(instrument.id)
             target_qty = float(target_w) * float(equity) / float(price)
+            diff_qty = target_qty - current_qty
             min_step = self._min_qty_step(instrument)
 
-            # --- Sign-flip branch: flatten all open positions, then reopen. ---
-            if current_qty != 0.0 and target_qty * current_qty < 0:
-                flat_orders = self._flatten_open_positions(instrument.id)
-                submitted.extend(flat_orders)
+            # --- Reduce / flatten / sign-flip branch. ---
+            #
+            # Triggered whenever diff is in the *opposite direction* to
+            # the current position, i.e. we need to reduce or fully close.
+            # This is wider than the old "sign-flip only" check: it also
+            # covers same-direction reduce (current=1 → target=0.5) and
+            # flatten-to-zero (current=1 → target=0).  Under NT HEDGING
+            # mode any plain market order without an explicit position_id
+            # is treated as a new position by the execution engine
+            # (_determine_hedging_position_id in execution/engine.pyx), so
+            # we must never emit a bare reduce-direction market order.
+            if current_qty != 0.0 and diff_qty * current_qty < 0:
+                abs_diff = abs(diff_qty)
+                abs_current = abs(current_qty)
 
-                abs_target = abs(target_qty)
-                if abs_target < min_step:
-                    logger.debug(
-                        "OrderManager.execute_diff: %s sign-flip → flatten only "
-                        "(|target|=%.8f < min_step %.8f)",
-                        symbol,
-                        abs_target,
-                        min_step,
+                if abs_diff >= abs_current:
+                    # Full flatten: close every open position for this
+                    # instrument, then optionally open a new leg if target
+                    # is non-zero (cross-zero sign-flip case).
+                    flat_orders = self._flatten_open_positions(instrument.id)
+                    submitted.extend(flat_orders)
+
+                    abs_target = abs(target_qty)
+                    if abs_target < min_step:
+                        logger.debug(
+                            "OrderManager.execute_diff: %s flatten → no reopen "
+                            "(|target|=%.8f < min_step %.8f)",
+                            symbol,
+                            abs_target,
+                            min_step,
+                        )
+                        continue
+
+                    side = OrderSide.BUY if target_qty > 0 else OrderSide.SELL
+                    qty = instrument.make_qty(abs_target)
+                    open_order = self.strategy.order_factory.market(
+                        instrument_id=instrument.id,
+                        order_side=side,
+                        quantity=qty,
+                        time_in_force=TimeInForce.GTC,
                     )
-                    continue
+                    self.strategy.submit_order(open_order)
+                    submitted.append(open_order)
+                else:
+                    # Partial reduce: diff is smaller than the current
+                    # position; close only |diff_qty| worth of exposure.
+                    if abs_diff < min_step:
+                        logger.debug(
+                            "OrderManager.execute_diff: skip %s — reduce diff "
+                            "%.8f < min_step %.8f",
+                            symbol,
+                            abs_diff,
+                            min_step,
+                        )
+                        continue
 
-                side = OrderSide.BUY if target_qty > 0 else OrderSide.SELL
-                qty = instrument.make_qty(abs_target)
-                open_order = self.strategy.order_factory.market(
-                    instrument_id=instrument.id,
-                    order_side=side,
-                    quantity=qty,
-                    time_in_force=TimeInForce.GTC,
-                )
-                self.strategy.submit_order(open_order)
-                submitted.append(open_order)
+                    reduce_orders = self._reduce_open_positions(
+                        instrument, abs_diff
+                    )
+                    submitted.extend(reduce_orders)
                 continue
 
-            # --- Same-sign / opening-from-flat branch: original flow. ---
-            diff_qty = target_qty - current_qty
+            # --- Same-sign add / opening-from-flat branch: original flow. ---
             abs_diff = abs(diff_qty)
 
             if abs_diff < min_step:
@@ -270,6 +312,110 @@ class OrderManager:
             # pass.  Downstream callers only care about the count.
             closed.append(position)
         return closed
+
+    def _reduce_open_positions(
+        self,
+        instrument: Any,
+        reduce_amount: float,
+    ) -> list[Any]:
+        """Partially close open positions on *instrument* by *reduce_amount*.
+
+        Issues reduce-only market orders bound to specific position IDs so
+        that NT's HEDGING execution engine correctly reduces the designated
+        position rather than opening a new one.
+
+        The algorithm greedily iterates open positions and closes as much
+        of each as needed until *reduce_amount* is exhausted.  In the
+        normal case there is exactly one open position per instrument per
+        strategy, so only one order is emitted.
+
+        Parameters
+        ----------
+        instrument:
+            The :class:`Instrument` for the symbol being reduced.  Used to
+            round quantities via ``make_qty`` and for ``instrument.id``.
+        reduce_amount:
+            The unsigned quantity to reduce in total across all open
+            positions.  Caller must ensure ``reduce_amount > 0``.
+
+        Returns
+        -------
+        list[Any]
+            Submitted reduce-only order objects, for inclusion in
+            :meth:`execute_diff`'s ``submitted`` return list.
+        """
+        from nautilus_trader.model.enums import OrderSide, TimeInForce
+
+        reduced: list[Any] = []
+        cache = getattr(self.strategy, "cache", None)
+        if cache is None:
+            return reduced
+
+        strategy_id = getattr(self.strategy, "id", None)
+        try:
+            positions = cache.positions_open(
+                venue=None,
+                instrument_id=instrument.id,
+                strategy_id=strategy_id,
+            )
+        except TypeError:
+            positions = cache.positions_open(instrument_id=instrument.id)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "OrderManager._reduce_open_positions: positions_open failed "
+                "for %s: %s",
+                instrument.id,
+                exc,
+            )
+            return reduced
+
+        remaining = reduce_amount
+        min_step = self._min_qty_step(instrument)
+
+        for position in positions or []:
+            if remaining < min_step:
+                break
+
+            # How much of this position can we close?
+            pos_qty: float
+            try:
+                pos_qty = float(position.quantity)
+            except Exception:  # pragma: no cover
+                pos_qty = abs(float(getattr(position, "signed_qty", remaining)))
+
+            close_this = min(pos_qty, remaining)
+            if close_this < min_step:
+                continue
+
+            # Determine the closing side from the position's sign.
+            try:
+                pos_signed = float(getattr(position, "signed_qty", 0.0))
+            except Exception:
+                pos_signed = 0.0
+            # Fallback: infer from position.side attribute string.
+            if pos_signed == 0.0:
+                side_str = str(getattr(position, "side", "")).upper()
+                if "LONG" in side_str or "BUY" in side_str:
+                    pos_signed = 1.0
+                elif "SHORT" in side_str or "SELL" in side_str:
+                    pos_signed = -1.0
+
+            # Closing side is opposite to position direction.
+            close_side = OrderSide.SELL if pos_signed > 0 else OrderSide.BUY
+
+            qty = instrument.make_qty(close_this)
+            order = self.strategy.order_factory.market(
+                instrument_id=instrument.id,
+                order_side=close_side,
+                quantity=qty,
+                time_in_force=TimeInForce.GTC,
+                reduce_only=True,
+            )
+            self.strategy.submit_order(order, position_id=position.id)
+            reduced.append(order)
+            remaining -= close_this
+
+        return reduced
 
     # ------------------------------------------------------------------
     # Internal helpers
