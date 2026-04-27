@@ -157,11 +157,49 @@ def test_list_signals_filters_deprecated_by_default(client, tmp_path):
 # 2. POST /api/signal/run
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Universe resolution mock — shared by /run tests
+# ---------------------------------------------------------------------------
+
+def _make_universe_row(*, row_id: int = 42, name: str = "top10_perp"):
+    """Build a stand-in ``UniverseORM`` row with two PIT-active symbols.
+
+    Mirrors what ``Universe.sync_from_csv`` would have written: every
+    symbol listed since 1970-01-01 (well outside the 7-day new-coin
+    isolation window) so ``get_symbols_at`` always returns both.
+    """
+    row = MagicMock()
+    row.id = row_id
+    row.name = name
+    row.pit_rules_json = {
+        "BTCUSDT-PERP": {
+            "listing_date": "2020-01-01",
+            "delisting_date": None,
+        },
+        "ETHUSDT-PERP": {
+            "listing_date": "2020-01-01",
+            "delisting_date": None,
+        },
+    }
+    return row
+
+
+def _make_run_db_session(universe_row):
+    """Build an AsyncSession whose ``.execute`` returns ``universe_row``."""
+    session = AsyncMock()
+    select_result = MagicMock()
+    select_result.scalar_one_or_none.return_value = universe_row
+    session.execute = AsyncMock(return_value=select_result)
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+    return session
+
+
 def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
     """``/run`` inserts a SignalRun row + LPUSHes a payload to Redis."""
     mock_rds = AsyncMock()
     mock_rds.lpush = AsyncMock(return_value=1)
-    mock_session = _make_async_db_session()
+    mock_session = _make_run_db_session(_make_universe_row())
 
     async def _db():
         yield mock_session
@@ -177,6 +215,7 @@ def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
             "/api/signal/run",
             json={
                 "signal_name": "my_user_signal",
+                "universe_id": 42,
                 "start": "2024-01-01",
                 "end": "2024-04-01",
             },
@@ -198,6 +237,16 @@ def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
     assert inserted.status == "queued"
     assert inserted.config["start"] == "2024-01-01"
     assert inserted.config["method"] == "top_k_long_short"
+    # Universe resolution populated instrument_ids + bar_type_template.
+    assert inserted.config["instrument_ids"] == [
+        "BTCUSDT-PERP.BINANCE",
+        "ETHUSDT-PERP.BINANCE",
+    ]
+    assert (
+        inserted.config["bar_type_template"]
+        == "{instrument_id}-1-DAY-LAST-EXTERNAL"  # rebalance_freq="1D" → 1-DAY
+    )
+    assert inserted.universe_id == 42
     mock_session.commit.assert_called()
 
     # Redis LPUSH on tino:signal:queue with run_id + signal_name in payload.
@@ -208,6 +257,122 @@ def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
     assert payload["run_id"] == body["run_id"]
     assert payload["signal_name"] == "my_user_signal"
     assert "config" in payload
+
+
+def test_run_resolves_universe_from_universe_id(client, temp_signal_module):
+    """``/run`` looks up universe by id (primary path) and writes instrument_ids."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    mock_session = _make_run_db_session(_make_universe_row(row_id=7))
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={"signal_name": "my_user_signal", "universe_id": 7},
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 200, resp.text
+    inserted = mock_session.add.call_args[0][0]
+    assert inserted.universe_id == 7
+    assert inserted.config["universe_id"] == 7
+    # PIT symbols persisted alongside NT instrument_ids for the worker.
+    assert inserted.config["universe_symbols"] == [
+        "BTCUSDT-PERP",
+        "ETHUSDT-PERP",
+    ]
+    assert len(inserted.config["instrument_ids"]) == 2
+
+
+def test_run_rejects_unresolvable_universe(client, temp_signal_module):
+    """``/run`` returns 422 when neither universe_id nor universe_ref resolves."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    # Session returns None for every .execute(SELECT ...) — no universe row.
+    mock_session = _make_run_db_session(universe_row=None)
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={"signal_name": "my_user_signal", "universe_id": 999},
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert "universe" in detail.lower()
+
+
+def test_run_rejects_empty_pit_universe(client, temp_signal_module):
+    """``/run`` returns 422 when the universe row has zero active symbols.
+
+    Simulates a universe whose members are all still inside the 7-day
+    new-coin isolation window at the anchor time → :meth:`get_symbols_at`
+    returns an empty list.  The helper raises ``ValueError`` which the
+    route translates to HTTP 422 so callers see the root cause without
+    paying for a worker round-trip.
+    """
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    # Universe has one symbol but its listing_date is AFTER req.end —
+    # i.e. not yet trading at the PIT anchor.
+    future_row = MagicMock()
+    future_row.id = 1
+    future_row.name = "future_perp"
+    future_row.pit_rules_json = {
+        "NEWCOINUSDT-PERP": {
+            "listing_date": "2099-01-01",
+            "delisting_date": None,
+        },
+    }
+    mock_session = _make_run_db_session(future_row)
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={
+                "signal_name": "my_user_signal",
+                "universe_id": 1,
+                "end": "2024-01-01",
+            },
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 422, resp.text
+    assert "empty" in resp.json()["detail"].lower()
 
 
 def test_run_404_unknown_signal(client, tmp_path):
@@ -522,6 +687,13 @@ def test_export_returns_portfolio_yaml_shape(client):
         "rebalance_freq": "1h",
         "extra_warmup_bars": 5,
         "factor_ref": "ret_N@1.0.0",
+        # PR #140 — universe resolution writes these into config.
+        "instrument_ids": [
+            "BTCUSDT-PERP.BINANCE",
+            "ETHUSDT-PERP.BINANCE",
+        ],
+        "bar_type_template": "{instrument_id}-1-HOUR-LAST-EXTERNAL",
+        "universe_symbols": ["BTCUSDT-PERP", "ETHUSDT-PERP"],
     }
     row.result = {"sharpe": 1.5, "mdd": 0.07}
 

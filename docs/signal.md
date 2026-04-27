@@ -418,9 +418,51 @@ from tinohelm.signal.evaluator import SignalEvalResult
     "extra_warmup_bars": 0,
     "version": "1.0.0",
     "code_hash": "abc123...",
-    "deprecated": false
+    "deprecated": false,
+
+    // Universe resolution — populated by /api/signal/run at enqueue time.
+    // See §9.5 below for the contract.
+    "universe_id": 42,
+    "universe_symbols": ["BTCUSDT-PERP", "ETHUSDT-PERP", "SOLUSDT-PERP"],
+    "instrument_ids": [
+        "BTCUSDT-PERP.BINANCE",
+        "ETHUSDT-PERP.BINANCE",
+        "SOLUSDT-PERP.BINANCE"
+    ],
+    "bar_type_template": "{instrument_id}-1-DAY-LAST-EXTERNAL",
+
+    // Request-side window
+    "start": "2024-01-01",
+    "end": "2024-04-01",
+    "force": false
 }
 ```
+
+### 9.5 Universe 解析合约（`POST /api/signal/run` 入队边界）
+
+从 PR #140 起，`POST /api/signal/run` 在入队前**必须**把一个 universe 引用解析为具体的 PIT 符号列表并写入 `signal_runs.config`。这一步由
+`tinohelm.signal._run_helpers.resolve_universe_to_instrument_ids` 完成，流程：
+
+1. **查表优先级**：`req.universe_id` > `spec.universe_ref`（按 `universes.name` 查 UNIQUE 列）。两者都查不到 → `HTTP 422`。
+2. **锚定时点**：`req.end` 优先（反映窗口结束时的历史 universe 状态，避免 look-back bias），否则 `datetime.utcnow()`。
+3. **PIT 过滤**：`Universe.from_db_row(row).get_symbols_at(anchor_ts)` 应用 7 天新币隔离 + 退市过滤；空结果 → `HTTP 422`。
+4. **写回 config**：四个字段必须同步持久化：
+   - `universe_id`（int）— 与 `SignalRun.universe_id` 列对齐；
+   - `universe_symbols`（list[str]）— TinoHelm 短符号（如 `"BTCUSDT-PERP"`），供 worker 构建 `Universe.from_symbols`；
+   - `instrument_ids`（list[str]）— NT 格式（`"*.BINANCE"` 后缀），供 `SignalDrivenStrategy` 消费；
+   - `bar_type_template`（str，含 `{instrument_id}` 占位符）— 由 `rebalance_freq` 通过 `build_bar_type_template()` 派生。
+5. **Export 端安全网**：`GET /api/signal/export/{run_id}` 在读到空 `instrument_ids` 时返回 `HTTP 400`，防止遗留数据触发 `BarSynchronizer.__init__` 的 `expected_symbols is empty` 错误。
+
+`rebalance_freq → bar_type_template` 映射（与 `tinohelm.strategy.loader_helpers.parse_interval` 共享 `INTERVAL_MAP`，大小写不敏感）：
+
+| rebalance_freq | bar_type_template |
+|------|------|
+| `"1H"` / `"1h"` | `"{instrument_id}-1-HOUR-LAST-EXTERNAL"` |
+| `"4H"` / `"4h"` | `"{instrument_id}-4-HOUR-LAST-EXTERNAL"` |
+| `"1D"` / `"1d"` | `"{instrument_id}-1-DAY-LAST-EXTERNAL"` |
+| `"30m"` | `"{instrument_id}-30-MINUTE-LAST-EXTERNAL"` |
+
+> **遗留数据**：PR #140 之前创建的 `SignalRun` 记录 `config` 缺 `instrument_ids`；这些行在 `/export` 上返回 400，需要重新发起 `/run` 请求。
 
 ### 9.3 SignalMethod Literal 类型
 

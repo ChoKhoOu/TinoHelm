@@ -276,12 +276,30 @@ async def run_signal(
 ) -> dict:
     """Enqueue a signal evaluation job.
 
-    Validates ``signal_name`` against the registry, creates a queued
-    :class:`SignalRun` row, and pushes the JSON payload onto
-    ``tino:signal:queue``.  The worker dequeues, runs the four-stage
-    pipeline, and writes the result back to ``signal_runs.result``.
+    Validates ``signal_name`` against the registry, **resolves the
+    universe** (``req.universe_id`` > ``spec.universe_ref``) into a
+    concrete PIT symbol list, creates a queued :class:`SignalRun` row
+    with ``instrument_ids`` + ``bar_type_template`` baked into
+    ``config``, and pushes the JSON payload onto ``tino:signal:queue``.
+
+    Universe resolution at enqueue time (vs. deferring to the worker or
+    the export endpoint) makes the ``signal_runs.config`` snapshot
+    **self-contained**: a downstream consumer (worker, ``/export``,
+    replay, audit) can reconstruct the exact instrument set that was
+    trading at the anchor timestamp without a second DB round-trip.
+
+    Raises
+    ------
+    HTTPException
+        * ``404`` — ``signal_name`` not in the registry.
+        * ``422`` — universe cannot be resolved (missing lookup keys, no
+          matching row, or empty PIT symbol list).
     """
     from tinohelm.signal.registry import SignalRegistry
+    from tinohelm.signal._run_helpers import (
+        build_bar_type_template,
+        resolve_universe_to_instrument_ids,
+    )
 
     registry = SignalRegistry()
     registry.scan()
@@ -292,12 +310,48 @@ async def run_signal(
             detail=f"Signal '{req.signal_name}' not found in registry",
         )
 
+    # ------------------------------------------------------------------
+    # Resolve universe → PIT symbols + NT instrument_ids
+    # ------------------------------------------------------------------
+    # Anchor the PIT lookup at ``req.end`` when supplied (so the universe
+    # reflects the *historical* trading state at the end of the run
+    # window), else ``utcnow()``.  ``req.start`` is deliberately not used
+    # — signals need the symbol list that was active at the end of the
+    # window to avoid look-back bias on delisted names.
+    anchor_ts: datetime | None = None
+    if req.end:
+        try:
+            anchor_ts = datetime.fromisoformat(req.end.replace("Z", "+00:00"))
+            if anchor_ts.tzinfo is not None:
+                anchor_ts = anchor_ts.replace(tzinfo=None)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid ISO-8601 end timestamp: {req.end!r}",
+            )
+
+    try:
+        resolved_universe_id, _universe_name, pit_symbols, instrument_ids = (
+            await resolve_universe_to_instrument_ids(
+                universe_id=req.universe_id,
+                universe_ref=spec.universe_ref,
+                anchor_ts=anchor_ts,
+                db=db,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    bar_type_template = build_bar_type_template(spec.rebalance_freq)
+
     run_id = str(uuid4())
 
     # Build the persisted config dict.  Includes every field the worker's
     # ``_build_spec_from_config`` knows how to consume + the request-side
-    # extras (universe_id / start / end / force) so re-runs from the DB
-    # row alone are reproducible.
+    # extras (universe_id / start / end / force) + the freshly resolved
+    # ``instrument_ids`` / ``bar_type_template`` so re-runs from the DB
+    # row alone are reproducible and the /export endpoint never sees an
+    # empty symbol list.
     config_payload: dict = {
         # Spec fields — used by worker._build_spec_from_config
         "factor_ref": spec.factor_ref,
@@ -316,8 +370,12 @@ async def run_signal(
         "code_hash": spec.code_hash,
         "description": spec.description,
         "deprecated": spec.deprecated,
+        # Universe resolution — populated from the DB row at enqueue time.
+        "universe_id": resolved_universe_id,
+        "universe_symbols": pit_symbols,
+        "instrument_ids": instrument_ids,
+        "bar_type_template": bar_type_template,
         # Request-side extras
-        "universe_id": req.universe_id,
         "start": req.start,
         "end": req.end,
         "force": req.force,
@@ -334,7 +392,7 @@ async def run_signal(
         progress=0,
         progress_stage=None,
         code_hash=spec.code_hash or None,
-        universe_id=req.universe_id,
+        universe_id=resolved_universe_id,
     )
     db.add(run)
     await db.commit()
@@ -346,7 +404,10 @@ async def run_signal(
     })
     await rds.lpush(QUEUE_KEY, queue_payload)
 
-    logger.info("Signal run %s enqueued: %s", run_id, req.signal_name)
+    logger.info(
+        "Signal run %s enqueued: %s (universe_id=%s, %d symbols)",
+        run_id, req.signal_name, resolved_universe_id, len(pit_symbols),
+    )
     return {"run_id": run_id, "status": "queued"}
 
 
@@ -691,6 +752,31 @@ async def export_run(
     warmup_bars: int = factor_lookback + extra_warmup_bars
 
     # ------------------------------------------------------------------
+    # Empty-universe safety net
+    # ------------------------------------------------------------------
+    # Legacy runs created before universe resolution was enforced at the
+    # /run boundary may have been persisted without an instrument_ids
+    # entry.  Exporting such a run would produce a
+    # SignalDrivenStrategyConfig whose ``instrument_ids=()`` crashes
+    # :class:`BarSynchronizer.__init__` at on_start time ("expected_symbols
+    # is empty").  Reject at the API boundary with a clear, actionable
+    # message rather than letting the NT runtime raise deep inside the
+    # subprocess.
+    stored_instrument_ids = config.get("instrument_ids", [])
+    if not stored_instrument_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot export SignalRun {run_id!r}: instrument_ids is "
+                "empty.  The run was created before universe resolution "
+                "was enforced at /api/signal/run (PR #140).  Re-run with "
+                "a valid universe_id or universe_ref to regenerate a "
+                "SignalRun whose config carries a non-empty "
+                "instrument_ids list."
+            ),
+        )
+
+    # ------------------------------------------------------------------
     # Build portfolio.yaml-compatible export payload
     # ------------------------------------------------------------------
     rebalance_freq: str = config.get("rebalance_freq", "1h")
@@ -715,12 +801,22 @@ async def export_run(
         "deprecated": config.get("deprecated", False),
     }
 
+    # Bar-type template — stored by /run for new records; fall back to
+    # the canonical rebalance-freq-derived form for legacy runs that were
+    # enqueued before the resolution machinery landed.  The fallback uses
+    # the same :func:`build_bar_type_template` helper that /run calls so
+    # both code paths stay in lockstep.
+    stored_bar_type_template = config.get("bar_type_template") or ""
+    if not stored_bar_type_template:
+        from tinohelm.signal._run_helpers import build_bar_type_template
+        stored_bar_type_template = build_bar_type_template(rebalance_freq)
+
     return {
         "strategy_class": strategy_class,
         "config": {
             "signal_name": run.signal_name,
-            "instrument_ids": config.get("instrument_ids", []),
-            "bar_type_template": config.get("bar_type_template", ""),
+            "instrument_ids": stored_instrument_ids,
+            "bar_type_template": stored_bar_type_template,
             "warmup_bars": warmup_bars,
             "rebalance_freq_ns": _parse_rebalance_to_ns(rebalance_freq),
             "signal_spec_json": signal_spec_json,

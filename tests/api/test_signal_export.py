@@ -87,6 +87,15 @@ def _mock_run(
         "max_position": 0.10,
         "version": "1.0.0",
         "code_hash": code_hash,
+        # PR #140 — /api/signal/run now persists the PIT-resolved
+        # instrument list so /export can enforce a non-empty safety net.
+        # All export tests share a small two-symbol universe by default.
+        "instrument_ids": [
+            "BTCUSDT-PERP.BINANCE",
+            "ETHUSDT-PERP.BINANCE",
+        ],
+        "bar_type_template": "{instrument_id}-1-HOUR-LAST-EXTERNAL",
+        "universe_symbols": ["BTCUSDT-PERP", "ETHUSDT-PERP"],
     }
     row.result = {"sharpe": 1.2}
     row.started_at = datetime(2024, 2, 1)
@@ -465,6 +474,77 @@ def test_export_custom_strategy_skips_ohlcv_validation(client):
 
     assert resp.status_code == 200
     assert resp.json()["strategy_class"] == "mypkg.strats:OIAwareStrategy"
+
+
+def test_export_rejects_run_with_empty_instrument_ids(client):
+    """Legacy runs without ``instrument_ids`` → HTTP 400 safety net.
+
+    The /run endpoint now resolves the universe at enqueue time and
+    persists ``instrument_ids`` into config; exporting a legacy run that
+    lacks this list would crash ``BarSynchronizer`` at on_start.  The
+    export endpoint short-circuits with a 400 before any factor registry
+    lookup so operators get an actionable error.
+    """
+    run = _mock_run()
+    # Wipe the list to simulate a legacy pre-resolution record.
+    run.config = {**run.config, "instrument_ids": []}
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    try:
+        resp = client.get("/api/signal/export/test-run-id")
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert "instrument_ids" in detail
+    # Users must be pointed at the remediation path.
+    assert "universe_id" in detail or "universe_ref" in detail
+
+
+def test_export_exposes_stored_instrument_ids_and_bar_type_template(client):
+    """Happy path — /export surfaces the exact list /run persisted."""
+    run = _mock_run()
+    run.config = {
+        **run.config,
+        "instrument_ids": [
+            "BTCUSDT-PERP.BINANCE",
+            "ETHUSDT-PERP.BINANCE",
+            "SOLUSDT-PERP.BINANCE",
+        ],
+        "bar_type_template": "{instrument_id}-1-HOUR-LAST-EXTERNAL",
+    }
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    registry_class, _ = _mock_factor_registry(lookback=5)
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    with patch("tinohelm.factor.registry.Registry", registry_class):
+        try:
+            resp = client.get("/api/signal/export/test-run-id")
+        finally:
+            test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["config"]["instrument_ids"] == [
+        "BTCUSDT-PERP.BINANCE",
+        "ETHUSDT-PERP.BINANCE",
+        "SOLUSDT-PERP.BINANCE",
+    ]
+    assert (
+        body["config"]["bar_type_template"]
+        == "{instrument_id}-1-HOUR-LAST-EXTERNAL"
+    )
 
 
 def test_export_default_strategy_passes_when_factor_missing_in_registry(client):
