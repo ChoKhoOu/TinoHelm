@@ -189,11 +189,18 @@ class SignalEvaluator:
         # -- Single-sided turnover per period --------------------------------
         # Period 0: Σ|w[0]| (enter from flat).
         # Period t>0: 0.5 × Σ|w[t] - w[t-1]|.
+        #
+        # NaN in weights represents "asset not in universe at this timestamp".
+        # Treat NaN as 0 exposure before computing delta so that universe
+        # entry (NaN → float) and exit (float → NaN) are correctly captured
+        # as real exposure changes — consistent with the module-level docstring
+        # semantics ("NaN weights are treated as 0 contributions").
+        weights_for_turnover = np.nan_to_num(weights, nan=0.0)
         turnover_per_period = np.empty(T)
-        turnover_per_period[0] = np.nansum(np.abs(weights[0]))
+        turnover_per_period[0] = np.sum(np.abs(weights_for_turnover[0]))
         if T > 1:
-            delta = weights[1:] - weights[:-1]  # (T-1, N) — NaN propagates
-            turnover_per_period[1:] = 0.5 * np.nansum(np.abs(delta), axis=1)
+            delta = weights_for_turnover[1:] - weights_for_turnover[:-1]  # (T-1, N)
+            turnover_per_period[1:] = 0.5 * np.sum(np.abs(delta), axis=1)
 
         # -- Cost -------------------------------------------------------------
         # total_per_side (bps) = fee + slippage - rebate
