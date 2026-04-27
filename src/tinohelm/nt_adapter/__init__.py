@@ -4,7 +4,8 @@ The ``nt_adapter`` package is the single, narrow bridge between the pure-logic
 ``signal/`` framework and the NT execution engine.  Direction of dependency:
 
 * ``signal/``    →  pure polars/numpy logic (no NT).
-* ``nt_adapter/``→  imports both ``signal/`` and ``nautilus_trader``.
+* ``nt_adapter/``→  imports both ``signal/`` and ``nautilus_trader`` in the
+  strategy module, while package import itself stays light-weight.
 * ``backtest/`` / ``node/``  →  load strategies via ``loader.create_strategies``,
   which can produce a :class:`SignalDrivenStrategy` instance from a
   ``portfolio.yaml`` exported by ``/api/signal/export/{id}``.
@@ -26,10 +27,6 @@ from tinohelm.nt_adapter.bar_synchronizer import (
     BarSynchronizerConfig,
 )
 from tinohelm.nt_adapter.order_manager import OrderManager
-from tinohelm.nt_adapter.signal_driven_strategy import (
-    SignalDrivenStrategy,
-    SignalDrivenStrategyConfig,
-)
 
 __all__ = [
     "BarSynchronizer",
@@ -38,3 +35,25 @@ __all__ = [
     "SignalDrivenStrategy",
     "SignalDrivenStrategyConfig",
 ]
+
+
+def __getattr__(name: str):
+    """Lazily expose NT-heavy strategy classes.
+
+    ``factor_panel`` and API export validation are pure-Python/server-side
+    paths.  Importing ``tinohelm.nt_adapter`` must not force
+    ``nautilus_trader`` to be installed unless callers explicitly ask for the
+    live ``SignalDrivenStrategy`` class.
+    """
+    if name in {"SignalDrivenStrategy", "SignalDrivenStrategyConfig"}:
+        from tinohelm.nt_adapter.signal_driven_strategy import (
+            SignalDrivenStrategy,
+            SignalDrivenStrategyConfig,
+        )
+
+        return {
+            "SignalDrivenStrategy": SignalDrivenStrategy,
+            "SignalDrivenStrategyConfig": SignalDrivenStrategyConfig,
+        }[name]
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -259,6 +259,110 @@ def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
     assert "config" in payload
 
 
+def test_run_config_merge_preserves_server_owned_fields(client, temp_signal_module):
+    """Caller config cannot overwrite PIT universe / factor snapshot fields."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    mock_session = _make_run_db_session(_make_universe_row())
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={
+                "signal_name": "my_user_signal",
+                "universe_id": 42,
+                "force": False,
+                "config": {
+                    # These critical fields are server-owned and must be ignored.
+                    "factor_ref": "evil_factor@9.9.9",
+                    "method": "threshold_signed",
+                    "gross_exposure": 99.0,
+                    "cost_model": {"name": "free", "fee_bps_per_side": 0.0},
+                    "universe_id": 999,
+                    "universe_symbols": ["DOGEUSDT-PERP"],
+                    "instrument_ids": ["DOGEUSDT-PERP.BINANCE"],
+                    "bar_type_template": "{instrument_id}-1-SECOND-LAST-EXTERNAL",
+                    "force": True,
+                    "start": "1900-01-01",
+                    # Allowed top-level evaluation extra.
+                    "periods_per_year": 8760,
+                    # Allowed nested kernel parameter merge.
+                    "method_params": {"k": 1, "note": "regression"},
+                },
+            },
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 200, resp.text
+    inserted = mock_session.add.call_args[0][0]
+    cfg = inserted.config
+
+    assert cfg["factor_ref"] == "ret_N@1.0.0"
+    assert cfg["method"] == "top_k_long_short"
+    assert cfg["gross_exposure"] == 1.0
+    assert cfg["cost_model"]["name"] == "taker_8bps"
+    assert cfg["universe_id"] == 42
+    assert cfg["universe_symbols"] == ["BTCUSDT-PERP", "ETHUSDT-PERP"]
+    assert cfg["instrument_ids"] == [
+        "BTCUSDT-PERP.BINANCE",
+        "ETHUSDT-PERP.BINANCE",
+    ]
+    assert cfg["bar_type_template"] == "{instrument_id}-1-DAY-LAST-EXTERNAL"
+    assert cfg["force"] is False
+    assert cfg["start"] is None
+
+    assert cfg["periods_per_year"] == 8760
+    assert cfg["method_params"] == {"k": 1, "note": "regression"}
+
+    queued = json.loads(mock_rds.lpush.call_args[0][1])
+    assert queued["config"] == cfg
+
+
+def test_run_rejects_non_object_method_params(client, temp_signal_module):
+    """``config.method_params`` must be an object when supplied."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    mock_session = _make_run_db_session(_make_universe_row())
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={
+                "signal_name": "my_user_signal",
+                "universe_id": 42,
+                "config": {"method_params": "k=1"},
+            },
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 422, resp.text
+    assert "method_params" in resp.json()["detail"]
+    mock_session.add.assert_not_called()
+    mock_rds.lpush.assert_not_called()
+
+
 def test_run_resolves_universe_from_universe_id(client, temp_signal_module):
     """``/run`` looks up universe by id (primary path) and writes instrument_ids."""
     mock_rds = AsyncMock()

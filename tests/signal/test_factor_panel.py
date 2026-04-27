@@ -14,7 +14,11 @@ Coverage
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -72,6 +76,38 @@ def _make_bars_newest_first(n: int, base_close: float = 100.0) -> list[_Bar]:
 # ---------------------------------------------------------------------------
 # 1. supported_bar_fields / factor_uses_only_bar_fields
 # ---------------------------------------------------------------------------
+
+
+def test_factor_panel_import_does_not_require_nautilus_trader():
+    """Pure factor-panel import must not eager-load NT-heavy strategy code."""
+    env = {
+        **os.environ,
+        "PYTHONPATH": (
+            f"{Path.cwd() / 'src'}"
+            f"{os.pathsep}{os.environ.get('PYTHONPATH', '')}"
+        ),
+    }
+    code = """
+import builtins
+
+real_import = builtins.__import__
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name.startswith("nautilus_trader"):
+        raise ModuleNotFoundError("blocked nautilus_trader import")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+import tinohelm.nt_adapter.factor_panel
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_supported_bar_fields_is_exact_ohlcv_set():

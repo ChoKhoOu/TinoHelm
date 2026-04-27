@@ -22,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal
 from uuid import uuid4
@@ -63,6 +64,15 @@ _ALLOWED_COMPARE_METRICS: frozenset[str] = frozenset({
     "tail_loss_p99",
     "total_return",
     "cost_drag",
+})
+
+# ``POST /api/signal/run`` persists a server-owned config snapshot used by the
+# worker, audit/replay, and the NT export path.  Callers may only supply
+# evaluation-tuning extras here; PIT universe resolution, factor identity,
+# constraints, bar template, and cost model must stay anchored to the
+# registered ``SignalSpec`` plus server-side universe lookup.
+_ALLOWED_RUN_CONFIG_EXTRA_KEYS: frozenset[str] = frozenset({
+    "periods_per_year",
 })
 
 
@@ -145,6 +155,45 @@ def _resolve_metrics(metrics: list[str] | None) -> list[str]:
             ),
         )
     return list(metrics)
+
+
+def _merge_allowed_run_config(
+    config_payload: dict,
+    user_config: Mapping[str, object] | None,
+) -> None:
+    """Merge caller-supplied ``/run`` config without clobbering server facts.
+
+    The run config is a durable snapshot consumed by the worker and export
+    endpoint.  Blindly applying ``dict.update`` would let a caller replace
+    PIT-resolved ``universe_symbols`` / ``instrument_ids`` or the registered
+    ``factor_ref`` / ``cost_model``.  Keep the surface deliberately small:
+
+    * top-level allowlist for harmless evaluation extras;
+    * nested merge for kernel ``method_params`` only.
+    """
+    if not user_config:
+        return
+
+    for key in _ALLOWED_RUN_CONFIG_EXTRA_KEYS:
+        if key in user_config:
+            config_payload[key] = user_config[key]
+
+    if "method_params" not in user_config:
+        return
+
+    raw_method_params = user_config["method_params"]
+    if raw_method_params is None:
+        return
+    if not isinstance(raw_method_params, Mapping):
+        raise HTTPException(
+            status_code=422,
+            detail="config.method_params must be an object when provided",
+        )
+
+    config_payload["method_params"] = {
+        **dict(config_payload.get("method_params") or {}),
+        **dict(raw_method_params),
+    }
 
 
 def _build_compare_table(
@@ -381,7 +430,7 @@ async def run_signal(
         "force": req.force,
     }
     if req.config:
-        config_payload.update(req.config)
+        _merge_allowed_run_config(config_payload, req.config)
 
     run = SignalRun(
         id=run_id,

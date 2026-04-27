@@ -434,7 +434,10 @@ from tinohelm.signal.evaluator import SignalEvalResult
     // Request-side window
     "start": "2024-01-01",
     "end": "2024-04-01",
-    "force": false
+    "force": false,
+
+    // Optional caller-supplied evaluation extra. See §9.5 for merge rules.
+    "periods_per_year": 8760
 }
 ```
 
@@ -451,7 +454,10 @@ from tinohelm.signal.evaluator import SignalEvalResult
    - `universe_symbols`（list[str]）— TinoHelm 短符号（如 `"BTCUSDT-PERP"`），供 worker 构建 `Universe.from_symbols`；
    - `instrument_ids`（list[str]）— NT 格式（`"*.BINANCE"` 后缀），供 `SignalDrivenStrategy` 消费；
    - `bar_type_template`（str，含 `{instrument_id}` 占位符）— 由 `rebalance_freq` 通过 `build_bar_type_template()` 派生。
-5. **Export 端安全网**：`GET /api/signal/export/{run_id}` 在读到空 `instrument_ids` 时返回 `HTTP 400`，防止遗留数据触发 `BarSynchronizer.__init__` 的 `expected_symbols is empty` 错误。
+5. **请求 config merge 规则**：`req.config` 不能覆盖服务端事实来源字段（例如 `factor_ref`、`method`、`cost_model`、`universe_symbols`、`instrument_ids`、`bar_type_template`、`start/end/force`）。当前只允许：
+   - 顶层 `periods_per_year`；
+   - 嵌套 `method_params` 增量合并到注册 `SignalSpec.method_params`。
+6. **Export 端安全网**：`GET /api/signal/export/{run_id}` 在读到空 `instrument_ids` 时返回 `HTTP 400`，防止遗留数据触发 `BarSynchronizer.__init__` 的 `expected_symbols is empty` 错误。
 
 `rebalance_freq → bar_type_template` 映射（与 `tinohelm.strategy.loader_helpers.parse_interval` 共享 `INTERVAL_MAP`，大小写不敏感）：
 
