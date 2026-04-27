@@ -598,8 +598,9 @@ class SignalDrivenStrategy(Strategy):
         Equity is read from the venue account via
         ``self.cache.account_for_venue(venue)`` — NT :class:`Strategy`
         does not expose ``self.account`` directly.  When the universe
-        spans multiple venues we sum each venue's balance_total to get
-        a single notional equity figure.
+        spans multiple venues we sum each venue's ``balance_total(quote_currency)``
+        to get a single notional equity figure, filtering out
+        non-quote balances (see :meth:`_compute_equity`).
         """
         if self._order_manager is None:
             return
@@ -625,13 +626,64 @@ class SignalDrivenStrategy(Strategy):
             prices=prices,
         )
 
-    def _compute_equity(self) -> float | None:
-        """Return total notional equity across all venues, in float USD-like units.
+    def _resolve_quote_currency(self) -> Any:
+        """Return the settlement :class:`Currency` shared by the universe.
 
-        Tests inject ``self.account = MagicMock()`` directly on the stub —
-        we honour that legacy hook first so existing test fixtures
-        continue to pass.  Production NT path falls through to
-        ``cache.account_for_venue``.
+        Cross-venue / cross-currency universes are out of scope for the
+        equity aggregation contract — mixing USDT + USDC + coin-margined
+        BTC into a single float would produce a meaningless number.  We
+        therefore pick the first instrument's ``settlement_currency`` and
+        log a warning if any sibling disagrees (the user misconfigured
+        the universe).
+
+        Returns
+        -------
+        Currency | None
+            The settlement currency (e.g. ``USDT`` for Binance USDT-M
+            Futures), or ``None`` when the instrument cache was empty at
+            ``on_start`` and we cannot infer one.
+        """
+        quote_currency: Any = None
+        for inst in self._instruments_by_short_symbol.values():
+            if inst is None:
+                # Instrument not yet loaded from cache — skip.
+                continue
+            candidate = getattr(inst, "settlement_currency", None)
+            if candidate is None:
+                continue
+            if quote_currency is None:
+                quote_currency = candidate
+                continue
+            if candidate != quote_currency:
+                self.log.warning(
+                    f"SignalDrivenStrategy[{self._signal_name}]: universe "
+                    f"spans mixed settlement currencies "
+                    f"({quote_currency} vs {candidate}); equity aggregation "
+                    "will only count the first currency."
+                )
+                break
+        return quote_currency
+
+    def _compute_equity(self) -> float | None:
+        """Return total notional equity across all venues, in the universe's quote currency.
+
+        Only balances denominated in the inferred ``quote_currency`` are
+        summed — mixing USDT + BNB + coin-margined BTC ``.as_double()``
+        values would produce a cross-currency float with no meaning and
+        break the downstream ``target_notional = w × equity / price``
+        calculation in :class:`OrderManager`.
+
+        Priority:
+
+        1. Legacy test hook — ``self.account`` MagicMock (stubs bypass NT
+           entirely).  Kept first so existing fixtures still pass.
+        2. NT single-currency API — ``account.balance_total(currency)``
+           is the canonical, currency-aware accessor that matches the
+           pattern used by ``RiskGuardActor`` / ``MetricsActor`` /
+           ``HealthActor``.
+        3. Fallback to ``balances_total().get(currency)`` when the
+           single-currency call raises (older Account stubs, dict-only
+           test doubles).
         """
         # Test hook: stubs pre-populate ``self.account`` (NT real
         # Strategy doesn't expose this attribute; tests bypass NT).
@@ -645,9 +697,19 @@ class SignalDrivenStrategy(Strategy):
             except (AttributeError, TypeError, ValueError):
                 return None
 
-        # Production NT path: aggregate per-venue accounts.
+        # Production NT path: aggregate per-venue accounts, filtering to
+        # the universe's settlement currency so cross-currency balances
+        # (BNB fee-discount, BTC coin-margin) do not pollute the sum.
         if not self._venues:
             return None
+        quote_currency = self._resolve_quote_currency()
+        if quote_currency is None:
+            self.log.warning(
+                f"SignalDrivenStrategy[{self._signal_name}]: cannot infer "
+                "quote currency from instruments cache — equity unavailable."
+            )
+            return None
+
         total: float = 0.0
         any_account = False
         for venue in self._venues:
@@ -655,22 +717,21 @@ class SignalDrivenStrategy(Strategy):
             if account is None:
                 continue
             any_account = True
+            money: Any = None
             try:
-                balances = account.balances_total()
-            except (AttributeError, TypeError):
-                # Fallback: single-currency account exposes a single Money
-                # via balance_total() (no currency arg).
-                balance = account.balance_total()
-                if balance is None:
+                money = account.balance_total(quote_currency)
+            except (AttributeError, TypeError, ValueError):
+                # Older stubs / multi-currency accounts without a
+                # base_currency set may raise — fall back to dict lookup.
+                try:
+                    balances = account.balances_total()
+                except (AttributeError, TypeError):
                     continue
-                total += float(balance.as_double())
+                if balances:
+                    money = balances.get(quote_currency)
+            if money is None:
                 continue
-            # balances_total() returns dict[Currency, Money] — sum the
-            # double values across currencies (assumes USD-equivalent).
-            for money in balances.values():
-                if money is None:
-                    continue
-                total += float(money.as_double())
+            total += float(money.as_double())
         return total if any_account else None
 
     @staticmethod

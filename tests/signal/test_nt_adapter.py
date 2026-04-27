@@ -571,6 +571,7 @@ class _SignalDrivenStrategyStub:
     _on_cross_section_ready = SignalDrivenStrategy._on_cross_section_ready
     _submit_diff = SignalDrivenStrategy._submit_diff
     _compute_equity = SignalDrivenStrategy._compute_equity
+    _resolve_quote_currency = SignalDrivenStrategy._resolve_quote_currency
     _resolve_signal_spec = SignalDrivenStrategy._resolve_signal_spec
     _symbol_short = staticmethod(SignalDrivenStrategy._symbol_short)
 
@@ -1171,3 +1172,183 @@ class TestComputeFactorPanelBase:
         s._compute_factor_panel = SignalDrivenStrategy._compute_factor_panel.__get__(s)
         result = s._compute_factor_panel(1_700_000_000_000_000_000, {})
         assert result is None
+
+
+# =============================================================================
+# Cross-currency equity aggregation — regression for _compute_equity
+# =============================================================================
+
+
+class TestComputeEquityCurrencyFiltering:
+    """_compute_equity must filter balances by the universe's quote currency.
+
+    Historical bug: ``balances_total()`` returns ``dict[Currency, Money]``;
+    the previous implementation summed ``money.as_double()`` across *all*
+    currencies, so holding 1 BTC (≈50k USD) alongside 100k USDT would
+    report ``100001`` equity and drive ``target_notional = w × equity /
+    price`` to a meaningless value.  The live Binance USDT-M Futures path
+    routinely carries BNB balances for fee discounts — this fix is
+    therefore latent in backtest but active in live.
+
+    The production path now:
+
+    1. Infers ``quote_currency`` from the first instrument's
+       :attr:`Instrument.settlement_currency`.
+    2. Prefers the NT single-currency API
+       ``account.balance_total(currency)`` (matches the pattern already
+       adopted in :class:`RiskGuardActor` / :class:`MetricsActor` /
+       :class:`HealthActor`).
+    3. Falls back to ``balances_total().get(currency)`` on error.
+    """
+
+    @staticmethod
+    def _money(amount: float, currency: Any) -> Any:
+        """Build a MagicMock that walks the Money.as_double() contract."""
+        m = MagicMock()
+        m.as_double.return_value = float(amount)
+        # Echo back the currency so sorting / dict-key comparisons work
+        # if a test later inspects the value.
+        m.currency = currency
+        return m
+
+    @staticmethod
+    def _instrument_with_settlement(currency: Any) -> Any:
+        """Stub Instrument exposing settlement_currency (CryptoPerpetual-compat)."""
+        inst = MagicMock()
+        inst.settlement_currency = currency
+        return inst
+
+    def _strategy_with_quote(
+        self,
+        *,
+        quote_currency: Any,
+        venue: Any,
+        account: Any,
+    ) -> _SignalDrivenStrategyStub:
+        """Build a stub wired for the production _compute_equity path."""
+        spec = _basic_signal_spec()
+        s = _make_strategy_for_unit_test(signal_spec=spec, cache_history_len=0)
+        # Force the production branch by dropping the legacy test hook.
+        del s.account
+        s._instruments_by_short_symbol = {
+            "BTCUSDT-PERP": self._instrument_with_settlement(quote_currency),
+        }
+        s._venues = {venue}
+        s.cache.account_for_venue.return_value = account
+        return s
+
+    def test_compute_equity_filters_non_quote_currencies(self):
+        """USDT 100k + BTC 1.0 → equity = 100000 (BTC ignored)."""
+        from nautilus_trader.model.currencies import BTC, USDT
+        from nautilus_trader.model.identifiers import Venue
+
+        venue = Venue("BINANCE")
+        account = MagicMock()
+        # Simulate the multi-currency case: account.balance_total(USDT)
+        # returns only the USDT slice.
+        account.balance_total.side_effect = lambda ccy: (
+            self._money(100_000.0, USDT) if ccy == USDT else None
+        )
+        # balances_total would still contain BTC, but we never reach the
+        # fallback — assert that below.
+        account.balances_total.return_value = {
+            USDT: self._money(100_000.0, USDT),
+            BTC: self._money(1.0, BTC),
+        }
+
+        s = self._strategy_with_quote(
+            quote_currency=USDT, venue=venue, account=account,
+        )
+        equity = s._compute_equity()
+
+        assert equity == pytest.approx(100_000.0, rel=1e-9)
+        # Must NOT be 100_001.0 (i.e. naive BTC + USDT sum).
+        assert equity != pytest.approx(100_001.0)
+
+    def test_compute_equity_uses_single_currency_api_preferentially(self):
+        """balance_total(currency) is called; balances_total() is not touched."""
+        from nautilus_trader.model.currencies import USDT
+        from nautilus_trader.model.identifiers import Venue
+
+        venue = Venue("BINANCE")
+        account = MagicMock()
+        account.balance_total.return_value = self._money(50_000.0, USDT)
+
+        s = self._strategy_with_quote(
+            quote_currency=USDT, venue=venue, account=account,
+        )
+        equity = s._compute_equity()
+
+        assert equity == pytest.approx(50_000.0, rel=1e-9)
+        account.balance_total.assert_called_once_with(USDT)
+        account.balances_total.assert_not_called()
+
+    def test_compute_equity_fallback_when_single_currency_api_raises(self):
+        """balance_total raises TypeError → fall back to balances_total().get."""
+        from nautilus_trader.model.currencies import USDT
+        from nautilus_trader.model.identifiers import Venue
+
+        venue = Venue("BINANCE")
+        account = MagicMock()
+        # Older stubs that took no arg (or multi-ccy accounts missing a
+        # base_currency) — NT raises ValueError; older doubles raise
+        # TypeError.  Both must route to the fallback branch.
+        account.balance_total.side_effect = TypeError(
+            "balance_total() takes no positional argument"
+        )
+        account.balances_total.return_value = {
+            USDT: self._money(75_000.0, USDT),
+        }
+
+        s = self._strategy_with_quote(
+            quote_currency=USDT, venue=venue, account=account,
+        )
+        equity = s._compute_equity()
+
+        assert equity == pytest.approx(75_000.0, rel=1e-9)
+        account.balance_total.assert_called_once_with(USDT)
+        account.balances_total.assert_called_once_with()
+
+
+class TestResolveQuoteCurrency:
+    """_resolve_quote_currency infers the universe's settlement currency."""
+
+    def test_resolve_quote_currency_from_instruments(self):
+        """First instrument's settlement_currency is returned."""
+        from nautilus_trader.model.currencies import USDT
+
+        spec = _basic_signal_spec()
+        s = _make_strategy_for_unit_test(signal_spec=spec, cache_history_len=0)
+        inst = MagicMock()
+        inst.settlement_currency = USDT
+        s._instruments_by_short_symbol = {"BTCUSDT-PERP": inst}
+
+        assert s._resolve_quote_currency() is USDT
+
+    def test_resolve_quote_currency_returns_none_when_no_instruments(self):
+        """Empty instruments dict → None (caller logs + bails)."""
+        spec = _basic_signal_spec()
+        s = _make_strategy_for_unit_test(signal_spec=spec, cache_history_len=0)
+        s._instruments_by_short_symbol = {}
+
+        assert s._resolve_quote_currency() is None
+
+    def test_resolve_quote_currency_warns_on_mixed_settlement(self):
+        """Mixed settlement currencies → warn + return first."""
+        from nautilus_trader.model.currencies import BTC, USDT
+
+        spec = _basic_signal_spec()
+        s = _make_strategy_for_unit_test(signal_spec=spec, cache_history_len=0)
+        inst_usdt = MagicMock()
+        inst_usdt.settlement_currency = USDT
+        inst_btc = MagicMock()
+        inst_btc.settlement_currency = BTC
+        # dict preserves insertion order → USDT is first.
+        s._instruments_by_short_symbol = {
+            "BTCUSDT-PERP": inst_usdt,
+            "BTCUSD-PERP": inst_btc,  # coin-margined
+        }
+
+        quote = s._resolve_quote_currency()
+        assert quote is USDT
+        s.log.warning.assert_called()

@@ -56,6 +56,13 @@ config = SignalDrivenStrategyConfig(
 | `rebalance_freq_ns` | `int` | `0` | 最小调仓间隔（ns）；0 = 无限制 |
 | `factor_lookback` | `int | None` | `None` | 显式因子 lookback；None = 从 factor registry 查找 |
 
+> **`instrument_ids` / `bar_type_template` 的来源**：这两个字段由
+> `POST /api/signal/run` 在 PIT 时点解析 universe 后写入 `signal_runs.config`
+> （见 `signal.md` §9.5），`GET /api/signal/export/{run_id}` 再透传到
+> `SignalDrivenStrategyConfig`。空的 `instrument_ids` 会在 export 端被拦截
+> （`HTTP 400`），避免在 `BarSynchronizer.__init__` 里抛
+> `expected_symbols is empty`。
+
 ### 2.2 msgspec Struct 注意事项
 
 `StrategyConfig` 继承自 msgspec `Struct`（NT 使用），**不是** Pydantic model：
