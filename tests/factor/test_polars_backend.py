@@ -760,3 +760,154 @@ class TestEmptyValueColumns:
         df = pl.DataFrame({"BTC": [1.0, 2.0, 3.0]})
         with pytest.raises(ValueError, match="expects a column named 'ts'"):
             backend.shift(df, 1)
+
+
+# ---------------------------------------------------------------------------
+# Regression: zscore axis=1 must not let a single NaN warmup cell contaminate
+# the entire column's mean/std.
+#
+# Bug: the axis=1 path called ``pl.col(c).mean()`` / ``pl.col(c).std()``
+# directly on the panel *without* masking NaN to null first.  Polars includes
+# NaN in the aggregation, producing a NaN mean and NaN std for the whole
+# column.  After the fix, _mask_nonfinite_to_null is applied first so only
+# null-masked NaN cells are excluded from mean/std, matching the axis=0 path.
+# ---------------------------------------------------------------------------
+
+
+class TestZscoreTimeSeriesNaNRegression:
+    """axis=1 zscore: NaN warmup/PIT cell → null output; other finite rows
+    in the same column must still produce finite zscores.
+    """
+
+    def test_nan_cell_produces_null_output(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """BTC[0] is NaN → zscore output for BTC[0] must be null (not NaN).
+
+        Regression: previously the NaN propagated through mean/std, turning
+        every BTC zscore to NaN instead of leaving finite rows unaffected.
+        """
+        result = backend.zscore(panel_with_nan, axis=1)
+        # NaN input → null output (masked to null before aggregation).
+        assert result["BTC"][0] is None, (
+            f"BTC[0] (NaN input) must be null after axis=1 zscore, got {result['BTC'][0]}"
+        )
+        assert result["SOL"][5] is None, (
+            f"SOL[5] (NaN input) must be null after axis=1 zscore, got {result['SOL'][5]}"
+        )
+
+    def test_other_finite_rows_remain_finite_after_nan_in_column(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """Finite rows in a column that also contains a NaN row must still
+        produce finite zscore values — the NaN must not poison the mean/std.
+
+        Regression: without the mask, BTC[1] through BTC[19] all became NaN
+        because ``pl.col('BTC').mean()`` propagated the BTC[0] NaN to the
+        aggregated mean, and then every subtraction became NaN.
+        """
+        result = backend.zscore(panel_with_nan, axis=1)
+        for i in range(1, T_BARS):
+            v = result["BTC"][i]
+            assert v is not None and math.isfinite(v), (
+                f"BTC[{i}] should be finite zscore; got {v}. "
+                "NaN at BTC[0] must not contaminate other rows."
+            )
+        # SOL[5] is NaN; all other SOL rows must be finite.
+        for i in range(T_BARS):
+            if i == 5:
+                continue
+            v = result["SOL"][i]
+            assert v is not None and math.isfinite(v), (
+                f"SOL[{i}] should be finite zscore; got {v}. "
+                "NaN at SOL[5] must not contaminate other rows."
+            )
+
+    def test_column_mean_near_zero_excluding_nan(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """The mean of valid (non-null) zscore values per column must be ~0,
+        confirming that mean/std were computed over the 19 valid rows only.
+        """
+        result = backend.zscore(panel_with_nan, axis=1)
+        # BTC has 1 NaN (row 0); 19 finite zscores must average to ~0.
+        btc_vals = [v for v in result["BTC"].to_list() if v is not None]
+        assert len(btc_vals) == T_BARS - 1, (
+            f"Expected {T_BARS - 1} valid BTC zscores, got {len(btc_vals)}"
+        )
+        assert sum(btc_vals) / len(btc_vals) == pytest.approx(0.0, abs=1e-9), (
+            "BTC column mean of valid zscores should be ~0"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Regression: fillna must replace BOTH null and NaN.
+#
+# Bug: the implementation called only ``fill_null(value)`` which does not
+# touch NaN (a valid IEEE-754 Float64 value in Polars).  Callers that invoke
+# fillna on a DataLayer panel (which uses NaN for PIT / warmup missingness)
+# would silently leave NaN cells unchanged.
+# ---------------------------------------------------------------------------
+
+
+class TestFillnaHandlesNaNAndNull:
+    """fillna(value) must replace both null and NaN in symbol columns."""
+
+    def test_fillna_replaces_nan(
+        self, backend: PolarsBackend, panel_with_nan: pl.DataFrame
+    ) -> None:
+        """NaN cells must be replaced by ``value``; they must not survive."""
+        result = backend.fillna(panel_with_nan, value=0.0)
+        # After fill, no NaN should remain in any symbol column.
+        for col in SYMBOL_COLS:
+            for v in result[col].to_list():
+                assert v is not None and math.isfinite(v), (
+                    f"{col}: unexpected NaN/null after fillna, got {v}"
+                )
+        # Confirm the specific NaN cells were replaced.
+        assert result["BTC"][0] == pytest.approx(0.0), (
+            "BTC[0] was NaN; fillna(0.0) must replace it with 0.0"
+        )
+        assert result["SOL"][5] == pytest.approx(0.0), (
+            "SOL[5] was NaN; fillna(0.0) must replace it with 0.0"
+        )
+
+    def test_fillna_replaces_null_and_nan_simultaneously(
+        self, backend: PolarsBackend
+    ) -> None:
+        """Panel with both null and NaN cells: fillna replaces both."""
+        ts = pl.datetime_range(
+            start=dt.datetime(2024, 1, 1),
+            end=dt.datetime(2024, 1, 3),
+            interval="1d",
+            eager=True,
+        )
+        # Row 0: BTC = null; ETH = NaN; SOL = 1.0 (valid).
+        # Row 1: BTC = NaN;  ETH = null; SOL = 2.0 (valid).
+        # Row 2: BTC = 3.0;  ETH = 4.0;  SOL = NaN.
+        df = pl.DataFrame(
+            {
+                "ts": ts.to_list(),
+                "BTC": [None, float("nan"), 3.0],
+                "ETH": [float("nan"), None, 4.0],
+                "SOL": [1.0, 2.0, float("nan")],
+            }
+        )
+        result = backend.fillna(df, value=-1.0)
+        # All null/NaN cells replaced with -1.0.
+        assert result["BTC"][0] == pytest.approx(-1.0), "BTC[0] was null"
+        assert result["BTC"][1] == pytest.approx(-1.0), "BTC[1] was NaN"
+        assert result["ETH"][0] == pytest.approx(-1.0), "ETH[0] was NaN"
+        assert result["ETH"][1] == pytest.approx(-1.0), "ETH[1] was null"
+        assert result["SOL"][2] == pytest.approx(-1.0), "SOL[2] was NaN"
+        # Valid cells remain unchanged.
+        assert result["SOL"][0] == pytest.approx(1.0), "SOL[0] should be unchanged"
+        assert result["SOL"][1] == pytest.approx(2.0), "SOL[1] should be unchanged"
+        assert result["BTC"][2] == pytest.approx(3.0), "BTC[2] should be unchanged"
+        assert result["ETH"][2] == pytest.approx(4.0), "ETH[2] should be unchanged"
