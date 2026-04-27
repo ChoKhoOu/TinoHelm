@@ -191,11 +191,16 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         cancel_key = f"tino:signal:cancel:{run_id}"
         if await rds.exists(cancel_key):
             logger.info("Signal run %s cancelled (pre-load), skipping", run_id)
+            now = datetime.now(UTC).replace(tzinfo=None)
             async with factory() as db:
                 await db.execute(
                     update(SignalRun)
                     .where(SignalRun.id == run_id)
-                    .values(status=STATUS_CANCELLED)
+                    .values(
+                        status=STATUS_CANCELLED,
+                        finished_at=now,
+                        progress_stage=None,
+                    )
                 )
                 await db.commit()
             return
@@ -269,11 +274,16 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             return bool(await rds.exists(cancel_key))
 
         async def _mark_cancelled() -> None:
+            now = datetime.now(UTC).replace(tzinfo=None)
             async with factory() as db_c:
                 await db_c.execute(
                     update(SignalRun)
                     .where(SignalRun.id == run_id)
-                    .values(status=STATUS_CANCELLED)
+                    .values(
+                        status=STATUS_CANCELLED,
+                        finished_at=now,
+                        progress_stage=None,
+                    )
                 )
                 await db_c.commit()
 

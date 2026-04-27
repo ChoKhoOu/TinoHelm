@@ -303,6 +303,9 @@ async def test_cancel_flag_pre_load_skips_job(captured_session_factory):
     # Status was SET to cancelled.
     cancelled_writes = [p for p in captured if p.get("status") == "cancelled"]
     assert cancelled_writes, "expected one UPDATE setting status='cancelled'"
+    cancel_write = cancelled_writes[-1]
+    assert isinstance(cancel_write.get("finished_at"), dt.datetime)
+    assert cancel_write.get("progress_stage") is None
 
 
 @pytest.mark.asyncio
@@ -352,6 +355,9 @@ async def test_cancel_flag_mid_pipeline_breaks(
     assert not kernel_called, "kernel must not run after cancel between stages"
     cancelled_writes = [p for p in captured if p.get("status") == "cancelled"]
     assert cancelled_writes, "expected status='cancelled' UPDATE"
+    cancel_write = cancelled_writes[-1]
+    assert isinstance(cancel_write.get("finished_at"), dt.datetime)
+    assert cancel_write.get("progress_stage") is None
 
 
 # ---------------------------------------------------------------------------

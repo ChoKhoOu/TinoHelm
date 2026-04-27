@@ -168,10 +168,32 @@ class OrderManager:
             # (_determine_hedging_position_id in execution/engine.pyx), so
             # we must never emit a bare reduce-direction market order.
             if current_qty != 0.0 and diff_qty * current_qty < 0:
+                # Branch decisions must match the lot-size quantity that
+                # would actually be sent to the venue.  In particular,
+                # near-flat targets can quantize to zero: deciding with raw
+                # floats would route a de-facto full close through the
+                # partial-reduce path, which is especially risky under
+                # HEDGING where full flatten must use Strategy.close_position.
+                target_qty = self._quantized_signed_qty(
+                    instrument, target_qty, min_step
+                )
+                diff_qty = target_qty - current_qty
+
+                if diff_qty * current_qty >= 0:
+                    logger.debug(
+                        "OrderManager.execute_diff: skip %s — quantized target "
+                        "%.8f leaves no reduce-direction diff from %.8f",
+                        symbol,
+                        target_qty,
+                        current_qty,
+                    )
+                    continue
+
                 abs_diff = abs(diff_qty)
                 abs_current = abs(current_qty)
+                eps = max(min_step * 1e-9, 1e-12)
 
-                if abs_diff >= abs_current:
+                if abs(target_qty) == 0.0 or abs_diff >= abs_current - eps:
                     # Full flatten: close every open position for this
                     # instrument, then optionally open a new leg if target
                     # is non-zero (cross-zero sign-flip case).
@@ -489,3 +511,52 @@ class OrderManager:
             except (TypeError, ValueError):
                 pass
         return 1e-9
+
+    @classmethod
+    def _quantized_signed_qty(
+        cls,
+        instrument: Any,
+        signed_qty: float,
+        min_step: float,
+    ) -> float:
+        """Return ``signed_qty`` after applying instrument lot-size rounding.
+
+        This helper is intentionally used only for reduce/flatten branch
+        selection.  Actual orders still call ``instrument.make_qty`` at the
+        point where the ``MarketOrder`` is built.  Values below ``min_step``
+        normalize to zero so dust targets take the full-flatten path.
+        """
+        abs_qty = abs(float(signed_qty))
+        if abs_qty < min_step:
+            return 0.0
+
+        try:
+            quantized = cls._qty_to_float(instrument.make_qty(abs_qty))
+        except Exception as exc:  # pragma: no cover — defensive fallback
+            logger.warning(
+                "OrderManager._quantized_signed_qty: make_qty failed for %s: %s",
+                getattr(instrument, "id", instrument),
+                exc,
+            )
+            quantized = abs_qty
+
+        if quantized < min_step:
+            return 0.0
+        return quantized if signed_qty >= 0 else -quantized
+
+    @staticmethod
+    def _qty_to_float(qty: Any) -> float:
+        """Best-effort conversion for NT Quantity and unit-test stubs."""
+        try:
+            return float(qty)
+        except (TypeError, ValueError):
+            pass
+
+        as_double = getattr(qty, "as_double", None)
+        if callable(as_double):
+            return float(as_double())
+
+        text = str(qty)
+        if text.startswith("Quantity(") and text.endswith(")"):
+            text = text[len("Quantity("):-1]
+        return float(Decimal(text))

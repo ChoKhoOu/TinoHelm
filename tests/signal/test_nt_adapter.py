@@ -537,6 +537,43 @@ class TestOrderManager:
         # production path where close_position doesn't expose the order object).
         assert len(submitted) == 1
 
+    def test_dust_target_quantizes_to_full_flatten(self):
+        """Near-zero target must branch as full flatten after lot-size normalization.
+
+        Regression guard for the raw-float branch bug:
+        current=0.0100, target=0.000004, min_step=0.001 gives a raw
+        abs(diff)=0.009996 < abs(current), which used to select the
+        partial-reduce path.  Once the target is normalized to lot size, it is
+        a zero target and must close via ``close_position``.
+        """
+        strategy = _stub_strategy(
+            net_position_per_id={"BTCUSDT-PERP.BINANCE": 0.01},  # long 0.01
+        )
+        open_pos = MagicMock(name="OpenLongPosition")
+        open_pos.id = MagicMock(name="PositionId-LONG-01")
+        open_pos.quantity = 0.01
+        open_pos.signed_qty = 0.01
+        strategy.cache.positions_open.return_value = [open_pos]
+        strategy.id = MagicMock(name="StrategyId")
+
+        inst = _stub_instrument("BTCUSDT-PERP", size_increment=0.001)
+        om = OrderManager(strategy)
+        # target_qty = target_w * equity / price = 0.000004 (< min_step)
+        submitted = om.execute_diff(
+            target_weights={"BTCUSDT-PERP": 0.00002},
+            instruments={"BTCUSDT-PERP": inst},
+            equity=10_000.0,
+            prices={"BTCUSDT-PERP": 50_000.0},
+        )
+
+        strategy.close_position.assert_called_once()
+        cp_args, cp_kwargs = strategy.close_position.call_args
+        assert cp_args[0] is open_pos
+        assert cp_kwargs.get("reduce_only") is True
+        strategy.order_factory.market.assert_not_called()
+        inst.make_qty.assert_not_called()
+        assert len(submitted) == 1
+
     def test_partial_same_sign_reduce_long(self):
         """current=+0.02, target=+0.01 → partial reduce 0.01 via reduce-only order.
 
