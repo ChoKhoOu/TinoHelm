@@ -335,11 +335,19 @@ class PolarsBackend:
             return panel.clone()
 
         if axis == 1:
+            # Mask NaN/inf → null before computing per-column mean/std so that
+            # a single NaN warmup cell does not contaminate the entire column's
+            # statistics.  Align with the axis=0 path (lines 348-349) and the
+            # axis=1 rank path (lines 245-246) which both apply _mask_nonfinite_to_null
+            # for the same reason.
+            masked = panel.with_columns(
+                [_mask_nonfinite_to_null(pl.col(c)).alias(c) for c in cols]
+            )
             exprs = [
                 ((pl.col(c) - pl.col(c).mean()) / pl.col(c).std()).alias(c)
                 for c in cols
             ]
-            return panel.with_columns(exprs)
+            return masked.with_columns(exprs)
 
         # Cross-sectional zscore via unpivot/pivot with ``over("ts")``.
         # Mask NaN/inf → null before unpivoting so that non-finite cells are
@@ -392,15 +400,24 @@ class PolarsBackend:
     # ------------------------------------------------------------------
 
     def fillna(self, panel: Panel, value: float = 0.0) -> Panel:
-        """Replace ``null`` values in symbol columns with ``value``.
+        """Replace ``null`` **and** ``NaN`` values in symbol columns with ``value``.
 
-        Provided for downstream factor kernels (e.g. ``ret_N`` warmup
-        zero-fill) that need explicit null handling.  Not part of the
-        :class:`AbstractBackend` Protocol — kept here as a backend-specific
-        helper.
+        Polars distinguishes ``null`` (missing value sentinel) from ``NaN``
+        (IEEE-754 not-a-number, a valid ``Float64`` value).  The DataLayer
+        uses ``NaN`` to mark "asset not in PIT universe" and rolling warmup
+        rows; callers that invoke ``fillna`` expect both to be replaced.
+
+        Implementation: ``fill_null(value)`` handles ``null``; chaining
+        ``fill_nan(value)`` then handles ``NaN``.  Order does not matter
+        because the two sets are disjoint in Polars ``Float64`` columns.
+
+        Not part of the :class:`AbstractBackend` Protocol — kept here as a
+        backend-specific helper.
         """
         self._ensure_ts_column(panel)
         cols = self._value_cols(panel)
         if not cols:
             return panel.clone()
-        return panel.with_columns([pl.col(c).fill_null(value).alias(c) for c in cols])
+        return panel.with_columns(
+            [pl.col(c).fill_null(value).fill_nan(value).alias(c) for c in cols]
+        )
