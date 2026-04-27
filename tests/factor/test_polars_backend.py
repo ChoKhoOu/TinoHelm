@@ -538,6 +538,60 @@ class TestRankInvalidAxis:
 
 
 # ---------------------------------------------------------------------------
+# Regression: axis=0 round-trip must not assume unique timestamps.
+#
+# Bug: rank(axis=0) / zscore(axis=0) used ``pivot(index="ts")`` after the
+# long-form round-trip.  Duplicate timestamps caused Polars to collapse rows
+# and raise ``ComputeError``.  Axis=0 is row-wise cross-sectional semantics, so
+# duplicate ``ts`` values must remain distinct rows.
+# ---------------------------------------------------------------------------
+
+
+class TestCrossSectionalDuplicateTimestampRegression:
+    def test_rank_axis0_preserves_duplicate_ts_rows(
+        self, backend: PolarsBackend
+    ) -> None:
+        ts0 = dt.datetime(2024, 1, 1)
+        panel = pl.DataFrame(
+            {
+                "ts": [ts0, ts0, dt.datetime(2024, 1, 2)],
+                "BTC": [1.0, 3.0, 2.0],
+                "ETH": [2.0, 1.0, 4.0],
+                "SOL": [3.0, 2.0, 6.0],
+            }
+        )
+
+        result = backend.rank(panel, axis=0, pct=True)
+
+        assert result["ts"].to_list() == panel["ts"].to_list()
+        assert result.height == panel.height
+        assert result["BTC"].to_list() == pytest.approx([1 / 3, 1.0, 1 / 3])
+        assert result["ETH"].to_list() == pytest.approx([2 / 3, 1 / 3, 2 / 3])
+        assert result["SOL"].to_list() == pytest.approx([1.0, 2 / 3, 1.0])
+
+    def test_zscore_axis0_preserves_duplicate_ts_rows(
+        self, backend: PolarsBackend
+    ) -> None:
+        ts0 = dt.datetime(2024, 1, 1)
+        panel = pl.DataFrame(
+            {
+                "ts": [ts0, ts0, dt.datetime(2024, 1, 2)],
+                "BTC": [1.0, 3.0, 2.0],
+                "ETH": [2.0, 1.0, 4.0],
+                "SOL": [3.0, 2.0, 6.0],
+            }
+        )
+
+        result = backend.zscore(panel, axis=0)
+
+        assert result["ts"].to_list() == panel["ts"].to_list()
+        assert result.height == panel.height
+        assert result["BTC"].to_list() == pytest.approx([-1.0, 1.0, -1.0])
+        assert result["ETH"].to_list() == pytest.approx([0.0, -1.0, 0.0])
+        assert result["SOL"].to_list() == pytest.approx([1.0, 0.0, 1.0])
+
+
+# ---------------------------------------------------------------------------
 # zscore — cross-sectional (axis=0) and time-series (axis=1)
 # ---------------------------------------------------------------------------
 

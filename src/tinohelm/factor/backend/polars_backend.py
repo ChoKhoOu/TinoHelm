@@ -210,8 +210,8 @@ class PolarsBackend:
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         - ``axis=0`` (default) — **cross-sectional rank**: ranks across
           symbols at each timestamp independently.  Implemented by
-          unpivoting the wide table to long form, ranking ``over("ts")``,
-          and pivoting back.  When ``pct=True`` the rank is divided by
+          unpivoting the wide table to long form, ranking over a stable
+          per-row id, and pivoting back.  When ``pct=True`` the rank is divided by
           the per-row count of non-null values, giving values in
           ``(0, 1]`` for valid cells (``null`` for null inputs).
         - ``axis=1`` — **time-series rank**: ranks the time-history of
@@ -261,30 +261,42 @@ class PolarsBackend:
                 pct_exprs.append((pl.col(c) / cnt_expr).alias(c))
             return ranked.with_columns(pct_exprs)
 
-        # Cross-sectional rank (axis=0): unpivot → rank.over("ts") → pivot back.
+        # Cross-sectional rank (axis=0): unpivot → rank.over(row) → pivot back.
+        #
+        # Important: rank is a row-wise panel operator.  The timestamp column is
+        # metadata and is not guaranteed to be unique (catalog/data-layer input
+        # can contain duplicate bars before upstream de-duplication).  Grouping
+        # and pivoting solely by ``ts`` would collapse duplicate timestamp rows
+        # and can raise ``ComputeError``.  Attach a stable row id before the
+        # long-form round-trip so duplicate ``ts`` values remain distinct and
+        # the original row order is restored exactly.
         # Mask NaN/inf → null before unpivoting so that non-finite cells are
         # excluded from the cross-sectional rank and pct denominator.
         masked_panel = panel.with_columns(
             [_mask_nonfinite_to_null(pl.col(c)).alias(c) for c in cols]
-        )
+        ).with_row_index("__row_id")
         long = masked_panel.unpivot(
-            index=[_TS_COL],
+            index=["__row_id", _TS_COL],
             on=cols,
             variable_name="__symbol",
             value_name="__v",
         )
-        rank_expr = pl.col("__v").rank(method="average", descending=False).over(_TS_COL)
+        rank_expr = (
+            pl.col("__v").rank(method="average", descending=False).over("__row_id")
+        )
         long = long.with_columns(rank_expr.cast(pl.Float64).alias("__r"))
         if pct:
-            cnt_expr = pl.col("__v").is_not_null().sum().over(_TS_COL).cast(pl.Float64)
+            cnt_expr = (
+                pl.col("__v").is_not_null().sum().over("__row_id").cast(pl.Float64)
+            )
             long = long.with_columns((pl.col("__r") / cnt_expr).alias("__r"))
-        wide = long.select([_TS_COL, "__symbol", "__r"]).pivot(
-            index=_TS_COL,
+        wide = long.select(["__row_id", _TS_COL, "__symbol", "__r"]).pivot(
+            index=["__row_id", _TS_COL],
             on="__symbol",
             values="__r",
         )
         # Restore original symbol-column ordering (pivot does not preserve it).
-        return wide.select([_TS_COL, *cols])
+        return wide.sort("__row_id").select([_TS_COL, *cols])
 
     def clip(
         self,
@@ -312,7 +324,8 @@ class PolarsBackend:
 
         For ``axis=0`` (cross-sectional): at each timestamp, subtract
         the mean across symbols and divide by the std across symbols.
-        Implemented via unpivot/pivot with ``over("ts")``.
+        Implemented via unpivot/pivot with a stable per-row id, so duplicate
+        timestamps remain distinct rows.
 
         For ``axis=1`` (time-series): for each symbol, subtract its
         historical mean and divide by its historical std.
@@ -349,30 +362,34 @@ class PolarsBackend:
             ]
             return masked.with_columns(exprs)
 
-        # Cross-sectional zscore via unpivot/pivot with ``over("ts")``.
+        # Cross-sectional zscore via unpivot/pivot with row-scoped windows.
+        #
+        # Keep duplicate timestamp rows distinct for the same reason as
+        # ``rank(axis=0)`` above: axis=0 means "across symbols in this row",
+        # not "across every row sharing the same ts".
         # Mask NaN/inf → null before unpivoting so that non-finite cells are
         # excluded from mean/std computation and produce null output (not
         # NaN-contaminated values across the entire cross-section).
         masked_panel = panel.with_columns(
             [_mask_nonfinite_to_null(pl.col(c)).alias(c) for c in cols]
-        )
+        ).with_row_index("__row_id")
         long = masked_panel.unpivot(
-            index=[_TS_COL],
+            index=["__row_id", _TS_COL],
             on=cols,
             variable_name="__symbol",
             value_name="__v",
         )
         z_expr = (
-            (pl.col("__v") - pl.col("__v").mean().over(_TS_COL))
-            / pl.col("__v").std().over(_TS_COL)
+            (pl.col("__v") - pl.col("__v").mean().over("__row_id"))
+            / pl.col("__v").std().over("__row_id")
         ).alias("__z")
         long = long.with_columns(z_expr)
-        wide = long.select([_TS_COL, "__symbol", "__z"]).pivot(
-            index=_TS_COL,
+        wide = long.select(["__row_id", _TS_COL, "__symbol", "__z"]).pivot(
+            index=["__row_id", _TS_COL],
             on="__symbol",
             values="__z",
         )
-        return wide.select([_TS_COL, *cols])
+        return wide.sort("__row_id").select([_TS_COL, *cols])
 
     def log(self, panel: Panel) -> Panel:
         """Element-wise natural logarithm.
