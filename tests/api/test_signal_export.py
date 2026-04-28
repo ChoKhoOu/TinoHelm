@@ -63,6 +63,7 @@ def _mock_run(
     extra_warmup_bars: int = 10,
     rebalance_freq: str = "1h",
     code_hash: str = "abc",
+    factor_params: dict | None = None,
 ):
     """Build a MagicMock SignalRun with the given attributes."""
     from datetime import datetime
@@ -80,6 +81,7 @@ def _mock_run(
         "method": "top_k_long_short",
         "weighting": "equal",
         "universe_ref": "top10_perp",
+        "factor_params": dict(factor_params or {}),
         "method_params": {"k": 5},
         "cost_model": {"name": "taker_8bps", "fee_bps_per_side": 4.0},
         "gross_exposure": 1.0,
@@ -218,6 +220,39 @@ def test_export_warmup_zero_extra(client):
     body = resp.json()
     assert body["config"]["warmup_bars"] == 20
     assert body["metadata"]["warmup_bars_derived"] == 20
+
+
+def test_export_factor_params_lookback_raises_warmup(client):
+    """Exported factor_params must affect live warmup derivation."""
+    run = _mock_run(
+        factor_ref="ret_N@1.0.0",
+        extra_warmup_bars=3,
+        factor_params={"lookback": 30},
+    )
+    session = _make_db_session(scalar_one_or_none=run)
+
+    async def _db():
+        yield session
+
+    registry_class, _ = _mock_factor_registry(
+        lookback=20, input_field_names=("close",)
+    )
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db
+    with patch("tinohelm.factor.registry.Registry", registry_class):
+        try:
+            resp = client.get("/api/signal/export/test-run-id")
+        finally:
+            test_app.dependency_overrides[get_db] = _override_get_db_default
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["config"]["warmup_bars"] == 33
+    assert body["config"]["factor_lookback"] == 30
+    assert body["config"]["signal_spec_json"]["factor_params"] == {"lookback": 30}
+    assert body["metadata"]["factor_lookback"] == 30
+    assert body["metadata"]["warmup_bars_derived"] == 33
 
 
 # ---------------------------------------------------------------------------

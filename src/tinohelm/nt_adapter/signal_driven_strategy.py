@@ -462,6 +462,7 @@ class SignalDrivenStrategy(Strategy):
             factor_spec=self._factor_spec,
             bars_by_symbol=bars_by_symbol,
             min_history=self._effective_warmup,
+            extra_kernel_params=dict(self.signal_spec.factor_params),
         )
 
     # ------------------------------------------------------------------
@@ -542,8 +543,12 @@ class SignalDrivenStrategy(Strategy):
     def _derive_warmup_bars(self, spec: SignalSpec) -> int:
         """Compute ``factor.lookback + extra_warmup_bars``."""
         extra = int(spec.extra_warmup_bars)
+        factor_param_lookback = spec.factor_params.get("lookback")
         if self._configured_factor_lookback is not None:
-            return int(self._configured_factor_lookback) + extra
+            factor_lookback = int(self._configured_factor_lookback)
+            if factor_param_lookback is not None:
+                factor_lookback = max(factor_lookback, int(factor_param_lookback))
+            return factor_lookback + extra
         # Fall back to the factor registry.  factor_ref may be plain
         # ``"name"`` or ``"name@version"``.
         factor_name = spec.factor_ref.split("@", 1)[0]
@@ -559,7 +564,10 @@ class SignalDrivenStrategy(Strategy):
                 "set SignalDrivenStrategyConfig.factor_lookback explicitly "
                 "or ensure factors_dir is populated"
             )
-        return int(factor_spec.lookback) + extra
+        factor_lookback = int(factor_spec.lookback)
+        if factor_param_lookback is not None:
+            factor_lookback = max(factor_lookback, int(factor_param_lookback))
+        return factor_lookback + extra
 
     def _enforce_warmup(self) -> None:
         """Raise ``RuntimeError`` if any bar type has *partial* warmup history.

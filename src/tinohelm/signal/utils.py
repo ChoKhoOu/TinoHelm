@@ -34,9 +34,9 @@ def signal_spec_from_dict(name: str, config: dict) -> SignalSpec:
     * :mod:`tinohelm.nt_adapter.signal_driven_strategy` — rebuilds the spec
       from an inline JSON payload supplied via ``signal_spec_json``.
 
-    The dict shape is the same in both callers: flat scalar fields + a
-    ``method_params`` sub-dict + a ``cost_model`` sub-dict, mirroring the
-    :class:`SignalSpec` dataclass layout.
+    The dict shape is the same in both callers: flat scalar fields +
+    ``factor_params`` / ``method_params`` sub-dicts + a ``cost_model``
+    sub-dict, mirroring the :class:`SignalSpec` dataclass layout.
 
     Parameters
     ----------
@@ -72,6 +72,7 @@ def signal_spec_from_dict(name: str, config: dict) -> SignalSpec:
         net_exposure=float(config.get("net_exposure", 0.0)),
         max_position=float(config.get("max_position", 0.10)),
         turnover_budget=config.get("turnover_budget"),
+        factor_params=dict(config.get("factor_params") or {}),
         method_params=dict(config.get("method_params") or {}),
         cost_model=cost_model,
         extra_warmup_bars=int(config.get("extra_warmup_bars", 0)),

@@ -505,6 +505,7 @@ def test_build_spec_from_config_round_trip():
     assert spec.gross_exposure == 1.0
     assert spec.net_exposure == 0.0
     assert spec.max_position == 0.5
+    assert spec.factor_params == {}
     assert spec.method_params == {"k": 1}
     assert isinstance(spec.cost_model, CostModel)
     assert spec.cost_model.fee_bps_per_side == 4.0
@@ -576,9 +577,12 @@ def test_load_aligned_panels_invokes_datalayer_and_kernel():
         input_specs=(InputSpec(field_name="close"),),
     )
 
+    captured_kernel_params: dict = {}
+
     def _fake_kernel(close, params=None):
         # Return the close panel unchanged so we can assert shape.
         # Matches the ret_N signature: ``def ret_N(close: Panel, params=None)``.
+        captured_kernel_params.update(params or {})
         return close
 
     # DataLayer.load returns the same close panel whether it's asked for
@@ -598,6 +602,7 @@ def test_load_aligned_panels_invokes_datalayer_and_kernel():
         "universe_symbols": list(syms),
         "start": "2024-01-01",
         "end": "2024-01-02",
+        "factor_params": {"lookback": 5},
     }
 
     # Patch the registry + DataLayer so the test does not touch disk.
@@ -626,6 +631,7 @@ def test_load_aligned_panels_invokes_datalayer_and_kernel():
     # Factor panel is whatever the kernel returned (our synthetic close).
     assert set(factor_panel.columns) == {"ts", *syms}
     assert factor_panel.height == 3
+    assert captured_kernel_params == {"lookback": 5}
 
     # Future returns shape matches and the last row is all NaN (shift(-1)).
     assert set(future_returns.columns) == {"ts", *syms}
@@ -806,7 +812,7 @@ async def test_recover_interrupted_jobs_flips_running_to_queued():
 
     assert recovered == 2
     assert captured_updates, "expected one UPDATE flipping running → queued"
-    rds.delete.assert_called_with("tino:signal:queue")
+    rds.delete.assert_not_called()
     assert rds.lpush.await_count == 2
     payloads = [json.loads(call.args[1]) for call in rds.lpush.await_args_list]
     assert payloads == [

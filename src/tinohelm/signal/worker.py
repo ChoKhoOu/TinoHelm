@@ -140,7 +140,6 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
         ).all()
 
         if queued_runs:
-            await rds.delete(QUEUE_KEY)
             for run_id, signal_name, config in queued_runs:
                 payload = json.dumps({
                     "run_id": run_id,
@@ -150,7 +149,10 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
                 # Queue contract is LPUSH producers + BRPOP consumer.  With
                 # rows selected created_at ASC, LPUSHing in that same order
                 # leaves the oldest job at the right side of the list, so
-                # BRPOP resumes queued runs chronologically.
+                # BRPOP resumes queued runs chronologically.  Do not delete
+                # the shared queue here: rolling startups can overlap with
+                # fresh API enqueues.  Duplicate payloads are harmless because
+                # _process_job claims rows by DB status before execution.
                 await rds.lpush(QUEUE_KEY, payload)
 
     if recovered:
@@ -227,21 +229,31 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             if run.status == STATUS_CANCELLED:
                 logger.info("SignalRun %s already cancelled, skipping", run_id)
                 return
+            if run.status != "queued":
+                logger.info(
+                    "SignalRun %s status is %r, not queued; skipping",
+                    run_id, run.status,
+                )
+                return
 
             if config_dict is None:
                 config_dict = run.config or {}
             if not signal_name:
                 signal_name = run.signal_name
 
-            await db.execute(
+            claim_result = await db.execute(
                 update(SignalRun)
-                .where(SignalRun.id == run_id)
+                .where(SignalRun.id == run_id, SignalRun.status == "queued")
                 .values(
                     status=STATUS_RUNNING,
                     started_at=datetime.now(UTC).replace(tzinfo=None),
                     progress=0,
                 )
             )
+            if getattr(claim_result, "rowcount", None) == 0:
+                logger.info("SignalRun %s was already claimed; skipping", run_id)
+                await db.rollback()
+                return
             await db.commit()
 
         progress_channel = f"tino:signal:progress:{run_id}"
@@ -575,6 +587,14 @@ def _load_aligned_panels(
     )
     # DataLayer groups by (field, frequency, source) so listing every
     # symbol per field is fine — it fans out the ThreadPoolExecutor.
+    merged_params: dict = dict(factor_spec.params or {})
+    factor_param_overrides = dict(config.get("factor_params") or {})
+    factor_param_overrides.update(dict(spec.factor_params or {}))
+    merged_params.update(factor_param_overrides)
+    effective_lookback = max(
+        int(factor_spec.lookback),
+        int(merged_params.get("lookback", factor_spec.lookback)),
+    )
     requests: list[DataRequest] = []
     for field_name in input_fields:
         for sym in pit_symbols:
@@ -590,7 +610,7 @@ def _load_aligned_panels(
                     symbol=sym,
                     field_name=field_name,
                     frequency=freq,
-                    lookback=int(factor_spec.lookback),
+                    lookback=effective_lookback,
                     source=source,
                 )
             )
@@ -601,7 +621,6 @@ def _load_aligned_panels(
     # ----------------------------------------------------------------
     # Kernel signature: ``kernel(**panels_by_field, params=...)`` — same
     # convention as :class:`tinohelm.factor.engine.scheduler.Scheduler`.
-    merged_params: dict = dict(factor_spec.params or {})
     factor_panel = factor_kernel(**panels, params=merged_params)
 
     # ----------------------------------------------------------------

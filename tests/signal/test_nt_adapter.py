@@ -821,7 +821,10 @@ def _make_strategy_for_unit_test(
     )
 
 
-def _basic_signal_spec(extra_warmup: int = 0) -> SignalSpec:
+def _basic_signal_spec(
+    extra_warmup: int = 0,
+    factor_params: dict[str, Any] | None = None,
+) -> SignalSpec:
     return SignalSpec(
         name="test_signal",
         factor_ref="ret_N@1.0.0",
@@ -832,6 +835,7 @@ def _basic_signal_spec(extra_warmup: int = 0) -> SignalSpec:
         gross_exposure=1.0,
         net_exposure=0.0,
         max_position=0.5,
+        factor_params=dict(factor_params or {}),
         method_params={"k": 1},
         cost_model=CostModel(name="taker_8bps"),
         extra_warmup_bars=extra_warmup,
@@ -901,6 +905,13 @@ class TestSignalDrivenStrategyWarmup:
             signal_spec=spec, cache_history_len=100, factor_lookback=15
         )
         assert s._derive_warmup_bars(spec) == 15
+
+    def test_factor_param_lookback_raises_derived_warmup(self):
+        spec = _basic_signal_spec(extra_warmup=2, factor_params={"lookback": 30})
+        s = _make_strategy_for_unit_test(
+            signal_spec=spec, cache_history_len=100, factor_lookback=20
+        )
+        assert s._derive_warmup_bars(spec) == 32
 
     def test_enforce_warmup_raises_when_history_short(self):
         """cache.bars(bar_type) shorter than warmup → RuntimeError."""
@@ -1032,6 +1043,7 @@ class TestSignalSpecFromDict:
             "net_exposure": 0.0,
             "max_position": 0.5,
             "turnover_budget": None,
+            "factor_params": {"lookback": 7},
             "method_params": {"k": 3},
             "cost_model": {
                 "name": "taker_8bps",
@@ -1049,6 +1061,7 @@ class TestSignalSpecFromDict:
         assert spec.name == "x"
         assert spec.factor_ref == "ret_N@1.0.0"
         assert spec.extra_warmup_bars == 5
+        assert spec.factor_params == {"lookback": 7}
         assert spec.method_params == {"k": 3}
         assert spec.cost_model.fee_bps_per_side == 4.0
 
@@ -1415,12 +1428,16 @@ class TestComputeFactorPanelBase:
         # NT cache returns newest-first via deque.appendleft.
         return list(reversed(bars))
 
-    def _wire_strategy(self, lookback: int = 5):
+    def _wire_strategy(
+        self,
+        lookback: int = 5,
+        factor_params: dict[str, Any] | None = None,
+    ):
         """Build a stub strategy with cache.bars(...) wired to fake bars."""
         from nautilus_trader.model.data import BarType
         from tinohelm.factor.types import FactorSpec, InputSpec
 
-        spec_signal = _basic_signal_spec()
+        spec_signal = _basic_signal_spec(factor_params=factor_params)
         s = _make_strategy_for_unit_test(
             signal_spec=spec_signal, cache_history_len=30, factor_lookback=lookback
         )
@@ -1489,6 +1506,19 @@ class TestComputeFactorPanelBase:
         assert captured["close_panel"] is not None
         assert "BTCUSDT-PERP" in captured["close_panel"].columns
         assert captured["params"] == {"lookback": 5}
+
+    def test_compute_factor_panel_forwards_signal_factor_params(self):
+        """Exported factor params override FactorSpec defaults in live path."""
+        s, captured = self._wire_strategy(
+            lookback=5,
+            factor_params={"lookback": 7, "winsor": 2.5},
+        )
+        s._compute_factor_panel = SignalDrivenStrategy._compute_factor_panel.__get__(s)
+
+        result = s._compute_factor_panel(1_700_000_000_000_000_000, {})
+
+        assert result is not None
+        assert captured["params"] == {"lookback": 7, "winsor": 2.5}
 
     def test_compute_factor_panel_returns_none_when_unresolved(self):
         """When _factor_kernel is None, we log + return None (don't crash)."""

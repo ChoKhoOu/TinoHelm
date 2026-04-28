@@ -334,8 +334,10 @@ def test_run_config_merge_preserves_server_owned_fields(client, temp_signal_modu
                     "start": "1900-01-01",
                     # Allowed top-level evaluation extra.
                     "periods_per_year": 8760,
+                    # Allowed nested factor parameter merge.
+                    "factor_params": {"lookback": 5},
                     # Allowed nested kernel parameter merge.
-                    "method_params": {"k": 1, "note": "regression"},
+                    "method_params": {"k": 1},
                 },
             },
         )
@@ -362,7 +364,8 @@ def test_run_config_merge_preserves_server_owned_fields(client, temp_signal_modu
     assert cfg["start"] is None
 
     assert cfg["periods_per_year"] == 8760
-    assert cfg["method_params"] == {"k": 1, "note": "regression"}
+    assert cfg["factor_params"] == {"lookback": 5}
+    assert cfg["method_params"] == {"k": 1}
 
     queued = json.loads(mock_rds.lpush.call_args[0][1])
     assert queued["config"] == cfg
@@ -398,6 +401,40 @@ def test_run_rejects_non_object_method_params(client, temp_signal_module):
 
     assert resp.status_code == 422, resp.text
     assert "method_params" in resp.json()["detail"]
+    mock_session.add.assert_not_called()
+    mock_rds.lpush.assert_not_called()
+
+
+def test_run_rejects_factor_params_inside_method_params(client, temp_signal_module):
+    """Factor overrides must live under ``config.factor_params``."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    mock_session = _make_run_db_session(_make_universe_row())
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={
+                "signal_name": "my_user_signal",
+                "universe_id": 42,
+                "config": {"method_params": {"lookback": 5}},
+            },
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 422, resp.text
+    assert "factor overrides" in resp.json()["detail"]
     mock_session.add.assert_not_called()
     mock_rds.lpush.assert_not_called()
 
@@ -885,6 +922,7 @@ def test_export_returns_portfolio_yaml_shape(client):
     row.config = {
         "method": "top_k_long_short",
         "method_params": {"k": 3},
+        "factor_params": {"lookback": 30},
         "rebalance_freq": "1h",
         "extra_warmup_bars": 5,
         "factor_ref": "ret_N@1.0.0",
@@ -938,14 +976,16 @@ def test_export_returns_portfolio_yaml_shape(client):
 
     cfg = body["config"]
     assert cfg["signal_name"] == "sig"
-    # warmup_bars = factor_lookback(20) + extra_warmup_bars(5) = 25
-    assert cfg["warmup_bars"] == 25
+    # warmup_bars honours the exported factor_params lookback override:
+    # max(factor_lookback(20), factor_params.lookback(30)) + extra(5) = 35.
+    assert cfg["warmup_bars"] == 35
+    assert cfg["signal_spec_json"]["factor_params"] == {"lookback": 30}
 
     meta = body["metadata"]
     assert meta["exported_from_run_id"] == "rid-export"
-    assert meta["factor_lookback"] == 20
+    assert meta["factor_lookback"] == 30
     assert meta["extra_warmup_bars"] == 5
-    assert meta["warmup_bars_derived"] == 25
+    assert meta["warmup_bars_derived"] == 35
 
 
 def test_export_400_when_not_completed(client):

@@ -27,3 +27,6 @@ target/
 
 # Local runtime data (PathSettings default root when running from project dir)
 tino/
+
+# Oh My Codex local state
+.omx/

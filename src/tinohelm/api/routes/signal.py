@@ -75,6 +75,19 @@ _ALLOWED_RUN_CONFIG_EXTRA_KEYS: frozenset[str] = frozenset({
     "periods_per_year",
 })
 
+_ALLOWED_METHOD_PARAMS_BY_METHOD: dict[str, frozenset[str]] = {
+    "top_k_long_short": frozenset({"k"}),
+    "quantile_long_short": frozenset({"quantiles", "long_q", "short_q"}),
+    "threshold_signed": frozenset({
+        "upper",
+        "lower",
+        "long_weight",
+        "short_weight",
+    }),
+    "zscore_clip": frozenset({"clip"}),
+    "rank_to_weight": frozenset({"power"}),
+}
+
 
 # ---------------------------------------------------------------------------
 # Request / response schemas
@@ -169,7 +182,8 @@ def _merge_allowed_run_config(
     ``factor_ref`` / ``cost_model``.  Keep the surface deliberately small:
 
     * top-level allowlist for harmless evaluation extras;
-    * nested merge for kernel ``method_params`` only.
+    * nested merge for upstream factor ``factor_params``;
+    * nested merge for signal-kernel ``method_params`` only.
     """
     if not user_config:
         return
@@ -178,9 +192,21 @@ def _merge_allowed_run_config(
         if key in user_config:
             config_payload[key] = user_config[key]
 
+    if "factor_params" in user_config:
+        raw_factor_params = user_config["factor_params"]
+        if raw_factor_params is not None:
+            if not isinstance(raw_factor_params, Mapping):
+                raise HTTPException(
+                    status_code=422,
+                    detail="config.factor_params must be an object when provided",
+                )
+            config_payload["factor_params"] = {
+                **dict(config_payload.get("factor_params") or {}),
+                **dict(raw_factor_params),
+            }
+
     if "method_params" not in user_config:
         return
-
     raw_method_params = user_config["method_params"]
     if raw_method_params is None:
         return
@@ -188,6 +214,18 @@ def _merge_allowed_run_config(
         raise HTTPException(
             status_code=422,
             detail="config.method_params must be an object when provided",
+        )
+    method = str(config_payload.get("method") or "")
+    allowed = _ALLOWED_METHOD_PARAMS_BY_METHOD.get(method, frozenset())
+    invalid = sorted(set(raw_method_params) - allowed)
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"config.method_params contains unsupported key(s) for "
+                f"{method!r}: {invalid}. Put upstream factor overrides "
+                "under config.factor_params instead."
+            ),
         )
 
     config_payload["method_params"] = {
@@ -417,6 +455,7 @@ async def run_signal(
         "net_exposure": spec.net_exposure,
         "max_position": spec.max_position,
         "turnover_budget": spec.turnover_budget,
+        "factor_params": {},
         "method_params": dict(spec.method_params),
         "cost_model": dataclasses.asdict(spec.cost_model),
         "extra_warmup_bars": spec.extra_warmup_bars,
@@ -806,6 +845,7 @@ async def export_run(
     factor_ref: str = config.get("factor_ref") or run.factor_ref or ""
     factor_name = factor_ref.split("@", 1)[0]
     extra_warmup_bars: int = int(config.get("extra_warmup_bars", 0))
+    factor_params: dict = dict(config.get("factor_params") or {})
 
     try:
         from tinohelm.factor.registry import Registry as FactorRegistry
@@ -829,6 +869,8 @@ async def export_run(
             "export_run: factor %r not found in registry; warmup_bars = extra_warmup_bars only",
             factor_name,
         )
+    if "lookback" in factor_params:
+        factor_lookback = max(factor_lookback, int(factor_params["lookback"]))
 
     warmup_bars: int = factor_lookback + extra_warmup_bars
 
@@ -873,6 +915,7 @@ async def export_run(
         "net_exposure": config.get("net_exposure", 0.0),
         "max_position": config.get("max_position", 0.10),
         "turnover_budget": config.get("turnover_budget"),
+        "factor_params": config.get("factor_params", {}),
         "method_params": config.get("method_params", {}),
         "cost_model": config.get("cost_model", {}),
         "extra_warmup_bars": extra_warmup_bars,

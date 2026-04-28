@@ -144,6 +144,13 @@ class SignalSpec:
     turnover_budget:
         Upper bound on daily turnover (Σ|Δw| / 2).  ``None`` = unconstrained.
 
+    Factor parameters
+    -----------------
+    factor_params:
+        Run/export-time overrides for the upstream factor kernel.  These are
+        merged on top of :class:`tinohelm.factor.types.FactorSpec.params`
+        before computing the factor panel.
+
     Method parameters
     -----------------
     method_params:
@@ -213,6 +220,12 @@ class SignalSpec:
     net_exposure: float = 0.0
     max_position: float = 0.10
     turnover_budget: float | None = None
+
+    # factor-specific parameters — excluded from hash/compare for
+    # consistency with FactorSpec.params handling.
+    factor_params: dict[str, Any] = field(
+        default_factory=dict, compare=False, hash=False
+    )
 
     # method-specific parameters — excluded from hash/compare for
     # consistency with FactorSpec.params handling.
