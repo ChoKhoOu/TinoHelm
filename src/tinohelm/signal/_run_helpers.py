@@ -27,6 +27,7 @@ them without spinning up the full factor engine.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,13 @@ if TYPE_CHECKING:  # pragma: no cover
 #: than a lookup.  If multi-venue support lands the lookup here + in
 #: ``loader_helpers`` must be upgraded together.
 _DEFAULT_VENUE_SUFFIX: str = ".BINANCE"
+_REBALANCE_FREQ_RE = re.compile(r"^([1-9]\d*)([smhd])$")
+_REBALANCE_UNITS_NS: dict[str, int] = {
+    "s": 1_000_000_000,
+    "m": 60_000_000_000,
+    "h": 3_600_000_000_000,
+    "d": 86_400_000_000_000,
+}
 
 
 def _nt_instrument_id(symbol: str) -> str:
@@ -75,7 +83,7 @@ async def resolve_universe_to_instrument_ids(
     universe_ref: str | None,
     anchor_ts: datetime | None,
     db: "AsyncSession",
-) -> tuple[int, str, list[str], list[str]]:
+) -> tuple[int, str, list[str], list[str], dict]:
     """Resolve a universe reference to concrete PIT symbols + instrument ids.
 
     Resolution order:
@@ -107,10 +115,13 @@ async def resolve_universe_to_instrument_ids(
 
     Returns
     -------
-    (universe_id, universe_name, pit_symbols, instrument_ids)
-        All four are derived atomically from the same DB row so callers
+    (universe_id, universe_name, pit_symbols, instrument_ids, pit_rules_json)
+        All five are derived atomically from the same DB row so callers
         can persist them into ``signal_runs.config`` + ``signal_runs.universe_id``
-        without risking cross-field drift.
+        without risking cross-field drift.  ``pit_rules_json`` preserves the
+        original listing/delisting boundaries for the worker's historical
+        :class:`DataLayer` PIT mask; ``pit_symbols`` is only the anchor-time
+        loading subset.
 
     Raises
     ------
@@ -173,12 +184,46 @@ async def resolve_universe_to_instrument_ids(
         )
 
     instrument_ids = [_nt_instrument_id(sym) for sym in pit_symbols]
-    return row.id, row.name, list(pit_symbols), instrument_ids
+    return (
+        row.id,
+        row.name,
+        list(pit_symbols),
+        instrument_ids,
+        dict(row.pit_rules_json or {}),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Bar-type template — rebalance_freq → NT interval segment
 # ---------------------------------------------------------------------------
+
+def normalize_rebalance_freq(rebalance_freq: str) -> str:
+    """Return a canonical short-form rebalance frequency or raise.
+
+    The strategy loader's :func:`parse_interval` intentionally falls back to
+    ``"1-MINUTE"`` for invalid strings to keep legacy portfolio loading
+    permissive.  Signal run/export/worker paths need a stricter contract: bar
+    cadence and rebalance gate must be derived from the exact same validated
+    frequency, otherwise live configs can subscribe to one cadence but gate on
+    another.  Accepted values are ``<positive integer><s|m|h|d>`` and are
+    case-insensitive (``"1H"`` → ``"1h"``).
+    """
+    freq = (rebalance_freq or "").strip().lower()
+    if not _REBALANCE_FREQ_RE.match(freq):
+        raise ValueError(
+            "invalid rebalance_freq: expected '<positive integer><s|m|h|d>', "
+            f"got {rebalance_freq!r}"
+        )
+    return freq
+
+
+def rebalance_freq_to_ns(rebalance_freq: str) -> int:
+    """Convert a validated short-form cadence (``1h``/``30m``/...) to ns."""
+    freq = normalize_rebalance_freq(rebalance_freq)
+    match = _REBALANCE_FREQ_RE.match(freq)
+    assert match is not None  # guaranteed by normalize_rebalance_freq
+    return int(match.group(1)) * _REBALANCE_UNITS_NS[match.group(2)]
+
 
 def build_bar_type_template(rebalance_freq: str) -> str:
     """Build the ``{instrument_id}``-placeholder bar-type template.
@@ -208,9 +253,10 @@ def build_bar_type_template(rebalance_freq: str) -> str:
     Parameters
     ----------
     rebalance_freq:
-        Short-form cadence string.  Empty / unparseable values fall back
-        to ``"1-MINUTE"`` via :func:`parse_interval` — consistent with the
-        portfolio loader's behaviour so we don't silently diverge.
+        Short-form cadence string.  Empty / unparseable values raise
+        ``ValueError``.  Signal configs must not inherit
+        :func:`parse_interval`'s legacy ``1-MINUTE`` fallback because export
+        also derives ``rebalance_freq_ns`` from this same value.
 
     Returns
     -------
@@ -222,11 +268,13 @@ def build_bar_type_template(rebalance_freq: str) -> str:
     # ``parse_interval`` lowercases its argument internally via ``.lower()``
     # on the dynamic-regex path, so "1H" and "1h" both resolve to
     # ``"1-HOUR"`` — matching the user-facing contract in signal.md §2.1.
-    interval_part = parse_interval(rebalance_freq or "")
+    interval_part = parse_interval(normalize_rebalance_freq(rebalance_freq))
     return f"{{instrument_id}}-{interval_part}-LAST-EXTERNAL"
 
 
 __all__ = [
     "resolve_universe_to_instrument_ids",
+    "normalize_rebalance_freq",
+    "rebalance_freq_to_ns",
     "build_bar_type_template",
 ]

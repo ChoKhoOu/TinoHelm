@@ -82,6 +82,11 @@ class BarSynchronizer:
         self._on_complete = on_complete
         # ts_ns → {symbol: Bar} (insertion-order preserved by dict, useful for tests)
         self._buffer: dict[int, dict[str, object]] = defaultdict(dict)
+        # Distinct timestamps observed in the stream, including slots that
+        # completed and were popped.  Stale eviction must count completed
+        # later cross-sections too; otherwise an old partial slot can survive
+        # forever during a healthy stream of complete later bars.
+        self._seen_timestamps: set[int] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -95,6 +100,7 @@ class BarSynchronizer:
         """
         ts_ns = self._extract_ts_ns(bar)
         symbol = self._extract_symbol(bar)
+        self._seen_timestamps.add(ts_ns)
 
         slot = self._buffer[ts_ns]
         if symbol in slot:
@@ -165,16 +171,20 @@ class BarSynchronizer:
         ``max_wait_bars + 1`` distinct *later* timestamps already
         buffered (the +1 is the latest one that just arrived).
         """
-        if len(self._buffer) <= 1:
+        if not self._buffer:
+            self._seen_timestamps.clear()
             return
         # max_wait_bars=0 means "no tolerance" — evict any buffered ts that
         # has been surpassed by even one later ts.
         threshold = self.config.max_wait_bars
-        sorted_ts = sorted(self._buffer.keys())
-        # For each ts, count how many later ts exist; if > threshold → evict.
-        # ``threshold`` counts later timestamps allowed before eviction.
-        for i, ts in enumerate(sorted_ts[:-1]):  # last ts has 0 later — never stale
-            n_later = len(sorted_ts) - 1 - i
+        sorted_buffer_ts = sorted(self._buffer.keys())
+        sorted_seen_ts = sorted(self._seen_timestamps)
+        # For each pending ts, count how many later timestamps have been seen,
+        # including complete slots already popped from ``_buffer``.  If
+        # > threshold → evict.  ``threshold`` counts later timestamps allowed
+        # before eviction.
+        for ts in sorted_buffer_ts:
+            n_later = sum(1 for seen_ts in sorted_seen_ts if seen_ts > ts)
             if n_later > threshold:
                 missing = self._expected - set(self._buffer[ts].keys())
                 logger.warning(
@@ -185,3 +195,14 @@ class BarSynchronizer:
                     sorted(missing),
                 )
                 self._buffer.pop(ts, None)
+        self._prune_seen_timestamps()
+
+    def _prune_seen_timestamps(self) -> None:
+        """Keep seen-ts accounting bounded by the oldest pending slot."""
+        if not self._buffer:
+            self._seen_timestamps.clear()
+            return
+        oldest_pending = min(self._buffer.keys())
+        self._seen_timestamps = {
+            ts for ts in self._seen_timestamps if ts >= oldest_pending
+        }

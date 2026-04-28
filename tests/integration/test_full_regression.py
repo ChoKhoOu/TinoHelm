@@ -178,7 +178,7 @@ def test_aligner_pit_and_neutralization(synthetic_market_data):
 
     # --- Case 2: LogMcap neutralization ---
     log_mcap = LogMcapExposure()
-    aligner_mcap = Aligner(uni, neutralize=[log_mcap])
+    aligner_mcap = Aligner(uni, neutralize=[log_mcap], allow_non_pit_exposures=True)
     neutral = aligner_mcap.align(factor_panel)
     assert neutral.shape == factor_panel.shape, "LogMcap: shape mismatch"
 
@@ -446,7 +446,7 @@ def test_full_regression_factor_to_signal(synthetic_market_data):
     # === Step 2: Align with Universe PIT + LogMcap neutralization ===
     uni = Universe.from_symbols(syms)
     log_mcap = LogMcapExposure()
-    aligner = Aligner(uni, neutralize=[log_mcap])
+    aligner = Aligner(uni, neutralize=[log_mcap], allow_non_pit_exposures=True)
 
     aligned_panels = {}
     for name, panel in factors_panels.items():

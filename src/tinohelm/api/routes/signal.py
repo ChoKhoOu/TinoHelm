@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.api.deps import get_db, get_redis
 from tinohelm.db.models import SignalRun
+from tinohelm.signal._run_helpers import rebalance_freq_to_ns
 
 logger = logging.getLogger(__name__)
 
@@ -291,19 +292,18 @@ def _build_compare_table(
             row.append(v)
         values.append(row)
 
-    # Per-metric 1-based ranking.  Lower-is-better metrics get an inverted
-    # comparator so the smallest |drawdown| ranks first.
-    _LOWER_IS_BETTER = {"mdd", "tail_loss_p99", "cost_drag"}
+    # Per-metric 1-based ranking.  ``tail_loss_p99`` is usually negative
+    # (e.g. -5% is worse than -1%), so it must rank by closeness to zero
+    # rather than raw ascending value.
+    _LOWER_IS_BETTER = {"mdd", "cost_drag"}
     rankings: list[list[int]] = [[0] * M for _ in range(F)]
     for m_idx, m in enumerate(metrics):
         col = [(values[i][m_idx], i) for i in range(F)]
         valid = [(v, i) for v, i in col if v is not None]
         none_idx = [i for v, i in col if v is None]
-        if m in _LOWER_IS_BETTER:
-            # Smaller absolute → better.  For mdd / tail_loss_p99 / cost_drag
-            # the metric is already a positive (or signed) magnitude, so we
-            # rank ascending by the *value* directly — this matches the
-            # "smaller drawdown = better" convention.
+        if m == "tail_loss_p99":
+            valid.sort(key=lambda t: abs(t[0]))
+        elif m in _LOWER_IS_BETTER:
             valid.sort(key=lambda t: t[0])
         else:
             valid.sort(key=lambda t: -t[0])
@@ -415,7 +415,7 @@ async def run_signal(
         try:
             anchor_ts = datetime.fromisoformat(req.end.replace("Z", "+00:00"))
             if anchor_ts.tzinfo is not None:
-                anchor_ts = anchor_ts.replace(tzinfo=None)
+                anchor_ts = anchor_ts.astimezone(UTC).replace(tzinfo=None)
         except ValueError:
             raise HTTPException(
                 status_code=422,
@@ -423,7 +423,13 @@ async def run_signal(
             )
 
     try:
-        resolved_universe_id, _universe_name, pit_symbols, instrument_ids = (
+        (
+            resolved_universe_id,
+            _universe_name,
+            pit_symbols,
+            instrument_ids,
+            pit_rules_json,
+        ) = (
             await resolve_universe_to_instrument_ids(
                 universe_id=req.universe_id,
                 universe_ref=spec.universe_ref,
@@ -434,7 +440,10 @@ async def run_signal(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    bar_type_template = build_bar_type_template(spec.rebalance_freq)
+    try:
+        bar_type_template = build_bar_type_template(spec.rebalance_freq)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     run_id = str(uuid4())
 
@@ -465,6 +474,7 @@ async def run_signal(
         "deprecated": spec.deprecated,
         # Universe resolution — populated from the DB row at enqueue time.
         "universe_id": resolved_universe_id,
+        "universe_pit_rules": pit_rules_json,
         "universe_symbols": pit_symbols,
         "instrument_ids": instrument_ids,
         "bar_type_template": bar_type_template,
@@ -679,28 +689,14 @@ async def compare_signals(
 # 7. GET /api/signal/export/{run_id}
 # ---------------------------------------------------------------------------
 
-_REBALANCE_UNITS: dict[str, int] = {
-    "s": 1_000_000_000,
-    "m": 60_000_000_000,
-    "h": 3_600_000_000_000,
-    "d": 86_400_000_000_000,
-}
-
-
 def _parse_rebalance_to_ns(rebalance_freq: str) -> int:
     """Convert '1h' / '1d' / '5m' / '30s' to nanoseconds.
 
-    Accepts case-insensitive suffix (s/m/h/d).  Falls back to 1h (3 600 s)
-    for empty or unrecognisable strings.
+    Accepts case-insensitive suffix (s/m/h/d).  Invalid or empty values raise
+    ``ValueError`` so export cannot silently diverge from the bar-type template
+    fallback semantics.
     """
-    if not rebalance_freq:
-        return _REBALANCE_UNITS["h"]
-    freq = rebalance_freq.strip()
-    suffix = freq[-1].lower()
-    prefix = freq[:-1]
-    if suffix not in _REBALANCE_UNITS or not prefix.isdigit():
-        return _REBALANCE_UNITS["h"]
-    return int(prefix) * _REBALANCE_UNITS[suffix]
+    return rebalance_freq_to_ns(rebalance_freq)
 
 
 _DEFAULT_STRATEGY_CLASS = (
@@ -933,7 +929,14 @@ async def export_run(
     stored_bar_type_template = config.get("bar_type_template") or ""
     if not stored_bar_type_template:
         from tinohelm.signal._run_helpers import build_bar_type_template
-        stored_bar_type_template = build_bar_type_template(rebalance_freq)
+        try:
+            stored_bar_type_template = build_bar_type_template(rebalance_freq)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        rebalance_freq_ns = _parse_rebalance_to_ns(rebalance_freq)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return {
         "strategy_class": strategy_class,
@@ -942,7 +945,7 @@ async def export_run(
             "instrument_ids": stored_instrument_ids,
             "bar_type_template": stored_bar_type_template,
             "warmup_bars": warmup_bars,
-            "rebalance_freq_ns": _parse_rebalance_to_ns(rebalance_freq),
+            "rebalance_freq_ns": rebalance_freq_ns,
             "signal_spec_json": signal_spec_json,
             "factor_lookback": factor_lookback,
         },

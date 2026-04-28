@@ -44,6 +44,7 @@ import json
 import logging
 import traceback
 from datetime import datetime, UTC
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import polars as pl
@@ -450,11 +451,10 @@ def _load_aligned_panels(
     -------------------------
     1. Resolve the factor kernel + :class:`FactorSpec` from
        :class:`tinohelm.factor.registry.Registry`.
-    2. Use :class:`tinohelm.factor.universe.Universe.from_symbols` to
-       wrap the PIT-resolved symbol list stored in
-       ``config["universe_symbols"]`` (populated by
-       :mod:`tinohelm.api.routes.signal`) — no CSV re-read, no second
-       PIT pass.
+    2. Rebuild :class:`tinohelm.factor.universe.Universe` from the persisted
+       ``config["universe_pit_rules"]`` boundary snapshot, while using
+       ``config["universe_symbols"]`` as the anchor-time loading subset.  This
+       keeps historical PIT masking intact across listing/delisting windows.
     3. Build a :class:`DataLayer` against ``catalog_root`` and issue
        :class:`DataRequest` entries for every ``input_spec`` the factor
        declares, clipped to the ``[start, end]`` window from ``config``.
@@ -478,7 +478,8 @@ def _load_aligned_panels(
         ``rebalance_freq``, ``universe_ref``).
     config:
         The raw ``signal_runs.config`` dict (carries ``start`` / ``end``,
-        ``universe_symbols`` / ``instrument_ids`` / ``periods_per_year``).
+        ``universe_pit_rules`` / ``universe_symbols`` / ``instrument_ids`` /
+        ``periods_per_year``).
 
     Returns
     -------
@@ -506,7 +507,7 @@ def _load_aligned_panels(
     from tinohelm.factor.registry import Registry as FactorRegistry
     from tinohelm.factor.types import DataRequest
     from tinohelm.factor.universe import Universe
-    from tinohelm.strategy.loader_helpers import parse_interval
+    from tinohelm.signal._run_helpers import normalize_rebalance_freq
 
     # ----------------------------------------------------------------
     # 1. Resolve factor kernel + FactorSpec from the registry
@@ -536,7 +537,7 @@ def _load_aligned_panels(
         )
 
     # ----------------------------------------------------------------
-    # 2. Build Universe from the persisted PIT symbol list
+    # 2. Build Universe from the persisted PIT boundary snapshot
     # ----------------------------------------------------------------
     pit_symbols = config.get("universe_symbols") or []
     if not pit_symbols:
@@ -549,25 +550,33 @@ def _load_aligned_panels(
             "was created before /api/signal/run enforced universe "
             "resolution.  Re-create the run via POST /api/signal/run."
         )
-    universe = Universe.from_symbols(tuple(pit_symbols))
+    pit_rules_snapshot = config.get("universe_pit_rules") or {}
+    if pit_rules_snapshot:
+        universe = Universe.from_db_row(
+            SimpleNamespace(
+                name=str(config.get("universe_ref") or "signal_run_universe"),
+                pit_rules_json=pit_rules_snapshot,
+            )
+        )
+    else:
+        # Legacy rows created before ``universe_pit_rules`` was persisted can
+        # only provide the anchor-time load subset.  Keep them runnable, but
+        # new /run rows preserve listing/delisting boundaries so historical
+        # DataLayer PIT masking is not downgraded to a permanent universe.
+        logger.warning(
+            "_load_aligned_panels: signal run config missing "
+            "'universe_pit_rules'; falling back to permanent anchor-time "
+            "universe for legacy compatibility"
+        )
+        universe = Universe.from_symbols(tuple(pit_symbols))
 
     # ----------------------------------------------------------------
     # 3. Frequency derivation — rebalance_freq → INTERVAL_MAP key
     # ----------------------------------------------------------------
-    # ``parse_interval`` maps "1H" → "1-HOUR" (NT wire format); DataLayer
-    # wants the short-form INTERVAL_MAP key ("1h").  The rebalance_freq
-    # is already in short form by convention (see signal.md §2), just
-    # lowercased for the data layer.
-    freq = (spec.rebalance_freq or "1h").lower()
-    # Validate the short form parses — fall back to 1h otherwise to
-    # match ``_parse_rebalance_to_ns`` in the API route.
-    parsed = parse_interval(freq)
-    if parsed == "1-MINUTE" and freq not in ("1m",):
-        logger.warning(
-            "_load_aligned_panels: rebalance_freq %r not in INTERVAL_MAP, "
-            "falling back to '1h'", spec.rebalance_freq,
-        )
-        freq = "1h"
+    # Keep research DataLayer cadence, /export rebalance gate, and live bar
+    # subscription template on one strict parser; invalid strings fail loudly
+    # instead of falling back to inconsistent cadences.
+    freq = normalize_rebalance_freq(spec.rebalance_freq)
 
     # ----------------------------------------------------------------
     # 4. Build DataLayer + issue per-input DataRequests

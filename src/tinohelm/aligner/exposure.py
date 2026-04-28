@@ -28,9 +28,10 @@ class ExposureProvider(Protocol):
     Implementors must expose a ``name: str`` class-level or instance attribute;
     Aligner uses it to match the string references in EvalConfig.neutralize.
 
-    PIT guarantee: ``get_exposure`` must return PIT-aligned data; any look-ahead
-    (using future data to estimate the current exposure) is the responsibility of
-    the implementing class.
+    PIT guarantee: ``get_exposure`` should return PIT-aligned data by default.
+    Providers that intentionally use latest/current snapshots must expose
+    ``pit_safe = False`` so historical neutralization can reject them unless the
+    caller explicitly opts in.
     """
 
     name: str

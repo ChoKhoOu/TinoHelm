@@ -7,16 +7,19 @@ For each timestamp t and symbol s:
     log_mcap[t, s] = ln(close[t, s] × circulating_supply[s])
 
 where ``circulating_supply[s]`` is the **current snapshot** (fetched once per
-symbol with a 24 h file cache).  Using a static supply scalar does not
-introduce cross-sectional look-ahead bias for *ranking* purposes — only
-absolute magnitudes drift from historical truth.  This simplification is
-explicitly documented in ``DataLayer._load_market_cap_field``.
+symbol with a 24 h file cache).  This is convenient for exploratory/latest
+exposure inspection, but it is **not PIT-safe** for historical neutralization:
+circulating supply is a time-varying, symbol-specific series and a current
+snapshot can change past log-mcap rankings and OLS residuals.
 
 PIT note
 --------
-``close[t, s]`` is the bar-closing price at time t; it is observable at t's
-close.  The supply scalar is a non-time-varying multiplier applied uniformly.
-Therefore ``log_mcap[t, s]`` is PIT-safe for cross-sectional ranking.
+``close[t, s]`` is PIT, but the supply scalar is not.  The provider therefore
+declares ``pit_safe = False`` and :class:`tinohelm.aligner.Aligner` rejects it
+by default for historical neutralization unless the caller explicitly opts in
+to non-PIT exposures.  A future implementation should replace this current
+snapshot scalar with a historical supply provider before re-enabling it by
+default.
 
 Cross-sectional normalisation is deliberately *not* applied here — that is the
 responsibility of the Aligner neutralisation layer.  LogMcapExposure returns
@@ -46,7 +49,7 @@ _DEFAULT_FREQ = "1m"
 
 
 class LogMcapExposure:
-    """log(close × circulating_supply) exposure panel, PIT per bar.
+    """log(close × current circulating_supply) exposure panel (non-PIT).
 
     Parameters
     ----------
@@ -58,6 +61,7 @@ class LogMcapExposure:
     """
 
     name: str = "log_mcap"
+    pit_safe: bool = False
 
     def __init__(
         self,
@@ -220,4 +224,3 @@ class LogMcapExposure:
         from tinohelm.factor.universe import Universe
 
         return DataLayer(universe=Universe.from_symbols(symbols))
-

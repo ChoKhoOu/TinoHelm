@@ -95,6 +95,11 @@ class Aligner:
         - an **ExposureProvider instance** that is used directly.
 
         Both forms can be mixed freely.
+    allow_non_pit_exposures:
+        ``False`` by default.  Providers may declare ``pit_safe = False`` when
+        they rely on current/latest snapshots (for example current circulating
+        supply).  Such providers are rejected for historical neutralization
+        unless this flag is explicitly set.
 
     Raises
     ------
@@ -106,9 +111,24 @@ class Aligner:
         self,
         universe: "Universe",
         neutralize: Sequence[NeutralizeArg] = (),
+        *,
+        allow_non_pit_exposures: bool = False,
     ) -> None:
         self.universe = universe
         self._providers: list[ExposureProvider] = self._resolve_neutralize(neutralize)
+        if not allow_non_pit_exposures:
+            non_pit = [
+                provider.name
+                for provider in self._providers
+                if getattr(provider, "pit_safe", True) is False
+            ]
+            if non_pit:
+                raise ValueError(
+                    "Non-PIT exposure providers are not allowed for historical "
+                    f"neutralization by default: {non_pit}. Use a PIT-safe "
+                    "historical exposure provider, or pass "
+                    "allow_non_pit_exposures=True for explicit exploratory use."
+                )
 
     # ------------------------------------------------------------------
     # Internal helpers

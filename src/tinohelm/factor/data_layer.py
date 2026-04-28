@@ -31,7 +31,8 @@ Bar fields (source="bar"):
 Funding rate (source="funding_rate"):
     ``funding_rate``
 Market cap (source="market_cap"):
-    ``market_cap``  (close × circulating_supply; PIT-with-current-snapshot)
+    ``market_cap``  (close × current circulating_supply snapshot; non-PIT for
+    historical research unless replaced with a dated supply series)
 Trade-tick derived (source="trade_tick"):
     ``trade_imbalance``  (not yet implemented — raises NotImplementedError)
 
@@ -47,7 +48,7 @@ import json
 import logging
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Sequence
 
@@ -375,7 +376,7 @@ class DataLayer:
         return _build_series_frame(timestamps, values)
 
     # ------------------------------------------------------------------
-    # Market-cap reader (close × circulating_supply, PIT-with-current)
+    # Market-cap reader (close × current circulating_supply snapshot, non-PIT)
     # ------------------------------------------------------------------
 
     def _load_market_cap_field(
@@ -389,15 +390,13 @@ class DataLayer:
 
         PIT note
         --------
-        Binance does not expose historical circulating-supply snapshots.  This
-        implementation uses the **current snapshot** (fetched with a 24 h cache)
-        and applies it uniformly across all bars.  The scalar multiplier does not
-        introduce look-ahead bias for *ranking* purposes (cross-sectional ranks
-        of market-cap are invariant to a static denominator per symbol), but
-        absolute values will drift from historical truth.  A comment is included
-        at call-site level to document this limitation.  When historical supply
-        data becomes available this method can be upgraded to a step-function
-        multiplier without changing the public API.
+        Binance does not expose historical circulating-supply snapshots here.
+        This implementation uses the **current snapshot** (fetched with a 24 h
+        cache) and applies it uniformly across all bars.  That is non-PIT for
+        historical research because supply is a symbol-specific time-varying
+        series and the latest snapshot can change historical cross-sectional
+        ranks.  Use only for latest/exploratory views unless a dated supply
+        series is wired in.
         """
         from tinohelm.data.instruments import fetch_circulating_supply
 
@@ -417,7 +416,7 @@ class DataLayer:
             )
             return _empty_series_frame()
 
-        # --- mcap = close × circulating (PIT-with-current-snapshot) ---
+        # --- mcap = close × current circulating snapshot (non-PIT historically) ---
         return close_frame.with_columns(
             (pl.col(_VAL_COL) * float(circulating)).alias(_VAL_COL),
         )
@@ -769,7 +768,11 @@ def _parse_ts(value: str | datetime) -> datetime:
     without forcing this module to import pandas.
     """
     if isinstance(value, datetime):
-        return value.replace(tzinfo=None) if value.tzinfo is not None else value
+        return (
+            value.astimezone(UTC).replace(tzinfo=None)
+            if value.tzinfo is not None
+            else value
+        )
     # Duck-typed pandas Timestamp passthrough — keeps backward compatibility
     # with callers that still construct ``pandas Timestamp`` values.
     if hasattr(value, "isoformat") and hasattr(value, "tzinfo"):
@@ -793,7 +796,7 @@ def _parse_iso8601(value: str) -> datetime:
         # Fallback for date-only strings (datetime.fromisoformat handles this
         # since 3.11; older paths kept for safety).
         ts = datetime.strptime(s, "%Y-%m-%d")
-    return ts.replace(tzinfo=None) if ts.tzinfo is not None else ts
+    return ts.astimezone(UTC).replace(tzinfo=None) if ts.tzinfo is not None else ts
 
 
 def _datetime_to_ns(value: datetime) -> int:
@@ -803,7 +806,7 @@ def _datetime_to_ns(value: datetime) -> int:
     the ns boundary up to ``1_000`` × the microsecond count.
     """
     if value.tzinfo is not None:
-        value = value.replace(tzinfo=None)
+        value = value.astimezone(UTC).replace(tzinfo=None)
     epoch = datetime(1970, 1, 1)
     delta = value - epoch
     seconds = delta.days * 86_400 + delta.seconds

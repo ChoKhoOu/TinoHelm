@@ -5,6 +5,7 @@ to avoid duplicated :class:`SignalSpec` reconstruction logic.
 """
 from __future__ import annotations
 
+from tinohelm.signal._run_helpers import normalize_rebalance_freq
 from tinohelm.signal.types import CostModel, SignalSpec
 
 
@@ -22,6 +23,7 @@ def validate_supported_signal_execution(spec: SignalSpec) -> None:
         raise ValueError(f"unsupported signal weighting: {spec.weighting}")
     if spec.turnover_budget is not None:
         raise ValueError("turnover_budget is not enforced yet")
+    normalize_rebalance_freq(spec.rebalance_freq)
 
 
 def signal_spec_from_dict(name: str, config: dict) -> SignalSpec:

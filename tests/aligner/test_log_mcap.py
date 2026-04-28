@@ -15,6 +15,8 @@ import polars as pl
 import pytest
 
 from tinohelm.aligner.exposure_logmcap import LogMcapExposure
+from tinohelm.aligner.aligner import Aligner
+from tinohelm.factor.universe import Universe
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,21 @@ def test_returns_dataframe_shape() -> None:
     assert df.columns[0] == "ts"
     assert df.schema["ts"] == pl.Datetime("ns")
     assert set(df.columns[1:]) == set(symbols)
+
+
+def test_log_mcap_rejected_by_aligner_by_default() -> None:
+    """Current-supply log_mcap is non-PIT and must require explicit opt-in."""
+    provider = LogMcapExposure()
+    assert provider.pit_safe is False
+    with pytest.raises(ValueError, match="Non-PIT exposure providers"):
+        Aligner(Universe.from_symbols(["BTCUSDT-PERP"]), neutralize=[provider])
+
+    # Exploratory/latest use can still opt in explicitly.
+    Aligner(
+        Universe.from_symbols(["BTCUSDT-PERP"]),
+        neutralize=[provider],
+        allow_non_pit_exposures=True,
+    )
 
 
 # ---------------------------------------------------------------------------

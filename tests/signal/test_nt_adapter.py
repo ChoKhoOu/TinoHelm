@@ -202,6 +202,28 @@ class TestBarSynchronizer:
         assert 1000 not in sync.pending_timestamps()
         assert completed == []
 
+    def test_eviction_counts_completed_later_timestamps(self, caplog):
+        """Complete later cross-sections still overtake an old partial slot."""
+        completed: list[tuple[int, dict[str, Any]]] = []
+        sync = BarSynchronizer(
+            BarSynchronizerConfig(
+                expected_symbols=("BTC-USDT", "ETH-USDT"), max_wait_bars=2
+            ),
+            lambda ts, b: completed.append((ts, b)),
+        )
+
+        with caplog.at_level("WARNING", logger="tinohelm.nt_adapter.bar_synchronizer"):
+            sync.on_bar(_bar("BTC-USDT", 1000))  # partial, missing ETH
+            # These slots complete and are popped, but must still count as
+            # later timestamps for eviction of 1000.
+            for ts in (2000, 3000, 4000):
+                sync.on_bar(_bar("BTC-USDT", ts))
+                sync.on_bar(_bar("ETH-USDT", ts))
+
+        assert [ts for ts, _ in completed] == [2000, 3000, 4000]
+        assert 1000 not in sync.pending_timestamps()
+        assert any("evicting ts=1000" in rec.message for rec in caplog.records)
+
 
 # =============================================================================
 # OrderManager fixtures + tests

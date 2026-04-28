@@ -240,6 +240,7 @@ def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
     assert inserted.config["method"] == "top_k_long_short"
     assert inserted.config["factor_params"] == {"lookback": 7}
     assert inserted.config["method_params"] == {"k": 3}
+    assert inserted.config["universe_pit_rules"] == _make_universe_row().pit_rules_json
     # Universe resolution populated instrument_ids + bar_type_template.
     assert inserted.config["instrument_ids"] == [
         "BTCUSDT-PERP.BINANCE",
@@ -358,6 +359,7 @@ def test_run_config_merge_preserves_server_owned_fields(client, temp_signal_modu
     assert cfg["gross_exposure"] == 1.0
     assert cfg["cost_model"]["name"] == "taker_8bps"
     assert cfg["universe_id"] == 42
+    assert cfg["universe_pit_rules"] == _make_universe_row().pit_rules_json
     assert cfg["universe_symbols"] == ["BTCUSDT-PERP", "ETHUSDT-PERP"]
     assert cfg["instrument_ids"] == [
         "BTCUSDT-PERP.BINANCE",
@@ -501,6 +503,49 @@ def test_run_rejects_unenforced_signal_spec_knobs(
     mock_rds.lpush.assert_not_called()
 
 
+def test_run_rejects_invalid_rebalance_freq(client, tmp_path):
+    """Invalid signal rebalance_freq is rejected instead of fallback divergence."""
+    from tinohelm.core.paths import paths as _paths
+
+    signals_dir = tmp_path / "bad_freq_signals"
+    signals_dir.mkdir()
+    (signals_dir / "bad_freq_sig.py").write_text(
+        "from tinohelm.signal import signal\n"
+        "@signal(name='bad_freq_sig', factor_ref='ret_N@1.0.0', "
+        "method='top_k_long_short', rebalance_freq='nonsense', "
+        "universe_ref='top10_perp')\n"
+        "def k(factor_panel): return factor_panel\n"
+    )
+    _paths.override("signals_dir", signals_dir)
+
+    mock_rds = AsyncMock()
+    mock_session = _make_run_db_session(_make_universe_row())
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={"signal_name": "bad_freq_sig", "universe_id": 42},
+        )
+    finally:
+        _paths.reset_overrides()
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 422, resp.text
+    assert "invalid rebalance_freq" in resp.json()["detail"]
+    mock_session.add.assert_not_called()
+
+
 def test_run_resolves_universe_from_universe_id(client, temp_signal_module):
     """``/run`` looks up universe by id (primary path) and writes instrument_ids."""
     mock_rds = AsyncMock()
@@ -615,6 +660,54 @@ def test_run_rejects_empty_pit_universe(client, temp_signal_module):
 
     assert resp.status_code == 422, resp.text
     assert "empty" in resp.json()["detail"].lower()
+
+
+def test_run_end_timestamp_offset_is_converted_to_utc(client, temp_signal_module):
+    """Offset ISO end timestamps anchor PIT lookup at the equivalent UTC time."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    row = MagicMock()
+    row.id = 77
+    row.name = "newcoin_perp"
+    row.pit_rules_json = {
+        "NEWCOINUSDT-PERP": {
+            # Eligible from 2024-01-08T00:00:00 UTC after 7-day isolation.
+            "listing_date": "2024-01-01",
+            "delisting_date": None,
+        },
+    }
+    mock_session = _make_run_db_session(row)
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={
+                "signal_name": "my_user_signal",
+                "universe_id": 77,
+                # Local wall time is Jan 7, but UTC is Jan 8 01:00.
+                # Stripping tzinfo directly would incorrectly anchor before
+                # the new-coin isolation window ends and return an empty PIT
+                # universe.
+                "end": "2024-01-07T20:00:00-05:00",
+            },
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 200, resp.text
+    inserted = mock_session.add.call_args[0][0]
+    assert inserted.config["universe_symbols"] == ["NEWCOINUSDT-PERP"]
 
 
 def test_run_404_unknown_signal(client, tmp_path):
@@ -849,6 +942,19 @@ def test_compare_returns_ranking_heatmap(client):
     # MDD is lower-is-better — sig_b has smallest mdd (0.05) → rank 1.
     mdd_col = [row[1] for row in table["rankings"]]
     assert mdd_col == [2, 1, 3]
+
+
+def test_compare_tail_loss_ranks_closer_to_zero_as_better():
+    """For negative tail_loss_p99, -1% should rank ahead of -5%."""
+    runs = [
+        _completed_run("r1", "sig_a", sharpe=1.0, mdd=0.10, turnover=1.0),
+        _completed_run("r2", "sig_b", sharpe=1.0, mdd=0.10, turnover=1.0),
+    ]
+    runs[0].result["tail_loss_p99"] = -0.05
+    runs[1].result["tail_loss_p99"] = -0.01
+
+    table = signal_routes._build_compare_table(runs, ["tail_loss_p99"])
+    assert table["rankings"] == [[2], [1]]
 
 
 def test_compare_400_when_runs_not_completed(client):

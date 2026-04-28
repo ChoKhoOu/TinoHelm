@@ -232,6 +232,70 @@ def test_params_grid_calls_data_layer_with_data_requests(
     assert body["candidates"][0]["params"] == {"n": 5}
 
 
+def test_params_grid_passes_declared_non_close_inputs(client, mock_close_panel):
+    """Kernel kwargs follow FactorSpec.input_specs instead of hard-coded close."""
+    volume_panel = mock_close_panel.with_columns(pl.lit(1000.0).alias("BTCUSDT-PERP"))
+    spec = MagicMock()
+    spec.params = {"lookback": 5}
+    spec.lookback = 5
+    inp = MagicMock()
+    inp.field_name = "volume"
+    inp.frequency = None
+    spec.input_specs = [inp]
+
+    captured_kwargs: dict = {}
+
+    def _kernel(**kwargs):
+        captured_kwargs.update(kwargs)
+        return kwargs["volume"]
+
+    mock_registry = MagicMock()
+    mock_registry.get_spec.return_value = spec
+    mock_registry.get_kernel.return_value = _kernel
+    fake_fwd = _make_fwd_df(mock_close_panel)
+    mock_params_grid_result = [
+        {"params": {"lookback": 5}, "ic_mean": 0.03, "ir": 0.5},
+    ]
+
+    with (
+        patch("tinohelm.factor.registry.Registry", return_value=mock_registry),
+        patch(
+            "tinohelm.factor.data_layer.DataLayer.load",
+            return_value={"volume": volume_panel, "close": mock_close_panel},
+        ),
+        patch(
+            "tinohelm.factor.evaluation.evaluator._to_ts_value",
+            return_value=fake_fwd,
+        ),
+        patch(
+            "tinohelm.factor.evaluation.ic.forward_returns",
+            return_value=fake_fwd,
+        ),
+        patch(
+            "tinohelm.factor.evaluation.params_grid.params_grid",
+            side_effect=lambda factor_fn, *args, **kwargs: (
+                factor_fn(lookback=5),
+                mock_params_grid_result,
+            )[1],
+        ),
+    ):
+        resp = client.post(
+            "/api/factor/params_grid",
+            json={
+                "factor_name": "volume_factor",
+                "grid": {"lookback": [5]},
+                "start": "2026-01-01",
+                "end": "2026-04-01",
+                "universe": ["BTCUSDT-PERP"],
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert "volume" in captured_kwargs
+    assert "close" not in captured_kwargs
+    assert captured_kwargs["volume"] is volume_panel
+
+
 # ---------------------------------------------------------------------------
 # 4. Response shape validation
 # ---------------------------------------------------------------------------

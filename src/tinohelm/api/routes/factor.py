@@ -602,10 +602,29 @@ async def params_grid_endpoint(req: ParamsGridRequest) -> dict:
     # Wrap kernel to match params_grid's factor_fn signature.
     kernel = registry.get_kernel(req.factor_name)
 
+    declared_input_specs = list(spec.input_specs or [])
+    input_kwargs = {
+        input_spec.field_name: raw_panels[input_spec.field_name]
+        for input_spec in declared_input_specs
+        if input_spec.field_name in raw_panels
+    }
+    missing_inputs = [
+        input_spec.field_name
+        for input_spec in declared_input_specs
+        if input_spec.field_name not in input_kwargs
+    ]
+    if missing_inputs:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing factor inputs for params_grid: {missing_inputs}",
+        )
+    if not declared_input_specs:
+        input_kwargs = {"close": close_panel}
+
     def _factor_fn(**params_kw: object) -> object:
         merged_params = dict(spec.params)
         merged_params.update(params_kw)
-        return kernel(close=close_panel, params=merged_params)
+        return kernel(**input_kwargs, params=merged_params)
 
     try:
         candidates = await asyncio.to_thread(

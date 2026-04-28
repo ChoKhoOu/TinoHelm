@@ -24,7 +24,7 @@ import csv
 import json
 import math
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +34,13 @@ import pytest
 from tinohelm.factor.data_layer import DataLayer, _parse_ts, load_aligned
 from tinohelm.factor.types import DataRequest
 from tinohelm.factor.universe import Universe
+
+
+def test_parse_ts_converts_offset_to_utc_naive() -> None:
+    """Offset-aware timestamps must preserve the instant before stripping tz."""
+    assert _parse_ts("2026-01-01T00:00:00-05:00") == datetime(2026, 1, 1, 5, 0)
+    aware = datetime(2026, 1, 1, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
+    assert _parse_ts(aware) == datetime(2026, 1, 1, 5, 0)
 
 
 # ---------------------------------------------------------------------------

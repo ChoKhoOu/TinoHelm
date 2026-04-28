@@ -646,6 +646,77 @@ def test_load_aligned_panels_invokes_datalayer_and_kernel():
     assert abs(first_row["ETHUSDT-PERP"].item() - 0.10) < 1e-9
 
 
+def test_load_aligned_panels_preserves_universe_pit_boundaries():
+    """Worker uses persisted PIT rules, not permanent Universe.from_symbols."""
+    from unittest.mock import patch
+    import datetime as _dt
+
+    import polars as pl
+
+    from tinohelm.factor.types import FactorSpec, InputSpec
+    from tinohelm.signal.types import SignalSpec
+    from tinohelm.signal.worker import _load_aligned_panels
+
+    syms = ("BTCUSDT-PERP", "ETHUSDT-PERP")
+    synthetic_close = pl.DataFrame({
+        "ts": [_dt.datetime(2024, 1, 1, h) for h in range(3)],
+        "BTCUSDT-PERP": [100.0, 110.0, 121.0],
+        "ETHUSDT-PERP": [50.0, 55.0, 60.5],
+    })
+    factor_spec = FactorSpec(
+        name="fake_momentum",
+        category="momentum",
+        description="",
+        lookback=2,
+        input_specs=(InputSpec(field_name="close"),),
+    )
+    captured_boundaries = {}
+
+    def _fake_load(self, requests, start=None, end=None):
+        captured_boundaries.update(self._universe.get_symbol_boundaries())
+        return {"close": synthetic_close}
+
+    spec = SignalSpec(
+        name="test",
+        factor_ref="fake_momentum@1.0.0",
+        method="top_k_long_short",
+        weighting="equal",
+        rebalance_freq="1h",
+        universe_ref="test_universe",
+    )
+    config = {
+        "universe_symbols": list(syms),
+        "universe_pit_rules": {
+            "BTCUSDT-PERP": {
+                "listing_date": "2020-01-01",
+                "delisting_date": "2024-01-02",
+            },
+            "ETHUSDT-PERP": {
+                "listing_date": "2020-01-01",
+                "delisting_date": None,
+            },
+        },
+        "start": "2024-01-01",
+        "end": "2024-01-02",
+    }
+
+    with (
+        patch("tinohelm.factor.registry.Registry.scan", return_value=None),
+        patch(
+            "tinohelm.factor.registry.Registry.get_kernel",
+            return_value=lambda close, params=None: close,
+        ),
+        patch(
+            "tinohelm.factor.registry.Registry.get_spec",
+            return_value=factor_spec,
+        ),
+        patch("tinohelm.factor.data_layer.DataLayer.load", new=_fake_load),
+    ):
+        _load_aligned_panels(spec, config)
+
+    assert captured_boundaries["BTCUSDT-PERP"][1] == _dt.datetime(2024, 1, 2)
+
+
 def test_load_aligned_panels_rejects_missing_universe_symbols():
     """Legacy run without universe_symbols → ValueError (surfaces as failed)."""
     from tinohelm.signal.types import SignalSpec

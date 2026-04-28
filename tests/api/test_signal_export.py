@@ -394,12 +394,14 @@ def test_parse_rebalance_to_ns(freq, expected_ns):
     assert _parse_rebalance_to_ns(freq) == expected_ns
 
 
-def test_parse_rebalance_to_ns_empty_falls_back_to_1h():
-    assert _parse_rebalance_to_ns("") == 3_600_000_000_000
+def test_parse_rebalance_to_ns_empty_raises():
+    with pytest.raises(ValueError, match="invalid rebalance_freq"):
+        _parse_rebalance_to_ns("")
 
 
-def test_parse_rebalance_to_ns_invalid_falls_back_to_1h():
-    assert _parse_rebalance_to_ns("invalid") == 3_600_000_000_000
+def test_parse_rebalance_to_ns_invalid_raises():
+    with pytest.raises(ValueError, match="invalid rebalance_freq"):
+        _parse_rebalance_to_ns("invalid")
 
 
 # ---------------------------------------------------------------------------

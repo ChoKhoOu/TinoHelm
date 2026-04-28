@@ -131,7 +131,9 @@ exposure_df = provider.get_exposure(ts_series, symbols)
 
 - `name = "log_mcap"`
 - 以 log(市值) 作为暴露值（代理：log(close * circulating_supply)）
-- 无历史 look-ahead：只使用 ts 时刻或之前的市值估计
+- 当前实现使用 **current circulating supply snapshot**，不是 PIT-safe。
+  `Aligner` 默认禁止把它用于历史 neutralization；只有明确接受
+  non-PIT exploratory 语义时才传 `allow_non_pit_exposures=True`。
 
 ```python
 from tinohelm.aligner.exposure_logmcap import LogMcapExposure
@@ -175,7 +177,11 @@ aligner = Aligner(uni, neutralize=[BTCBetaExposure(rolling_window=60)])
 
 # 混合使用
 from tinohelm.aligner.exposure_logmcap import LogMcapExposure
-aligner = Aligner(uni, neutralize=["btc_beta", LogMcapExposure()])
+aligner = Aligner(
+    uni,
+    neutralize=["btc_beta", LogMcapExposure()],
+    allow_non_pit_exposures=True,  # log_mcap 当前使用 current supply snapshot
+)
 ```
 
 ### 4.2 align() 输入输出
@@ -186,7 +192,7 @@ from tinohelm.aligner.aligner import Aligner
 from tinohelm.factor.universe import Universe
 
 uni = Universe.from_symbols(["BTCUSDT-PERP", "ETHUSDT-PERP"])
-aligner = Aligner(uni, neutralize=["btc_beta", "log_mcap"])
+aligner = Aligner(uni, neutralize=["btc_beta"])
 
 # factor_panel: pl.DataFrame, 列：ts + N symbols
 factor_panel: pl.DataFrame = ...  # 由 @factor kernel 返回
@@ -237,7 +243,7 @@ print("无中性化（仅 PIT 过滤）:", raw_panel.shape)
 
 # 6. 使用 LogMcapExposure 实例（无需 registry lookup）
 log_mcap = LogMcapExposure()
-aligner_mcap = Aligner(uni, neutralize=[log_mcap])
+aligner_mcap = Aligner(uni, neutralize=[log_mcap], allow_non_pit_exposures=True)
 neutral_panel = aligner_mcap.align(factor_panel)
 print("log_mcap 中性化后:", neutral_panel.shape)
 assert neutral_panel.shape == factor_panel.shape

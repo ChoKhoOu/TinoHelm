@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
@@ -85,7 +85,7 @@ def _parse_date(value: str | None) -> datetime | None:
         # Fall back to plain ``YYYY-MM-DD`` (covers exotic separators).
         ts = datetime.strptime(cleaned, "%Y-%m-%d")
     if ts.tzinfo is not None:
-        ts = ts.replace(tzinfo=None)
+        ts = ts.astimezone(UTC).replace(tzinfo=None)
     # Normalise to midnight naive datetime to match the legacy contract.
     return ts.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -106,7 +106,7 @@ def _to_naive_datetime(ts: datetime) -> datetime:
         # never import pandas at module top.
         ts = ts.to_pydatetime()  # type: ignore[union-attr]
     if ts.tzinfo is not None:
-        return ts.replace(tzinfo=None)
+        return ts.astimezone(UTC).replace(tzinfo=None)
     return ts
 
 
