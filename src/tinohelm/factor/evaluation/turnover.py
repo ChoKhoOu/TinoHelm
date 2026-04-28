@@ -58,16 +58,30 @@ def compute_turnover(
         return dict(_EMPTY_OUTPUT)
 
     # Bucket each row into its calendar day, then walk consecutive days
-    # comparing per-row quantile labels via an inner join on the row position
-    # *within* a day. Legacy used pandas ``align(join="inner")`` on the time
-    # index inside the daily group — replicate that semantics here.
+    # comparing quantile labels.  For multi-symbol panels, preserve symbol
+    # identity and compare BTC_t with BTC_t+1 rather than using row position
+    # (which would silently compare against a different asset when the
+    # universe order changes).  For legacy flat series, keep the historical
+    # per-row alignment within each day.
     bucketed = bucketed.with_columns(
         pl.col("ts").dt.truncate("1d").alias("day"),
     )
-    # ``row_in_day`` enumerates rows within each day in chronological order.
-    bucketed = bucketed.sort(["day", "ts"]).with_columns(
-        pl.col("ts").cum_count().over("day").cast(pl.Int64).alias("row_in_day")
-    )
+    has_symbol = "symbol" in bucketed.columns
+    if has_symbol:
+        bucketed = bucketed.sort(["day", "symbol", "ts"]).with_columns(
+            pl.col("ts")
+            .cum_count()
+            .over(["day", "symbol"])
+            .cast(pl.Int64)
+            .alias("row_in_symbol_day")
+        )
+        join_cols = ["symbol", "row_in_symbol_day"]
+    else:
+        # ``row_in_day`` enumerates rows within each day in chronological order.
+        bucketed = bucketed.sort(["day", "ts"]).with_columns(
+            pl.col("ts").cum_count().over("day").cast(pl.Int64).alias("row_in_day")
+        )
+        join_cols = ["row_in_day"]
 
     daily_groups = bucketed.partition_by("day", as_dict=True, maintain_order=True)
     turnovers: list[float] = []
@@ -75,11 +89,11 @@ def compute_turnover(
     for _key, group in daily_groups.items():
         if group.height == 0:
             continue
-        curr_q = group.select(["row_in_day", "q"])
+        curr_q = group.select([*join_cols, "q"])
         if prev_q is not None:
             joined = prev_q.rename({"q": "q_prev"}).join(
                 curr_q.rename({"q": "q_curr"}),
-                on="row_in_day",
+                on=join_cols,
                 how="inner",
             )
             if joined.height > 0:

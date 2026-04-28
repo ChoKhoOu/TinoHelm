@@ -107,7 +107,8 @@ def compute_quantile_returns(
     for q in unique_qs:
         label = f"Q{int(q) + 1}"
         # Maintain chronological order so cum returns make sense.
-        group = bucketed.filter(pl.col("q") == q).sort("ts")
+        sort_cols = ["ts", "symbol"] if "symbol" in bucketed.columns else ["ts"]
+        group = bucketed.filter(pl.col("q") == q).sort(sort_cols)
         avg_returns[label] = round(float(group["fwd_ret"].mean()), 8)
 
         # Sample cumulative-return series down to ≤ ~100 points (legacy contract

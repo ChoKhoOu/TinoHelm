@@ -18,6 +18,7 @@ Usage example
         weighting="equal",
         rebalance_freq="1D",
         universe_ref="top10_perp",
+        factor_params={"lookback": 20},
         method_params={"k": 3},
     )
     def my_kernel(factor_panel):
@@ -88,6 +89,7 @@ def signal(
     rebalance_freq: str,
     universe_ref: str,
     weighting: SignalWeighting = "equal",
+    factor_params: dict[str, Any] | None = None,
     method_params: dict[str, Any] | None = None,
     cost_model: CostModel | None = None,
     gross_exposure: float = 1.0,
@@ -118,6 +120,10 @@ def signal(
         Universe name resolved at runtime.
     weighting:
         Weight regime — defaults to ``"equal"``.
+    factor_params:
+        Upstream factor-kernel parameter overrides (e.g. ``{"lookback": 20}``).
+        These are kept separate from signal-kernel ``method_params`` so
+        research runs and NT exports can reproduce the same factor panel.
     method_params:
         Method-specific kwargs (e.g. ``{"k": 10}``).
     cost_model:
@@ -193,6 +199,7 @@ def signal(
             net_exposure=net_exposure,
             max_position=max_position,
             turnover_budget=turnover_budget,
+            factor_params=dict(factor_params) if factor_params is not None else {},
             method_params=dict(method_params) if method_params is not None else {},
             cost_model=cost_model
             if cost_model is not None

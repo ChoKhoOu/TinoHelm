@@ -455,7 +455,7 @@ async def run_signal(
         "net_exposure": spec.net_exposure,
         "max_position": spec.max_position,
         "turnover_budget": spec.turnover_budget,
-        "factor_params": {},
+        "factor_params": dict(spec.factor_params),
         "method_params": dict(spec.method_params),
         "cost_model": dataclasses.asdict(spec.cost_model),
         "extra_warmup_bars": spec.extra_warmup_bars,

@@ -11,16 +11,17 @@
   diagnostic including shuffle test, subsample IC, cross-symbol IC, and
   cost waterfall.
 
-Panel → ``[ts, value]`` flattening
-----------------------------------
+Panel → ``[ts, symbol, value]`` flattening
+------------------------------------------
 The declarative framework still passes factor / forward-return data as a
 ``Panel`` (``pl.DataFrame`` keyed by ``ts`` with N symbol columns). Legacy
 sub-functions consumed flat pandas Series; the polars rewrite uses 2-col
-``[ts, value]`` :class:`pl.DataFrame` instances. :func:`_to_ts_value`
-flattens a panel by *unpivoting* the symbol columns into a single ``value``
-column (multi-symbol stacking still works because the IC / quantile /
-turnover routines bucket by ``ts`` internally — duplicate timestamps from
-multiple symbols flow correctly through ``group_by``).
+``[ts, value]`` or 3-col ``[ts, symbol, value]`` :class:`pl.DataFrame`
+instances. :func:`_to_ts_value` flattens a wide panel by *unpivoting* the
+symbol columns while preserving ``symbol`` as an identity key.  Downstream
+joins use ``(ts, symbol)`` when available, preventing multi-symbol panels
+from cross-pairing factor values and forward returns across different
+assets.
 
 Backward compatibility
 ----------------------
@@ -49,6 +50,7 @@ import polars as pl
 from tinohelm.factor.evaluation.cost import edge_waterfall
 from tinohelm.factor.evaluation.distribution import compute_distribution
 from tinohelm.factor.evaluation.ic import (
+    _join_keys,
     compute_ic_decay,
     compute_ic_series,
     compute_ic_summary,
@@ -72,6 +74,7 @@ from tinohelm.factor.types import EvalConfig, EvalResult, Panel
 # ---------------------------------------------------------------------------
 
 _TS_COL: str = "ts"
+_SYMBOL_COL: str = "symbol"
 _VAL_COL: str = "value"
 
 
@@ -130,15 +133,15 @@ def _pandas_dataframe_to_polars_panel(df: Any) -> pl.DataFrame:
 
 
 def _to_ts_value(values: Panel | pl.Series | Any) -> pl.DataFrame:
-    """Flatten *any* supported input shape into a 2-col ``[ts, value]`` frame.
+    """Flatten supported input into ``[ts, value]`` or ``[ts, symbol, value]``.
 
     Supported input types:
       * 2-col :class:`pl.DataFrame` ``[ts, value]`` — passed through.
+      * 3-col :class:`pl.DataFrame` ``[ts, symbol, value]`` — passed through
+        with canonical column order.
       * Multi-col :class:`pl.DataFrame` panel ``[ts, sym1, sym2, ...]`` —
-        unpivoted to long form so every symbol's value contributes to the
-        same flat ``value`` column. The ``ts`` column is duplicated across
-        symbols, which is exactly what the IC / quantile / turnover groupers
-        expect (they bucket by ``ts`` internally).
+        unpivoted to long form so every ``(ts, symbol)`` cell contributes one
+        row while retaining the symbol identity for later joins.
       * :class:`pl.Series` — wrapped with a synthetic integer ``ts`` axis.
       * pandas ``Series`` / ``DataFrame`` (duck-typed) — converted via
         :func:`_pandas_series_to_polars` /
@@ -156,23 +159,27 @@ def _to_ts_value(values: Panel | pl.Series | Any) -> pl.DataFrame:
                 f"polars DataFrame missing required {_TS_COL!r} column; got {cols!r}"
             )
         non_ts = [c for c in cols if c != _TS_COL]
+        if _SYMBOL_COL in cols and _VAL_COL in cols:
+            return values.select([_TS_COL, _SYMBOL_COL, _VAL_COL])
         if len(non_ts) == 1 and non_ts[0] == _VAL_COL:
             return values
         if len(non_ts) == 1:
-            # Single symbol column — rename to ``value`` for downstream uniformity.
+            # Single symbol column — keep the asset identity instead of
+            # collapsing it away, so wide-panel callers get consistent schema
+            # whether they pass one symbol or many.
             return values.select([
                 pl.col(_TS_COL),
+                pl.lit(non_ts[0]).alias(_SYMBOL_COL),
                 pl.col(non_ts[0]).alias(_VAL_COL),
             ])
         # Multi-symbol panel — unpivot to long form so every (ts, symbol)
-        # cell becomes a row in the flat ``value`` column.
-        long = values.unpivot(
+        # cell becomes a row without losing the symbol identity.
+        return values.unpivot(
             index=[_TS_COL],
             on=non_ts,
-            variable_name="__symbol",
+            variable_name=_SYMBOL_COL,
             value_name=_VAL_COL,
-        ).select([_TS_COL, _VAL_COL])
-        return long
+        ).select([_TS_COL, _SYMBOL_COL, _VAL_COL])
 
     if isinstance(values, pl.Series):
         ts = list(range(len(values)))
@@ -393,7 +400,7 @@ class Evaluator:
         returns: Panel | pl.Series | Any,
         config: EvalConfig,
     ) -> tuple[pl.DataFrame, pl.DataFrame | None]:
-        """Translate ``returns`` into a forward-return ``[ts, value]`` frame.
+        """Translate ``returns`` into a forward-return evaluation frame.
 
         Heuristic: if the input already contains explicit nulls in the tail
         (consistent with :func:`forward_returns`), treat it as pre-shifted
@@ -403,11 +410,21 @@ class Evaluator:
         Returns
         -------
         tuple[pl.DataFrame, pl.DataFrame | None]
-            ``(forward_return_frame, close_frame_or_none)`` — the close
+            ``(forward_return_frame, close_frame_or_none)`` — frames use
+            ``[ts, value]`` or ``[ts, symbol, value]``.  The close
             frame is ``None`` when the input was already pre-shifted (so
             :func:`compute_ic_decay` can be skipped in the caller).
         """
         as_frame = _to_ts_value(returns)
+        min_value = as_frame.select(pl.col(_VAL_COL).min()).item()
+        # Close-price panels should be strictly positive.  If callers pass
+        # return-like data (often centered around zero and containing negative
+        # values), treat it as already shifted even when the tail null marker
+        # is absent.  This keeps walk-forward/test slices from being mistaken
+        # for raw prices solely because slicing removed the original null tail.
+        if min_value is not None and float(min_value) <= 0:
+            return as_frame, None
+
         period = max(0, int(config.forward_period))
         if period > 0 and as_frame.height >= period:
             tail = as_frame.tail(period)
@@ -433,11 +450,17 @@ class Evaluator:
         factor_df = _to_ts_value(factor_values)
         fwd_df, close_df = self._prepare_returns(returns, config)
 
-        # Defensive: align by inner join on ``ts`` so stacked panels share the
-        # same time axis (mirrors the pandas ``align(join="inner")`` step).
-        common_ts = factor_df.join(fwd_df, on=_TS_COL, how="inner").select(_TS_COL)
-        factor_df = factor_df.join(common_ts, on=_TS_COL, how="inner")
-        fwd_df = fwd_df.join(common_ts, on=_TS_COL, how="inner")
+        # Defensive: align by identity keys so stacked panels share the same
+        # asset/time axis (mirrors pandas ``align(join="inner")`` without
+        # producing the symbol² row explosion caused by joining on ``ts`` only).
+        key_cols = _join_keys(factor_df, fwd_df)
+        common_keys = (
+            factor_df.select(key_cols)
+            .join(fwd_df.select(key_cols), on=key_cols, how="inner")
+            .unique(maintain_order=True)
+        )
+        factor_df = factor_df.join(common_keys, on=key_cols, how="inner")
+        fwd_df = fwd_df.join(common_keys, on=key_cols, how="inner")
 
         result = EvalResult()
 

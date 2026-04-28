@@ -94,6 +94,7 @@ def temp_signal_module(tmp_path, monkeypatch):
         '    method="top_k_long_short",\n'
         '    rebalance_freq="1D",\n'
         '    universe_ref="top10_perp",\n'
+        '    factor_params={"lookback": 7},\n'
         '    method_params={"k": 3},\n'
         ")\n"
         "def my_kernel(factor_panel):\n"
@@ -237,6 +238,8 @@ def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
     assert inserted.status == "queued"
     assert inserted.config["start"] == "2024-01-01"
     assert inserted.config["method"] == "top_k_long_short"
+    assert inserted.config["factor_params"] == {"lookback": 7}
+    assert inserted.config["method_params"] == {"k": 3}
     # Universe resolution populated instrument_ids + bar_type_template.
     assert inserted.config["instrument_ids"] == [
         "BTCUSDT-PERP.BINANCE",
@@ -257,6 +260,7 @@ def test_run_creates_db_row_and_pushes_queue(client, temp_signal_module):
     assert payload["run_id"] == body["run_id"]
     assert payload["signal_name"] == "my_user_signal"
     assert "config" in payload
+    assert payload["config"]["factor_params"] == {"lookback": 7}
 
 
 def test_run_marks_failed_when_enqueue_fails(client, temp_signal_module):

@@ -33,6 +33,7 @@ import pytest
 from tinohelm.factor.evaluation.ic import (
     _DEFAULT_LAGS,
     _EMPTY_SUMMARY,
+    _build_paired,
     compute_ic_decay,
     compute_ic_series,
     compute_ic_summary,
@@ -108,6 +109,27 @@ class TestForwardReturns:
         out = forward_returns(close, period=5)
         assert all(v is None for v in out["value"].to_list())
 
+    def test_multi_symbol_shift_stays_within_symbol(self):
+        ts = _hourly_ts(3)
+        close = pl.DataFrame(
+            {
+                "ts": [*ts.to_list(), *ts.to_list()],
+                "symbol": ["BTC", "BTC", "BTC", "ETH", "ETH", "ETH"],
+                "value": [100.0, 110.0, 121.0, 200.0, 180.0, 162.0],
+            }
+        )
+
+        out = forward_returns(close, period=1)
+
+        btc = out.filter(pl.col("symbol") == "BTC")["value"].to_list()
+        eth = out.filter(pl.col("symbol") == "ETH")["value"].to_list()
+        assert math.isclose(btc[0], 0.10, rel_tol=1e-12)
+        assert math.isclose(btc[1], 0.10, rel_tol=1e-12)
+        assert btc[2] is None
+        assert math.isclose(eth[0], -0.10, rel_tol=1e-12)
+        assert math.isclose(eth[1], -0.10, rel_tol=1e-12)
+        assert eth[2] is None
+
 
 # ──────────────────────────────────────────────────────────────────────
 # compute_ic_series
@@ -129,6 +151,36 @@ class TestComputeIcSeries:
         out = compute_ic_series(factor, fwd)
         assert out.height == 0
         assert out.columns == ["date", "ic"]
+
+    def test_build_paired_joins_multi_symbol_on_ts_and_symbol(self):
+        ts = _hourly_ts(4)
+        factor = pl.DataFrame(
+            {
+                "ts": [*ts.to_list(), *ts.to_list()],
+                "symbol": ["BTC", "BTC", "BTC", "BTC", "ETH", "ETH", "ETH", "ETH"],
+                "value": [0.10, 0.11, 0.12, 0.13, -0.10, -0.11, -0.12, -0.13],
+            }
+        )
+        fwd = pl.DataFrame(
+            {
+                "ts": [*ts.to_list(), *ts.to_list()],
+                "symbol": ["BTC", "BTC", "BTC", "BTC", "ETH", "ETH", "ETH", "ETH"],
+                "value": [0.01, 0.02, 0.03, None, -0.01, -0.02, -0.03, None],
+            }
+        )
+
+        paired = _build_paired(factor, fwd)
+
+        # 2 symbols × 3 valid timestamps.  A ts-only join would produce
+        # cross-symbol BTC↔ETH pairs and inflate this to 12 rows.
+        assert paired.height == 6
+        assert paired.select(["ts", "symbol"]).unique().height == 6
+        assert paired.filter(
+            (pl.col("symbol") == "BTC") & (pl.col("fwd_ret") < 0)
+        ).height == 0
+        assert paired.filter(
+            (pl.col("symbol") == "ETH") & (pl.col("fwd_ret") > 0)
+        ).height == 0
 
     def test_exactly_30_paired_does_not_short_circuit(self):
         factor, fwd = self._make_corr_pair(30)

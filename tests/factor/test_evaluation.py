@@ -412,8 +412,9 @@ class TestPanelFlattening:
         assert isinstance(out, pl.DataFrame)
         # Flattened length = bars × symbols (one row per (ts, symbol) cell).
         assert out.height == panel_close.shape[0] * panel_close.shape[1]
-        # 2-col output: ``ts`` + ``value``.
-        assert out.columns == ["ts", "value"]
+        # 3-col output preserves symbol identity for downstream joins.
+        assert out.columns == ["ts", "symbol", "value"]
+        assert sorted(out["symbol"].unique().to_list()) == sorted(panel_close.columns)
 
     def test_to_ts_value_unsupported_type_raises(self):
         with pytest.raises(TypeError):

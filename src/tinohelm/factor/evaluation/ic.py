@@ -9,14 +9,17 @@ Output values (``ic_mean``, ``ic_std``, ``ir``, ``ic_tstat``,
 
 Input contract (post-polars)
 ----------------------------
-``factor`` / ``fwd_ret`` / ``close`` are 2-column :class:`polars.DataFrame`
-instances with columns ``[ts, value]``:
+``factor`` / ``fwd_ret`` / ``close`` are :class:`polars.DataFrame`
+instances with columns ``[ts, value]`` or ``[ts, symbol, value]``:
 
 * ``ts``    — :class:`polars.Datetime` (nanos / micros) — paired by inner
   join across factor / fwd. Multi-symbol stacked panels may carry
   duplicate ``ts`` rows (one row per symbol per timestamp); duplicates
   flow through ``group_by`` correctly (the daily bucket math doesn't care
   whether a bucket comes from many symbols or one).
+* ``symbol`` — optional asset key.  When present on both frames, all joins
+  and shifts use ``(ts, symbol)`` so multi-symbol panels cannot cross-pair
+  BTC factor values with ETH forward returns.
 * ``value`` — :class:`polars.Float64` — factor score, forward return, or
   close price.
 
@@ -35,6 +38,7 @@ from scipy.stats import spearmanr
 # ---------------------------------------------------------------------------
 
 _TS_COL: str = "ts"
+_SYMBOL_COL: str = "symbol"
 _VAL_COL: str = "value"
 
 # Map pandas-compatible offset aliases (used historically across the project)
@@ -59,7 +63,7 @@ def _to_polars_freq(freq: str) -> str:
 
 
 def _ensure_ts_value_frame(df: pl.DataFrame, name: str) -> pl.DataFrame:
-    """Validate input has ``[ts, value]`` columns; raise ``ValueError`` otherwise.
+    """Validate input has ``[ts, value]`` plus optional ``symbol``.
 
     Returns the frame unchanged. Kept as a lightweight guard so the
     sub-functions surface clear errors when callers pass malformed inputs.
@@ -70,6 +74,14 @@ def _ensure_ts_value_frame(df: pl.DataFrame, name: str) -> pl.DataFrame:
             f"got: {df.columns!r}"
         )
     return df
+
+
+def _join_keys(left: pl.DataFrame, right: pl.DataFrame) -> list[str]:
+    """Return identity-preserving join keys for evaluation frames."""
+    keys = [_TS_COL]
+    if _SYMBOL_COL in left.columns and _SYMBOL_COL in right.columns:
+        keys.append(_SYMBOL_COL)
+    return keys
 
 
 # ---------------------------------------------------------------------------
@@ -86,15 +98,29 @@ def forward_returns(
     ``fwd[t] = close[t+period] / close[t] - 1`` (or log variant). The last
     ``period`` rows are ``null`` because the future bar isn't available.
 
-    Returns a fresh 2-col :class:`pl.DataFrame` with columns ``[ts, value]``.
+    Returns a fresh :class:`pl.DataFrame` with columns ``[ts, value]`` or
+    ``[ts, symbol, value]``.  Multi-symbol frames are shifted independently
+    within each symbol.
     The caller's frame is **not** mutated.
     """
     _ensure_ts_value_frame(close, "forward_returns(close)")
-    if log_ret:
-        expr = (pl.col(_VAL_COL).shift(-period) / pl.col(_VAL_COL)).log()
+    if _SYMBOL_COL in close.columns:
+        ordered = close.sort([_SYMBOL_COL, _TS_COL])
+        future = pl.col(_VAL_COL).shift(-period).over(_SYMBOL_COL)
     else:
-        expr = pl.col(_VAL_COL).shift(-period) / pl.col(_VAL_COL) - 1
-    return close.select([pl.col(_TS_COL), expr.alias(_VAL_COL)])
+        ordered = close.sort(_TS_COL)
+        future = pl.col(_VAL_COL).shift(-period)
+
+    if log_ret:
+        expr = (future / pl.col(_VAL_COL)).log()
+    else:
+        expr = future / pl.col(_VAL_COL) - 1
+
+    select_cols = [pl.col(_TS_COL)]
+    if _SYMBOL_COL in ordered.columns:
+        select_cols.append(pl.col(_SYMBOL_COL))
+    select_cols.append(expr.alias(_VAL_COL))
+    return ordered.select(select_cols)
 
 
 # ---------------------------------------------------------------------------
@@ -102,18 +128,20 @@ def forward_returns(
 # ---------------------------------------------------------------------------
 
 def _build_paired(factor: pl.DataFrame, fwd_ret: pl.DataFrame) -> pl.DataFrame:
-    """Inner-join on ``ts`` and drop non-finite rows.
+    """Inner-join on identity keys and drop non-finite rows.
 
-    Output schema: ``[ts (Datetime), factor (Float64), fwd_ret (Float64)]``.
+    Output schema: ``[ts, factor, fwd_ret]`` for single-series input, or
+    ``[ts, symbol, factor, fwd_ret]`` for multi-symbol input.
     Equivalent of ``pandas DataFrame({"factor": ..., "fwd_ret": ...}).dropna()``
     plus the historical ``np.isfinite`` guard.
     """
     _ensure_ts_value_frame(factor, "factor")
     _ensure_ts_value_frame(fwd_ret, "fwd_ret")
+    keys = _join_keys(factor, fwd_ret)
 
     paired = (
         factor.rename({_VAL_COL: "factor"})
-        .join(fwd_ret.rename({_VAL_COL: "fwd_ret"}), on=_TS_COL, how="inner")
+        .join(fwd_ret.rename({_VAL_COL: "fwd_ret"}), on=keys, how="inner")
         .drop_nulls()
         .filter(pl.col("factor").is_finite() & pl.col("fwd_ret").is_finite())
     )

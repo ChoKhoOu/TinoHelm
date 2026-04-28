@@ -156,17 +156,17 @@ def test_golden_synthetic_data():
     Synthetic construction:
         T=500, N=10 symbols.
         Factor scores drawn from N(i, 0.5) for symbol i.
-        IS segment (bars 0-299, 60%): forward returns = factor * 0.10 + noise
+        IS segment (bars 0-209): forward returns = factor * 0.10 + noise
             → Spearman IC ≈ +0.10.
-        OOS segment (bars 300-499, 40%): forward returns = factor * (-0.02) + larger_noise
-            → Spearman IC ≈ -0.02.
+        OOS segment (bars 210-499): forward returns = factor * (-0.02) + larger_noise
+            → negative Spearman IC.
 
         WalkForwardSpec(train_bars=200, test_bars=50, embargo_bars=10, purge_bars=10):
             fold 0: train [0, 190), test [210, 260)  — in OOS zone → IC≈-0.02
             fold 1: train [50, 240), test [260, 310) — test also in OOS zone
             (further folds test_end <= 500)
 
-        All test folds land in the OOS zone → mean OOS IC ∈ [-0.04, 0.0].
+        All test folds land in the OOS zone → mean OOS IC is clearly negative.
     """
     rng = np.random.default_rng(42)
     T = 500
@@ -185,7 +185,7 @@ def test_golden_synthetic_data():
     oos_noise = rng.normal(0, 0.5, size=(T, N))
 
     returns_vals = np.zeros((T, N))
-    is_end = 300  # first 60% is IS
+    is_end = 210  # test folds start at 210, so every OOS fold is in the negative regime
     returns_vals[:is_end] = factor_vals[:is_end] * 0.10 + is_noise[:is_end]
     returns_vals[is_end:] = factor_vals[is_end:] * (-0.02) + oos_noise[is_end:]
 
@@ -205,8 +205,8 @@ def test_golden_synthetic_data():
     assert len(result.oos_ic_series) >= 1, "expected at least 1 OOS fold"
     oos_ic_means = [d["ic_mean"] for d in result.oos_ic_series]
     mean_oos_ic = float(np.mean(oos_ic_means))
-    assert -0.04 <= mean_oos_ic <= 0.0, (
-        f"OOS IC mean {mean_oos_ic:.4f} not in [-0.04, 0.0]; "
+    assert -0.25 <= mean_oos_ic <= -0.05, (
+        f"OOS IC mean {mean_oos_ic:.4f} not in [-0.25, -0.05]; "
         f"per-fold IC means: {oos_ic_means}"
     )
 

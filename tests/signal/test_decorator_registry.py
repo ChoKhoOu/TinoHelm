@@ -57,6 +57,7 @@ class TestSignalDecoratorBasic:
             method="top_k_long_short",
             rebalance_freq="1D",
             universe_ref="top10_perp",
+            factor_params={"lookback": 7},
             method_params={"k": 3},
             description="my description",
             version="2.1.0",
@@ -71,6 +72,7 @@ class TestSignalDecoratorBasic:
         assert spec.weighting == "equal"  # default
         assert spec.rebalance_freq == "1D"
         assert spec.universe_ref == "top10_perp"
+        assert spec.factor_params == {"lookback": 7}
         assert spec.method_params == {"k": 3}
         assert spec.description == "my description"
         assert spec.version == "2.1.0"
