@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { Search, X } from "lucide-react";
+import { Search } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { FadeIn } from "@/components/motion/FadeIn";
@@ -12,13 +12,10 @@ import { Pagination } from "@/components/Pagination";
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 
 /* ── Types ──────────────────────────────────────────────── */
 
 type NodeType = "all" | "sandbox" | "live";
-type OrderStatus = "ALL" | "ACCEPTED" | "FILLED" | "CANCELED" | "REJECTED" | "EXPIRED";
-
 interface Order {
   id: number;
   node_type: string;
@@ -45,16 +42,6 @@ const NODE_TYPE_OPTIONS: { value: NodeType; label: string }[] = [
   { value: "live", label: "Live" },
 ];
 
-const STATUS_OPTIONS: OrderStatus[] = ["ALL", "ACCEPTED", "FILLED", "CANCELED", "REJECTED", "EXPIRED"];
-
-const STATUS_ZH: Record<string, string> = {
-  ALL: "All",
-  ACCEPTED: "Open",
-  FILLED: "Filled",
-  CANCELED: "Cancelled",
-  REJECTED: "Rejected",
-  EXPIRED: "Expired",
-};
 
 const TYPE_VARIANT: Record<string, string> = {
   LIMIT: "bg-secondary text-qds-t1",
@@ -65,6 +52,12 @@ const TYPE_VARIANT: Record<string, string> = {
 };
 
 type TabKey = "open" | "filled" | "cancelled";
+
+const TAB_STATUS_MAP: Record<TabKey, string[]> = {
+  open: ["ACCEPTED", "PARTIALLY_FILLED"],
+  filled: ["FILLED"],
+  cancelled: ["CANCELED", "REJECTED", "EXPIRED"],
+};
 
 /* ── Mock Data ──────────────────────────────────────────── */
 
@@ -201,14 +194,8 @@ export default function OrdersPage() {
   useEffect(() => { loadOrders(); }, [loadOrders]);
 
   /* Filter by tab */
-  const tabStatusMap: Record<TabKey, string[]> = {
-    open: ["ACCEPTED", "PARTIALLY_FILLED"],
-    filled: ["FILLED"],
-    cancelled: ["CANCELED", "REJECTED", "EXPIRED"],
-  };
-
   const filtered = useMemo(() => {
-    const statuses = tabStatusMap[activeTab];
+    const statuses = TAB_STATUS_MAP[activeTab];
     return orders.filter((o) => statuses.includes(o.status));
   }, [orders, activeTab]);
 

@@ -20,6 +20,17 @@ interface DataFetchJob {
   completed_at: string | null;
 }
 
+interface DataFetchProgressPayload {
+  data?: {
+    job_id?: string;
+    progress?: number;
+    message?: string | null;
+  };
+  job_id?: string;
+  progress?: number;
+  message?: string | null;
+}
+
 function timeAgo(iso: string | null): string {
   if (!iso) return "";
   const diff = Date.now() - new Date(iso).getTime();
@@ -67,7 +78,8 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
   const progressMsg = useWsEvent("data.fetch.progress");
   useEffect(() => {
     if (!progressMsg) return;
-    const p = (progressMsg as any).data ?? progressMsg;
+    const payload = progressMsg as DataFetchProgressPayload;
+    const p = payload.data ?? payload;
     const jobId = p.job_id;
     const pct = p.progress;
     if (!jobId || pct == null) return;

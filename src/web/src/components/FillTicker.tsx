@@ -4,6 +4,13 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useWsEvent } from "@/providers/WebSocketProvider";
 
+interface FillEventPayload {
+  instrument_id?: string;
+  order_side?: string;
+  last_qty?: string;
+  last_px?: string;
+}
+
 export function FillTicker() {
   const router = useRouter();
   const fillEvent = useWsEvent("fill.new");
@@ -14,7 +21,7 @@ export function FillTicker() {
   useEffect(() => {
     if (!fillEvent) return;
     // WS payload is flat JSON (no data wrapper)
-    const fill = fillEvent as Record<string, any>;
+    const fill = fillEvent as FillEventPayload;
 
     // Format: strip .BINANCE suffix and -PERP suffix
     const sym = (fill.instrument_id ?? "").replace(/\.BINANCE$/, "").replace(/-PERP$/, "");

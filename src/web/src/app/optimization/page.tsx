@@ -2,17 +2,14 @@
 
 import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { FlaskConical, Play, Check, ChevronRight } from "lucide-react";
+import { FlaskConical, Play, ChevronRight } from "lucide-react";
 import { formatDateTime } from "@/lib/format";
 import { apiGet } from "@/lib/api";
 import { FadeIn } from "@/components/motion/FadeIn";
-import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
 import { EmptyState } from "@/components/EmptyState";
 import { ConfirmModal } from "@/components/ConfirmModal";
-import { Pagination } from "@/components/Pagination";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 
 /* ── Types ──────────────────────────────────────────────── */
 
@@ -130,8 +127,6 @@ export default function OptimizationPage() {
   /* Results phase */
   const [heatmap, setHeatmap] = useState(mockHeatmap);
   const [topResults, setTopResults] = useState(mockTop10);
-  const [resultsPage, setResultsPage] = useState(1);
-  const [resultsPageSize, setResultsPageSize] = useState(20);
   const [applyModal, setApplyModal] = useState<{ open: boolean; rank: number }>({ open: false, rank: 0 });
 
   /* Detail panel for past runs */

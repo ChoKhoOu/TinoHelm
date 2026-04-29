@@ -34,12 +34,6 @@ const MOCK_TRADES: TradeLogEntry[] = Array.from({ length: 20 }, (_, i) => ({
   duration: "1h",
 }));
 
-const MOCK_OVERVIEW = {
-  equity_curve: [],
-  monthly_returns: [],
-  underwater_curve: [],
-  pnl_histogram: [],
-};
 
 test.beforeEach(async ({ page }) => {
   // Register catch-all first (lowest priority in Playwright's LIFO order)

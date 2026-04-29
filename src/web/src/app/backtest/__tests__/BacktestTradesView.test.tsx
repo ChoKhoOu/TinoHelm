@@ -4,7 +4,7 @@
  * 测试策略：核心过滤逻辑为纯函数，直接断言；RTL 渲染用于验证基础 DOM 结构。
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import type { TradeLogEntry } from '../types';
 
 /* ------------------------------------------------------------------ */

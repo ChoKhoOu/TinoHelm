@@ -58,7 +58,7 @@ export function useFactorRuns() {
 export function useCompareMulti() {
   const [result, setResult] = useState<CompareMultiResult | null>(null);
 
-  const action = useAction<CompareMultiResult>(
+  const action = useAction(
     async (payload: CompareMultiRequest) =>
       (await apiPost<CompareMultiResult>(
         "/api/factor/compare/multi",

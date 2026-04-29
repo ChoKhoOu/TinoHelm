@@ -148,9 +148,8 @@ function StatisticalTestsSection({ r }: { r: RobustnessMetrics }) {
 
 function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
   const cone = r.mc_equity_cone;
-  if (!cone) return null;
-
   const data = useMemo(() => {
+    if (!cone) return [];
     return cone.x_labels.map((x, i) => ({
       x,
       p5: cone.curves.p5[i],
@@ -166,6 +165,8 @@ function McEquityConeSection({ r }: { r: RobustnessMetrics }) {
       band_inner: cone.curves.p75[i] - cone.curves.p25[i],
     }));
   }, [cone]);
+
+  if (!cone) return null;
 
   return (
     <div {...cardAnim(0.07)}>
@@ -298,6 +299,23 @@ interface IsOosData {
 function IsOosSection({ opt }: { opt: IsOosData }) {
   const isStat = opt.train_validation?.statistics as Record<string, number | null> | undefined;
   const oosStat = opt.validation?.statistics as Record<string, number | null> | undefined;
+  const isEq = useMemo(
+    () => opt.train_validation?.equity_curve ?? [],
+    [opt.train_validation?.equity_curve],
+  );
+  const oosEq = useMemo(
+    () => opt.validation?.equity_curve ?? [],
+    [opt.validation?.equity_curve],
+  );
+
+  // Equity overlay
+  const equityData = useMemo(() => {
+    const all: Array<{ idx: number; is?: number; oos?: number }> = [];
+    isEq.forEach((pt, i) => all.push({ idx: i, is: pt.equity }));
+    oosEq.forEach((pt, i) => all.push({ idx: isEq.length + i, oos: pt.equity }));
+    return all;
+  }, [isEq, oosEq]);
+
   if (!isStat || !oosStat) return null;
 
   // Metrics comparison
@@ -315,17 +333,6 @@ function IsOosSection({ opt }: { opt: IsOosData }) {
     const degradation = isVal !== 0 ? ((oosVal - isVal) / Math.abs(isVal)) * 100 : 0;
     return { name: m.label, IS: isVal, OOS: oosVal, degradation: Math.round(degradation) };
   });
-
-  // Equity overlay
-  const isEq = opt.train_validation?.equity_curve ?? [];
-  const oosEq = opt.validation?.equity_curve ?? [];
-
-  const equityData = useMemo(() => {
-    const all: Array<{ idx: number; is?: number; oos?: number }> = [];
-    isEq.forEach((pt, i) => all.push({ idx: i, is: pt.equity }));
-    oosEq.forEach((pt, i) => all.push({ idx: isEq.length + i, oos: pt.equity }));
-    return all;
-  }, [isEq, oosEq]);
 
   return (
     <div {...cardAnim(0.21)}>
