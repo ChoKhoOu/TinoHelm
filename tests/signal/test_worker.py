@@ -912,6 +912,7 @@ async def test_start_stop_signal_worker_lifecycle():
     ):
         task = start_signal_worker("redis://localhost:6379")
 
+    assert task is not None
     assert _handle.is_running()
     stop_signal_worker()
     assert not _handle.is_running()
@@ -1002,7 +1003,7 @@ def test_load_aligned_panels_routes_market_cap_to_market_cap_source():
     ``source = "funding_rate" if field == "funding_rate" else "bar"``,
     which incorrectly routed market_cap → bar → DataLayer read failure.
     """
-    from unittest.mock import patch, call
+    from unittest.mock import patch
     import datetime as _dt
 
     import polars as pl

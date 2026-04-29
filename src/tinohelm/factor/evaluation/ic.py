@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
-from scipy.stats import spearmanr
 
 
 # ---------------------------------------------------------------------------
