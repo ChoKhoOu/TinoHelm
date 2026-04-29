@@ -91,6 +91,32 @@ def test_basic_evaluate(
     assert 0.0 <= result.capacity_score <= 1.0
 
 
+def test_evaluate_rejects_non_positive_periods_per_year(
+    sample_weight_panel: pl.DataFrame,
+    sample_future_returns: pl.DataFrame,
+    zero_cost: CostModel,
+) -> None:
+    evaluator = SignalEvaluator(periods_per_year=0)
+    with pytest.raises(ValueError, match="periods_per_year must be > 0"):
+        evaluator.evaluate(sample_weight_panel, sample_future_returns, zero_cost)
+
+
+def test_align_requires_ts_column(zero_cost: CostModel) -> None:
+    evaluator = SignalEvaluator()
+    with pytest.raises(ValueError, match="weight_panel missing required 'ts'"):
+        evaluator.evaluate(
+            pl.DataFrame({"s1": [1.0]}),
+            pl.DataFrame({"ts": [0], "s1": [0.01]}),
+            zero_cost,
+        )
+    with pytest.raises(ValueError, match="future_returns missing required 'ts'"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0], "s1": [1.0]}),
+            pl.DataFrame({"s1": [0.01]}),
+            zero_cost,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — all-zero weights → sharpe=0 / mdd=0 / turnover=0
 # ---------------------------------------------------------------------------

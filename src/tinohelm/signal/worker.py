@@ -666,11 +666,19 @@ def _load_aligned_panels(
         )
     symbol_cols = [c for c in close_panel.columns if c != "ts"]
     # Shift each symbol column by -1 (future close) and divide by current.
+    # Guard zero/non-finite current or future close values: raw division would
+    # create ±inf, and the evaluator only trims all-NaN rows.  A single inf in
+    # one asset can poison gross/net PnL for the whole timestamp.
     future_returns = close_panel.with_columns(
         [
-            (
-                (pl.col(c).shift(-1) / pl.col(c)) - 1.0
-            ).alias(c)
+            pl.when(
+                pl.col(c).is_finite()
+                & pl.col(c).shift(-1).is_finite()
+                & (pl.col(c) != 0)
+            )
+            .then((pl.col(c).shift(-1) / pl.col(c)) - 1.0)
+            .otherwise(None)
+            .alias(c)
             for c in symbol_cols
         ]
     )

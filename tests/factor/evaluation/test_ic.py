@@ -130,6 +130,28 @@ class TestForwardReturns:
         assert math.isclose(eth[1], -0.10, rel_tol=1e-12)
         assert eth[2] is None
 
+    def test_invalid_period_rejected(self):
+        close = _make_frame([100.0, 101.0, 102.0])
+        with pytest.raises(ValueError, match="period must be > 0"):
+            forward_returns(close, period=0)
+
+    def test_zero_and_non_finite_close_emit_null_not_inf(self):
+        close = _make_frame([100.0, 0.0, 105.0, float("inf"), 110.0])
+        out = forward_returns(close, period=1)
+        assert math.isclose(out["value"][0], -1.0, rel_tol=1e-12)
+        assert out["value"][1] is None
+        assert out["value"][2] is None
+        assert out["value"][3] is None
+        assert out["value"][4] is None
+
+    def test_log_returns_require_positive_close_pair(self):
+        close = _make_frame([100.0, -90.0, 81.0, 90.0])
+        out = forward_returns(close, period=1, log_ret=True)
+        assert out["value"][0] is None
+        assert out["value"][1] is None
+        assert math.isclose(out["value"][2], math.log(90.0 / 81.0), rel_tol=1e-12)
+        assert out["value"][3] is None
+
 
 # ──────────────────────────────────────────────────────────────────────
 # compute_ic_series
