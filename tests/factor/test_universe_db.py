@@ -1,7 +1,7 @@
 """Tests for Universe DB integration — sync_from_csv, from_db_row, and API endpoints.
 
-Uses a real PostgreSQL instance (same credentials as test_migration_012.py) since
-JSONB column semantics and FK constraints cannot be validated with SQLite.
+Uses the PostgreSQL URL from ``TINO_TEST_DATABASE_URL`` since JSONB column
+semantics and FK constraints cannot be validated with SQLite.
 
 Test cases
 ----------
@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
-import tempfile
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -32,7 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 # uniformly behind `-m "not integration"` in environments without DB infrastructure.
 pytestmark = pytest.mark.integration
 
-DB_URL = "postgresql+asyncpg://tinohelm:tinohelm_secret@localhost:5432/tinohelm"
+DB_URL = os.environ.get("TINO_TEST_DATABASE_URL")
+if not DB_URL:
+    pytest.skip(
+        "TINO_TEST_DATABASE_URL is required for Universe DB integration tests",
+        allow_module_level=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +53,7 @@ def event_loop():
 
 @pytest_asyncio.fixture(scope="module")
 async def engine():
+    assert DB_URL is not None
     eng = create_async_engine(DB_URL, pool_pre_ping=True)
     yield eng
     await eng.dispose()
@@ -229,6 +235,57 @@ async def test_sync_from_csv_different_content_creates_new_row(tmp_path, session
     for h in (hash_a, hash_b):
         async with session_factory() as session:
             await _delete_by_hash(session, h)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_sync_from_csv_same_filename_new_content_gets_suffixed_name(
+    tmp_path,
+    session_factory,
+):
+    """Changing one CSV path creates a new immutable row with a unique name."""
+    from tinohelm.db.models import Universe as UniverseORM
+    from tinohelm.factor.universe import Universe
+
+    csv_path = _write_csv(tmp_path, [
+        {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+    ], filename="uni_collision_test.csv")
+    hash_a = _sha256_path(csv_path)
+
+    async with session_factory() as session:
+        await _delete_by_hash(session, hash_a)
+
+    async with session_factory() as session:
+        uni_a, id_a = await Universe.sync_from_csv(csv_path, session)
+        await session.commit()
+
+    csv_path = _write_csv(tmp_path, [
+        {"symbol": "ETHUSDT-PERP", "listing_date": "2020-03-01", "delisting_date": ""},
+    ], filename="uni_collision_test.csv")
+    hash_b = _sha256_path(csv_path)
+
+    async with session_factory() as session:
+        await _delete_by_hash(session, hash_b)
+
+    async with session_factory() as session:
+        uni_b, id_b = await Universe.sync_from_csv(csv_path, session)
+        await session.commit()
+
+    assert id_a != id_b
+    assert hash_a != hash_b
+    assert uni_a.name == "uni_collision_test"
+    assert uni_b.name == f"uni_collision_test-{hash_b[:12]}"
+    assert uni_a.name != uni_b.name
+
+    async with session_factory() as session:
+        rows = (await session.execute(
+            select(UniverseORM).where(UniverseORM.id.in_([id_a, id_b]))
+        )).scalars().all()
+    assert {row.name for row in rows} == {uni_a.name, uni_b.name}
+    assert {row.source_csv_hash for row in rows} == {hash_a, hash_b}
+
+    for csv_hash in (hash_a, hash_b):
+        async with session_factory() as session:
+            await _delete_by_hash(session, csv_hash)
 
 
 # ---------------------------------------------------------------------------

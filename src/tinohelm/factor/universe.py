@@ -327,7 +327,10 @@ class Universe:
 
         - If a row with the same ``source_csv_hash`` already exists → returns
           the existing row without creating a duplicate.
-        - Otherwise → inserts a new row.
+        - Otherwise → inserts a new immutable row.  The first CSV content for a
+          stem keeps the plain stem as ``name``; later different contents from
+          the same stem receive a deterministic short hash suffix to satisfy
+          the unique DB constraint without mutating historical rows.
 
         The ``pit_rules_json`` column is populated with a dict mapping each
         symbol to its ``listing_date`` / ``delisting_date`` strings.
@@ -378,8 +381,28 @@ class Universe:
                 ),
             }
 
+        base_name = universe.name
+        name_exists = (await db_session.execute(
+            select(UniverseORM.id).where(UniverseORM.name == base_name)
+        )).scalar_one_or_none() is not None
+        db_name = base_name
+        if name_exists:
+            for suffix_len in (12, 16, 20, 24, 32, 40, 64):
+                candidate = f"{base_name}-{csv_hash[:suffix_len]}"
+                candidate_exists = (await db_session.execute(
+                    select(UniverseORM.id).where(UniverseORM.name == candidate)
+                )).scalar_one_or_none() is not None
+                if not candidate_exists:
+                    db_name = candidate
+                    break
+            else:  # pragma: no cover - sha256 suffix exhaustion is not realistic
+                raise RuntimeError(
+                    f"Could not derive unique universe name for {base_name!r}"
+                )
+        universe.name = db_name
+
         db_row = UniverseORM(
-            name=universe.name,
+            name=db_name,
             source_csv_path=str(csv_path),
             source_csv_hash=csv_hash,
             min_history_bars=100,

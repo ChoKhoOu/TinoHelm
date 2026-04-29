@@ -194,6 +194,7 @@ class SignalDrivenStrategy(Strategy):
         # Cached InstrumentId / BarType objects (avoid re-parsing per bar).
         self._bar_types: dict[str, BarType] = {}  # symbol_short → BarType
         self._instruments_by_short_symbol: dict[str, Any] = {}
+        self._instrument_ids_by_short_symbol: dict[str, InstrumentId] = {}
         # Distinct venues across the universe — used by _submit_diff to
         # resolve the account via cache.account_for_venue (NT does not
         # expose ``self.account`` on Strategy directly).
@@ -227,6 +228,7 @@ class SignalDrivenStrategy(Strategy):
             )
             symbol_short = self._symbol_short(inst_id)
             self._bar_types[symbol_short] = bar_type
+            self._instrument_ids_by_short_symbol[symbol_short] = inst_id
             inst = self.cache.instrument(inst_id)
             if inst is None:
                 self.log.warning(
@@ -642,6 +644,7 @@ class SignalDrivenStrategy(Strategy):
         """
         if self._order_manager is None:
             return
+        self._refresh_missing_instruments()
         equity = self._compute_equity()
         if equity is None or equity <= 0:
             return
@@ -663,6 +666,31 @@ class SignalDrivenStrategy(Strategy):
             equity=equity,
             prices=prices,
         )
+
+    def _refresh_missing_instruments(self) -> None:
+        """Retry instruments that were absent from cache during ``on_start``."""
+        missing = [
+            symbol_short
+            for symbol_short, inst in self._instruments_by_short_symbol.items()
+            if inst is None
+        ]
+        for symbol_short in missing:
+            inst_id = self._instrument_ids_by_short_symbol.get(symbol_short)
+            if inst_id is None:
+                for inst_str in self._instrument_id_strs:
+                    try:
+                        candidate = InstrumentId.from_str(inst_str)
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+                    if self._symbol_short(candidate) == symbol_short:
+                        inst_id = candidate
+                        self._instrument_ids_by_short_symbol[symbol_short] = inst_id
+                        break
+            if inst_id is None:
+                continue
+            inst = self.cache.instrument(inst_id)
+            if inst is not None:
+                self._instruments_by_short_symbol[symbol_short] = inst
 
     def _resolve_quote_currency(self) -> Any:
         """Return the settlement :class:`Currency` shared by the universe.

@@ -3,12 +3,13 @@
 Verifies upgrade/downgrade roundtrip, index existence, nullable new columns,
 and that pre-existing factor_runs rows are unaffected.
 
-Uses the real PostgreSQL instance (same as alembic.ini config) since JSONB/FK
-semantics cannot be validated with SQLite.
+Uses the PostgreSQL URL from ``TINO_TEST_DATABASE_URL`` since JSONB/FK semantics
+cannot be validated with SQLite.
 """
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from pathlib import Path
 
@@ -22,7 +23,12 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection
 # via `-m "not integration"`.
 pytestmark = pytest.mark.integration
 
-DB_URL = "postgresql+asyncpg://tinohelm:tinohelm_secret@localhost:5432/tinohelm"
+DB_URL = os.environ.get("TINO_TEST_DATABASE_URL")
+if not DB_URL:
+    pytest.skip(
+        "TINO_TEST_DATABASE_URL is required for migration integration tests",
+        allow_module_level=True,
+    )
 
 # Repo root resolved from this file's location: <repo>/tests/db/test_migration_012.py
 # parents[0]=<repo>/tests/db, parents[1]=<repo>/tests, parents[2]=<repo>
@@ -57,15 +63,60 @@ FACTOR_RUNS_NEW_COLS = {
 def _run_alembic(*args: str) -> None:
     """Run alembic CLI via subprocess (isolates from the test process state)."""
     import subprocess, sys
+    assert DB_URL is not None
     result = subprocess.run(
         [sys.executable, "-m", "alembic"] + list(args),
         capture_output=True,
         text=True,
         cwd=str(_REPO_ROOT),
+        env={**os.environ, "TINO_DATABASE__URL": DB_URL},
     )
     assert result.returncode == 0, (
         f"alembic {' '.join(args)} failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     )
+
+
+def _reset_database_to_pre_012() -> None:
+    """Build an isolated synthetic 011 schema in the test database.
+
+    The project started Alembic after the original base tables already existed
+    (see migration ``add_watchlist``).  A clean PostgreSQL database therefore
+    cannot run the full Alembic chain from scratch: migration 002 expects
+    ``strategies`` and ``backtest_runs`` to be present already.  For this 012
+    migration test we create the current ORM schema, remove exactly the objects
+    introduced by 012, and stamp the DB at revision 011.  The test then runs
+    the real 012 upgrade/downgrade against the same database URL used by the
+    assertion engine.
+    """
+    assert DB_URL is not None
+
+    async def _reset() -> None:
+        from tinohelm.db.models import Base
+
+        engine = create_async_engine(DB_URL, pool_pre_ping=True)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+                await conn.execute(text("CREATE SCHEMA public"))
+                await conn.run_sync(Base.metadata.create_all)
+
+                # Remove 012-created tables / constraints from the current ORM
+                # schema so Alembic 012 can add them for real.
+                await conn.execute(text("DROP TABLE IF EXISTS signal_runs CASCADE"))
+                await conn.execute(text("DROP TABLE IF EXISTS exposures_cache CASCADE"))
+                await conn.execute(text("DROP TABLE IF EXISTS universes CASCADE"))
+                await conn.execute(text("DROP INDEX IF EXISTS ix_factor_runs_baseline"))
+                await conn.execute(text("DROP INDEX IF EXISTS ix_factor_runs_universe"))
+                for col in FACTOR_RUNS_NEW_COLS:
+                    await conn.execute(text(f"ALTER TABLE factor_runs DROP COLUMN IF EXISTS {col}"))
+
+                await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+                await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+                await conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('011')"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_reset())
 
 
 async def _get_version(conn: AsyncConnection) -> str:
@@ -118,6 +169,7 @@ def event_loop():
 
 @pytest.fixture(scope="module")
 async def engine():
+    assert DB_URL is not None
     eng = create_async_engine(DB_URL, pool_pre_ping=True)
     yield eng
     await eng.dispose()
@@ -126,6 +178,7 @@ async def engine():
 @pytest.fixture(scope="module")
 def ensure_at_012():
     """Guarantee DB is at 012 before any test in this module runs."""
+    _reset_database_to_pre_012()
     _run_alembic("upgrade", "head")
 
 
@@ -237,7 +290,7 @@ async def test_downgrade_removes_tables_and_columns(engine, ensure_at_012):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_upgrade_after_downgrade_idempotent(engine):
+async def test_upgrade_after_downgrade_idempotent(engine, ensure_at_012):
     """After downgrade+upgrade roundtrip DB is back at 012 with all indexes."""
     async with engine.connect() as conn:
         ver = await _get_version(conn)

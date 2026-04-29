@@ -149,6 +149,22 @@ def _noop_db_patch(monkeypatch) -> None:
     monkeypatch.setattr("sqlalchemy.orm.Session", MagicMock(return_value=fake_session))
 
 
+def _patch_shared_engine(monkeypatch) -> None:
+    """Patch simple-mode shared runner prep so no real NT kernel is created."""
+    from tinohelm.backtest.runner import BacktestRunner
+
+    async def _prepare_engine(self):
+        engine = MagicMock(name="SharedBacktestEngine")
+        engine.dispose = MagicMock()
+        return engine, MagicMock(name="StrategyBundle"), 10_000.0
+
+    def _run_trial(self, *args, **kwargs):
+        return {"statistics": {"sharpe_ratio": 1.0}}
+
+    monkeypatch.setattr(BacktestRunner, "prepare_engine", _prepare_engine)
+    monkeypatch.setattr(BacktestRunner, "run_trial", _run_trial)
+
+
 # Full-shape result that late-phase full-mode calls return.
 # Mirrors the shape runner_cli emits in "full" mode — contains equity_curve,
 # daily_returns, monthly_returns, statistics, and trade_log.
@@ -219,11 +235,8 @@ def test_validation_uses_subprocess(monkeypatch):
     # Patch DB
     _noop_db_patch(monkeypatch)
 
-    # Bypass shared-engine preparation (not needed, would fail without NT data)
-    opt._shared_runner = MagicMock()
-    opt._shared_runner.run_trial = MagicMock(
-        return_value={"statistics": {"sharpe_ratio": 1.0}}
-    )
+    # Bypass real shared-engine preparation (not needed, would fail without NT data)
+    _patch_shared_engine(monkeypatch)
 
     # Patch build_full_result to capture what validation= and dsr= receives
     captured_validation = [None]
@@ -430,11 +443,8 @@ def test_late_phase_handles_subprocess_failure(monkeypatch):
     # Patch DB
     _noop_db_patch(monkeypatch)
 
-    # Shared engine stub
-    opt._shared_runner = MagicMock()
-    opt._shared_runner.run_trial = MagicMock(
-        return_value={"statistics": {"sharpe_ratio": 1.0}}
-    )
+    # Bypass real shared-engine preparation (not needed, would fail without NT data)
+    _patch_shared_engine(monkeypatch)
 
     # Capture build_full_result's validation argument
     captured_validation = [sentinel := object()]

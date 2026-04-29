@@ -258,37 +258,29 @@ class TestFundingRate:
         assert frame["value"].to_list()[0] == pytest.approx(0.0001)
 
     def test_funding_aligned_onto_bar_index_as_of_delay(self, tmp_path: Path, monkeypatch):
-        """The first bar (at T0) should NOT see the T0 funding rate (as-of delay).
-
-        The rate published at T0=00:00 only becomes visible at T0+8h (next period).
-        So bars at T0 through T0+8h-1min should show the *previous* (shifted) value,
-        which is null for the very first period.
-        """
+        """Funding prints become visible only after their exact timestamp."""
         _stub_make_instrument(monkeypatch)
         catalog_path, funding_dir, uni, ts_ns = self._base_setup(tmp_path)
         dl = DataLayer(uni, catalog_root=catalog_path, funding_dir=funding_dir)
 
-        _8h_ms = 8 * 3600 * 1000
-        t0_ms = _T0_NS // 1_000_000
-
         funding_ts = [
-            datetime(1970, 1, 1) + timedelta(milliseconds=t0_ms),
-            datetime(1970, 1, 1) + timedelta(milliseconds=t0_ms + _8h_ms),
+            datetime(2024, 1, 1, 0, 0),
+            datetime(2024, 1, 1, 8, 0),
         ]
         funding_series = pl.DataFrame(
             {"ts": funding_ts, "value": [0.0001, 0.0002]},
             schema={"ts": pl.Datetime("ns"), "value": pl.Float64},
         )
 
-        bar_ts = [datetime(1970, 1, 1) + timedelta(microseconds=ts // 1_000) for ts in ts_ns]
+        bar_ts = [
+            datetime(2024, 1, 1, 0, 0),
+            datetime(2024, 1, 1, 1, 0),
+            datetime(2024, 1, 1, 8, 0),
+            datetime(2024, 1, 1, 9, 0),
+        ]
         aligned = dl._align_funding_onto_bar_index(funding_series, bar_ts)
 
-        # After shift(1), the T0 rate becomes visible only at T0+8h.
-        # Bars before the T0+8h funding rate => null.
-        first_value = aligned["value"].to_list()[0]
-        assert first_value is None, (
-            f"First bar at T0 should be null (rate not yet visible), got {first_value}"
-        )
+        assert aligned["value"].to_list() == [None, 0.0001, 0.0001, 0.0002]
 
     def test_load_aligned_includes_funding_key(self, tmp_path: Path, monkeypatch):
         """load_aligned() should return a 'funding_rate' key aligned to bar index."""

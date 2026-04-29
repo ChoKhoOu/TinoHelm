@@ -6,8 +6,9 @@ Design
 - Reuses ``tinohelm.data.funding_cache._load_cache`` for funding_rate JSON reads.
 - Parallel per-symbol loading via ``ThreadPoolExecutor``.
 - Time alignment: non-bar sources (funding_rate) are forward-filled onto the bar index.
-  funding_rate uses ``shift(1)`` on the 8h-frequency layer before ffill to implement
-  as-of delay (avoid look-ahead bias: a rate published at T is only visible at T+8h).
+  funding_rate timestamps are shifted by +1ns before ffill to implement strict
+  backward-asof visibility (avoid look-ahead bias: a rate published at T is only
+  visible after T, not on a bar timestamped exactly T).
 - PIT filtering: for each timestamp, symbols absent from ``Universe.get_symbols_at``
   are set to NaN (shape is preserved — rows are NOT dropped).
 
@@ -655,17 +656,17 @@ class DataLayer:
         funding_series: pl.DataFrame,
         bar_ts: Sequence[datetime],
     ) -> pl.DataFrame:
-        """Apply as-of delay and forward-fill funding_rate onto bar index.
+        """Apply strict backward-asof visibility onto the bar index.
 
         PIT logic:
-        - A funding rate published at time T is only observable *after* that
-          settlement.  In Binance perpetuals, rates settle at 00:00, 08:00,
-          16:00 UTC.  A bar at exactly 08:00 should NOT yet see the 08:00 rate
-          — it becomes visible at the *next* bar.
-        - Implementation: shift the funding series by 1 period (one 8h step)
-          on the 8h-frequency index *before* forward-filling onto the bar index.
-          This is equivalent to ``method="ffill"`` with ``limit=None`` on the
-          already-shifted series.
+        - A funding rate published at time T is only observable strictly
+          *after* that settlement.  In Binance perpetuals, rates settle at
+          00:00, 08:00, 16:00 UTC.  A bar at exactly 08:00 should still see the
+          previously observable rate; the 08:00 print becomes visible on the
+          first later bar.
+        - Implementation: shift funding timestamps by +1ns, not values by one
+          native 8h row, then forward-fill on the union grid and project back
+          to the requested bar timestamps.
 
         Parameters
         ----------
@@ -680,7 +681,7 @@ class DataLayer:
         -------
         polars.DataFrame
             2-col ``[ts, value]`` frame aligned to ``bar_ts`` with the as-of
-            delay + forward-fill applied.  Missing bars before the first
+            strict-asof delay + forward-fill applied.  Missing bars before the first
             observable value are ``null``.
         """
         target = pl.DataFrame(
@@ -691,8 +692,9 @@ class DataLayer:
         if funding_series.is_empty() or len(bar_ts) == 0:
             return target.with_columns(pl.lit(None, dtype=pl.Float64).alias(_VAL_COL))
 
-        # Shift by 1 period on the native 8h grid to apply the as-of delay.
-        shifted = funding_series.with_columns(pl.col(_VAL_COL).shift(1))
+        # Shift timestamps by the minimum representable unit so a print at T is
+        # invisible to a bar exactly at T but visible to the first later bar.
+        shifted = funding_series.with_columns(pl.col(_TS_COL) + pl.duration(nanoseconds=1))
 
         # Forward-fill onto the union of the bar timestamps and the shifted
         # 8h grid, then restrict to the bar grid.

@@ -795,6 +795,7 @@ class _SignalDrivenStrategyStub:
         self._order_manager = None
         self._bar_types: dict[str, Any] = {}
         self._instruments_by_short_symbol: dict[str, Any] = {}
+        self._instrument_ids_by_short_symbol: dict[str, Any] = {}
 
         # NT collaborator stubs.
         self.cache = MagicMock()
@@ -821,6 +822,7 @@ class _SignalDrivenStrategyStub:
     _extract_latest_weights = SignalDrivenStrategy._extract_latest_weights
     _on_cross_section_ready = SignalDrivenStrategy._on_cross_section_ready
     _submit_diff = SignalDrivenStrategy._submit_diff
+    _refresh_missing_instruments = SignalDrivenStrategy._refresh_missing_instruments
     _compute_equity = SignalDrivenStrategy._compute_equity
     _resolve_quote_currency = SignalDrivenStrategy._resolve_quote_currency
     _resolve_signal_spec = SignalDrivenStrategy._resolve_signal_spec
@@ -1152,6 +1154,35 @@ class TestCrossSectionReadyExecutesKernelAndSubmits:
         assert s.last_rebalance_ts_ns == 1_700_000_000_000_000_000
         assert s.target_weights["BTCUSDT-PERP"] == pytest.approx(0.5, rel=1e-9)
         assert s.target_weights["ETHUSDT-PERP"] == pytest.approx(-0.5, rel=1e-9)
+
+    def test_submit_diff_refreshes_instrument_missing_at_start(self):
+        """An instrument cached as None at start is retried before order diffing."""
+        from nautilus_trader.model.identifiers import InstrumentId
+
+        spec = _basic_signal_spec()
+        s = _make_strategy_for_unit_test(
+            signal_spec=spec, cache_history_len=100, factor_lookback=20
+        )
+        s._kernel = lambda panel, params, constraints: panel  # type: ignore[method-assign]
+        s._order_manager = OrderManager(s)
+        s._instrument_id_strs = ("BTCUSDT-PERP.BINANCE",)
+        inst_id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        s._instrument_ids_by_short_symbol = {"BTCUSDT-PERP": inst_id}
+        s._instruments_by_short_symbol = {"BTCUSDT-PERP": None}
+        btc_inst = _stub_instrument("BTCUSDT-PERP")
+        s.cache.instrument.return_value = btc_inst
+
+        s._compute_factor_panel = (  # type: ignore[method-assign]
+            lambda ts_ns, bars: pl.DataFrame({"ts": [ts_ns], "BTCUSDT-PERP": [1.0]})
+        )
+        bars = {"BTCUSDT-PERP": _bar("BTCUSDT-PERP", 1_700_000_000_000_000_000, 50_000.0)}
+
+        s._on_cross_section_ready(1_700_000_000_000_000_000, bars)
+
+        s.cache.instrument.assert_called_once_with(inst_id)
+        assert s._instruments_by_short_symbol["BTCUSDT-PERP"] is btc_inst
+        btc_inst.make_qty.assert_called_once()
+        s.submit_order.assert_called_once()
 
     def test_rebalance_freq_gates_subsequent_calls(self):
         """rebalance_freq_ns honoured: second call inside the window is a no-op."""
