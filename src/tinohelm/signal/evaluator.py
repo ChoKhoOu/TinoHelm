@@ -306,12 +306,22 @@ class SignalEvaluator:
                 f"got {future_returns.columns!r}"
             )
         # Determine common symbol columns (preserve weight_panel order).
+        weight_sym_cols = [c for c in weight_panel.columns if c != "ts"]
         ret_sym_cols = {c for c in future_returns.columns if c != "ts"}
-        sym_cols = [c for c in weight_panel.columns if c != "ts" and c in ret_sym_cols]
+        sym_cols = [c for c in weight_sym_cols if c in ret_sym_cols]
 
         if not sym_cols:
-            # No common columns — return 0 periods.
+            if weight_sym_cols and ret_sym_cols:
+                raise ValueError(
+                    "no common symbol columns between weight_panel and future_returns; "
+                    f"weight_panel={weight_sym_cols!r}, "
+                    f"future_returns={sorted(ret_sym_cols)!r}"
+                )
+            # One or both panels contain no symbols — return 0 periods.
             return np.empty((0, 0)), np.empty((0, 0)), 0
+
+        SignalEvaluator._ensure_unique_ts(weight_panel, "weight_panel")
+        SignalEvaluator._ensure_unique_ts(future_returns, "future_returns")
 
         # Inner-join on ts; suffix "_ret" applied to right-side duplicates.
         joined = weight_panel.join(
@@ -329,8 +339,25 @@ class SignalEvaluator:
         weights_arr = joined.select(sym_cols).to_numpy().astype(np.float64, copy=True)
         ret_cols_in_joined = [f"{c}_ret" for c in sym_cols]
         returns_arr = joined.select(ret_cols_in_joined).to_numpy().astype(np.float64, copy=True)
+        SignalEvaluator._reject_infinite_values(weights_arr, "weight_panel")
+        SignalEvaluator._reject_infinite_values(returns_arr, "future_returns")
 
         return weights_arr, returns_arr, T
+
+    @staticmethod
+    def _ensure_unique_ts(frame: pl.DataFrame, name: str) -> None:
+        """Fail before join if a panel would create many-to-many timestamp rows."""
+        if bool(frame["ts"].is_duplicated().any()):
+            raise ValueError(f"{name} contains duplicate ts rows; refusing many-to-many join")
+
+    @staticmethod
+    def _reject_infinite_values(values: np.ndarray, name: str) -> None:
+        """Reject +/-inf while preserving existing NaN-as-missing semantics."""
+        if np.isinf(values).any():
+            raise ValueError(
+                f"{name} contains non-finite values (inf/-inf); "
+                "use NaN for missing values"
+            )
 
     @staticmethod
     def _compute_mdd(pnl_curve: np.ndarray) -> float:

@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 _shutdown_event: asyncio.Event = asyncio.Event()
 
 
+def _terminalizing_key(run_id: str) -> str:
+    """Redis marker set by runner_cli while terminal writes are in progress."""
+    return f"tino:backtest:terminalizing:{run_id}"
+
+
 async def start_consumers(
     n: int,
     redis_url: str,
@@ -214,6 +219,14 @@ async def _cancel_watcher(
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=sigterm_grace)
                 except asyncio.TimeoutError:
+                    if await rds.get(_terminalizing_key(run_id)):
+                        logger.warning(
+                            "Subprocess %s is terminalizing after SIGTERM grace; "
+                            "waiting without SIGKILL escalation",
+                            run_id,
+                        )
+                        await proc.wait()
+                        return
                     logger.warning("Subprocess %s did not exit in %.1fs — SIGKILL",
                                    run_id, sigterm_grace)
                     proc.kill()

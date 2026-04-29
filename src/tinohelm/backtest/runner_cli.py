@@ -63,6 +63,12 @@ _current_run_id: str | None = None
 _current_r: redis.Redis | None = None
 _current_db_url: str | None = None
 _terminalizing: bool = False
+_TERMINALIZING_TTL_SECONDS = 60
+
+
+def _terminalizing_key(run_id: str) -> str:
+    """Redis marker consumed by the parent cancel watcher."""
+    return f"tino:backtest:terminalizing:{run_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +118,7 @@ def _run_queue_mode(run_id: str) -> int:
 
     # Pre-cancel check
     cancel_key = f"tino:backtest:cancel:{run_id}"
+    terminalizing_key = _terminalizing_key(run_id)
     if r.get(cancel_key):
         logger.info("Run %s was cancelled before execution", run_id)
         r.delete(cancel_key)
@@ -199,7 +206,10 @@ def _run_queue_mode(run_id: str) -> int:
 
         # From here on completion owns the terminal state. A SIGTERM from a
         # late cancel watcher must not publish a contradictory cancelled event.
+        # The Redis marker lets the parent watcher avoid SIGKILL escalation while
+        # this child is writing artifact/Redis/DB completion state.
         _terminalizing = True
+        r.setex(terminalizing_key, _TERMINALIZING_TTL_SECONDS, "1")
 
         # Save artifact JSON atomically.  Readers should never observe a
         # partially-written results.json while status polling races completion.
@@ -257,6 +267,11 @@ def _run_queue_mode(run_id: str) -> int:
         update_db_status(cfg.database.url, run_id, "failed", error_msg=safe_error)
         return 1
     finally:
+        if _terminalizing:
+            try:
+                r.delete(terminalizing_key)
+            except Exception:
+                logger.exception("Failed to delete terminalizing marker for %s", run_id)
         _current_run_id = None
         _current_r = None
         _current_db_url = None
