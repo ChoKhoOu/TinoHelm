@@ -54,6 +54,10 @@ PROGRESS_DB_STEP = 10
 _handle: WorkerHandle = WorkerHandle(name="factor-worker")
 
 
+class FactorRunCancelled(Exception):
+    """Raised internally when a factor run observes its Redis cancel flag."""
+
+
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     """Reset FactorRun rows stuck in 'running' back to 'queued' and re-enqueue.
 
@@ -143,15 +147,23 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         # 2. Check cancel flag early (before DB round-trip)
         # ----------------------------------------------------------------
         cancel_key = f"tino:factor:cancel:{run_id}"
-        if await rds.exists(cancel_key):
-            logger.info("Factor run %s cancelled (pre-load), skipping", run_id)
-            async with factory() as db:
-                await db.execute(
+
+        async def _mark_cancelled() -> None:
+            async with factory() as db_c:
+                await db_c.execute(
                     update(FactorRun)
                     .where(FactorRun.id == run_id)
-                    .values(status=STATUS_CANCELLED)
+                    .values(
+                        status=STATUS_CANCELLED,
+                        finished_at=datetime.now(UTC).replace(tzinfo=None),
+                        progress_stage=None,
+                    )
                 )
-                await db.commit()
+                await db_c.commit()
+
+        if await rds.exists(cancel_key):
+            logger.info("Factor run %s cancelled (pre-load), skipping", run_id)
+            await _mark_cancelled()
             return
 
         # ----------------------------------------------------------------
@@ -217,6 +229,19 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
                     )
                     await db2.commit()
 
+        async def _check_cancel() -> bool:
+            return bool(await rds.exists(cancel_key))
+
+        async def _progress_and_check_cancel(
+            pct: int,
+            msg: str = "",
+            *,
+            stage: str | None = None,
+        ) -> None:
+            await _progress(pct, msg, stage=stage)
+            if await _check_cancel():
+                raise FactorRunCancelled(run_id)
+
         # ----------------------------------------------------------------
         # 5. Build Orchestrator and run (CPU-bound → thread)
         # ----------------------------------------------------------------
@@ -224,12 +249,19 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         progress_futures: list[concurrent.futures.Future[None]] = []
 
         def _sync_progress(pct: int, msg: str = "", *, stage: str | None = None) -> None:
-            """Bridge: schedule async progress update from a worker thread."""
+            """Bridge progress from the worker thread and fail fast on cancel.
+
+            Blocking on the scheduled coroutine is safe here: the event loop is
+            awaiting ``asyncio.to_thread`` while this code runs in that worker
+            thread.  This gives factor runs the same between-stage cancellation
+            semantics as signal runs instead of only checking before start.
+            """
             fut = asyncio.run_coroutine_threadsafe(
-                _progress(pct, msg, stage=stage),
+                _progress_and_check_cancel(pct, msg, stage=stage),
                 loop,
             )
             progress_futures.append(fut)
+            fut.result()
 
         eval_result = await asyncio.to_thread(
             _run_orchestrator,
@@ -245,6 +277,8 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
                 *(asyncio.wrap_future(fut) for fut in progress_futures),
                 return_exceptions=False,
             )
+        if await _check_cancel():
+            raise FactorRunCancelled(run_id)
 
         # ----------------------------------------------------------------
         # 6. Mark completed
@@ -258,6 +292,12 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
                     status=STATUS_COMPLETED,
                     progress=100,
                     result=result_dict,
+                    oos_ic_series=result_dict.get("oos_ic_series") or None,
+                    neutralization_config=(
+                        result_dict.get("neutralization_config") or None
+                    ),
+                    universe_id=config_dict.get("universe_id"),
+                    segment_results=result_dict.get("segment_results") or None,
                     finished_at=datetime.now(UTC).replace(tzinfo=None),
                 )
             )
@@ -271,6 +311,18 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             "factor_name": factor_name,
             "rating": eval_result.rating,
         }))
+
+    except FactorRunCancelled:
+        logger.info("FactorRun %s cancelled", run_id)
+        try:
+            await _mark_cancelled()
+            await rds.publish(EVENTS_CHANNEL, json.dumps({
+                "type": "factor.cancelled",
+                "run_id": run_id,
+                "factor_name": factor_name,
+            }))
+        except Exception:
+            logger.exception("Failed to update FactorRun %s to cancelled", run_id)
 
     except Exception as exc:
         tb = traceback.format_exc()
@@ -323,7 +375,7 @@ def _run_orchestrator(
     from tinohelm.factor.evaluation.evaluator import Evaluator
     from tinohelm.factor.observer import Observer
     from tinohelm.factor.registry import Registry
-    from tinohelm.factor.types import EvalConfig
+    from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.universe import Universe
     from tinohelm.core.config import get_settings
     import pathlib
@@ -375,18 +427,7 @@ def _run_orchestrator(
     observer.start_span = _instrumented_span  # type: ignore[method-assign]
 
     # --- Reconstruct EvalConfig from dict --------------------------------
-    config = EvalConfig(
-        universe=tuple(config_dict.get("universe", [])),
-        start=config_dict["start"],
-        end=config_dict["end"],
-        forward_period=config_dict.get("forward_period", 5),
-        quantiles=config_dict.get("quantiles", 5),
-        cost_bps=config_dict.get("cost_bps", 4.0),
-        ic_freq=config_dict.get("ic_freq", "D"),
-        log_ret=config_dict.get("log_ret", False),
-        returns_kind=config_dict.get("returns_kind", "close"),
-        params=params or config_dict.get("params", {}),
-    )
+    config = parse_eval_config(config_dict, params=params)
 
     orchestrator = Orchestrator(
         registry=registry,

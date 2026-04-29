@@ -306,3 +306,35 @@ def test_agent_summary_mentions_best():
         assert "name" in p and "ir" in p and "why" in p, (
             f"top_performer missing required keys: {p!r}"
         )
+
+
+def test_compare_results_bootstrap_pairs_common_dates_only():
+    """Pairwise compare must align IC observations by date before bootstrap."""
+    eval_a = EvalResult(
+        ic_mean=0.2,
+        ir=1.0,
+        ic_series=[
+            {"date": "2024-01-01", "ic": 10.0},
+            {"date": "2024-01-02", "ic": 0.1},
+            {"date": "2024-01-03", "ic": 0.2},
+        ],
+    )
+    eval_b = EvalResult(
+        ic_mean=0.3,
+        ir=1.5,
+        ic_series=[
+            {"date": "2024-01-02", "ic": 0.2},
+            {"date": "2024-01-03", "ic": 0.3},
+            {"date": "2024-01-04", "ic": -10.0},
+        ],
+    )
+
+    out = compare_results(eval_a, eval_b, n_bootstrap=200, random_seed=42)
+    ic_mean_entry = next(d for d in out["metric_diffs"] if d["name"] == "ic_mean")
+
+    assert ic_mean_entry["ci_low"] is not None
+    assert ic_mean_entry["ci_high"] is not None
+    # Only the shared dates 2024-01-02 and 2024-01-03 are bootstrapped; the
+    # large non-overlapping outliers must not dominate the paired CI.
+    assert 0.0 <= ic_mean_entry["ci_low"] <= 0.11
+    assert 0.0 <= ic_mean_entry["ci_high"] <= 0.11

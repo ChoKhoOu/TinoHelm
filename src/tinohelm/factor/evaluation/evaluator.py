@@ -256,6 +256,9 @@ def _scrub_result(result: EvalResult) -> EvalResult:
     result.ic_decay = _finite_or_none(result.ic_decay) or []
     result.robustness = _finite_or_none(result.robustness) or {}
     result.cost = _finite_or_none(result.cost) or {}
+    result.oos_ic_series = _finite_or_none(result.oos_ic_series) or []
+    result.segment_results = _finite_or_none(result.segment_results) or {}
+    result.neutralization_config = _finite_or_none(result.neutralization_config) or {}
 
     return result
 

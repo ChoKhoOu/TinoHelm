@@ -205,7 +205,7 @@ async def explore_factor(req: ExploreRequest) -> dict:
     from tinohelm.factor.evaluation.evaluator import Evaluator
     from tinohelm.factor.observer import Observer
     from tinohelm.factor.registry import Registry
-    from tinohelm.factor.types import EvalConfig
+    from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.universe import Universe
     from tinohelm.core.config import get_settings
     import asyncio
@@ -221,18 +221,8 @@ async def explore_factor(req: ExploreRequest) -> dict:
 
     config_dict = req.config
     try:
-        config = EvalConfig(
-            universe=tuple(config_dict.get("universe", [])),
-            start=config_dict["start"],
-            end=config_dict["end"],
-            forward_period=config_dict.get("forward_period", 5),
-            quantiles=config_dict.get("quantiles", 5),
-            cost_bps=config_dict.get("cost_bps", 4.0),
-            ic_freq=config_dict.get("ic_freq", "D"),
-            log_ret=config_dict.get("log_ret", False),
-            params=req.params or config_dict.get("params", {}),
-        )
-    except (KeyError, TypeError) as exc:
+        config = parse_eval_config(config_dict, params=req.params)
+    except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=f"Invalid config: {exc}")
 
     universe_obj = Universe.from_symbols(config.universe)
@@ -289,6 +279,9 @@ async def explore_factor(req: ExploreRequest) -> dict:
         "turnover_annualized": result.turnover_annualized,
         "fee_drag_monthly": result.fee_drag_monthly,
         "half_life": result.half_life,
+        "oos_ic_series": result.oos_ic_series,
+        "segment_results": result.segment_results,
+        "neutralization_config": result.neutralization_config,
     }
 
 
@@ -308,6 +301,7 @@ async def submit_run(
     returns ``{run_id, status: "queued"}``.
     """
     # Validate factor_name exists in registry (same guard as /explore).
+    from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.registry import Registry
 
     registry = Registry()
@@ -315,14 +309,24 @@ async def submit_run(
     if registry.get_spec(req.factor_name) is None:
         raise HTTPException(status_code=404, detail=f"Factor '{req.factor_name}' not found")
 
+    try:
+        parsed_config = parse_eval_config(req.config, params=req.params)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid config: {exc}")
+
     run_id = str(uuid4())
 
+    neutralize = list(parsed_config.neutralize)
     run = FactorRun(
         id=run_id,
         factor_name=req.factor_name,
         status="queued",
         config=req.config,
         progress=0,
+        universe_id=parsed_config.universe_id,
+        neutralization_config=(
+            {"providers": list(neutralize)} if neutralize else None
+        ),
     )
     db.add(run)
     await db.commit()

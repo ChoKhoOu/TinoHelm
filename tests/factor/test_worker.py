@@ -369,3 +369,45 @@ async def test_start_stop_worker_lifecycle():
 
     # Let the event loop process the cancellation.
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_cancel_flag_mid_pipeline_breaks(mock_session_factory, mock_eval_result):
+    """Factor worker observes cancel flags emitted between progress stages."""
+    factory, _session = mock_session_factory
+
+    rds = AsyncMock()
+    # 1) pre-load check: no cancel; 2) after progress 10: no cancel;
+    # 3) after progress 40: cancel observed and the run aborts.
+    rds.exists.side_effect = [0, 0, 1]
+    rds.publish = AsyncMock()
+    rds.setex = AsyncMock()
+    rds.close = AsyncMock()
+
+    stage_calls: list[int] = []
+
+    def _fake_orchestrator(**kwargs):
+        progress_cb = kwargs["progress_cb"]
+        progress_cb(10, "data_load", stage="aligning")
+        stage_calls.append(10)
+        progress_cb(40, "kernel_exec", stage="computing")
+        stage_calls.append(40)  # must not be reached after cancel raises
+        return mock_eval_result
+
+    with (
+        patch("tinohelm.factor.worker.get_session_factory", return_value=factory),
+        patch("tinohelm.factor.worker.aioredis.from_url", return_value=rds),
+        patch("tinohelm.factor.worker._run_orchestrator", side_effect=_fake_orchestrator),
+    ):
+        from tinohelm.factor.worker import _process_job
+
+        await _process_job(_make_payload(run_id="cancel-mid"), "redis://localhost:6379")
+
+    assert stage_calls == [10]
+    event_payloads = [
+        json.loads(call.args[1])
+        for call in rds.publish.call_args_list
+        if call.args[0] == "tino:factor:events"
+    ]
+    assert any(event["type"] == "factor.cancelled" for event in event_payloads)
+    assert not any(event["type"] == "factor.completed" for event in event_payloads)

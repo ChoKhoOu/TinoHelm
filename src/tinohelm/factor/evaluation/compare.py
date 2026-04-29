@@ -96,6 +96,21 @@ def _extract_ic_frame(result: EvalResult, name: str) -> pl.DataFrame:
     return pl.DataFrame(rows, schema={"date": pl.Utf8, name: pl.Float64})
 
 
+def _paired_ic_arrays(eval_a: EvalResult, eval_b: EvalResult) -> tuple[np.ndarray, np.ndarray]:
+    """Return IC arrays aligned by ``date`` for paired A/B comparison."""
+    a_frame = _extract_ic_frame(eval_a, "a")
+    b_frame = _extract_ic_frame(eval_b, "b")
+    if a_frame.height == 0 or b_frame.height == 0:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+    paired = a_frame.join(b_frame, on="date", how="inner").drop_nulls()
+    if paired.height == 0:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+    return (
+        paired["a"].to_numpy().astype(np.float64, copy=False),
+        paired["b"].to_numpy().astype(np.float64, copy=False),
+    )
+
+
 # ---------------------------------------------------------------------------
 # compare_results — pairwise bootstrap CI
 # ---------------------------------------------------------------------------
@@ -141,8 +156,10 @@ def compare_results(
         is too short (< 2 points) for bootstrap.
     """
     rng = np.random.default_rng(random_seed)
-    a_ic = _extract_ic_values(eval_a)
-    b_ic = _extract_ic_values(eval_b)
+    # A/B IC observations are naturally paired by date for runs over the same
+    # universe/window.  Align on date before bootstrapping so missing buckets do
+    # not cause unrelated IC values to be compared positionally.
+    a_ic, b_ic = _paired_ic_arrays(eval_a, eval_b)
 
     diffs: list[dict] = []
 
@@ -179,12 +196,13 @@ def compare_results(
             })
             continue
 
-        n_a, n_b = len(a_ic), len(b_ic)
+        n = len(a_ic)
         boot_deltas = np.empty(n_bootstrap, dtype=np.float64)
 
         for k in range(n_bootstrap):
-            a_sample = rng.choice(a_ic, size=n_a, replace=True)
-            b_sample = rng.choice(b_ic, size=n_b, replace=True)
+            idx = rng.integers(0, n, size=n)
+            a_sample = a_ic[idx]
+            b_sample = b_ic[idx]
 
             if metric_name == "ic_mean":
                 bdiff = float(np.mean(b_sample)) - float(np.mean(a_sample))
