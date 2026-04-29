@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
-from scipy.stats import spearmanr
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +103,8 @@ def forward_returns(
     The caller's frame is **not** mutated.
     """
     _ensure_ts_value_frame(close, "forward_returns(close)")
+    if period <= 0:
+        raise ValueError(f"period must be > 0, got {period!r}")
     if _SYMBOL_COL in close.columns:
         ordered = close.sort([_SYMBOL_COL, _TS_COL])
         future = pl.col(_VAL_COL).shift(-period).over(_SYMBOL_COL)
@@ -111,10 +112,14 @@ def forward_returns(
         ordered = close.sort(_TS_COL)
         future = pl.col(_VAL_COL).shift(-period)
 
+    current = pl.col(_VAL_COL)
+    valid_pair = future.is_finite() & current.is_finite() & (current != 0)
+    ratio = future / current
     if log_ret:
-        expr = (future / pl.col(_VAL_COL)).log()
+        valid_pair = valid_pair & (future > 0) & (current > 0)
+        expr = pl.when(valid_pair).then(ratio.log()).otherwise(None)
     else:
-        expr = future / pl.col(_VAL_COL) - 1
+        expr = pl.when(valid_pair).then(ratio - 1).otherwise(None)
 
     select_cols = [pl.col(_TS_COL)]
     if _SYMBOL_COL in ordered.columns:

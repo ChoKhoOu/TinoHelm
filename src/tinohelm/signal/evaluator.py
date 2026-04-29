@@ -138,6 +138,10 @@ class SignalEvaluator:
         -------
         SignalEvalResult
         """
+        if self.periods_per_year <= 0:
+            raise ValueError(
+                f"periods_per_year must be > 0, got {self.periods_per_year!r}"
+            )
         weights, returns, T = self._align(weight_panel, future_returns)
 
         # -- Zero-period edge case -----------------------------------------
@@ -292,6 +296,15 @@ class SignalEvaluator:
             number of aligned rows and ``N`` is the number of common
             symbol columns.
         """
+        if "ts" not in weight_panel.columns:
+            raise ValueError(
+                f"weight_panel missing required 'ts' column; got {weight_panel.columns!r}"
+            )
+        if "ts" not in future_returns.columns:
+            raise ValueError(
+                "future_returns missing required 'ts' column; "
+                f"got {future_returns.columns!r}"
+            )
         # Determine common symbol columns (preserve weight_panel order).
         ret_sym_cols = {c for c in future_returns.columns if c != "ts"}
         sym_cols = [c for c in weight_panel.columns if c != "ts" and c in ret_sym_cols]

@@ -91,6 +91,32 @@ def test_basic_evaluate(
     assert 0.0 <= result.capacity_score <= 1.0
 
 
+def test_evaluate_rejects_non_positive_periods_per_year(
+    sample_weight_panel: pl.DataFrame,
+    sample_future_returns: pl.DataFrame,
+    zero_cost: CostModel,
+) -> None:
+    evaluator = SignalEvaluator(periods_per_year=0)
+    with pytest.raises(ValueError, match="periods_per_year must be > 0"):
+        evaluator.evaluate(sample_weight_panel, sample_future_returns, zero_cost)
+
+
+def test_align_requires_ts_column(zero_cost: CostModel) -> None:
+    evaluator = SignalEvaluator()
+    with pytest.raises(ValueError, match="weight_panel missing required 'ts'"):
+        evaluator.evaluate(
+            pl.DataFrame({"s1": [1.0]}),
+            pl.DataFrame({"ts": [0], "s1": [0.01]}),
+            zero_cost,
+        )
+    with pytest.raises(ValueError, match="future_returns missing required 'ts'"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0], "s1": [1.0]}),
+            pl.DataFrame({"s1": [0.01]}),
+            zero_cost,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — all-zero weights → sharpe=0 / mdd=0 / turnover=0
 # ---------------------------------------------------------------------------
@@ -129,7 +155,7 @@ def test_zero_weights_zero_metrics() -> None:
 
 def test_known_pnl_synthetic() -> None:
     """Constant weights + constant returns → verifiable cumulative PnL."""
-    T, N = 10, 2
+    T = 10
     weights = np.array([[0.5, -0.5]] * T)
     returns = np.array([[0.01, -0.01]] * T)
 
@@ -273,7 +299,7 @@ def test_mdd_counts_loss_from_flat_baseline() -> None:
 
 def test_capacity_score_concentrated_low() -> None:
     """Single asset holds 100% weight → capacity_score = 0."""
-    T, N = 5, 4
+    T = 5
     weight_panel = pl.DataFrame(
         {
             "ts": list(range(T)),
@@ -297,7 +323,7 @@ def test_capacity_score_concentrated_low() -> None:
 
 def test_capacity_score_diversified_high() -> None:
     """Four equal 25% weights → capacity_score = 0.75."""
-    T, N = 5, 4
+    T = 5
     weight_panel = pl.DataFrame(
         {
             "ts": list(range(T)),
@@ -326,7 +352,7 @@ def test_capacity_score_diversified_high() -> None:
 
 def test_tail_loss_p99_extreme_negative() -> None:
     """1st-percentile net return over 100 random periods should be negative."""
-    T, N = 100, 1
+    T = 100
     np.random.seed(42)
     rets = np.random.randn(T) * 0.01
     weight_panel = pl.DataFrame({"ts": list(range(T)), "s1": [1.0] * T})
@@ -385,7 +411,6 @@ def test_trailing_nan_return_rows_excluded() -> None:
     """
     T_full = 5
     T_valid = 4
-    N = 2
     ts = list(range(T_full))
 
     # Constant weights: s1=0.6, s2=0.4 for all 5 rows.

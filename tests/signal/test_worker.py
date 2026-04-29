@@ -675,6 +675,60 @@ def test_load_aligned_panels_invokes_datalayer_and_kernel():
     assert abs(first_row["ETHUSDT-PERP"].item() - 0.10) < 1e-9
 
 
+def test_load_aligned_panels_future_returns_masks_zero_and_non_finite_close():
+    """Future-return builder must not emit inf that poisons evaluator PnL."""
+    from unittest.mock import patch
+    import datetime as _dt
+
+    import polars as pl
+
+    from tinohelm.factor.types import FactorSpec, InputSpec
+    from tinohelm.signal.types import SignalSpec
+    from tinohelm.signal.worker import _load_aligned_panels
+
+    syms = ("BTCUSDT-PERP",)
+    ts = pl.Series("ts", [_dt.datetime(2024, 1, 1, h) for h in range(5)])
+    synthetic_close = pl.DataFrame({
+        "ts": ts,
+        "BTCUSDT-PERP": [100.0, 0.0, 105.0, float("inf"), 110.0],
+    })
+    factor_spec = FactorSpec(
+        name="fake_momentum",
+        category="momentum",
+        description="",
+        lookback=1,
+        input_specs=(InputSpec(field_name="close"),),
+    )
+
+    def _fake_kernel(close, params=None):
+        return close
+
+    def _fake_load(requests, start=None, end=None):
+        return {"close": synthetic_close}
+
+    spec = SignalSpec(
+        name="test",
+        factor_ref="fake_momentum@1.0.0",
+        method="top_k_long_short",
+        weighting="equal",
+        rebalance_freq="1h",
+        universe_ref="test_universe",
+    )
+    config = {"universe_symbols": list(syms)}
+
+    with (
+        patch("tinohelm.factor.registry.Registry.scan", return_value=None),
+        patch("tinohelm.factor.registry.Registry.get_kernel", return_value=_fake_kernel),
+        patch("tinohelm.factor.registry.Registry.get_spec", return_value=factor_spec),
+        patch("tinohelm.factor.data_layer.DataLayer.load", side_effect=_fake_load),
+    ):
+        _factor_panel, future_returns = _load_aligned_panels(spec, config)
+
+    values = future_returns["BTCUSDT-PERP"].to_list()
+    assert values[0] == -1.0
+    assert values[1:] == [None, None, None, None]
+
+
 def test_load_aligned_panels_preserves_universe_pit_boundaries():
     """Worker uses persisted PIT rules, not permanent Universe.from_symbols."""
     from unittest.mock import patch
@@ -858,6 +912,7 @@ async def test_start_stop_signal_worker_lifecycle():
     ):
         task = start_signal_worker("redis://localhost:6379")
 
+    assert task is not None
     assert _handle.is_running()
     stop_signal_worker()
     assert not _handle.is_running()
@@ -948,7 +1003,7 @@ def test_load_aligned_panels_routes_market_cap_to_market_cap_source():
     ``source = "funding_rate" if field == "funding_rate" else "bar"``,
     which incorrectly routed market_cap → bar → DataLayer read failure.
     """
-    from unittest.mock import patch, call
+    from unittest.mock import patch
     import datetime as _dt
 
     import polars as pl
