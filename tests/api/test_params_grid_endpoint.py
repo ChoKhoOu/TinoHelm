@@ -235,6 +235,7 @@ def test_params_grid_calls_data_layer_with_data_requests(
 def test_params_grid_passes_declared_non_close_inputs(client, mock_close_panel):
     """Kernel kwargs follow FactorSpec.input_specs instead of hard-coded close."""
     volume_panel = mock_close_panel.with_columns(pl.lit(1000.0).alias("BTCUSDT-PERP"))
+    captured_requests: list = []
     spec = MagicMock()
     spec.params = {"lookback": 5}
     spec.lookback = 5
@@ -257,11 +258,15 @@ def test_params_grid_passes_declared_non_close_inputs(client, mock_close_panel):
         {"params": {"lookback": 5}, "ic_mean": 0.03, "ir": 0.5},
     ]
 
+    def _fake_load(request, start=None, end=None):
+        captured_requests.extend(request)
+        return {"volume": volume_panel, "close": mock_close_panel}
+
     with (
         patch("tinohelm.factor.registry.Registry", return_value=mock_registry),
         patch(
             "tinohelm.factor.data_layer.DataLayer.load",
-            return_value={"volume": volume_panel, "close": mock_close_panel},
+            side_effect=_fake_load,
         ),
         patch(
             "tinohelm.factor.evaluation.evaluator._to_ts_value",
@@ -291,9 +296,47 @@ def test_params_grid_passes_declared_non_close_inputs(client, mock_close_panel):
         )
 
     assert resp.status_code == 200, resp.text
+    assert {r.field_name for r in captured_requests} == {"volume", "close"}
     assert "volume" in captured_kwargs
     assert "close" not in captured_kwargs
     assert captured_kwargs["volume"] is volume_panel
+
+
+def test_params_grid_requires_close_eval_target(client, mock_close_panel):
+    """Non-close factors must not evaluate IC against their own input panel."""
+    volume_panel = mock_close_panel.with_columns(pl.lit(1000.0).alias("BTCUSDT-PERP"))
+    spec = MagicMock()
+    spec.params = {"lookback": 5}
+    spec.lookback = 5
+    inp = MagicMock()
+    inp.field_name = "volume"
+    inp.frequency = None
+    spec.input_specs = [inp]
+
+    mock_registry = MagicMock()
+    mock_registry.get_spec.return_value = spec
+    mock_registry.get_kernel.return_value = lambda volume, params: volume
+
+    with (
+        patch("tinohelm.factor.registry.Registry", return_value=mock_registry),
+        patch(
+            "tinohelm.factor.data_layer.DataLayer.load",
+            return_value={"volume": volume_panel},
+        ),
+    ):
+        resp = client.post(
+            "/api/factor/params_grid",
+            json={
+                "factor_name": "volume_factor",
+                "grid": {"lookback": [5]},
+                "start": "2026-01-01",
+                "end": "2026-04-01",
+                "universe": ["BTCUSDT-PERP"],
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "close price panel" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

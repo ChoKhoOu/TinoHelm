@@ -308,6 +308,33 @@ class TestFundingRate:
         # funding panel shape must match bar index length
         assert result["funding_rate"].height == result["close"].height
 
+    def test_load_funding_direct_uses_bar_index_not_raw_funding_index(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        """Direct funding loads must align onto bars, not sparse 8h timestamps."""
+        _stub_make_instrument(monkeypatch)
+        catalog_path, funding_dir, uni, ts_ns = self._base_setup(tmp_path)
+        dl = DataLayer(uni, catalog_root=catalog_path, funding_dir=funding_dir)
+
+        req = DataRequest(
+            "BTCUSDT-PERP",
+            "funding_rate",
+            "1m",
+            0,
+            "funding_rate",
+        )
+        result = dl.load(req)
+
+        assert "funding_rate" in result
+        panel = result["funding_rate"]
+        assert panel.height == len(ts_ns)
+        assert _ts_list(panel) == [
+            datetime(1970, 1, 1) + timedelta(microseconds=ts // 1_000)
+            for ts in ts_ns
+        ]
+
     def test_missing_funding_json_returns_empty_frame(self, tmp_path: Path, monkeypatch):
         _stub_make_instrument(monkeypatch)
         catalog_path = tmp_path / "catalog"

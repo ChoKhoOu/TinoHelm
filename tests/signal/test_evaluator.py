@@ -252,6 +252,20 @@ def test_mdd_correctness() -> None:
     assert abs(result.mdd - 0.15) < 1e-9
 
 
+def test_mdd_counts_loss_from_flat_baseline() -> None:
+    """Losing from the first period is drawdown from the initial flat baseline."""
+    result = SignalEvaluator().evaluate(
+        pl.DataFrame({"ts": [0, 1], "s1": [1.0, 1.0]}),
+        pl.DataFrame({"ts": [0, 1], "s1": [-0.10, 0.02]}),
+        CostModel(name="custom", fee_bps_per_side=0.0, slippage_bps_per_side=0.0),
+    )
+
+    # cum_net = [-0.10, -0.08]; with the implicit starting equity/PnL of 0,
+    # max drawdown is 0.10.  The previous implementation incorrectly used
+    # -0.10 as the first peak and returned 0.0.
+    assert result.mdd == pytest.approx(0.10)
+
+
 # ---------------------------------------------------------------------------
 # Test 7 — capacity_score: concentrated vs diversified
 # ---------------------------------------------------------------------------

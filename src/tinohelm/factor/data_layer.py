@@ -112,6 +112,14 @@ def _build_series_frame(
     return df
 
 
+def _first_panel_timestamps(panels: dict[str, Panel]) -> list[datetime]:
+    """Return the first non-empty panel timestamp index from a loaded panel dict."""
+    for panel in panels.values():
+        if not panel.is_empty() and _TS_COL in panel.columns:
+            return panel[_TS_COL].to_list()
+    return []
+
+
 # ---------------------------------------------------------------------------
 # DataLayer
 # ---------------------------------------------------------------------------
@@ -184,7 +192,16 @@ class DataLayer:
             groups[(req.field_name, req.frequency, req.source)].append(req)
 
         result: dict[str, Panel] = {}
-        for (field_name, frequency, source), reqs in groups.items():
+        funding_groups: list[tuple[tuple[str, str, str], list[DataRequest]]] = []
+        for key, reqs in groups.items():
+            field_name, frequency, source = key
+            if source == "funding_rate":
+                # Funding panels need a bar-frequency reference index.  Defer
+                # them until bar groups have been loaded so mixed requests like
+                # [close, funding_rate] use the same timestamp grid.
+                funding_groups.append((key, reqs))
+                continue
+
             symbols = [r.symbol for r in reqs]
             # Use the max lookback across all requests for this group
             lookback = max(r.lookback for r in reqs)
@@ -197,6 +214,23 @@ class DataLayer:
                 start=start,
                 end=end,
                 lookback=lookback,
+            )
+            result[field_name] = panel
+
+        for (field_name, frequency, source), reqs in funding_groups:
+            symbols = [r.symbol for r in reqs]
+            lookback = max(r.lookback for r in reqs)
+            reference_ts = _first_panel_timestamps(result)
+
+            panel = self._load_panel(
+                symbols=symbols,
+                field_name=field_name,
+                frequency=frequency,
+                source=source,
+                start=start,
+                end=end,
+                lookback=lookback,
+                reference_ts=reference_ts,
             )
             result[field_name] = panel
 
@@ -215,6 +249,7 @@ class DataLayer:
         start: str | datetime | None,
         end: str | datetime | None,
         lookback: int,
+        reference_ts: Sequence[datetime] | None = None,
     ) -> Panel:
         """Load one Panel (time × symbol) for a given field/frequency/source."""
         ts_start = _parse_ts(start) if start is not None else None
@@ -269,18 +304,34 @@ class DataLayer:
         if source == "bar":
             panel = self._align_time(series_by_symbol)
         elif source == "funding_rate":
-            # Apply as-of delay (shift(1) + ffill) onto the union bar index so
-            # a funding rate published at T is only visible at T+8h.  Using the
-            # union index of all loaded series as the reference bar index gives
-            # correct PIT alignment without requiring a separate bar load.
-            raw_panel = self._align_time(series_by_symbol)
-            bar_ts: list[datetime] = (
-                raw_panel[_TS_COL].to_list() if _TS_COL in raw_panel.columns else []
+            # Apply as-of delay (shift(1) + ffill) onto a real bar-frequency
+            # index.  Raw funding timestamps are sparse 8h settlement points;
+            # using them as the target grid would misrepresent funding factors
+            # as 8h-only panels and break mixed bar/funding evaluation.
+            bar_ts = list(reference_ts or [])
+            if not bar_ts:
+                bar_ts = self._load_bar_reference_index(
+                    symbols=symbols,
+                    frequency=frequency,
+                    start=ts_load_start,
+                    end=ts_end,
+                )
+            bar_ts = sorted(dict.fromkeys(bar_ts))
+            aligned_cols: dict[str, pl.DataFrame] = {
+                sym: self._align_funding_onto_bar_index(series, bar_ts)
+                for sym, series in series_by_symbol.items()
+            }
+            panel = (
+                self._align_time(aligned_cols)
+                if bar_ts
+                else pl.DataFrame(
+                    {col: [] for col in [_TS_COL, *symbols]},
+                    schema={
+                        _TS_COL: pl.Datetime("ns"),
+                        **{s: pl.Float64 for s in symbols},
+                    },
+                )
             )
-            aligned_cols: dict[str, pl.DataFrame] = {}
-            for sym, series in series_by_symbol.items():
-                aligned_cols[sym] = self._align_funding_onto_bar_index(series, bar_ts)
-            panel = self._align_time(aligned_cols)
         else:
             # trade_tick / market_cap and others: simple union-index align.
             panel = self._align_time(series_by_symbol)
@@ -316,6 +367,35 @@ class DataLayer:
             )
         else:
             raise ValueError(f"Unknown data source: {source!r}")
+
+    def _load_bar_reference_index(
+        self,
+        symbols: Sequence[str],
+        frequency: str,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> list[datetime]:
+        """Load the union close-bar timestamp grid for funding alignment.
+
+        Funding-rate inputs are sparse settlement events.  When callers ask
+        for funding without also requesting a bar field, load close bars only
+        for their timestamps so ``DataLayer.load()`` still returns a panel on
+        the intended bar cadence.
+        """
+        ts_values: set[datetime] = set()
+        for sym in symbols:
+            try:
+                close_series = self._load_bar_field(sym, "close", frequency, start, end)
+            except Exception:
+                logger.warning(
+                    "Failed to load bar reference index for funding_rate symbol %s",
+                    sym,
+                    exc_info=True,
+                )
+                continue
+            if not close_series.is_empty() and _TS_COL in close_series.columns:
+                ts_values.update(close_series[_TS_COL].to_list())
+        return sorted(ts_values)
 
     # ------------------------------------------------------------------
     # Bar reader (reuses catalog.py private helpers via internal import)

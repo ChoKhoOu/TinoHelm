@@ -564,6 +564,21 @@ async def params_grid_endpoint(req: ParamsGridRequest) -> dict:
             )
             for sym in universe_symbols
         ]
+    elif not any(r.field_name == "close" and r.source == "bar" for r in data_requests):
+        # Factor inputs are not necessarily prices (volume/funding/market_cap),
+        # but IC/forward-return evaluation must always be against close returns.
+        # Load close as an eval-only panel without passing it to the kernel
+        # unless the factor explicitly declares it.
+        data_requests.extend(
+            DataRequest(
+                symbol=sym,
+                field_name="close",
+                frequency=_DEFAULT_INTERVAL,
+                lookback=0,
+                source="bar",
+            )
+            for sym in universe_symbols
+        )
 
     # Load data once; the resulting panels are shared by all grid combinations.
     try:
@@ -580,13 +595,13 @@ async def params_grid_endpoint(req: ParamsGridRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Data load failed: {exc}")
 
-    # Extract the close panel (primary input for most factors).
+    # Extract the close panel used strictly as the forward-return target.
     close_panel = raw_panels.get("close")
     if close_panel is None:
-        # Fall back to the first available panel when factor uses a non-close field.
-        close_panel = next(iter(raw_panels.values()), None)
-    if close_panel is None:
-        raise HTTPException(status_code=400, detail="Data load returned no panels")
+        raise HTTPException(
+            status_code=400,
+            detail="Params grid requires a close price panel for forward returns",
+        )
 
     # Build kernel callable for the factor.
     from tinohelm.factor.evaluation.ic import forward_returns as _fwd_returns

@@ -335,6 +335,11 @@ class SignalEvaluator:
         """
         if len(pnl_curve) == 0:
             return 0.0
-        running_max = np.maximum.accumulate(pnl_curve)
-        drawdown = pnl_curve - running_max  # always ≤ 0
+        # Include the flat starting baseline.  Without the leading 0.0, a
+        # strategy that loses money immediately (e.g. cumulative PnL
+        # ``[-0.10, -0.08]``) would incorrectly treat ``-0.10`` as the first
+        # peak and report zero drawdown.
+        curve_with_baseline = np.concatenate(([0.0], pnl_curve))
+        running_max = np.maximum.accumulate(curve_with_baseline)
+        drawdown = curve_with_baseline - running_max  # always ≤ 0
         return float(-np.min(drawdown))
