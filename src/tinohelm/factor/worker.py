@@ -23,6 +23,7 @@ Payload schema consumed from the queue::
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import dataclasses
 import json
 import logging
@@ -51,6 +52,10 @@ EVENTS_CHANNEL = "tino:factor:events"
 PROGRESS_DB_STEP = 10
 
 _handle: WorkerHandle = WorkerHandle(name="factor-worker")
+
+
+class FactorRunCancelled(Exception):
+    """Raised internally when a factor run observes its Redis cancel flag."""
 
 
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
@@ -142,15 +147,23 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         # 2. Check cancel flag early (before DB round-trip)
         # ----------------------------------------------------------------
         cancel_key = f"tino:factor:cancel:{run_id}"
-        if await rds.exists(cancel_key):
-            logger.info("Factor run %s cancelled (pre-load), skipping", run_id)
-            async with factory() as db:
-                await db.execute(
+
+        async def _mark_cancelled() -> None:
+            async with factory() as db_c:
+                await db_c.execute(
                     update(FactorRun)
                     .where(FactorRun.id == run_id)
-                    .values(status=STATUS_CANCELLED)
+                    .values(
+                        status=STATUS_CANCELLED,
+                        finished_at=datetime.now(UTC).replace(tzinfo=None),
+                        progress_stage=None,
+                    )
                 )
-                await db.commit()
+                await db_c.commit()
+
+        if await rds.exists(cancel_key):
+            logger.info("Factor run %s cancelled (pre-load), skipping", run_id)
+            await _mark_cancelled()
             return
 
         # ----------------------------------------------------------------
@@ -194,32 +207,61 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         # ----------------------------------------------------------------
         throttle = PercentStepThrottle(step=PROGRESS_DB_STEP)
 
-        async def _progress(pct: int, msg: str = "") -> None:
+        async def _progress(pct: int, msg: str = "", *, stage: str | None = None) -> None:
             payload = json.dumps({
                 "run_id": run_id,
                 "factor_name": factor_name,
                 "progress": pct,
                 "message": msg,
+                "stage": stage,
             })
             await rds.publish(progress_channel, payload)
             await rds.setex(progress_channel, 86400, str(pct))
-            if throttle.should_write(pct):
+            update_values: dict = {"progress": pct} if throttle.should_write(pct) else {}
+            if stage is not None:
+                update_values["progress_stage"] = stage
+            if update_values:
                 async with factory() as db2:
                     await db2.execute(
                         update(FactorRun)
                         .where(FactorRun.id == run_id)
-                        .values(progress=pct)
+                        .values(**update_values)
                     )
                     await db2.commit()
+
+        async def _check_cancel() -> bool:
+            return bool(await rds.exists(cancel_key))
+
+        async def _progress_and_check_cancel(
+            pct: int,
+            msg: str = "",
+            *,
+            stage: str | None = None,
+        ) -> None:
+            await _progress(pct, msg, stage=stage)
+            if await _check_cancel():
+                raise FactorRunCancelled(run_id)
 
         # ----------------------------------------------------------------
         # 5. Build Orchestrator and run (CPU-bound → thread)
         # ----------------------------------------------------------------
         loop = asyncio.get_running_loop()
+        progress_futures: list[concurrent.futures.Future[None]] = []
 
-        def _sync_progress(pct: int, msg: str = "") -> None:
-            """Bridge: schedule async progress update from a worker thread."""
-            asyncio.run_coroutine_threadsafe(_progress(pct, msg), loop)
+        def _sync_progress(pct: int, msg: str = "", *, stage: str | None = None) -> None:
+            """Bridge progress from the worker thread and fail fast on cancel.
+
+            Blocking on the scheduled coroutine is safe here: the event loop is
+            awaiting ``asyncio.to_thread`` while this code runs in that worker
+            thread.  This gives factor runs the same between-stage cancellation
+            semantics as signal runs instead of only checking before start.
+            """
+            fut = asyncio.run_coroutine_threadsafe(
+                _progress_and_check_cancel(pct, msg, stage=stage),
+                loop,
+            )
+            progress_futures.append(fut)
+            fut.result()
 
         eval_result = await asyncio.to_thread(
             _run_orchestrator,
@@ -230,6 +272,13 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             run_id=run_id,
             progress_cb=_sync_progress,
         )
+        if progress_futures:
+            await asyncio.gather(
+                *(asyncio.wrap_future(fut) for fut in progress_futures),
+                return_exceptions=False,
+            )
+        if await _check_cancel():
+            raise FactorRunCancelled(run_id)
 
         # ----------------------------------------------------------------
         # 6. Mark completed
@@ -243,6 +292,12 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
                     status=STATUS_COMPLETED,
                     progress=100,
                     result=result_dict,
+                    oos_ic_series=result_dict.get("oos_ic_series") or None,
+                    neutralization_config=(
+                        result_dict.get("neutralization_config") or None
+                    ),
+                    universe_id=config_dict.get("universe_id"),
+                    segment_results=result_dict.get("segment_results") or None,
                     finished_at=datetime.now(UTC).replace(tzinfo=None),
                 )
             )
@@ -256,6 +311,18 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             "factor_name": factor_name,
             "rating": eval_result.rating,
         }))
+
+    except FactorRunCancelled:
+        logger.info("FactorRun %s cancelled", run_id)
+        try:
+            await _mark_cancelled()
+            await rds.publish(EVENTS_CHANNEL, json.dumps({
+                "type": "factor.cancelled",
+                "run_id": run_id,
+                "factor_name": factor_name,
+            }))
+        except Exception:
+            logger.exception("Failed to update FactorRun %s to cancelled", run_id)
 
     except Exception as exc:
         tb = traceback.format_exc()
@@ -301,14 +368,14 @@ def _run_orchestrator(
     calls :meth:`Orchestrator.run`.  Imported lazily to keep worker module
     importable even when heavy deps (pandas, numpy) are absent in test env.
     """
-    from tinohelm.factor.backend.pandas_backend import PandasBackend
+    from tinohelm.factor.backend.polars_backend import PolarsBackend
     from tinohelm.factor.cache import FactorCache
     from tinohelm.factor.data_layer import DataLayer
     from tinohelm.factor.engine.orchestrator import Orchestrator
     from tinohelm.factor.evaluation.evaluator import Evaluator
     from tinohelm.factor.observer import Observer
     from tinohelm.factor.registry import Registry
-    from tinohelm.factor.types import EvalConfig
+    from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.universe import Universe
     from tinohelm.core.config import get_settings
     import pathlib
@@ -326,7 +393,7 @@ def _run_orchestrator(
 
     data_layer = DataLayer(universe_obj, catalog_root=pathlib.Path(catalog_path))
 
-    backend = PandasBackend()
+    backend = PolarsBackend()
     evaluator = Evaluator()
 
     # Cache — use settings.paths.factor_cache (no hardcoded path).
@@ -336,12 +403,12 @@ def _run_orchestrator(
     # The Observer's span mechanism drives coarse-grained step events.
     observer = Observer()
 
-    # Emit progress at major pipeline stages via Observer hook.
-    # stage_pct maps span name → approximate percent on entry.
-    _STAGE_PCT: dict[str, int] = {
-        "data_load": 10,
-        "kernel_exec": 40,
-        "evaluate": 70,
+    # Emit 4-stage progress events via Observer span hook.
+    # Maps observer span name → (pct, stage_label) on span entry.
+    _STAGE_MAP: dict[str, tuple[int, str]] = {
+        "data_load":   (10, "aligning"),
+        "kernel_exec": (40, "computing"),
+        "evaluate":    (70, "evaluating"),
     }
 
     original_start_span = observer.start_span
@@ -350,26 +417,17 @@ def _run_orchestrator(
 
     @contextlib.contextmanager
     def _instrumented_span(name: str, **tags):
-        pct = _STAGE_PCT.get(name)
-        if pct is not None:
-            progress_cb(pct, name)
+        entry = _STAGE_MAP.get(name)
+        if entry is not None:
+            pct, stage = entry
+            progress_cb(pct, name, stage=stage)
         with original_start_span(name, **tags) as ctx:
             yield ctx
 
     observer.start_span = _instrumented_span  # type: ignore[method-assign]
 
     # --- Reconstruct EvalConfig from dict --------------------------------
-    config = EvalConfig(
-        universe=tuple(config_dict.get("universe", [])),
-        start=config_dict["start"],
-        end=config_dict["end"],
-        forward_period=config_dict.get("forward_period", 5),
-        quantiles=config_dict.get("quantiles", 5),
-        cost_bps=config_dict.get("cost_bps", 4.0),
-        ic_freq=config_dict.get("ic_freq", "D"),
-        log_ret=config_dict.get("log_ret", False),
-        params=params or config_dict.get("params", {}),
-    )
+    config = parse_eval_config(config_dict, params=params)
 
     orchestrator = Orchestrator(
         registry=registry,
@@ -388,7 +446,10 @@ def _run_orchestrator(
         full=full,
     )
 
-    progress_cb(100, "Done")
+    # Stage 4: persisting — emitted here so the async layer (step 6 in
+    # _process_job) can write progress_stage="persisting" to DB before the
+    # final completed update.
+    progress_cb(95, "Persisting results", stage="persisting")
     return result
 
 

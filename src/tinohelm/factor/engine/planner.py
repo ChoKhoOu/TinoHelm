@@ -297,6 +297,7 @@ _TRADE_TICK_FIELDS: frozenset[str] = frozenset({
 _QUOTE_TICK_FIELDS: frozenset[str] = frozenset({
     "quote_tick", "orderbook_imbalance", "bid_price", "bid_qty", "ask_price", "ask_qty",
 })
+_MARKET_CAP_FIELDS: frozenset[str] = frozenset({"market_cap"})
 
 
 def _infer_source(field_name: str) -> str:
@@ -309,4 +310,6 @@ def _infer_source(field_name: str) -> str:
         return "trade_tick"
     if field_name in _QUOTE_TICK_FIELDS:
         return "quote_tick"
+    if field_name in _MARKET_CAP_FIELDS:
+        return "market_cap"
     return "bar"

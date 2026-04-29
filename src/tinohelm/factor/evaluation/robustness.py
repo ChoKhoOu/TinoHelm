@@ -1,13 +1,16 @@
 """Robustness tests — shuffle test, subsample IC, cross-symbol IC.
 
-Migrated from ``research.robustness`` — API-compatible (same function names,
-signatures, and output shape) so numerical regression tests pass.
+Migrated to polars-native input handling. The deterministic / pure
+helpers (``summarize_shuffle_distribution``, ``_single_shuffle_ic``) keep
+their numpy-array contract since they consume already-flattened factor /
+forward-return arrays. Higher-level entry points (``shuffle_test``,
+``subsample_ic``) now accept the same 2-col ``[ts, value]``
+:class:`pl.DataFrame` shape used elsewhere in the evaluation package.
 
-``cross_symbol_ic`` still takes a factor_name + factor_params + symbols tuple
-because it re-loads data per symbol and re-computes the factor internally.
-In the declarative framework the caller will typically iterate an Orchestrator
-instead, but we keep the old entrypoint to avoid breaking the migration
-contract (AC-13.2).
+``cross_symbol_ic`` retains its factor_name + factor_params + symbols
+tuple since it reloads bar data per symbol and recomputes the factor
+internally; the only polars-related change is that the kernel runs on
+:class:`pl.DataFrame` panels instead of pandas.
 """
 from __future__ import annotations
 
@@ -16,8 +19,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any
 
 import numpy as np
-import pandas as pd
+import polars as pl
 from scipy.stats import spearmanr
+
+from tinohelm.factor.evaluation.ic import _build_paired, _to_polars_freq
 
 logger = logging.getLogger(__name__)
 
@@ -103,25 +108,24 @@ def summarize_shuffle_distribution(
 
 
 def shuffle_test(
-    factor: pd.Series,
-    fwd_ret: pd.Series,
+    factor: pl.DataFrame,
+    fwd_ret: pl.DataFrame,
     n_iter: int = 1000,
     max_workers: int = 4,
 ) -> dict:
     """Shuffle factor values N times, compute null IC distribution.
 
-    Returns ``{real_ic, shuffle_distribution, p_value, significant}``.  Below
-    ``SHUFFLE_MIN_OBSERVATIONS`` valid pairs the function short-circuits to a
-    no-signal payload — the ProcessPool is never spawned.
+    Returns ``{real_ic, shuffle_distribution, p_value, significant}``. Below
+    ``SHUFFLE_MIN_OBSERVATIONS`` valid pairs the function short-circuits to
+    a no-signal payload — the ProcessPool is never spawned.
     """
-    paired = pd.DataFrame({"f": factor, "r": fwd_ret}).dropna()
-    paired = paired[np.isfinite(paired["f"]) & np.isfinite(paired["r"])]
+    paired = _build_paired(factor, fwd_ret)
 
-    if len(paired) < SHUFFLE_MIN_OBSERVATIONS:
+    if paired.height < SHUFFLE_MIN_OBSERVATIONS:
         return {"real_ic": 0, "shuffle_distribution": [], "p_value": 1.0, "significant": False}
 
-    f_vals = paired["f"].values
-    r_vals = paired["r"].values
+    f_vals = paired["factor"].to_numpy()
+    r_vals = paired["fwd_ret"].to_numpy()
 
     real_ic, _ = spearmanr(f_vals, r_vals)
     real_ic = float(real_ic) if np.isfinite(real_ic) else 0.0
@@ -138,28 +142,39 @@ def shuffle_test(
 
 
 def subsample_ic(
-    factor: pd.Series,
-    fwd_ret: pd.Series,
+    factor: pl.DataFrame,
+    fwd_ret: pl.DataFrame,
     freq: str = "ME",
 ) -> list[dict]:
     """Compute IC per time segment (monthly by default).
 
-    Groups with < 20 observations or non-finite IC are skipped.  Returns a
+    Groups with < 20 observations or non-finite IC are skipped. Returns a
     list of ``{"period": "YYYY-MM", "ic": float}`` dicts.
     """
-    paired = pd.DataFrame({"f": factor, "r": fwd_ret}).dropna()
-    paired = paired[np.isfinite(paired["f"]) & np.isfinite(paired["r"])]
+    paired = _build_paired(factor, fwd_ret)
 
-    results = []
-    for period, group in paired.groupby(pd.Grouper(freq=freq)):
-        if len(group) < 20:
+    if paired.height == 0:
+        return []
+
+    bucket = pl.col("ts").dt.truncate(_to_polars_freq(freq)).alias("bucket")
+    paired_bucketed = paired.with_columns(bucket)
+
+    results: list[dict] = []
+    for (bucket_dt,), group in paired_bucketed.group_by(["bucket"], maintain_order=True):
+        if group.height < 20:
             continue
-        ic, _ = spearmanr(group["f"], group["r"])
-        if np.isfinite(ic):
-            results.append({
-                "period": period.strftime("%Y-%m") if hasattr(period, "strftime") else str(period),
-                "ic": round(float(ic), 6),
-            })
+        ic_arr = group.select(
+            pl.corr(pl.col("factor"), pl.col("fwd_ret"), method="spearman").alias("ic")
+        )
+        ic_val = ic_arr.item()
+        if ic_val is None or not np.isfinite(ic_val):
+            continue
+        # ``bucket_dt`` is a python datetime → strftime mirrors legacy.
+        period_str = bucket_dt.strftime("%Y-%m") if hasattr(bucket_dt, "strftime") else str(bucket_dt)
+        results.append({
+            "period": period_str,
+            "ic": round(float(ic_val), 6),
+        })
 
     return results
 
@@ -168,12 +183,12 @@ def _cross_symbol_worker(args: tuple) -> dict:
     """Worker for cross-symbol IC (top-level for pickling).
 
     Loads bar data via DataLayer and computes the factor signal using the
-    declarative factor registry.  Reuses the module-level ``_worker_registry``
+    declarative factor registry. Reuses the module-level ``_worker_registry``
     created by ``_init_worker()`` to avoid rebuilding the Registry per symbol.
 
     The kernel is called with the same convention as
     :meth:`Scheduler._call_kernel`: ``kernel(**factor_data)`` where
-    ``factor_data`` maps ``input_spec.field_name → Panel``.  ``params`` is
+    ``factor_data`` maps ``input_spec.field_name → Panel``. ``params`` is
     injected when the kernel's spec declares a ``params`` parameter.
     """
     symbol, factor_name, factor_params, interval, start, end, forward_period, catalog_path = args
@@ -198,23 +213,20 @@ def _cross_symbol_worker(args: tuple) -> dict:
         )
 
         close_panel = panels.get("close")
-        if close_panel is None or close_panel.empty or len(close_panel) < 100:
+        if close_panel is None or len(close_panel) < 100:
             return {"symbol": symbol, "ic": 0, "n_obs": 0}
 
-        # Resolve factor kernel + spec via the worker-level registry
+        # Resolve factor kernel + spec via the worker-level registry.
         registry = _worker_registry
         kernel = registry.get_kernel(factor_name)
         spec = registry.get_spec(factor_name)
 
-        # Build factor_data dict from spec.input_specs — same convention as
-        # Scheduler._select_inputs: keys are field_name strings.
-        factor_data: dict[str, pd.DataFrame] = {}
+        factor_data: dict[str, Any] = {}
         if spec is not None:
             for inp in spec.input_specs:
                 if inp.field_name in panels:
                     factor_data[inp.field_name] = panels[inp.field_name]
         else:
-            # Fallback: pass close if spec is unavailable
             factor_data["close"] = close_panel
 
         # Inject params if the kernel accepts it (legacy convention used by
@@ -225,22 +237,43 @@ def _cross_symbol_worker(args: tuple) -> dict:
             factor_data["params"] = factor_params  # type: ignore[assignment]
 
         sig_panel = kernel(**factor_data)
-        sig = sig_panel[symbol] if symbol in sig_panel.columns else sig_panel.iloc[:, 0]
+        # The kernel returns a Panel with the symbol column. Extract the
+        # 2-col ``[ts, value]`` view used by ``forward_returns`` /
+        # ``_build_paired``.  Fallback: pick the first non-``ts`` column.
+        cols = [c for c in sig_panel.columns if c != "ts"]
+        if symbol in cols:
+            value_col = symbol
+        elif cols:
+            value_col = cols[0]
+        else:
+            return {"symbol": symbol, "ic": 0, "n_obs": 0}
+        sig_df = sig_panel.select([
+            pl.col("ts"),
+            pl.col(value_col).alias("value"),
+        ]) if "ts" in sig_panel.columns else None
+        if sig_df is None:
+            return {"symbol": symbol, "ic": 0, "n_obs": 0}
 
-        close_df = panels["close"]
-        fwd = forward_returns(close_df[symbol], forward_period)
+        close_cols = [c for c in close_panel.columns if c != "ts"]
+        close_value_col = symbol if symbol in close_cols else close_cols[0]
+        close_df = close_panel.select([
+            pl.col("ts"),
+            pl.col(close_value_col).alias("value"),
+        ])
+        fwd_df = forward_returns(close_df, forward_period)
 
-        paired = pd.DataFrame({"f": sig, "r": fwd}).dropna()
-        paired = paired[np.isfinite(paired["f"]) & np.isfinite(paired["r"])]
+        paired = _build_paired(sig_df, fwd_df)
 
-        if len(paired) < 30:
-            return {"symbol": symbol, "ic": 0, "n_obs": len(paired)}
+        if paired.height < 30:
+            return {"symbol": symbol, "ic": 0, "n_obs": paired.height}
 
-        ic, _ = spearmanr(paired["f"], paired["r"])
+        f_vals = paired["factor"].to_numpy()
+        r_vals = paired["fwd_ret"].to_numpy()
+        ic, _ = spearmanr(f_vals, r_vals)
         return {
             "symbol": symbol,
             "ic": round(float(ic), 6) if np.isfinite(ic) else 0,
-            "n_obs": len(paired),
+            "n_obs": paired.height,
         }
     except Exception as exc:
         logger.warning("Cross-symbol IC failed for %s: %s", symbol, exc)

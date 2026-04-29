@@ -37,11 +37,11 @@ it's threaded into the ``DataRequest`` objects this module generates.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
-import pandas as pd
+from joblib import Parallel, delayed
 
 from tinohelm.factor.backend.base import AbstractBackend
 from tinohelm.factor.cache import FactorCache
@@ -112,6 +112,31 @@ def _extract_close_panel(data: dict[str, Panel]) -> Panel | None:
     return data.get("close")
 
 
+def _serialize_segment_results(segment_results: dict[str, dict]) -> dict[str, dict]:
+    """Convert nested EvalResult objects returned by segmentation to dicts."""
+    out: dict[str, dict] = {}
+    for provider, segments in segment_results.items():
+        out[provider] = {}
+        for label, value in segments.items():
+            if dataclasses.is_dataclass(value):
+                out[provider][label] = dataclasses.asdict(value)
+            else:
+                out[provider][label] = value
+    return out
+
+
+def _select_btc_or_first_symbol(panel: Panel, universe: tuple[str, ...]) -> str | None:
+    """Choose a close/funding column for BTC-based segmentation providers."""
+    candidate_cols = [c for c in panel.columns if c != "ts"]
+    for sym in universe:
+        if sym in candidate_cols and sym.upper().startswith("BTC"):
+            return sym
+    for col in candidate_cols:
+        if col.upper().startswith("BTC"):
+            return col
+    return candidate_cols[0] if candidate_cols else None
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -128,7 +153,7 @@ class Orchestrator:
         loading.  Must already be configured with a :class:`Universe`.
     backend:
         :class:`~tinohelm.factor.backend.base.AbstractBackend` implementation
-        (typically :class:`~tinohelm.factor.backend.pandas_backend.PandasBackend`).
+        (typically :class:`~tinohelm.factor.backend.polars_backend.PolarsBackend`).
     evaluator:
         :class:`~tinohelm.factor.evaluation.evaluator.Evaluator` instance.
     cache:
@@ -261,6 +286,14 @@ class Orchestrator:
             else:
                 factor_values = cached_values
 
+            if config.neutralize:
+                with self._observer.start_span(
+                    "neutralize",
+                    factor=factor_name,
+                    providers=list(config.neutralize),
+                ):
+                    factor_values = self._neutralize_factor_values(factor_values, config)
+
             self._observer.record_output_stats(factor_name, factor_values)
 
             # 4. Evaluate ------------------------------------------------
@@ -307,6 +340,25 @@ class Orchestrator:
                         factor_values, close_panel, config
                     )
 
+            if config.neutralize:
+                eval_result.neutralization_config = {
+                    "providers": list(config.neutralize),
+                    "method": "ols",
+                }
+
+            if config.segments:
+                with self._observer.start_span(
+                    "segment_evaluate",
+                    factor=factor_name,
+                    providers=list(config.segments),
+                ):
+                    eval_result.segment_results = self._evaluate_segments(
+                        factor_values=factor_values,
+                        close_panel=close_panel,
+                        data=data,
+                        config=config,
+                    )
+
             # 5. Cache store ---------------------------------------------
             if self._cache is not None:
                 self._cache.store(
@@ -318,6 +370,74 @@ class Orchestrator:
                 )
 
             return eval_result
+
+    def _neutralize_factor_values(self, factor_values: Panel, config: EvalConfig) -> Panel:
+        """Apply configured Universe PIT masking and OLS neutralization."""
+        from tinohelm.aligner.aligner import Aligner
+        from tinohelm.factor.universe import Universe
+
+        universe_obj = getattr(self._data_layer, "_universe", None)
+        if universe_obj is None:
+            universe_obj = Universe.from_symbols(config.universe)
+        aligner = Aligner(universe_obj, neutralize=list(config.neutralize))
+        return aligner.align(factor_values)
+
+    def _evaluate_segments(
+        self,
+        *,
+        factor_values: Panel,
+        close_panel: Panel,
+        data: dict[str, Panel],
+        config: EvalConfig,
+    ) -> dict[str, dict]:
+        """Run requested segmentation providers against the production panel."""
+        from tinohelm.factor.evaluation.segmentation import segment_evaluate
+
+        requested = set(config.segments)
+        supported = {"btc_trend", "vol_regime", "funding_level"}
+        unknown = sorted(requested - supported)
+        if unknown:
+            raise ValueError(f"Unknown factor segment provider(s): {unknown}")
+
+        symbol = _select_btc_or_first_symbol(close_panel, config.universe)
+        btc_close_series = close_panel[symbol] if symbol else None
+        btc_vol_series = close_panel[symbol] if symbol else None
+
+        funding_series = None
+        if "funding_level" in requested:
+            funding_panel = data.get("funding_rate")
+            if funding_panel is None:
+                funding_requests = [
+                    DataRequest(
+                        symbol=sym,
+                        field_name="funding_rate",
+                        frequency="8h",
+                        lookback=0,
+                        source="funding_rate",
+                    )
+                    for sym in config.universe
+                ]
+                funding_data = self._data_layer.load(
+                    funding_requests, start=config.start, end=config.end
+                )
+                funding_panel = funding_data.get("funding_rate")
+            if funding_panel is not None:
+                funding_symbol = _select_btc_or_first_symbol(funding_panel, config.universe)
+                funding_series = funding_panel[funding_symbol] if funding_symbol else None
+            if funding_series is None:
+                raise RuntimeError("funding_level segmentation requires a funding_rate panel")
+
+        # Avoid computing unrequested BTC-derived providers by withholding the
+        # corresponding input series.
+        raw = segment_evaluate(
+            factor_values,
+            self._evaluator._prepare_returns(close_panel, config)[0],
+            btc_close_series=(btc_close_series if "btc_trend" in requested else None),
+            btc_vol_series=(btc_vol_series if "vol_regime" in requested else None),
+            funding_series=funding_series,
+            eval_config=dataclasses.replace(config, returns_kind="forward_returns"),
+        )
+        return _serialize_segment_results({k: v for k, v in raw.items() if k in requested})
 
     # ------------------------------------------------------------------
     # Public API — batch factor run
@@ -461,37 +581,45 @@ class Orchestrator:
                     s for s in specs_needing_compute if s.name in kernel_map
                 ]
 
-                # Fan out via a local ThreadPoolExecutor. We cannot use the
-                # Scheduler directly because its _select_inputs raises on
-                # missing fields which we want to capture per-factor here.
+                # Fan out via joblib.Parallel (threading backend keeps thread
+                # semantics identical to the old ThreadPoolExecutor while
+                # enabling joblib's smarter load-balancing and progress hooks).
+                # We use backend="threading" rather than "loky" because factor
+                # kernels may be local closures (e.g. in tests) which are not
+                # picklable across a process boundary.
                 n_workers = (
                     max_workers if max_workers is not None else max(1, len(specs_with_kernels))
                 )
 
-                # Record kernel_exec spans in main thread order; actual
-                # execution is concurrent.
+                # Record kernel_exec spans; actual execution is concurrent.
+                # ``_run_one_kernel`` returns ``BaseException`` instead of
+                # raising so that one factor failing does not abort the
+                # whole ``Parallel`` batch (joblib 1.5 dropped the
+                # ``return_exceptions`` kwarg — failure isolation is
+                # implemented in the worker function instead).
                 with self._observer.start_span("kernel_exec", n_factors=len(specs_with_kernels)):
-                    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                        future_to_spec = {
-                            pool.submit(
-                                _run_one_kernel, spec, kernel_map[spec.name], data, self._backend
-                            ): spec
-                            for spec in specs_with_kernels
-                        }
-                        for future in as_completed(future_to_spec):
-                            spec = future_to_spec[future]
-                            try:
-                                panel = future.result()
-                                factor_values_map[spec.name] = panel
-                            except Exception as exc:  # noqa: BLE001
-                                errors_map[spec.name] = (
-                                    f"{type(exc).__name__}: {exc}"
-                                )
-                                logger.warning(
-                                    "batch_run: factor %r raised %s",
-                                    spec.name,
-                                    errors_map[spec.name],
-                                )
+                    raw_results = Parallel(
+                        n_jobs=n_workers,
+                        backend="threading",
+                    )(
+                        delayed(_run_one_kernel)(
+                            spec, kernel_map[spec.name], data, self._backend
+                        )
+                        for spec in specs_with_kernels
+                    )
+
+                    for spec, outcome in zip(specs_with_kernels, raw_results):
+                        if isinstance(outcome, BaseException):
+                            errors_map[spec.name] = (
+                                f"{type(outcome).__name__}: {outcome}"
+                            )
+                            logger.warning(
+                                "batch_run: factor %r raised %s",
+                                spec.name,
+                                errors_map[spec.name],
+                            )
+                        else:
+                            factor_values_map[spec.name] = outcome
 
             # 5. Evaluate each successful factor + cache store ------------
             for spec in specs_to_compute:
@@ -504,6 +632,14 @@ class Orchestrator:
                     # Shouldn't happen with our bookkeeping, but guard anyway.
                     results[spec.name] = None
                     continue
+
+                if config.neutralize:
+                    with self._observer.start_span(
+                        "neutralize",
+                        factor=spec.name,
+                        providers=list(config.neutralize),
+                    ):
+                        factor_values = self._neutralize_factor_values(factor_values, config)
 
                 self._observer.record_output_stats(spec.name, factor_values)
 
@@ -523,6 +659,19 @@ class Orchestrator:
                     )
                     results[spec.name] = None
                     continue
+
+                if config.neutralize:
+                    eval_result.neutralization_config = {
+                        "providers": list(config.neutralize),
+                        "method": "ols",
+                    }
+                if config.segments:
+                    eval_result.segment_results = self._evaluate_segments(
+                        factor_values=factor_values,
+                        close_panel=close_panel,
+                        data=data,
+                        config=config,
+                    )
 
                 results[spec.name] = eval_result
 
@@ -567,13 +716,27 @@ def _run_one_kernel(
     kernel: Callable,
     data: dict[str, Panel],
     backend: AbstractBackend,
-) -> Panel:
+) -> Panel | BaseException:
     """Worker-thread entry that pairs _select_inputs + _call_kernel.
 
     Kept at module level so it pickles cleanly for any future
     :class:`ProcessPoolExecutor` migration.
+
+    Failure isolation contract
+    --------------------------
+    Returns a :class:`BaseException` instance instead of raising when the
+    kernel fails.  joblib 1.5 dropped support for the ``return_exceptions``
+    kwarg, so exceptions raised inside ``Parallel`` workers now propagate
+    through ``Parallel.__call__`` and abort the whole batch.  Catching here
+    keeps the behaviour the call-site in :meth:`Orchestrator.batch_run`
+    already expects (it inspects each outcome with
+    ``isinstance(outcome, BaseException)``) and preserves the design's
+    failure-isolation guarantee.
     """
-    return _call_kernel(spec, kernel, data, backend)
+    try:
+        return _call_kernel(spec, kernel, data, backend)
+    except BaseException as exc:  # noqa: BLE001 — by design: isolate per-factor failures
+        return exc
 
 
 __all__ = ["Orchestrator"]

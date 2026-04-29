@@ -198,6 +198,21 @@ class TestGetSymbolsAtDelisting:
         result = uni_with_delisting.get_symbols_at(datetime(2030, 1, 1))
         assert "BTCUSDT-PERP" in result
 
+    def test_symbols_between_includes_delisted_inside_window(self, uni_with_delisting: Universe):
+        """Historical loading set includes names active before the end anchor."""
+        result = uni_with_delisting.get_symbols_between(
+            datetime(2024, 1, 1),
+            datetime(2024, 12, 31),
+        )
+        assert result == ["BTCUSDT-PERP", "DOTUSDT-PERP"]
+
+    def test_symbols_between_excludes_delisted_before_window(self, uni_with_delisting: Universe):
+        result = uni_with_delisting.get_symbols_between(
+            datetime(2024, 6, 1),
+            datetime(2024, 12, 31),
+        )
+        assert result == ["BTCUSDT-PERP"]
+
 
 class TestGetSymbolsAtPdTimestamp:
     """Ensure pd.Timestamp inputs work identically to datetime inputs."""

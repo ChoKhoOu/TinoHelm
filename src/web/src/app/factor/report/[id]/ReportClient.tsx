@@ -6,6 +6,7 @@ import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { InlineError, StatusBadge } from "@/components/qds";
+import { useCancelFactorRun } from "../../hooks/useCancelFactorRun";
 import { cn } from "@/lib/utils";
 import { SignalProfileTab } from "./components/SignalProfileTab";
 import { PredictivePowerTab } from "./components/PredictivePowerTab";
@@ -42,6 +43,8 @@ export function ReportClient() {
   const { report, loading, error, reload } = useReport(runId);
 
   const [activeTab, setActiveTab] = useState<TabKey>("profile");
+
+  const cancelAction = useCancelFactorRun();
 
   const result = report?.result;
 
@@ -138,7 +141,7 @@ export function ReportClient() {
         {report.status === "failed" && report.error && (
           <InlineError>{report.error}</InlineError>
         )}
-        {report.status !== "failed" && (
+        {report.status !== "failed" && report.status !== "cancelled" && (
           <div className="mt-4 rounded-lg border bg-card p-8 text-center">
             <div className="text-[0.8rem] font-semibold mb-2">
               诊断运行中 · {report.status}
@@ -146,6 +149,25 @@ export function ReportClient() {
             <div className="font-mono text-[0.68rem] text-muted-foreground leading-relaxed max-w-md mx-auto">
               当前进度 {report.progress ?? 0}%，完成后自动刷新。
             </div>
+            {(report.status === "queued" || report.status === "running") && (
+              <div className="mt-4 flex flex-col items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => cancelAction.execute(runId).then(() => reload())}
+                  disabled={cancelAction.state === "loading" || cancelAction.state === "success"}
+                >
+                  {cancelAction.state === "loading"
+                    ? "取消中..."
+                    : cancelAction.state === "success"
+                    ? "已发送取消"
+                    : "取消运行"}
+                </Button>
+                {cancelAction.state === "error" && cancelAction.error && (
+                  <InlineError>{cancelAction.error}</InlineError>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

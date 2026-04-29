@@ -20,15 +20,6 @@ const COMPLETED_RUN = {
   },
 };
 
-const MOCK_OVERVIEW = {
-  equity_curve: [
-    { ts: "2025-01-01", equity: 100000 },
-    { ts: "2025-03-31", equity: 112345 },
-  ],
-  monthly_returns: [],
-  underwater_curve: [],
-  pnl_histogram: [],
-};
 
 test.beforeEach(async ({ page }) => {
   // Register catch-all first (lowest priority in Playwright's LIFO order)
@@ -91,7 +82,6 @@ test("switching to Overview tab shows equity SVG component", async ({ page }) =>
   await page.locator("button:has-text('Overview')").click();
 
   // OverviewEquitySvg renders an SVG inside the overview tab
-  const overviewContent = page.locator("[data-view-tab='overview'], .mt-4");
   // The equity chart is a RechartsChart or SVG — check it appears
   await expect(page.locator("svg").first()).toBeVisible({ timeout: 10000 });
 });

@@ -1,7 +1,7 @@
 """L2 disk cache for factor computation results.
 
 Two-level cache:
-* ``values/{key}.parquet`` — factor_values Panel (DatetimeIndex × symbol)
+* ``values/{key}.parquet`` — factor_values Panel (``ts`` + symbol columns)
 * ``eval/{key}.json``     — EvalResult serialised to JSON with NaN/Inf scrub
 
 Cache key is a SHA-256 digest of (factor_name, code_hash, stable_json(config),
@@ -14,6 +14,13 @@ re-computing factor values when they are already cached.
 NaN/Inf contract: ``EvalResult`` floats are scrubbed to ``None`` before
 serialisation.  On deserialisation, ``None`` stays ``None`` — callers must
 handle the absence of a value.
+
+Polars contract
+---------------
+Cached factor values are written and read as :class:`polars.DataFrame`
+panels — :data:`Panel` is ``pl.DataFrame`` after the polars migration.
+Existing on-disk pandas-written parquet files remain readable through
+polars' parquet reader because the format is column-compatible.
 """
 from __future__ import annotations
 
@@ -31,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from tinohelm.core.paths import paths
 from tinohelm.factor.types import EvalConfig, EvalResult, Panel
@@ -278,7 +285,7 @@ class FactorCache:
         factor_values: Panel | None = None
         if vpath.exists():
             try:
-                factor_values = pd.read_parquet(vpath)
+                factor_values = pl.read_parquet(vpath)
                 values_hit = True
             except Exception as exc:  # pragma: no cover
                 log.warning("FactorCache: failed to read %s: %s", vpath, exc)
@@ -335,7 +342,13 @@ class FactorCache:
 
         if factor_values is not None:
             vpath = self._values_path(key)
-            factor_values.to_parquet(vpath)
+            # Polars uses ``write_parquet``; pandas ``to_parquet`` is kept as
+            # a fallback so transitional callers that still pass pandas
+            # frames don't regress.
+            if hasattr(factor_values, "write_parquet"):
+                factor_values.write_parquet(vpath)
+            else:
+                factor_values.to_parquet(vpath)  # type: ignore[union-attr]
             added_bytes += vpath.stat().st_size
 
         if eval_result is not None:

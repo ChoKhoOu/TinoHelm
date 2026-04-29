@@ -22,8 +22,6 @@ export function BacktestCreateStepper({ step, className }: BacktestCreateStepper
         const stepNum = (i + 1) as 1 | 2 | 3;
         const isActive = step === stepNum;
         const isCompleted = step > stepNum;
-        const isPending = step < stepNum;
-
         const dotCls = isActive
           ? STEPPER_DOT_CLS_MAP.active
           : isCompleted

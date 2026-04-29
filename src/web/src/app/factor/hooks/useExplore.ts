@@ -17,7 +17,7 @@ export function useExplore() {
   const [result, setResult] = useState<ExploreResult | null>(null);
   const [lastFactorName, setLastFactorName] = useState<string | null>(null);
 
-  const action = useAction<ExploreResult>(
+  const action = useAction(
     async (payload: ExploreRequest) =>
       (await apiPost<ExploreResult>("/api/factor/explore", payload)) as ExploreResult,
     {

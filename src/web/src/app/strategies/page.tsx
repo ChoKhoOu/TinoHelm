@@ -517,6 +517,7 @@ export default function StrategiesPage() {
 
   useEffect(() => {
     loadStrategies();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function loadStrategies(autoSelectName?: string) {

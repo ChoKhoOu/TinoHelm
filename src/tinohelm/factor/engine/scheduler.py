@@ -13,10 +13,9 @@ Responsibilities
 Parallelism
 -----------
 Uses :class:`concurrent.futures.ThreadPoolExecutor` because factor kernels
-are typically CPU-bound pandas operations.  The GIL limits true CPU
-parallelism for pure-Python work, but for I/O-heavy kernels (rare in factor
-research) or when NumPy/pandas releases the GIL internally, this still
-provides real concurrency.
+are typically CPU-bound polars operations.  Polars releases the GIL for the
+bulk of its compute path so ThreadPoolExecutor produces real parallelism
+for the per-factor work.
 
 ``max_workers`` defaults to the number of factors in the group so that each
 factor gets its own thread, capped at the system thread limit implicitly
@@ -34,7 +33,7 @@ import logging
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
 
-import pandas as pd
+import polars as pl
 
 from tinohelm.factor.backend.base import AbstractBackend
 from tinohelm.factor.engine.planner import Plan
@@ -266,9 +265,9 @@ class Scheduler:
         else:
             result = kernel(**factor_data)
 
-        if not isinstance(result, pd.DataFrame):
+        if not isinstance(result, pl.DataFrame):
             raise TypeError(
-                f"Kernel for factor '{spec.name}' must return a pd.DataFrame "
+                f"Kernel for factor '{spec.name}' must return a pl.DataFrame "
                 f"(Panel), got {type(result).__name__}"
             )
         return result

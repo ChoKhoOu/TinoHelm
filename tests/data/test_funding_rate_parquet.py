@@ -286,7 +286,9 @@ class TestDataLayerFundingLoad:
             json.dump(self._records(), fh)
 
     def test_parquet_only_loads_correctly(self, tmp_path: Path):
-        """Only Parquet present → series with 2 correct values."""
+        """Only Parquet present → frame with 2 correct values."""
+        import polars as pl
+
         catalog_root = tmp_path / "catalog"
         funding_dir = tmp_path / "no_json_here"
 
@@ -295,15 +297,19 @@ class TestDataLayerFundingLoad:
         from tinohelm.factor.data_layer import DataLayer
 
         dl = DataLayer(uni, catalog_root=catalog_root, funding_dir=funding_dir)
-        series = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
+        frame = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
 
-        assert isinstance(series, pd.Series)
-        assert len(series) == 2
-        assert series.iloc[0] == pytest.approx(0.0001)
-        assert series.iloc[1] == pytest.approx(0.0002)
+        assert isinstance(frame, pl.DataFrame)
+        assert frame.columns == ["ts", "value"]
+        values = frame["value"].to_list()
+        assert len(values) == 2
+        assert values[0] == pytest.approx(0.0001)
+        assert values[1] == pytest.approx(0.0002)
 
     def test_json_only_fallback_loads_correctly(self, tmp_path: Path):
-        """Only JSON present → series loaded from JSON fallback."""
+        """Only JSON present → frame loaded from JSON fallback."""
+        import polars as pl
+
         catalog_root = tmp_path / "catalog"
         funding_dir = tmp_path / "funding_rates"
 
@@ -312,11 +318,13 @@ class TestDataLayerFundingLoad:
         from tinohelm.factor.data_layer import DataLayer
 
         dl = DataLayer(uni, catalog_root=catalog_root, funding_dir=funding_dir)
-        series = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
+        frame = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
 
-        assert isinstance(series, pd.Series)
-        assert len(series) == 2
-        assert series.iloc[0] == pytest.approx(0.0001)
+        assert isinstance(frame, pl.DataFrame)
+        assert frame.columns == ["ts", "value"]
+        values = frame["value"].to_list()
+        assert len(values) == 2
+        assert values[0] == pytest.approx(0.0001)
 
     def test_parquet_wins_when_both_present(self, tmp_path: Path):
         """Both Parquet and JSON present → Parquet values are returned.
@@ -347,9 +355,10 @@ class TestDataLayerFundingLoad:
         from tinohelm.factor.data_layer import DataLayer
 
         dl = DataLayer(uni, catalog_root=catalog_root, funding_dir=funding_dir)
-        series = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
+        frame = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
 
+        first_value = frame["value"].to_list()[0]
         # Parquet has 0.9999; JSON has 0.0001. Parquet must win.
-        assert series.iloc[0] == pytest.approx(0.9999), (
-            f"Expected Parquet value 0.9999, got {series.iloc[0]} — JSON fallback must NOT win"
+        assert first_value == pytest.approx(0.9999), (
+            f"Expected Parquet value 0.9999, got {first_value} — JSON fallback must NOT win"
         )

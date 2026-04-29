@@ -20,20 +20,31 @@ dependencies = [
     "pyyaml>=6.0",
     "plotly>=6.3.1",
     "scipy>=1.14.0",
+    "polars>=1.20.0",
+    "joblib>=1.4.0",
+    "scikit-learn>=1.5.0",
 ]
 
 [project.optional-dependencies]
 optimize = ["optuna>=3.0.0", "cmaes>=0.10.0"]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "freezegun>=1.5.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-x -q --tb=short"
+# Note: -x is intentionally NOT here so CI can run the full suite without first-failure
+# short-circuit. Local devs who want fail-fast can pass `pytest -x` explicitly.
+addopts = "-q --tb=short"
 asyncio_mode = "auto"
 filterwarnings = [
     "ignore::DeprecationWarning:nautilus_trader.*",
 ]
 markers = [
     "integration: marks tests that require real infrastructure (DB, Redis, subprocess)",
+    "performance: wall-clock performance benchmarks — flaky on shared CI runners, run locally via pytest -m performance",
 ]
 
 [tool.setuptools.packages.find]

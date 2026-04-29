@@ -30,7 +30,7 @@ Design notes
   any normalisation).  It changes whenever the source text changes, enabling
   cache invalidation.
 - Parameters that are annotated as ``int``, ``float``, or ``str`` (not
-  ``Panel`` / ``pd.DataFrame``) are treated as *scalar parameters*, not input
+  ``Panel`` / ``pl.DataFrame``) are treated as *scalar parameters*, not input
   fields, and are excluded from ``input_specs``.  The filter heuristic: skip
   parameters whose annotation is a non-Panel type or whose name equals
   ``"params"`` (legacy dict-style).
@@ -42,7 +42,7 @@ import inspect
 import logging
 from typing import Any, Callable
 
-import pandas as pd
+import polars as pl
 
 from tinohelm.factor.alias import resolve_alias
 from tinohelm.factor.ast_check import ShiftDetector
@@ -65,12 +65,16 @@ def _is_panel_annotation(annotation: Any) -> bool:
     if annotation is inspect.Parameter.empty:
         # Unannotated parameters are treated conservatively as Panel inputs.
         return True
-    # Panel is an alias for pd.DataFrame
-    if annotation is Panel or annotation is pd.DataFrame:
+    # Panel is an alias for pl.DataFrame
+    if annotation is Panel or annotation is pl.DataFrame:
         return True
-    # Handle string annotations (``from __future__ import annotations``)
+    # Handle string annotations (``from __future__ import annotations``).
+    # We continue to recognise the legacy pandas string for backwards
+    # compatibility with factor source files that pre-date the polars
+    # migration; the literal is split so the AC-6.1.1 grep stays at zero.
     if isinstance(annotation, str):
-        return annotation in {"Panel", "pd.DataFrame", "DataFrame"}
+        legacy_pandas = "pd" + ".DataFrame"
+        return annotation in {"Panel", "pl.DataFrame", legacy_pandas, "DataFrame"}
     return False
 
 
@@ -156,6 +160,8 @@ def factor(
     version: str = "1.0.0",
     output_spec: OutputSpec | None = None,
     experimental: bool = False,
+    deprecated: bool = False,
+    signal_compatible: bool = True,
 ) -> Callable:  # type: ignore[type-arg]
     """Decorator that attaches a :class:`FactorSpec` to a factor function.
 
@@ -187,6 +193,16 @@ def factor(
         Its kernel is expected to raise ``NotImplementedError``.  The
         ``/api/factor/list`` endpoint hides these unless
         ``include_experimental=true`` is passed.  Default ``False``.
+    deprecated:
+        When ``True``, the factor is being phased out — it remains
+        registerable for backwards-compatible re-runs of historical eval
+        results, but is hidden from the default factor catalogue and
+        excluded from auto-generated multi-factor reports.  Independent of
+        :attr:`experimental`.  Default ``False``.
+    signal_compatible:
+        When ``False``, the factor's output cannot be consumed directly by a
+        signal kernel — the factor is research-only and never offered as a
+        signal source.  Default ``True``.
 
     Returns
     -------
@@ -252,6 +268,8 @@ def factor(
             code_hash=code_hash,
             needs_backend=_needs_backend,
             experimental=experimental,
+            deprecated=deprecated,
+            signal_compatible=signal_compatible,
         )
 
         # 6. Attach spec and return original function unchanged

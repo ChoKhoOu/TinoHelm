@@ -14,9 +14,9 @@ on:
       - 'pyproject.toml'
 
 jobs:
-  test:
+  unit:
     runs-on: ubuntu-latest
-    name: pytest
+    name: pytest unit
 
     steps:
       - uses: actions/checkout@v4
@@ -29,8 +29,46 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e "."
-          pip install pytest pytest-asyncio
+          pip install -e ".[test]"
 
       - name: Run tests
-        run: python -m pytest tests/ -x -q --tb=short
+        run: python -m pytest tests/ -q --tb=short -m "not integration and not performance"
+
+  integration:
+    runs-on: ubuntu-latest
+    name: pytest integration
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tinohelm_test
+          POSTGRES_PASSWORD: tinohelm_test
+          POSTGRES_DB: tinohelm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TINO_TEST_DATABASE_URL: postgresql+asyncpg://tinohelm_test:tinohelm_test@localhost:5432/tinohelm_test
+      TINO_DATABASE__URL: postgresql+asyncpg://tinohelm_test:tinohelm_test@localhost:5432/tinohelm_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run DB integration tests
+        run: python -m pytest tests/db/test_migration_012.py tests/factor/test_universe_db.py -q --tb=short

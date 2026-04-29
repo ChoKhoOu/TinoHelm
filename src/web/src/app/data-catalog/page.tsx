@@ -210,7 +210,7 @@ export default function DataCatalogPage() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1.5rem" }}>
           <div>
             <div className="text-[1.1rem] font-bold mb-[.2rem]">数据目录</div>
-            <div className="font-mono text-[.72rem] text-muted-foreground">// 本地 ParquetDataCatalog</div>
+            <div className="font-mono text-[.72rem] text-muted-foreground">{"// 本地 ParquetDataCatalog"}</div>
           </div>
           <div style={{ display: "flex", gap: ".4rem", alignItems: "flex-start" }}>
             <button className="btn btn-p" onClick={() => setFetchOpen(true)}>↓ 拉取数据</button>

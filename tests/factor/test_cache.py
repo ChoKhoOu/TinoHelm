@@ -8,6 +8,13 @@ Coverage matrix
 4. ``invalidate("factor_name")`` removes all keys for that factor, leaves others intact.
 5. ``invalidate()`` removes everything.
 6. NaN/Inf inside ``EvalResult`` are scrubbed to ``None`` after round-trip.
+
+Polars contract
+---------------
+Cached factor panels are stored and returned as :class:`polars.DataFrame`
+instances after the polars migration (``Panel = pl.DataFrame``).  The
+fixtures construct synthetic panels directly with polars so the round-trip
+asserts the canonical format.
 """
 from __future__ import annotations
 
@@ -15,7 +22,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
 from tinohelm.factor.cache import CacheHit, FactorCache
@@ -42,13 +49,20 @@ def config() -> EvalConfig:
 
 
 @pytest.fixture()
-def sample_panel() -> pd.DataFrame:
-    idx = pd.date_range("2024-01-01", periods=30, freq="D")
+def sample_panel() -> pl.DataFrame:
+    """30-row × 2-symbol synthetic panel in the canonical polars layout."""
+    from datetime import datetime, timedelta
+
     rng = np.random.default_rng(42)
-    return pd.DataFrame(
-        rng.standard_normal((30, 2)),
-        index=idx,
-        columns=["BTCUSDT-PERP", "ETHUSDT-PERP"],
+    timestamps = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(30)]
+    randn = rng.standard_normal((30, 2))
+    return pl.DataFrame(
+        {
+            "ts": timestamps,
+            "BTCUSDT-PERP": randn[:, 0].tolist(),
+            "ETHUSDT-PERP": randn[:, 1].tolist(),
+        },
+        schema={"ts": pl.Datetime("us"), "BTCUSDT-PERP": pl.Float64, "ETHUSDT-PERP": pl.Float64},
     )
 
 
@@ -128,7 +142,7 @@ class TestFullMissThenHit:
         self,
         cache: FactorCache,
         config: EvalConfig,
-        sample_panel: pd.DataFrame,
+        sample_panel: pl.DataFrame,
         sample_eval_result: EvalResult,
     ) -> None:
         key = _key(cache, config)
@@ -145,7 +159,7 @@ class TestFullMissThenHit:
         assert hit is not None
         assert hit.factor_values_hit is True
         assert hit.eval_hit is True
-        assert isinstance(hit.factor_values, pd.DataFrame)
+        assert isinstance(hit.factor_values, pl.DataFrame)
         assert hit.factor_values.shape == sample_panel.shape
         assert isinstance(hit.eval_result, EvalResult)
         assert hit.eval_result.ic_mean == pytest.approx(0.05, rel=1e-6)
@@ -158,7 +172,7 @@ class TestCodeHashChangeInvalidatesKey:
         self,
         cache: FactorCache,
         config: EvalConfig,
-        sample_panel: pd.DataFrame,
+        sample_panel: pl.DataFrame,
         sample_eval_result: EvalResult,
     ) -> None:
         key_v1 = FactorCache.build_key("ret_5", "hash_v1", config, ("2024-01-01", "2024-03-01"))
@@ -182,7 +196,7 @@ class TestPartialHit:
         self,
         cache: FactorCache,
         config: EvalConfig,
-        sample_panel: pd.DataFrame,
+        sample_panel: pl.DataFrame,
     ) -> None:
         key = _key(cache, config)
         cache.store(
@@ -230,7 +244,7 @@ class TestInvalidate:
         config: EvalConfig,
         factor_name: str,
         code_hash: str,
-        panel: pd.DataFrame,
+        panel: pl.DataFrame,
         result: EvalResult,
     ) -> str:
         key = FactorCache.build_key(factor_name, code_hash, config, ("2024-01-01", "2024-03-01"))
@@ -242,7 +256,7 @@ class TestInvalidate:
         self,
         cache: FactorCache,
         config: EvalConfig,
-        sample_panel: pd.DataFrame,
+        sample_panel: pl.DataFrame,
         sample_eval_result: EvalResult,
     ) -> None:
         key_a1 = self._store_factor(cache, config, "factor_a", "h1", sample_panel, sample_eval_result)
@@ -260,7 +274,7 @@ class TestInvalidate:
         self,
         cache: FactorCache,
         config: EvalConfig,
-        sample_panel: pd.DataFrame,
+        sample_panel: pl.DataFrame,
         sample_eval_result: EvalResult,
     ) -> None:
         key_a = self._store_factor(cache, config, "factor_a", "h1", sample_panel, sample_eval_result)
@@ -275,7 +289,7 @@ class TestInvalidate:
         self,
         cache: FactorCache,
         config: EvalConfig,
-        sample_panel: pd.DataFrame,
+        sample_panel: pl.DataFrame,
         sample_eval_result: EvalResult,
     ) -> None:
         self._store_factor(cache, config, "factor_a", "h1", sample_panel, sample_eval_result)

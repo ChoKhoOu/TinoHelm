@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 
 from tinohelm.api import deps
-from tinohelm.api.routes import backtest, dashboard, data, factor, node, optimize, settings, strategy, trading, watchlist
+from tinohelm.api.routes import backtest, dashboard, data, factor, node, optimize, settings, signal, strategy, trading, universe, watchlist
 from tinohelm.api.ws import hub
 from tinohelm.core.bridge import EventBridge
 from tinohelm.core.config import get_settings
@@ -22,6 +22,7 @@ from tinohelm.core.node_controller import NodeController
 from tinohelm.backtest import consumer as bt_consumer
 from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker
 from tinohelm.factor.worker import recover_interrupted_jobs as recover_factor_jobs, start_factor_worker, stop_factor_worker
+from tinohelm.signal.worker import recover_interrupted_jobs as recover_signal_jobs, start_signal_worker, stop_signal_worker
 from tinohelm.db.session import get_session_factory
 from tinohelm.strategy.registry import persist_strategies, scan_strategies
 
@@ -85,6 +86,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await recover_factor_jobs(redis_client)
     start_factor_worker(redis_url=cfg.redis.url)
 
+    # Signal worker (async, in-process)
+    await recover_signal_jobs(redis_client)
+    start_signal_worker(redis_url=cfg.redis.url)
+
     # Backtest consumer pool (N long-running tasks; each launches a fresh
     # runner_cli subprocess per job — fresh NT Rust runtime per run).
     consumer_tasks, consumer_rds = await bt_consumer.start_consumers(
@@ -103,6 +108,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("TinoHelm API shutting down")
     stop_data_worker()
     stop_factor_worker()
+    stop_signal_worker()
 
     from .routes.optimize import cleanup_optimizer_processes
     cleanup_optimizer_processes()
@@ -151,6 +157,8 @@ def create_app() -> FastAPI:
     app.include_router(strategy.router)
     app.include_router(data.router)
     app.include_router(factor.router, dependencies=_auth_deps)
+    app.include_router(signal.router, dependencies=_auth_deps)
+    app.include_router(universe.router, dependencies=_auth_deps)
     app.include_router(trading.router)
     app.include_router(dashboard.router)
     app.include_router(hub.router)

@@ -19,7 +19,6 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-import { TrendingUp, Grid3x3, Activity, BarChart3 } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { FadeIn } from "@/components/motion/FadeIn";
 import { StaggerContainer, StaggerItem } from "@/components/motion/StaggerContainer";
@@ -46,10 +45,6 @@ interface StrategyReturn {
   [strategy: string]: string | number;
 }
 
-interface CorrelationEntry {
-  pair: [string, string];
-  value: number;
-}
 
 interface FactorExposure {
   factor: string;

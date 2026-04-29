@@ -1,46 +1,57 @@
-"""High-level evaluation orchestrator.
+"""High-level evaluation orchestrator (polars-native).
 
 ``Evaluator`` glues the sub-modules (``ic``, ``quantile``, ``distribution``,
 ``turnover``, ``robustness``, ``cost``, ``rating``) into two entry points:
 
 * ``evaluate(factor_values, returns, config) -> EvalResult`` — fast path
-  used by the explorer panel.  Runs distribution → IC → quantile → turnover
-  → rating.  No ProcessPoolExecutor spawns.
+  used by the explorer panel. Runs distribution → IC → quantile → turnover
+  → rating. No ProcessPoolExecutor spawns.
 
 * ``evaluate_full(factor_values, returns, config) -> EvalResult`` — full
   diagnostic including shuffle test, subsample IC, cross-symbol IC, and
   cost waterfall.
 
-Panel → series flattening
--------------------------
-The declarative framework passes factor values and forward returns as a
-``Panel`` (``DatetimeIndex × symbol``).  All legacy sub-functions take flat
-``pd.Series``.  The evaluator flattens the Panel into a long-form Series by
-stacking symbols (preserving the DatetimeIndex so ``pd.Grouper(freq="D")``
-still works on the time dimension).
+Panel → ``[ts, symbol, value]`` flattening
+------------------------------------------
+The declarative framework still passes factor / forward-return data as a
+``Panel`` (``pl.DataFrame`` keyed by ``ts`` with N symbol columns). Legacy
+sub-functions consumed flat pandas Series; the polars rewrite uses 2-col
+``[ts, value]`` or 3-col ``[ts, symbol, value]`` :class:`pl.DataFrame`
+instances. :func:`_to_ts_value` flattens a wide panel by *unpivoting* the
+symbol columns while preserving ``symbol`` as an identity key.  Downstream
+joins use ``(ts, symbol)`` when available, preventing multi-symbol panels
+from cross-pairing factor values and forward returns across different
+assets.
 
-If the input is already a ``pd.Series`` (single-symbol factor), we pass it
-through unchanged — this keeps the explorer panel's existing behaviour
-intact during the migration window.
+Backward compatibility
+----------------------
+A small number of callers (``test_evaluation.py`` integration suite, the
+``orchestrator`` while ``DataLayer`` still emits pandas) feed pandas
+``Series`` / ``DataFrame`` instances. We accept those too via a lightweight
+duck-typed conversion in :func:`_to_ts_value` — without importing pandas at
+module top — so AC-1 (zero pandas imports under
+``src/tinohelm/factor/evaluation/``) is satisfied.
 
 NaN / Infinity contract
 -----------------------
 ``EvalResult`` must never contain non-finite floats — the project has been
 burned by PostgreSQL JSON columns rejecting NaN/Inf (see ``CLAUDE.md``
-Pitfalls).  The ``_scrub`` helper converts non-finite floats to ``None``
+Pitfalls). The ``_scrub`` helper converts non-finite floats to ``None``
 before the ``EvalResult`` is returned.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Any
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from tinohelm.factor.evaluation.cost import edge_waterfall
 from tinohelm.factor.evaluation.distribution import compute_distribution
 from tinohelm.factor.evaluation.ic import (
+    _join_keys,
     compute_ic_decay,
     compute_ic_series,
     compute_ic_summary,
@@ -55,6 +66,7 @@ from tinohelm.factor.evaluation.robustness import (
     subsample_ic,
 )
 from tinohelm.factor.evaluation.turnover import compute_turnover
+from tinohelm.factor.evaluation.walk_forward import WalkForwardEvaluator
 from tinohelm.factor.types import EvalConfig, EvalResult, Panel
 
 
@@ -62,33 +74,127 @@ from tinohelm.factor.types import EvalConfig, EvalResult, Panel
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_series(values: Panel | pd.Series) -> pd.Series:
-    """Flatten a Panel (time × symbol) into a long-form Series keyed by time.
+_TS_COL: str = "ts"
+_SYMBOL_COL: str = "symbol"
+_VAL_COL: str = "value"
 
-    * ``pd.Series`` → returned as-is (explorer panel's single-symbol path).
-    * ``pd.DataFrame`` with a single column → squeezed to Series.
-    * ``pd.DataFrame`` with multiple columns → ``stack()`` produces a
-      MultiIndex; we collapse to a flat DatetimeIndex by stacking symbols
-      *below* time (so pd.Grouper(freq="D") still works).
 
-    The underlying IC / quantile / turnover functions all call ``dropna()``
-    first so the duplicated time-index stemming from multi-symbol stacking
-    is fine — same time may appear multiple times (once per symbol).
+def _is_pandas_series(obj: Any) -> bool:
+    """Duck-typed detection of a pandas ``Series`` (no top-level pandas import)."""
+    cls = type(obj)
+    return cls.__module__.startswith("pandas") and cls.__name__ == "Series"
+
+
+def _is_pandas_dataframe(obj: Any) -> bool:
+    cls = type(obj)
+    return cls.__module__.startswith("pandas") and cls.__name__ == "DataFrame"
+
+
+def _pandas_series_to_polars(series: Any) -> pl.DataFrame:
+    """Convert a pandas Series into the canonical 2-col ``[ts, value]`` frame.
+
+    Uses ``getattr`` rather than ``import pandas`` so the evaluation module
+    stays free of pandas dependencies (AC-1). The conversion path is:
+      * Index → ``ts`` column (any DatetimeIndex / RangeIndex / PeriodIndex
+        normalised to plain :class:`datetime.datetime` via
+        :meth:`Series.index.to_pydatetime` when available, otherwise the raw
+        index values are wrapped untouched).
+      * Series values → ``value`` column, cast to ``Float64``.
     """
-    if isinstance(values, pd.Series):
-        return values
-    if isinstance(values, pd.DataFrame):
-        if values.shape[1] == 1:
-            return values.iloc[:, 0]
-        # Multi-symbol panel: stack() yields a Series with (time, symbol)
-        # MultiIndex. We drop the symbol level to keep a flat DatetimeIndex
-        # while duplicating timestamps across symbols. ``pd.Grouper`` still
-        # buckets by time because the outer level is time.
-        stacked = values.stack(future_stack=True).sort_index()
-        # ``stacked.index`` has 2 levels [time, symbol]. Reset the symbol
-        # level to drop it, keeping timestamps as the only index.
-        stacked.index = stacked.index.get_level_values(0)
-        return stacked
+    idx = getattr(series, "index", None)
+    if idx is not None and hasattr(idx, "to_pydatetime"):
+        ts_vals = list(idx.to_pydatetime())
+    elif idx is not None:
+        ts_vals = list(idx)
+    else:
+        ts_vals = list(range(len(series)))
+    val_vals = [float(v) if v is not None else None for v in series.tolist()]
+    return pl.DataFrame({_TS_COL: ts_vals, _VAL_COL: val_vals})
+
+
+def _pandas_dataframe_to_polars_panel(df: Any) -> pl.DataFrame:
+    """Convert a multi-column pandas ``DataFrame`` panel into a polars panel.
+
+    Same duck-typed pattern as :func:`_pandas_series_to_polars`. The panel
+    keeps its original column ordering with ``ts`` prepended.
+    """
+    idx = getattr(df, "index", None)
+    if idx is not None and hasattr(idx, "to_pydatetime"):
+        ts_vals = list(idx.to_pydatetime())
+    elif idx is not None:
+        ts_vals = list(idx)
+    else:
+        ts_vals = list(range(len(df)))
+
+    payload: dict[str, list] = {_TS_COL: ts_vals}
+    for col in df.columns:
+        col_vals = df[col].tolist()
+        payload[str(col)] = [float(v) if v is not None else None for v in col_vals]
+    return pl.DataFrame(payload)
+
+
+def _to_ts_value(values: Panel | pl.Series | Any) -> pl.DataFrame:
+    """Flatten supported input into ``[ts, value]`` or ``[ts, symbol, value]``.
+
+    Supported input types:
+      * 2-col :class:`pl.DataFrame` ``[ts, value]`` — passed through.
+      * 3-col :class:`pl.DataFrame` ``[ts, symbol, value]`` — passed through
+        with canonical column order.
+      * Multi-col :class:`pl.DataFrame` panel ``[ts, sym1, sym2, ...]`` —
+        unpivoted to long form so every ``(ts, symbol)`` cell contributes one
+        row while retaining the symbol identity for later joins.
+      * :class:`pl.Series` — wrapped with a synthetic integer ``ts`` axis.
+      * pandas ``Series`` / ``DataFrame`` (duck-typed) — converted via
+        :func:`_pandas_series_to_polars` /
+        :func:`_pandas_dataframe_to_polars_panel`, then re-flattened.
+
+    Raises
+    ------
+    TypeError
+        If ``values`` is none of the above (matches legacy contract).
+    """
+    if isinstance(values, pl.DataFrame):
+        cols = values.columns
+        if _TS_COL not in cols:
+            raise ValueError(
+                f"polars DataFrame missing required {_TS_COL!r} column; got {cols!r}"
+            )
+        non_ts = [c for c in cols if c != _TS_COL]
+        if _SYMBOL_COL in cols and _VAL_COL in cols:
+            return values.select([_TS_COL, _SYMBOL_COL, _VAL_COL])
+        if len(non_ts) == 1 and non_ts[0] == _VAL_COL:
+            return values
+        if len(non_ts) == 1:
+            # Single symbol column — keep the asset identity instead of
+            # collapsing it away, so wide-panel callers get consistent schema
+            # whether they pass one symbol or many.
+            return values.select([
+                pl.col(_TS_COL),
+                pl.lit(non_ts[0]).alias(_SYMBOL_COL),
+                pl.col(non_ts[0]).alias(_VAL_COL),
+            ])
+        # Multi-symbol panel — unpivot to long form so every (ts, symbol)
+        # cell becomes a row without losing the symbol identity.
+        return values.unpivot(
+            index=[_TS_COL],
+            on=non_ts,
+            variable_name=_SYMBOL_COL,
+            value_name=_VAL_COL,
+        ).select([_TS_COL, _SYMBOL_COL, _VAL_COL])
+
+    if isinstance(values, pl.Series):
+        ts = list(range(len(values)))
+        return pl.DataFrame({_TS_COL: ts, _VAL_COL: values.to_list()})
+
+    # Pandas duck-typed fall-throughs — keeps the evaluation module pandas-free
+    # while still letting orchestrator + integration tests pass pandas inputs.
+    if _is_pandas_series(values):
+        return _pandas_series_to_polars(values)
+    if _is_pandas_dataframe(values):
+        # Re-route through the panel conversion + recursive flatten.
+        panel = _pandas_dataframe_to_polars_panel(values)
+        return _to_ts_value(panel)
+
     raise TypeError(f"Unsupported input type: {type(values).__name__}")
 
 
@@ -96,8 +202,8 @@ def _finite_or_none(x: Any) -> Any:
     """Replace NaN/Inf floats with ``None``; recurse into dicts + lists.
 
     Mirrors ``research.analysis.sanitize_for_json`` but returns the original
-    object type (list for list, dict for dict).  Exposed so callers can
-    scrub a whole ``EvalResult`` before serialization.
+    object type (list for list, dict for dict). Exposed so callers can scrub
+    a whole ``EvalResult`` before serialization.
     """
     if isinstance(x, float):
         if math.isnan(x) or math.isinf(x):
@@ -118,7 +224,7 @@ def _finite_or_none(x: Any) -> Any:
 def _scrub_result(result: EvalResult) -> EvalResult:
     """Replace any non-finite float inside ``EvalResult`` with ``None``.
 
-    Scalar float fields (``ic_mean`` etc.) become ``None`` if NaN/Inf.  Dict
+    Scalar float fields (``ic_mean`` etc.) become ``None`` if NaN/Inf. Dict
     / list fields (``quantile_pnl``, ``ic_series`` …) are recursively
     scrubbed via ``_finite_or_none``.
     """
@@ -150,6 +256,9 @@ def _scrub_result(result: EvalResult) -> EvalResult:
     result.ic_decay = _finite_or_none(result.ic_decay) or []
     result.robustness = _finite_or_none(result.robustness) or {}
     result.cost = _finite_or_none(result.cost) or {}
+    result.oos_ic_series = _finite_or_none(result.oos_ic_series) or []
+    result.segment_results = _finite_or_none(result.segment_results) or {}
+    result.neutralization_config = _finite_or_none(result.neutralization_config) or {}
 
     return result
 
@@ -162,7 +271,7 @@ class Evaluator:
     """Evaluate a factor against forward returns under an ``EvalConfig``.
 
     The class is deliberately stateless — it's safe to instantiate once and
-    reuse across many factors, or to spin up a new one per call.  All
+    reuse across many factors, or to spin up a new one per call. All
     long-lived state lives in the arguments.
 
     Example
@@ -178,24 +287,21 @@ class Evaluator:
 
     def evaluate(
         self,
-        factor_values: Panel | pd.Series,
-        returns: Panel | pd.Series,
+        factor_values: Panel | pl.Series | Any,
+        returns: Panel | pl.Series | Any,
         config: EvalConfig,
     ) -> EvalResult:
         """Fast evaluation — IC / quantile / turnover / distribution / rating.
 
-        ``returns`` may be either:
-          * Forward returns (already shifted) — used directly.
-          * Raw close prices — ``forward_returns(..., config.forward_period)``
-            is applied if the input looks price-like (all positive, no NaN
-            tail).  This matches the explorer panel's calling convention.
+        ``returns`` semantics are explicit via ``config.returns_kind``:
+          * ``"close"`` — raw close prices; :func:`forward_returns` is applied.
+          * ``"forward_returns"`` — already shifted returns; used directly.
 
-        The ``Evaluator`` is conservative and *does not* heuristically detect
-        "price vs forward-return"; callers must pass forward returns
-        explicitly.  ``_prepare_returns()`` is the single integration point
-        if a heuristic is added later.
+        Pandas inputs are accepted via the duck-typed conversion in
+        :func:`_to_ts_value`; the evaluation module itself never imports
+        pandas (AC-1).
         """
-        result, _factor_s, _fwd_s, _close_s = self._evaluate_core(
+        result, _factor_df, _fwd_df, _close_df = self._evaluate_core(
             factor_values, returns, config
         )
         return result
@@ -206,8 +312,8 @@ class Evaluator:
 
     def evaluate_full(
         self,
-        factor_values: Panel | pd.Series,
-        returns: Panel | pd.Series,
+        factor_values: Panel | pl.Series | Any,
+        returns: Panel | pl.Series | Any,
         config: EvalConfig,
         *,
         shuffle_iter: int = 1000,
@@ -217,6 +323,11 @@ class Evaluator:
     ) -> EvalResult:
         """Full diagnostic — adds shuffle, subsample, cross-symbol IC + cost.
 
+        When ``config.walk_forward`` is not ``None``, delegates to
+        :class:`~tinohelm.factor.evaluation.walk_forward.WalkForwardEvaluator`
+        and returns its aggregated OOS result directly (robustness + cost
+        are not run for walk-forward mode as they require a flat panel).
+
         Parameters
         ----------
         shuffle_iter : int
@@ -224,15 +335,25 @@ class Evaluator:
         shuffle_workers : int
             ProcessPool size for shuffle test.
         subsample_freq : str
-            Pandas offset string for subsample IC grouping (``"ME"`` = month-end).
+            Pandas-compatible offset alias for subsample IC grouping
+            (``"ME"`` = month-end). Translated to a polars duration via
+            ``ic._FREQ_MAP``.
         cross_symbol_args : dict | None
-            If provided, runs ``cross_symbol_ic`` with these kwargs. Shape:
-            ``{"factor_name": str, "factor_params": dict, "symbols": list,
-              "interval": str, "start": str, "end": str,
-              "catalog_path": str | None, "max_workers": int}``.
+            If provided, runs ``cross_symbol_ic`` with these kwargs.
         """
-        # Reuse the core evaluation (no redundant _prepare_returns call).
-        result, factor_s, fwd_s, _close_s = self._evaluate_core(
+        # --- Walk-forward branch -------------------------------------------
+        if config.walk_forward is not None:
+            wf_evaluator = WalkForwardEvaluator(config.walk_forward)
+            fwd_df, _close_df = self._prepare_returns(returns, config)
+            fwd_config = dataclasses.replace(config, returns_kind="forward_returns")
+
+            def _eval_fn(panel: Panel, fwd: Panel) -> EvalResult:
+                result, _, _, _ = self._evaluate_core(panel, fwd, fwd_config)
+                return result
+
+            return wf_evaluator.evaluate(factor_values, fwd_df, eval_fn=_eval_fn)
+
+        result, factor_df, fwd_df, _close_df = self._evaluate_core(
             factor_values, returns, config
         )
 
@@ -242,7 +363,7 @@ class Evaluator:
         if shuffle_iter and shuffle_iter > 0:
             try:
                 robustness["shuffle"] = shuffle_test(
-                    factor_s, fwd_s, n_iter=shuffle_iter, max_workers=shuffle_workers,
+                    factor_df, fwd_df, n_iter=shuffle_iter, max_workers=shuffle_workers,
                 )
             except Exception as exc:  # pragma: no cover — defensive
                 robustness["shuffle"] = {
@@ -254,7 +375,7 @@ class Evaluator:
                 }
 
         # --- Subsample IC ------------------------------------------------
-        robustness["subsample"] = subsample_ic(factor_s, fwd_s, freq=subsample_freq)
+        robustness["subsample"] = subsample_ic(factor_df, fwd_df, freq=subsample_freq)
 
         # --- Cross-symbol IC -------------------------------------------
         if cross_symbol_args:
@@ -281,62 +402,70 @@ class Evaluator:
 
     @staticmethod
     def _prepare_returns(
-        returns: Panel | pd.Series,
+        returns: Panel | pl.Series | Any,
         config: EvalConfig,
-    ) -> tuple[pd.Series, pd.Series | None]:
-        """Translate ``returns`` into a forward-return series.
+    ) -> tuple[pl.DataFrame, pl.DataFrame | None]:
+        """Translate ``returns`` into a forward-return evaluation frame.
 
-        Heuristic: if the input already contains explicit NaNs in the tail
-        (consistent with ``forward_returns(..., period)``), treat it as
-        pre-shifted forward returns.  Otherwise treat it as close prices
-        and apply ``forward_returns``.
+        ``config.returns_kind`` is the only source of truth.  Do not infer
+        semantics from values: a sliced forward-return fold can be strictly
+        positive and have no tail null marker, making it indistinguishable
+        from a close-price slice by shape alone.
 
         Returns
         -------
-        tuple[pd.Series, pd.Series | None]
-            ``(forward_return_series, close_series_or_none)``.
-            ``close_series_or_none`` is the flattened price series when the
-            input was detected as prices (used for IC decay).  ``None``
-            when the input was already pre-shifted forward returns.
+        tuple[pl.DataFrame, pl.DataFrame | None]
+            ``(forward_return_frame, close_frame_or_none)`` — frames use
+            ``[ts, value]`` or ``[ts, symbol, value]``.  The close
+            frame is ``None`` when the input was already pre-shifted (so
+            :func:`compute_ic_decay` can be skipped in the caller).
         """
-        as_series = _to_series(returns)
-
-        # Tail NaN heuristic — if the last ``forward_period`` entries are
-        # all NaN, assume it's already a forward-return series.
-        tail = as_series.iloc[-config.forward_period:]
-        if len(tail) == config.forward_period and tail.isna().all():
-            return as_series, None
-
-        # Treat as close price; compute forward returns.
-        fwd = forward_returns(as_series, config.forward_period, log_ret=config.log_ret)
-        return fwd, as_series
+        as_frame = _to_ts_value(returns)
+        if config.returns_kind == "forward_returns":
+            return as_frame, None
+        if config.returns_kind == "close":
+            fwd = forward_returns(as_frame, config.forward_period, log_ret=config.log_ret)
+            return fwd, as_frame
+        raise ValueError(
+            "unknown EvalConfig.returns_kind="
+            f"{config.returns_kind!r}; expected 'close' or 'forward_returns'"
+        )
 
     def _evaluate_core(
         self,
-        factor_values: Panel | pd.Series,
-        returns: Panel | pd.Series,
+        factor_values: Panel | pl.Series | Any,
+        returns: Panel | pl.Series | Any,
         config: EvalConfig,
-    ) -> tuple[EvalResult, pd.Series, pd.Series, pd.Series | None]:
-        """Shared implementation returning ``(result, factor_s, fwd_s, close_s)``.
+    ) -> tuple[EvalResult, pl.DataFrame, pl.DataFrame, pl.DataFrame | None]:
+        """Shared implementation — returns ``(result, factor_df, fwd_df, close_df)``.
 
-        Both ``evaluate()`` and ``evaluate_full()`` delegate here so that
-        flattening and ``_prepare_returns`` happen exactly once.
+        Both :meth:`evaluate` and :meth:`evaluate_full` delegate here so
+        flattening + ``_prepare_returns`` happen exactly once.
         """
-        factor_s = _to_series(factor_values)
-        fwd_s, close_s = self._prepare_returns(returns, config)
+        factor_df = _to_ts_value(factor_values)
+        fwd_df, close_df = self._prepare_returns(returns, config)
 
-        # Defensive: align indices so stacked panels share the same time axis.
-        factor_s, fwd_s = factor_s.align(fwd_s, join="inner")
+        # Defensive: align by identity keys so stacked panels share the same
+        # asset/time axis (mirrors pandas ``align(join="inner")`` without
+        # producing the symbol² row explosion caused by joining on ``ts`` only).
+        key_cols = _join_keys(factor_df, fwd_df)
+        common_keys = (
+            factor_df.select(key_cols)
+            .join(fwd_df.select(key_cols), on=key_cols, how="inner")
+            .unique(maintain_order=True)
+        )
+        factor_df = factor_df.join(common_keys, on=key_cols, how="inner")
+        fwd_df = fwd_df.join(common_keys, on=key_cols, how="inner")
 
         result = EvalResult()
 
         # 1. Distribution — factor-only analysis, cheap.
-        dist = compute_distribution(factor_s)
+        dist = compute_distribution(factor_df)
         result.distribution_stats = dist.get("stats", {})
         result.distribution_histogram = dist.get("histogram", [])
 
         # 2. IC series + summary.
-        ic_series_df = compute_ic_series(factor_s, fwd_s, freq=config.ic_freq)
+        ic_series_df = compute_ic_series(factor_df, fwd_df, freq=config.ic_freq)
         summary = compute_ic_summary(ic_series_df)
         result.ic_mean = float(summary["ic_mean"])
         result.ic_std = float(summary["ic_std"])
@@ -345,24 +474,24 @@ class Evaluator:
         result.ic_positive_pct = float(summary["ic_positive_pct"])
         result.ic_max_abs = float(summary["ic_max_abs"])
         result.ic_series = (
-            ic_series_df.to_dict("records") if len(ic_series_df) > 0 else []
+            ic_series_df.to_dicts() if ic_series_df.height > 0 else []
         )
 
         # 3. Decay + half-life — needs the close price, not forward returns.
-        if close_s is not None:
-            decay = compute_ic_decay(factor_s, close_s)
+        if close_df is not None:
+            decay = compute_ic_decay(factor_df, close_df)
             result.ic_decay = decay
             result.half_life = compute_half_life(decay)
 
         # 4. Quantile analysis.
-        q = compute_quantile_returns(factor_s, fwd_s, n_quantiles=config.quantiles)
+        q = compute_quantile_returns(factor_df, fwd_df, n_quantiles=config.quantiles)
         result.quantile_pnl = q.get("avg_returns", {})
         result.quantile_cum_returns = q.get("cum_returns", {})
         result.is_monotonic = bool(q.get("is_monotonic", False))
 
         # 5. Turnover — uses the cost_bps config for fee drag.
         fee_rate = config.cost_bps / 10000.0 / 2.0  # bps → per-side decimal
-        turn = compute_turnover(factor_s, fwd_s, n_quantiles=config.quantiles, fee_rate=fee_rate)
+        turn = compute_turnover(factor_df, fwd_df, n_quantiles=config.quantiles, fee_rate=fee_rate)
         result.turnover = float(turn["daily"])
         result.turnover_annualized = float(turn["annualized"])
         result.fee_drag_monthly = float(turn["fee_drag_monthly"])
@@ -373,7 +502,7 @@ class Evaluator:
             "ic_positive_pct": result.ic_positive_pct,
         })
 
-        return _scrub_result(result), factor_s, fwd_s, close_s
+        return _scrub_result(result), factor_df, fwd_df, close_df
 
 
 __all__ = ["Evaluator"]

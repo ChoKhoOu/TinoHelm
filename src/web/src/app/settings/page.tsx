@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Server, FolderOpen, Shield, Edit3, Save, X } from "lucide-react";
 import { apiGet, apiPut } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -93,6 +93,10 @@ function FormInput({ label, value, onChange, type = "text" }: {
 
 /* -- Page ----------------------------------------------------------- */
 
+function riskFormFromSettings(rl: RiskLimits): RiskLimits {
+  return { max_position_size: rl.max_position_size, max_daily_loss: rl.max_daily_loss, max_order_value: rl.max_order_value ?? 0, max_leverage: rl.max_leverage };
+}
+
 export default function SettingsPage() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [settings, setSettings] = useState<SettingsData | null>(null);
@@ -104,13 +108,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
-  function riskFormFromSettings(rl: RiskLimits): RiskLimits {
-    return { max_position_size: rl.max_position_size, max_daily_loss: rl.max_daily_loss, max_order_value: rl.max_order_value ?? 0, max_leverage: rl.max_leverage };
-  }
-
-  useEffect(() => { loadAll(); }, []);
-
-  async function loadAll() {
+  const loadAll = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -122,7 +120,9 @@ export default function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   async function handleSaveRisk() {
     setSaving(true);
@@ -150,7 +150,7 @@ export default function SettingsPage() {
       <div className="flex flex-col gap-5 p-6">
         <div className="flex flex-col gap-0.5">
           <h1 className="text-[1.1rem] font-bold tracking-tight text-foreground">系统设置</h1>
-          <span className="qds-stat-label">// 加载中...</span>
+          <span className="qds-stat-label">{"// 加载中..."}</span>
         </div>
         <div className="grid grid-cols-2 gap-5">
           {Array.from({ length: 3 }).map((_, i) => (
@@ -190,7 +190,7 @@ export default function SettingsPage() {
         <div className="flex flex-col gap-6 p-6">
           <div className="flex flex-col gap-0.5 shrink-0">
             <h1 className="text-[1.1rem] font-bold tracking-tight text-foreground">系统设置</h1>
-            <span className="qds-stat-label">// TinoHelm v{health?.platform_version ?? "0.1.0"}</span>
+            <span className="qds-stat-label">{`// TinoHelm v${health?.platform_version ?? "0.1.0"}`}</span>
           </div>
 
           <div className="grid grid-cols-2 gap-5">

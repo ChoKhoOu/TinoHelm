@@ -15,6 +15,10 @@ from nautilus_trader.core.message import Event
 
 from tinohelm.node.actors._utils import redis_publish, ts_ns_to_iso
 from tinohelm.node.actors.serialize import build_equity_snapshot
+from tinohelm.node.topics import (
+    SIGNAL_COMMISSION_DEVIATION,
+    SIGNAL_COST_DEVIATION,  # DEPRECATED: dual-publish for one release cycle
+)
 
 
 class MetricsActorConfig(ActorConfig):
@@ -24,6 +28,12 @@ class MetricsActorConfig(ActorConfig):
     db_url: str = ""
     venue_name: str = "BINANCE"
     currency: str = "USDT"
+    # Signal commission deviation monitoring.
+    # Scope: validates exchange commission per fill ONLY (does NOT include
+    # slippage or rebate; full cost model lives in research-side SignalEvaluator).
+    # Set expected_commission_bps_per_side to 0.0 to disable monitoring.
+    expected_commission_bps_per_side: float = 0.0   # expected per-side commission (bps); 0 = disabled
+    deviation_threshold_bps: float = 5.0             # alert when |actual - expected| > threshold
 
 
 class MetricsActor(Actor):
@@ -37,6 +47,8 @@ class MetricsActor(Actor):
         self._db_url = config.db_url or os.environ.get("TINO_DATABASE__URL", "")
         self._venue_name_str = config.venue_name
         self._currency_str = config.currency
+        self._expected_commission_bps = config.expected_commission_bps_per_side
+        self._deviation_threshold_bps = config.deviation_threshold_bps
         self._redis: redis.Redis | None = None
         self._db_engine: Any = None
         self._venue = None
@@ -67,6 +79,16 @@ class MetricsActor(Actor):
     def on_event(self, event: Event) -> None:
         if isinstance(event, TimeEvent) and event.name == "equity_snapshot":
             self._take_equity_snapshot()
+            return
+        # Signal commission deviation monitoring — fires on every fill when enabled.
+        if self._expected_commission_bps > 0.0:
+            try:
+                from nautilus_trader.model.events import OrderFilled
+
+                if isinstance(event, OrderFilled):
+                    self._check_commission_deviation(event)
+            except ImportError:
+                pass
 
     def on_stop(self) -> None:
         if self._redis:
@@ -114,6 +136,79 @@ class MetricsActor(Actor):
                 )
         except Exception as e:
             self.log.error(f"Equity snapshot error: {e}")
+
+    def _check_commission_deviation(self, fill_event: object) -> None:
+        """Check whether the per-fill exchange commission deviates from the
+        expected per-side bps.
+
+        **Scope**: this monitor validates *exchange commission only* — it does
+        NOT include slippage or maker rebate.  The research-side
+        :class:`tinohelm.signal.types.CostModel` defines the full 3-component
+        cost (``fee + slippage − rebate``); the live monitor is intentionally
+        narrower because NT live fills do not carry expected-vs-actual price
+        context required to compute slippage.  The published payload includes
+        ``metric: "commission_only"`` to make this scope explicit on the wire.
+
+        Publishes to:
+          - ``tino:{node_type}:signal.commission.deviation`` (canonical)
+          - ``tino:{node_type}:signal.cost.deviation`` (DEPRECATED alias —
+            removed after one release cycle).
+
+        Parameters
+        ----------
+        fill_event:
+            An ``OrderFilled`` NT event.  Accessed via ``getattr`` so the
+            method is testable without the NT Cython extension.
+        """
+        try:
+            commission = float(getattr(fill_event, "commission").as_double())
+            quantity = float(getattr(fill_event, "last_qty").as_double())
+            last_px = float(getattr(fill_event, "last_px").as_double())
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+            return
+
+        if quantity == 0.0 or last_px == 0.0:
+            return
+
+        actual_commission_bps = (commission / (quantity * last_px)) * 10_000.0
+        deviation_bps = abs(actual_commission_bps - self._expected_commission_bps)
+
+        if deviation_bps <= self._deviation_threshold_bps:
+            return
+
+        payload: dict[str, Any] = {
+            "fill_id": str(getattr(fill_event, "trade_id", "")),
+            "instrument_id": str(getattr(fill_event, "instrument_id", "")),
+            "metric": "commission_only",
+            "expected_commission_bps": self._expected_commission_bps,
+            "actual_commission_bps": round(actual_commission_bps, 6),
+            "deviation_bps": round(deviation_bps, 6),
+            "ts_ns": getattr(fill_event, "ts_init", 0),
+            # DEPRECATED legacy aliases — kept for one release cycle so existing
+            # subscribers keep working.  New code must read the *_commission_bps fields.
+            "expected_bps": self._expected_commission_bps,
+            "actual_bps": round(actual_commission_bps, 6),
+        }
+
+        redis_publish(
+            self._redis,
+            self._node_type,
+            SIGNAL_COMMISSION_DEVIATION,
+            payload,
+        )
+        # DEPRECATED dual-publish: removed after one release cycle.
+        redis_publish(
+            self._redis,
+            self._node_type,
+            SIGNAL_COST_DEVIATION,
+            payload,
+        )
+
+        self.log.warning(
+            f"signal.commission.deviation: expected={self._expected_commission_bps}bps "
+            f"actual={actual_commission_bps:.2f}bps deviation={deviation_bps:.2f}bps "
+            f"fill={payload['fill_id']} instrument={payload['instrument_id']}"
+        )
 
     def _persist_equity_snapshot(
         self, equity: float, balance: float, unrealized: float, ts: str,

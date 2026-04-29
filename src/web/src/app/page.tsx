@@ -16,7 +16,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { TrendingUp, Activity, BarChart3, Wallet, Server } from "lucide-react";
-import { CHART_AXIS_STYLE, CHART_TOOLTIP_PROPS, CHART_GRID_STYLE, CHART_COLORS } from "@/lib/chartTheme";
+import { CHART_AXIS_STYLE, CHART_TOOLTIP_PROPS } from "@/lib/chartTheme";
 
 // ---------------------------------------------------------------------------
 // Types

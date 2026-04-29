@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/factor", tags=["factor"])
 
 QUEUE_KEY = "tino:factor:queue"
+CANCEL_KEY_PREFIX = "tino:factor:cancel:"
+_CANCEL_TTL_SECONDS = 3600
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +62,36 @@ class CreateRequest(BaseModel):
     name: str
     category: str = "自定义"
     template: str | None = None
+
+
+class ParamsGridRequest(BaseModel):
+    """Request body for POST /api/factor/params_grid (synchronous grid search)."""
+
+    factor_name: str
+    grid: dict[str, list]
+    top_k: int = 3
+    corr_filter: float = 0.7
+    forward_periods: int = 5
+    start: str
+    end: str
+    universe: list[str] | None = None
+    n_jobs: int = -1
+
+
+class CompareRequest(BaseModel):
+    """Request body for POST /api/factor/compare (pairwise metric diff + bootstrap CI)."""
+
+    eval_a_run_id: str
+    eval_b_run_id: str
+    n_bootstrap: int = 1000
+    confidence: float = 0.95
+
+
+class CompareMultiRequest(BaseModel):
+    """Request body for POST /api/factor/compare/multi (multi-factor report)."""
+
+    eval_run_ids: list[str]  # at least 2
+    n_bootstrap: int = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -166,14 +198,14 @@ async def explore_factor(req: ExploreRequest) -> dict:
     Returns only ``ic_mean``, ``ic_std``, ``ir``, ``rating``, and
     ``quantile_pnl`` summary — no robustness / cost analysis.
     """
-    from tinohelm.factor.backend.pandas_backend import PandasBackend
+    from tinohelm.factor.backend.polars_backend import PolarsBackend
     from tinohelm.factor.cache import FactorCache
     from tinohelm.factor.data_layer import DataLayer
     from tinohelm.factor.engine.orchestrator import Orchestrator
     from tinohelm.factor.evaluation.evaluator import Evaluator
     from tinohelm.factor.observer import Observer
     from tinohelm.factor.registry import Registry
-    from tinohelm.factor.types import EvalConfig
+    from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.universe import Universe
     from tinohelm.core.config import get_settings
     import asyncio
@@ -189,23 +221,13 @@ async def explore_factor(req: ExploreRequest) -> dict:
 
     config_dict = req.config
     try:
-        config = EvalConfig(
-            universe=tuple(config_dict.get("universe", [])),
-            start=config_dict["start"],
-            end=config_dict["end"],
-            forward_period=config_dict.get("forward_period", 5),
-            quantiles=config_dict.get("quantiles", 5),
-            cost_bps=config_dict.get("cost_bps", 4.0),
-            ic_freq=config_dict.get("ic_freq", "D"),
-            log_ret=config_dict.get("log_ret", False),
-            params=req.params or config_dict.get("params", {}),
-        )
-    except (KeyError, TypeError) as exc:
+        config = parse_eval_config(config_dict, params=req.params)
+    except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=f"Invalid config: {exc}")
 
     universe_obj = Universe.from_symbols(config.universe)
     data_layer = DataLayer(universe_obj, catalog_root=Path(catalog_path))
-    backend = PandasBackend()
+    backend = PolarsBackend()
     evaluator = Evaluator()
     # Cache — use settings.paths.factor_cache (no hardcoded path).
     cache = FactorCache()
@@ -257,6 +279,9 @@ async def explore_factor(req: ExploreRequest) -> dict:
         "turnover_annualized": result.turnover_annualized,
         "fee_drag_monthly": result.fee_drag_monthly,
         "half_life": result.half_life,
+        "oos_ic_series": result.oos_ic_series,
+        "segment_results": result.segment_results,
+        "neutralization_config": result.neutralization_config,
     }
 
 
@@ -276,6 +301,7 @@ async def submit_run(
     returns ``{run_id, status: "queued"}``.
     """
     # Validate factor_name exists in registry (same guard as /explore).
+    from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.registry import Registry
 
     registry = Registry()
@@ -283,14 +309,24 @@ async def submit_run(
     if registry.get_spec(req.factor_name) is None:
         raise HTTPException(status_code=404, detail=f"Factor '{req.factor_name}' not found")
 
+    try:
+        parsed_config = parse_eval_config(req.config, params=req.params)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid config: {exc}")
+
     run_id = str(uuid4())
 
+    neutralize = list(parsed_config.neutralize)
     run = FactorRun(
         id=run_id,
         factor_name=req.factor_name,
         status="queued",
         config=req.config,
         progress=0,
+        universe_id=parsed_config.universe_id,
+        neutralization_config=(
+            {"providers": list(neutralize)} if neutralize else None
+        ),
     )
     db.add(run)
     await db.commit()
@@ -340,7 +376,26 @@ async def list_runs(
 
 
 # ---------------------------------------------------------------------------
-# 7. GET /api/factor/report/{run_id}
+# 7. POST /api/factor/cancel/{run_id}
+# ---------------------------------------------------------------------------
+
+@router.post("/cancel/{run_id}")
+async def cancel_factor_run(
+    run_id: str,
+    rds: aioredis.Redis = Depends(get_redis),
+) -> dict:
+    """Set the cancel flag for a factor run.
+
+    The worker re-checks the flag between every progress checkpoint; setting
+    it after the job has already reached the final stage is a no-op.
+    """
+    cancel_key = f"{CANCEL_KEY_PREFIX}{run_id}"
+    await rds.set(cancel_key, "1", ex=_CANCEL_TTL_SECONDS)
+    return {"run_id": run_id, "status": "cancellation_requested"}
+
+
+# ---------------------------------------------------------------------------
+# 8. GET /api/factor/report/{run_id}
 # ---------------------------------------------------------------------------
 
 @router.get("/report/{run_id}")
@@ -423,3 +478,324 @@ def {name}(close: Panel, params=None) -> Panel:
     logger.info("Created factor template: %s", target)
 
     return {"name": name, "path": str(target)}
+
+
+# ---------------------------------------------------------------------------
+# 9. POST /api/factor/params_grid  (synchronous grid search)
+# ---------------------------------------------------------------------------
+
+@router.post("/params_grid")
+async def params_grid_endpoint(req: ParamsGridRequest) -> dict:
+    """Run a synchronous params-grid search and return up to ``top_k`` candidates.
+
+    Evaluates every Cartesian-product combination of ``grid`` values in parallel
+    (joblib loky backend), ranks by IR descending, filters correlated candidates,
+    and returns up to ``top_k`` results.
+
+    Example request body::
+
+        {
+          "factor_name": "ret_N",
+          "grid": {"n": [5, 10, 20]},
+          "top_k": 3,
+          "corr_filter": 0.7,
+          "forward_periods": 1,
+          "start": "2026-01-01",
+          "end": "2026-04-01"
+        }
+
+    Response body::
+
+        {
+          "factor_name": "ret_N",
+          "candidates": [
+            {"params": {"n": 10}, "ic_mean": 0.05, "ir": 0.8},
+            ...
+          ]
+        }
+    """
+    import asyncio
+
+    from tinohelm.factor.data_layer import DataLayer
+    from tinohelm.factor.evaluation.params_grid import params_grid
+    from tinohelm.factor.registry import Registry
+    from tinohelm.factor.types import EvalConfig
+    from tinohelm.factor.universe import Universe
+    from tinohelm.core.config import get_settings
+
+    settings = get_settings()
+    catalog_path = str(settings.paths.catalog)
+
+    registry = Registry()
+    registry.scan()
+    spec = registry.get_spec(req.factor_name)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Factor '{req.factor_name}' not found")
+
+    universe_symbols = tuple(req.universe or [])
+    config = EvalConfig(
+        universe=universe_symbols,
+        start=req.start,
+        end=req.end,
+        forward_period=req.forward_periods,
+    )
+
+    if not universe_symbols:
+        raise HTTPException(
+            status_code=422,
+            detail="universe must be non-empty for params_grid search",
+        )
+
+    universe_obj = Universe.from_symbols(universe_symbols)
+    data_layer = DataLayer(universe_obj, catalog_root=Path(catalog_path))
+
+    # Build DataRequest objects from the factor spec's input_specs.
+    # Uses the same helper as the Orchestrator so frequency resolution is
+    # consistent: default to "1m" when the spec does not mandate a frequency.
+    from tinohelm.factor.engine.orchestrator import _build_data_requests
+    from tinohelm.factor.types import DataRequest
+
+    _DEFAULT_INTERVAL = "1m"
+    data_requests = _build_data_requests([spec], universe_symbols, _DEFAULT_INTERVAL)
+    if not data_requests:
+        # Fallback: spec has no input_specs — request the close field directly.
+        data_requests = [
+            DataRequest(
+                symbol=sym,
+                field_name="close",
+                frequency=_DEFAULT_INTERVAL,
+                lookback=spec.lookback,
+            )
+            for sym in universe_symbols
+        ]
+    elif not any(r.field_name == "close" and r.source == "bar" for r in data_requests):
+        # Factor inputs are not necessarily prices (volume/funding/market_cap),
+        # but IC/forward-return evaluation must always be against close returns.
+        # Load close as an eval-only panel without passing it to the kernel
+        # unless the factor explicitly declares it.
+        data_requests.extend(
+            DataRequest(
+                symbol=sym,
+                field_name="close",
+                frequency=_DEFAULT_INTERVAL,
+                lookback=0,
+                source="bar",
+            )
+            for sym in universe_symbols
+        )
+
+    # Load data once; the resulting panels are shared by all grid combinations.
+    try:
+        raw_panels = await asyncio.to_thread(
+            data_layer.load,
+            data_requests,
+            start=req.start,
+            end=req.end,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Data not found: {exc}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Data validation error: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Data load failed: {exc}")
+
+    # Extract the close panel used strictly as the forward-return target.
+    close_panel = raw_panels.get("close")
+    if close_panel is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Params grid requires a close price panel for forward returns",
+        )
+
+    # Build kernel callable for the factor.
+    from tinohelm.factor.evaluation.ic import forward_returns as _fwd_returns
+    from tinohelm.factor.evaluation.evaluator import _to_ts_value
+
+    # Derive forward-return panel from the close panel.
+    try:
+        close_flat = _to_ts_value(close_panel)
+        fwd_df = _fwd_returns(close_flat, config.forward_period)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Forward-return computation failed: {exc}")
+
+    # Wrap kernel to match params_grid's factor_fn signature.
+    kernel = registry.get_kernel(req.factor_name)
+
+    declared_input_specs = list(spec.input_specs or [])
+    input_kwargs = {
+        input_spec.field_name: raw_panels[input_spec.field_name]
+        for input_spec in declared_input_specs
+        if input_spec.field_name in raw_panels
+    }
+    missing_inputs = [
+        input_spec.field_name
+        for input_spec in declared_input_specs
+        if input_spec.field_name not in input_kwargs
+    ]
+    if missing_inputs:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing factor inputs for params_grid: {missing_inputs}",
+        )
+    if not declared_input_specs:
+        input_kwargs = {"close": close_panel}
+
+    def _factor_fn(**params_kw: object) -> object:
+        merged_params = dict(spec.params)
+        merged_params.update(params_kw)
+        return kernel(**input_kwargs, params=merged_params)
+
+    try:
+        candidates = await asyncio.to_thread(
+            params_grid,
+            _factor_fn,
+            {},
+            req.grid,
+            fwd_df,
+            top_k=req.top_k,
+            corr_filter=req.corr_filter,
+            n_jobs=req.n_jobs,
+            eval_config=config,
+        )
+    except Exception as exc:
+        logger.warning("params_grid failed for %s: %s", req.factor_name, exc)
+        raise HTTPException(status_code=400, detail=f"Params grid search failed: {exc}")
+
+    return {
+        "factor_name": req.factor_name,
+        "candidates": [
+            {
+                "params": c["params"],
+                "ic_mean": c["ic_mean"],
+                "ir": c["ir"],
+            }
+            for c in candidates
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal helper — load EvalResult from a FactorRun DB record
+# ---------------------------------------------------------------------------
+
+async def _load_eval_result_from_db(
+    run_id: str,
+    db: AsyncSession,
+) -> "EvalResult":
+    """Load a :class:`~tinohelm.factor.types.EvalResult` from a completed FactorRun.
+
+    Raises :exc:`fastapi.HTTPException` (404) if the run does not exist, and
+    (400) if the run has not completed or has no result stored.
+    """
+    from tinohelm.factor.types import EvalResult as _EvalResult
+
+    row = (
+        await db.execute(select(FactorRun).where(FactorRun.id == run_id))
+    ).scalar_one_or_none()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"FactorRun '{run_id}' not found")
+    if row.status != "completed" or row.result is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"FactorRun '{run_id}' is not completed (status={row.status!r})",
+        )
+
+    result_dict: dict = row.result  # JSONB — already a plain dict from SQLAlchemy
+    # Reconstruct EvalResult from stored dict.  Only known scalar fields are
+    # mapped; unknown keys are ignored to stay forward-compatible.
+    field_defaults = {f.name: f.default for f in dataclasses.fields(_EvalResult)}
+    kwargs: dict = {}
+    for fname in field_defaults:
+        if fname in result_dict:
+            kwargs[fname] = result_dict[fname]
+    return _EvalResult(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# 10. POST /api/factor/compare  (pairwise bootstrap CI)
+# ---------------------------------------------------------------------------
+
+@router.post("/compare")
+async def compare_endpoint(
+    req: CompareRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Compare two FactorRun results with bootstrap CI on metric differences.
+
+    Loads both FactorRuns from the DB, extracts their IC series, and runs
+    ``n_bootstrap`` iterations of paired resampling to estimate the CI on
+    ``ic_mean`` and ``ir`` differences.
+
+    Returns ``{"metric_diffs": [{name, a, b, delta, ci_low, ci_high,
+    significant}, ...]}``.
+    """
+    from tinohelm.factor.evaluation.compare import compare_results
+
+    eval_a = await _load_eval_result_from_db(req.eval_a_run_id, db)
+    eval_b = await _load_eval_result_from_db(req.eval_b_run_id, db)
+
+    import asyncio
+
+    result = await asyncio.to_thread(
+        compare_results,
+        eval_a,
+        eval_b,
+        n_bootstrap=req.n_bootstrap,
+        confidence=req.confidence,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 11. POST /api/factor/compare/multi  (multi-factor report)
+# ---------------------------------------------------------------------------
+
+@router.post("/compare/multi")
+async def compare_multi_endpoint(
+    req: CompareMultiRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Multi-factor comparison report.
+
+    Accepts a list of ``eval_run_ids`` (at least 2) and returns a report
+    containing:
+
+    * ``ranking_heatmap`` — factor × metric table with 1-based rankings
+    * ``rolling_ic_small_multiples`` — 30-bar rolling mean IC per factor
+    * ``dendrogram`` — hierarchical cluster linkage matrix (Ward, correlation
+      distance) from ``tinohelm.factor.evaluation.clustering``
+    * ``ic_time_series_corr`` — pairwise Pearson correlation across IC series
+    * ``agent_summary`` — plain-English summary of the comparison
+    """
+    from tinohelm.factor.evaluation.compare import compare_multi
+
+    if len(req.eval_run_ids) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="compare/multi requires at least 2 eval_run_ids",
+        )
+
+    # Load all EvalResults — preserve insertion order as factor names.
+    results: dict = {}
+    for run_id in req.eval_run_ids:
+        eval_result = await _load_eval_result_from_db(run_id, db)
+        # Use run_id as the factor label if we cannot get factor_name more
+        # cheaply; factor_name is retrieved from the DB row if needed.
+        row = (
+            await db.execute(select(FactorRun).where(FactorRun.id == run_id))
+        ).scalar_one_or_none()
+        label = row.factor_name if row else run_id
+        # Deduplicate labels: if the same factor appears twice, append run_id suffix.
+        if label in results:
+            label = f"{label}:{run_id[:8]}"
+        results[label] = eval_result
+
+    import asyncio
+
+    report = await asyncio.to_thread(
+        compare_multi,
+        results,
+        n_bootstrap=req.n_bootstrap,
+    )
+    return report

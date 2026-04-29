@@ -12,6 +12,7 @@ function Card({
     <div
       data-slot="card"
       data-size={size}
+      data-padding={padding}
       className={cn(
         "card flex flex-col gap-4 has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
         className

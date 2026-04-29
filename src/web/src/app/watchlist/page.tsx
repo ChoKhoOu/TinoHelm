@@ -2,8 +2,8 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { Plus, Trash2, Star, Bell } from "lucide-react";
-import { apiGet, apiPost, apiDelete } from "@/lib/api";
+import { Plus, Star } from "lucide-react";
+import { apiGet, apiPost } from "@/lib/api";
 import { FadeIn } from "@/components/motion/FadeIn";
 import { EmptyState } from "@/components/EmptyState";
 import { TickFlash } from "@/components/TickFlash";
@@ -26,11 +26,6 @@ interface WatchlistItem {
   created_at: string | null;
 }
 
-interface WatchlistGroup {
-  name: string;
-  items: WatchlistItem[];
-}
-
 interface QuoteRow {
   id: number;
   symbol: string;
@@ -48,13 +43,6 @@ interface QuoteRow {
 
 /* ── Mock ────────────────────────────────────────────────── */
 
-function mockWatchlists(): WatchlistGroup[] {
-  return [
-    { name: "Default", items: [] },
-    { name: "BTC Hedges", items: [] },
-    { name: "High Vol", items: [] },
-  ];
-}
 
 function mockQuotes(): QuoteRow[] {
   const data: { sym: string; last: number; chg: number; vol: number; fund: number; spread: number; alert: string | null }[] = [
@@ -97,7 +85,11 @@ function Sparkline({ data, positive }: { data: number[]; positive: boolean }) {
     ctx.beginPath();
     data.forEach((p, j) => {
       const x = (j / (data.length - 1)) * w;
-      j === 0 ? ctx.moveTo(x, p) : ctx.lineTo(x, p);
+      if (j === 0) {
+        ctx.moveTo(x, p);
+      } else {
+        ctx.lineTo(x, p);
+      }
     });
     ctx.strokeStyle = positive ? "#36884B" : "#FE8181";
     ctx.lineWidth = 1.2;
@@ -253,8 +245,8 @@ function fundingColor(rate: number): string {
 /* ── Page ────────────────────────────────────────────────── */
 
 export default function WatchlistPage() {
-  const [items, setItems] = useState<WatchlistItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [, setItems] = useState<WatchlistItem[]>([]);
+  const [, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [quotes, setQuotes] = useState<QuoteRow[]>(mockQuotes);
   const [activeList, setActiveList] = useState("Default");
@@ -305,15 +297,6 @@ export default function WatchlistPage() {
     try {
       await apiPost("/api/watchlist", { instrument_id: symbol, source });
       await fetchItems();
-    } catch {
-      // silently handle
-    }
-  }
-
-  async function handleDelete(id: number) {
-    try {
-      await apiDelete(`/api/watchlist/${id}`);
-      setItems((prev) => prev.filter((it) => it.id !== id));
     } catch {
       // silently handle
     }
