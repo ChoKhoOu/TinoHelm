@@ -6,19 +6,39 @@
 use crossterm::style::{Color, Stylize};
 
 /// Balanced green (Tailwind green-500) — visible on both light and dark terminals.
-pub const POS: Color = Color::Rgb { r: 34, g: 197, b: 94 };
+pub const POS: Color = Color::Rgb {
+    r: 34,
+    g: 197,
+    b: 94,
+};
 
 /// Softer red (Tailwind red-400) — clear but not harsh.
-pub const NEG: Color = Color::Rgb { r: 248, g: 113, b: 113 };
+pub const NEG: Color = Color::Rgb {
+    r: 248,
+    g: 113,
+    b: 113,
+};
 
 /// Medium grey for muted/dim text — visible on both light and dark backgrounds.
-const MUTED_GREY: Color = Color::Rgb { r: 128, g: 128, b: 128 };
+const MUTED_GREY: Color = Color::Rgb {
+    r: 128,
+    g: 128,
+    b: 128,
+};
 
 /// Long position blue (Tailwind blue-400).
-pub const LONG_COLOR: Color = Color::Rgb { r: 96, g: 165, b: 250 };
+pub const LONG_COLOR: Color = Color::Rgb {
+    r: 96,
+    g: 165,
+    b: 250,
+};
 
 /// Short position orange (Tailwind orange-400).
-pub const SHORT_COLOR: Color = Color::Rgb { r: 251, g: 146, b: 60 };
+pub const SHORT_COLOR: Color = Color::Rgb {
+    r: 251,
+    g: 146,
+    b: 60,
+};
 
 // ── ANSI Helpers ─────────────────────────────────────────────────────────
 
@@ -208,9 +228,8 @@ impl Table {
             .collect();
         println!();
         println!("  {}", bold(&parts.join("  ")));
-        let total_w: usize =
-            self.columns.iter().map(|c| c.width).sum::<usize>()
-                + self.columns.len().saturating_sub(1) * 2;
+        let total_w: usize = self.columns.iter().map(|c| c.width).sum::<usize>()
+            + self.columns.len().saturating_sub(1) * 2;
         divider(total_w);
     }
 
@@ -309,30 +328,15 @@ impl BoxReport {
     }
 
     pub fn top(&self) {
-        println!(
-            "  {}{}{}",
-            BOX_TL,
-            BOX_H.repeat(self.width),
-            BOX_TR,
-        );
+        println!("  {}{}{}", BOX_TL, BOX_H.repeat(self.width), BOX_TR,);
     }
 
     pub fn mid(&self) {
-        println!(
-            "  {}{}{}",
-            BOX_LT,
-            BOX_H.repeat(self.width),
-            BOX_RT,
-        );
+        println!("  {}{}{}", BOX_LT, BOX_H.repeat(self.width), BOX_RT,);
     }
 
     pub fn bot(&self) {
-        println!(
-            "  {}{}{}",
-            BOX_BL,
-            BOX_H.repeat(self.width),
-            BOX_BR,
-        );
+        println!("  {}{}{}", BOX_BL, BOX_H.repeat(self.width), BOX_BR,);
     }
 
     pub fn line(&self, text: &str) {

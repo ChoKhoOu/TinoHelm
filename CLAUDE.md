@@ -30,10 +30,10 @@ pip install -e ".[optimize]"      # With Optuna support
 # Database migrations
 alembic upgrade head
 
-# Rust CLI/TUI (recommended — fast, zero dependencies)
-cd cli && cargo build --release    # Build (~2.5 MB binary)
-cli/target/release/tino --help     # CLI mode
-cli/target/release/tino            # TUI mode (interactive dashboard)
+# Rust CLI (LLM-first, no TUI)
+cd cli && cargo build --release    # Build binary
+cli/target/release/tino --help
+cli/target/release/tino -f llm api get /api/node/status
 cli/target/release/tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
 
 # Frontend
@@ -76,7 +76,7 @@ cd src/web && npm run build            # Static export to src/web/out/
 
 **Data flow for backtests**: CLI → POST /api/backtest/run → Redis queue `tino:backtest:queue` → Worker subprocess dequeues → BacktestRunner (NT BacktestEngine) → Result extraction → DB + Redis progress → CLI polls status
 
-**Data flow for live/sandbox trading**: TradingNode subprocess → 5 specialized actors handle bridging: **SnapshotActor** publishes NT position/order/bar events to Redis PubSub (`tino:{node_type}:positions`, `tino:{node_type}:fills`), **DbWriterActor** persists to PostgreSQL (`positions` table via UPSERT, `fills` table via INSERT ON CONFLICT DO NOTHING), **CommandActor** receives external lifecycle commands via Redis SUBSCRIBE, **HealthActor** sends heartbeats + monitors strategy files, **MetricsActor** captures equity snapshots → EventBridge relays to WebSocket clients → TUI receives `position.update`/`fill.new` events and refreshes display. Dedup keys: `position_id` for positions, `trade_id` for fills. TUI boots by GET-loading historical data, then switches to WS real-time stream.
+**Data flow for live/sandbox trading**: TradingNode subprocess → 5 specialized actors handle bridging: **SnapshotActor** publishes NT position/order/bar events to Redis PubSub (`tino:{node_type}:positions`, `tino:{node_type}:fills`), **DbWriterActor** persists to PostgreSQL (`positions` table via UPSERT, `fills` table via INSERT ON CONFLICT DO NOTHING), **CommandActor** receives external lifecycle commands via Redis SUBSCRIBE, **HealthActor** sends heartbeats + monitors strategy files, **MetricsActor** captures equity snapshots → EventBridge relays to WebSocket clients. CLI consumers use HTTP one-shot calls by default and can still inspect the same persisted positions/fills/summary endpoints. Dedup keys: `position_id` for positions, `trade_id` for fills.
 
 **Data pipeline** (instrument + bars): `data/instruments.py` fetches real instrument definitions from Binance `/fapi/v1/exchangeInfo` API (24h file cache), `data/catalog.py` wraps into NT-native Parquet format. BinanceVisionPipeline (`data/pipeline.py`) orchestrates Download → Convert → Store for 12 data types. Vision types map to DB categories via `_WRITE_CATEGORY` (e.g., klines→bar, aggTrades→trade_tick, fundingRate→funding_rate).
 
@@ -206,52 +206,36 @@ Frontend `/api/data/types` returns `db_category` for each Vision type. Frontend 
 - Implement `on_order_rejected()` to handle venue rejections.
 - **Constructor (`__init__`)**: Do NOT access `self.clock` or `self.log` here — system hasn't initialized them yet. Only set instance attributes.
 
-## Rust CLI/TUI Development
+## Rust CLI Development
 
 ### Architecture
 ```
 cli/src/
-├── main.rs          # Entry: CLI (clap) vs TUI (no args) dispatch
-├── api.rs           # HTTP client — all API calls to FastAPI backend
-├── tui/
-│   ├── mod.rs       # Event loop, key handling, render dispatch, DataCmd channel
-│   ├── app.rs       # App state, adaptive tick rate, animation flags
-│   ├── theme.rs     # Color palette & style presets (semantic names only)
-│   ├── chrome.rs    # Top bar (workspace tabs, WS dot, clock) & bottom bar (key hints)
-│   ├── widgets.rs   # Shared primitives: spinner, pulse_color, header_cell, kv_line
-│   ├── ws.rs        # WebSocket listener for real-time events
-│   ├── workspaces/  # One module per F-key workspace
-│   └── views/       # (legacy) older view implementations, being migrated to workspaces/
+├── main.rs          # clap entrypoint; no no-arg TUI fallback
+├── api.rs           # Auth-aware HTTP client + generic request_json()
+├── output.rs        # text/json/llm output modes and LLM envelope
+├── config.rs        # API URL + X-API-Key discovery
+├── cli/
+│   ├── api.rs       # generic `tino api call/get/post/routes`; covers every FastAPI route
+│   ├── auth.rs      # `tino auth status|login|logout`
+│   ├── backtest.rs  # typed human-friendly backtest shortcuts
+│   ├── factor.rs    # typed factor research shortcuts
+│   ├── signal.rs    # typed signal research/export shortcuts
+│   ├── universe.rs  # universe sync/get helpers
+│   └── style.rs     # terminal text styling only, not TUI
+└── types.rs         # serde structs for typed shortcuts
 ```
 
-### Theme Color Conventions
-Color constants use **semantic names** describing purpose, NEVER literal color names:
-- `FG_IDENTIFIER` (soft blue) — names, tickers, identifiers
-- `FG_TAG` (purple) — categories, types, labels
-- `FG_HIGHLIGHT` (warm gold) — key values
-- `FG_HINT` (cyan) — keyboard shortcut hints
-- `FG_POSITIVE` / `FG_NEGATIVE` — semantic only (profit/loss, online/offline)
-- `FG_AMBER` — structural elements only (headers, titles, brand)
+### Output Contract
+- `-f text`: human terminal output.
+- `-f json`: raw API JSON or typed-command JSON.
+- `-f llm`: stable envelope `{ok,data,error,meta}` for autonomous callers. API errors should still be parseable JSON on stdout and exit non-zero.
 
-**Rule**: Green/Red are NEVER decorative — always semantic. Name colors by purpose (`FG_IDENTIFIER`), not appearance (`FG_BLUE`).
+### API Coverage Rule
+Do not wait for typed Rust structs before exposing new backend operations. Add or use `tino api call METHOD /path --body-file req.json` first; typed subcommands are convenience wrappers for common workflows.
 
-### Table Design Principle
-All list/table views MUST have a `─` divider line between header row and data rows. Two patterns:
-- **Table widget**: Use 2-line `header_cell()` helper — line 1 is amber text, line 2 is `─`.repeat(50) in `FG_BORDER`. Set `.height(2)` on the header Row.
-- **Paragraph**: Manual `format!` header line + full-width `─` divider as a separate Line.
-
-### Ratatui Version Pinning
-**ratatui 0.30** + **crossterm 0.28** + **ratatui-macros 0.7**. Use `line![]` / `span!()` macros from `ratatui-macros`.
-
-### Adaptive Tick Rate & Animation System
-- **100ms (10 FPS)**: boot animation, loading spinners, pulse animations, WS connected/connecting
-- **250ms (4 FPS)**: running backtests (progress monitoring)
-- **500ms (2 FPS)**: fully idle
-
-**Key rule**: Any visual element with animation MUST be covered by `has_active_animations()` in `app.rs`, otherwise the tick rate drops to 500ms.
-
-### Non-Blocking Data Loading
-All API calls use a `DataCmd` channel pattern: `fire_load_*()` spawns `tokio::spawn`, sends results via `mpsc::unbounded_channel`, `handle_data_cmd()` updates `App` state in the main loop.
+### Auth Rule
+Backend auth uses `X-API-Key`. Client priority is `--api-key` > `TINO_API_KEY` > `~/.tino/credentials/api_key` > `~/.tino/config/user.yaml`. Never print secret values; only print source labels such as `env`, `credentials_file`, or `none`.
 
 ### Worker Pool (Python backend)
 - Keep-alive worker (`idle_timeout=0`): always running

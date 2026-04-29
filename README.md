@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md)
 
-Quantitative trading platform powered by [NautilusTrader](https://nautilustrader.io). Supports backtesting, paper trading (sandbox), and live trading via a FastAPI backend, Redis job queue, PostgreSQL persistence, and a Rust TUI.
+Quantitative trading platform powered by [NautilusTrader](https://nautilustrader.io). Supports backtesting, paper trading (sandbox), and live trading via a FastAPI backend, Redis job queue, PostgreSQL persistence, and a Rust LLM-first CLI.
 
 ## Quick Start
 
@@ -20,30 +20,25 @@ Rebuild after source code changes:
 docker compose up -d --build api
 ```
 
-### 2. Build the CLI / TUI
+### 2. Build the CLI
 
-The Rust CLI is the primary interface — fast, zero-dependency single binary.
+The Rust CLI is the primary interface: one-shot commands, raw JSON, and stable `llm` envelopes for autonomous callers.
 
 ```bash
 cd cli && cargo build --release
 ```
 
-The binary is at `cli/target/release/tino` (~2.5 MB).
+The binary is at `cli/target/release/tino`.
 
 ### 3. Usage
 
-**TUI mode** (interactive dashboard):
-
 ```bash
-./cli/target/release/tino
-```
-
-**CLI mode** (one-shot commands):
-
-```bash
+tino --help
+tino -f llm api get /api/node/status
 tino backtest list
 tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
-tino strategy list
+tino factor list
+tino signal list
 ```
 
 ## Getting Started — Create Your First Strategy
@@ -113,7 +108,7 @@ class MyHftStrategy(Strategy):
 ## Project Structure
 
 ```
-cli/              Rust CLI + TUI (clap + ratatui)
+cli/              Rust CLI (clap, LLM-first API caller)
 src/tinohelm/     Python backend (FastAPI + NautilusTrader)
 src/web/          Next.js frontend (optional)
 scripts/          Utility scripts

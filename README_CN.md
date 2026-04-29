@@ -1,6 +1,6 @@
 # TinoHelm
 
-基于 [NautilusTrader](https://nautilustrader.io) 的量化交易平台。支持回测、模拟盘（sandbox）和实盘交易，后端为 FastAPI + Redis 任务队列 + PostgreSQL 持久化，客户端为 Rust TUI。
+基于 [NautilusTrader](https://nautilustrader.io) 的量化交易平台。支持回测、模拟盘（sandbox）和实盘交易，后端为 FastAPI + Redis 任务队列 + PostgreSQL 持久化，客户端为 Rust LLM-first CLI。
 
 ## 快速开始
 
@@ -18,30 +18,25 @@ docker compose up -d
 docker compose up -d --build api
 ```
 
-### 2. 构建 CLI / TUI
+### 2. 构建 CLI
 
-Rust CLI 是主要交互界面 — 快速、零依赖的单一二进制文件。
+Rust CLI 是主要交互界面：单次命令、原始 JSON，以及给 LLM/自动化调用使用的稳定 `llm` envelope。
 
 ```bash
 cd cli && cargo build --release
 ```
 
-产物在 `cli/target/release/tino`（约 2.5 MB）。
+产物在 `cli/target/release/tino`。
 
 ### 3. 使用方式
 
-**TUI 模式**（交互式仪表盘）：
-
 ```bash
-./cli/target/release/tino
-```
-
-**CLI 模式**（单次命令）：
-
-```bash
+tino --help
+tino -f llm api get /api/node/status
 tino backtest list
 tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
-tino strategy list
+tino factor list
+tino signal list
 ```
 
 ## 入门 — 创建你的第一个策略
@@ -111,7 +106,7 @@ class MyHftStrategy(Strategy):
 ## 项目结构
 
 ```
-cli/              Rust CLI + TUI（clap + ratatui）
+cli/              Rust CLI（clap，LLM-first API caller）
 src/tinohelm/     Python 后端（FastAPI + NautilusTrader）
 src/web/          Next.js 前端（可选）
 scripts/          工具脚本

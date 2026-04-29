@@ -4,7 +4,8 @@ use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
-use crate::types::{DataFetchRequest, DataFetchBatchRequest, DataCompactRequest};
+use crate::output::{print_json, print_llm_success, EnvelopeMeta, OutputFormat};
+use crate::types::{DataCompactRequest, DataFetchBatchRequest, DataFetchRequest};
 
 #[derive(Subcommand)]
 pub enum DataCmd {
@@ -71,7 +72,7 @@ fn fmt_size(size_bytes: u64) -> String {
     }
 }
 
-pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<()> {
+pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
     match cmd {
         DataCmd::Fetch {
             symbol,
@@ -86,9 +87,8 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                 end: end.clone(),
             };
             let result = client.fetch_data(&req).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_data_machine(format, client, "data.fetch", result);
             }
 
             let st = result
@@ -102,11 +102,7 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
             kv("Symbol", &accent(&symbol), 12);
             kv("Interval", &interval, 12);
             kv("Period", &format!("{} ~ {}", start, end), 12);
-            kv(
-                "Status",
-                &format!("{}  {}", status_badge(st), bold(st)),
-                12,
-            );
+            kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
             if let Some(m) = msg {
                 println!();
                 println!("    {}", dim(m));
@@ -115,9 +111,8 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
         }
         DataCmd::List => {
             let result = client.list_data().await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_data_machine(format, client, "data.list", result);
             }
 
             let empty_vec = vec![];
@@ -147,26 +142,14 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
             t.header();
 
             for item in items {
-                let sym = item
-                    .get("symbol")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let ivl = item
-                    .get("interval")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let sym = item.get("symbol").and_then(|v| v.as_str()).unwrap_or("?");
+                let ivl = item.get("interval").and_then(|v| v.as_str()).unwrap_or("?");
                 let start_d = item
                     .get("start_date")
                     .and_then(|v| v.as_str())
                     .unwrap_or("-");
-                let end_d = item
-                    .get("end_date")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("-");
-                let size = item
-                    .get("size_bytes")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let end_d = item.get("end_date").and_then(|v| v.as_str()).unwrap_or("-");
+                let size = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
 
                 t.row(&[
                     &bold(&accent(sym)),
@@ -183,9 +166,8 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
         }
         DataCmd::Info { symbol } => {
             let result = client.list_data().await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_data_machine(format, client, "data.info", result);
             }
 
             // Filter items for this symbol
@@ -218,22 +200,13 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                 kv("Datasets", &items.len().to_string(), 12);
                 println!();
                 for item in &items {
-                    let ivl = item
-                        .get("interval")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let ivl = item.get("interval").and_then(|v| v.as_str()).unwrap_or("?");
                     let start_d = item
                         .get("start_date")
                         .and_then(|v| v.as_str())
                         .unwrap_or("-");
-                    let end_d = item
-                        .get("end_date")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("-");
-                    let size = item
-                        .get("size_bytes")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                    let end_d = item.get("end_date").and_then(|v| v.as_str()).unwrap_or("-");
+                    let size = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
                     println!(
                         "    {}  {} ~ {}  {}",
                         accent(ivl),
@@ -259,15 +232,18 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                 end: end.clone(),
             };
             let result = client.fetch_data_batch(&req).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_data_machine(format, client, "data.fetch_batch", result);
             }
 
-            let st = result.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(
-                (symbols.len() * interval.len()) as u64,
-            );
+            let st = result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let count = result
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or((symbols.len() * interval.len()) as u64);
             let msg = result.get("message").and_then(|v| v.as_str());
 
             header("Batch Data Fetch Submitted");
@@ -289,12 +265,14 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                 interval: interval.clone(),
             };
             let result = client.compact_data(&req).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_data_machine(format, client, "data.compact", result);
             }
 
-            let st = result.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let st = result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let badge = if st == "accepted" {
                 status_badge("completed")
             } else {
@@ -314,16 +292,18 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
         }
         DataCmd::Validate { symbol, interval } => {
             let result = client.validate_data(&symbol, &interval).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_data_machine(format, client, "data.validate", result);
             }
 
             header(&format!("Validate: {} {}", symbol, interval));
             divider(50);
 
             if let Some(obj) = result.as_object() {
-                let st = obj.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let st = obj
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let issues = obj.get("issues").and_then(|v| v.as_array());
                 let has_issues = issues.map(|a| !a.is_empty()).unwrap_or(false);
 
@@ -331,7 +311,11 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                     println!(
                         "    {}  {}",
                         status_badge("completed"),
-                        format!("{}", "Data is valid".with(crossterm::style::Color::Rgb { r: 34, g: 197, b: 94 })),
+                        "Data is valid".with(crossterm::style::Color::Rgb {
+                            r: 34,
+                            g: 197,
+                            b: 94
+                        }),
                     );
                 } else {
                     kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
@@ -361,11 +345,26 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
                         println!();
                         println!(
                             "    {}",
-                            bold(&format!("{}", "Issues:".with(crossterm::style::Color::Rgb { r: 248, g: 113, b: 113 }))),
+                            bold(&format!(
+                                "{}",
+                                "Issues:".with(crossterm::style::Color::Rgb {
+                                    r: 248,
+                                    g: 113,
+                                    b: 113
+                                })
+                            )),
                         );
                         for issue in issues {
                             let text = issue.as_str().unwrap_or("?");
-                            println!("      {} {}", "-".with(crossterm::style::Color::Rgb { r: 248, g: 113, b: 113 }), text);
+                            println!(
+                                "      {} {}",
+                                "-".with(crossterm::style::Color::Rgb {
+                                    r: 248,
+                                    g: 113,
+                                    b: 113
+                                }),
+                                text
+                            );
                         }
                     }
                 }
@@ -374,9 +373,8 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
         }
         DataCmd::Scan => {
             let result = client.scan_data().await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_data_machine(format, client, "data.scan", result);
             }
 
             let scanned = result.get("scanned").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -392,4 +390,20 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: &str) -> Result<
         }
     }
     Ok(())
+}
+
+fn print_data_machine<T: serde::Serialize>(
+    format: OutputFormat,
+    client: &ApiClient,
+    command: &'static str,
+    data: T,
+) -> Result<()> {
+    match format {
+        OutputFormat::Llm => print_llm_success(
+            data,
+            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
+        ),
+        OutputFormat::Json => print_json(&data),
+        OutputFormat::Text => Ok(()),
+    }
 }

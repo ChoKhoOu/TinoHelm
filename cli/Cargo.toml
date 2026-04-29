@@ -2,7 +2,7 @@
 name = "tino"
 version = "0.1.0"
 edition = "2021"
-description = "TinoHelm CLI & TUI — Quantitative trading platform powered by NautilusTrader"
+description = "TinoHelm CLI — LLM-first quantitative trading control plane"
 
 [[bin]]
 name = "tino"
@@ -11,21 +11,13 @@ path = "src/main.rs"
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
-
-# TUI
-ratatui = "0.30"
 crossterm = "0.28"
-ratatui-macros = "0.7"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-
-# WebSocket
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-futures-util = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -37,10 +29,6 @@ anyhow = "1"
 
 # Config paths
 dirs = "6"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = "0.3"
 
 [profile.release]
 opt-level = "z"

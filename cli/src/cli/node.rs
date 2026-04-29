@@ -4,6 +4,7 @@ use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
+use crate::output::{print_json, print_llm_success, EnvelopeMeta, OutputFormat};
 
 #[derive(Subcommand)]
 pub enum NodeCmd {
@@ -23,8 +24,9 @@ pub enum NodeCmd {
         #[command(subcommand)]
         command: LifecycleCmd,
     },
-    /// Portfolio management on a running node
-    Portfolio {
+    /// Node strategy-set management on a running node.
+    #[command(alias = "portfolio")]
+    Strategy {
         #[command(subcommand)]
         command: PortfolioCmd,
     },
@@ -134,13 +136,12 @@ pub enum LifecycleCmd {
     },
 }
 
-pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: &str) -> Result<()> {
+pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
     match cmd {
         NodeCmd::Status => {
             let result = client.node_status().await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.status", result);
             }
 
             let nodes = result
@@ -175,9 +176,8 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: &str) -> Result<
         }
         NodeCmd::Kill { node_type, level } => {
             let result = client.node_kill(&node_type, level).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.kill", result);
             }
 
             header(&format!("Kill Switch  {}", mode_label(&node_type)));
@@ -194,34 +194,56 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: &str) -> Result<
         NodeCmd::Lifecycle { command } => {
             dispatch_lifecycle(command, client, format).await?;
         }
-        NodeCmd::Portfolio { command } => {
+        NodeCmd::Strategy { command } => {
             dispatch_portfolio(command, client, format).await?;
         }
     }
     Ok(())
 }
 
-async fn dispatch_lifecycle(cmd: LifecycleCmd, client: &ApiClient, format: &str) -> Result<()> {
+async fn dispatch_lifecycle(
+    cmd: LifecycleCmd,
+    client: &ApiClient,
+    format: OutputFormat,
+) -> Result<()> {
     match cmd {
         LifecycleCmd::Pause { mode, strategy_id } => {
-            let result = client.lifecycle_command("pause", &mode, strategy_id.as_deref()).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+            let result = client
+                .lifecycle_command("pause", &mode, strategy_id.as_deref())
+                .await?;
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.lifecycle.pause", result);
             } else {
                 let target = strategy_id.as_deref().unwrap_or("all strategies");
-                println!("  {} Pausing {} on {} node", "\u{25CF}".yellow(), target, mode_label(&mode));
+                println!(
+                    "  {} Pausing {} on {} node",
+                    "\u{25CF}".yellow(),
+                    target,
+                    mode_label(&mode)
+                );
             }
         }
         LifecycleCmd::Resume { mode, strategy_id } => {
-            let result = client.lifecycle_command("resume", &mode, strategy_id.as_deref()).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+            let result = client
+                .lifecycle_command("resume", &mode, strategy_id.as_deref())
+                .await?;
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.lifecycle.resume", result);
             } else {
                 let target = strategy_id.as_deref().unwrap_or("all strategies");
-                println!("  {} Resuming {} on {} node", "\u{25CF}".green(), target, mode_label(&mode));
+                println!(
+                    "  {} Resuming {} on {} node",
+                    "\u{25CF}".green(),
+                    target,
+                    mode_label(&mode)
+                );
             }
         }
-        LifecycleCmd::Flatten { mode, strategy_id, yes } => {
+        LifecycleCmd::Flatten {
+            mode,
+            strategy_id,
+            yes,
+        } => {
             if !yes {
                 let target = strategy_id.as_deref().unwrap_or("ALL");
                 eprint!("  Flatten positions for {}? [y/N] ", target);
@@ -232,9 +254,11 @@ async fn dispatch_lifecycle(cmd: LifecycleCmd, client: &ApiClient, format: &str)
                     return Ok(());
                 }
             }
-            let result = client.lifecycle_command("flatten", &mode, strategy_id.as_deref()).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+            let result = client
+                .lifecycle_command("flatten", &mode, strategy_id.as_deref())
+                .await?;
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.lifecycle.flatten", result);
             } else {
                 println!("  {} Flatten command sent", "\u{25CF}".yellow());
             }
@@ -250,18 +274,26 @@ async fn dispatch_lifecycle(cmd: LifecycleCmd, client: &ApiClient, format: &str)
                 }
             }
             let result = client.lifecycle_command("halt", &mode, None).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.lifecycle.halt", result);
             } else {
-                println!("  {} Trading HALTED on {} node", "\u{25CF}".red(), mode_label(&mode));
+                println!(
+                    "  {} Trading HALTED on {} node",
+                    "\u{25CF}".red(),
+                    mode_label(&mode)
+                );
             }
         }
         LifecycleCmd::Unhalt { mode } => {
             let result = client.lifecycle_command("unhalt", &mode, None).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.lifecycle.unhalt", result);
             } else {
-                println!("  {} Trading resumed on {} node", "\u{25CF}".green(), mode_label(&mode));
+                println!(
+                    "  {} Trading resumed on {} node",
+                    "\u{25CF}".green(),
+                    mode_label(&mode)
+                );
             }
         }
         LifecycleCmd::Shutdown { mode, yes } => {
@@ -275,22 +307,28 @@ async fn dispatch_lifecycle(cmd: LifecycleCmd, client: &ApiClient, format: &str)
                 }
             }
             let result = client.lifecycle_command("shutdown", &mode, None).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.lifecycle.shutdown", result);
             } else {
-                println!("  {} Shutdown command sent to {} node", "\u{25CF}".red(), mode_label(&mode));
+                println!(
+                    "  {} Shutdown command sent to {} node",
+                    "\u{25CF}".red(),
+                    mode_label(&mode)
+                );
             }
         }
         LifecycleCmd::State { mode } => {
             let result = client.lifecycle_state(&mode).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.lifecycle.state", result);
             }
             header(&format!("Lifecycle State  {}", mode_label(&mode)));
             divider(50);
 
-            let trading_state = result.get("trading_state").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let trading_state = result
+                .get("trading_state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let ts_colored = match trading_state {
                 "active" => format!("{}", trading_state.green().bold()),
                 "halted" => format!("{}", trading_state.red().bold()),
@@ -329,13 +367,16 @@ async fn dispatch_lifecycle(cmd: LifecycleCmd, client: &ApiClient, format: &str)
     Ok(())
 }
 
-async fn dispatch_portfolio(cmd: PortfolioCmd, client: &ApiClient, format: &str) -> Result<()> {
+async fn dispatch_portfolio(
+    cmd: PortfolioCmd,
+    client: &ApiClient,
+    format: OutputFormat,
+) -> Result<()> {
     match cmd {
         PortfolioCmd::List { mode } => {
             let resp = client.list_portfolios(&mode).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!(resp.portfolios))?);
-                return Ok(());
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.strategy.list", resp.portfolios);
             }
             if resp.portfolios.is_empty() {
                 println!("  No portfolios found on {} node", mode);
@@ -364,7 +405,7 @@ async fn dispatch_portfolio(cmd: PortfolioCmd, client: &ApiClient, format: &str)
                         &format!("{}{}", name, was),
                         &state_colored,
                         &p.strategy_ids.len().to_string(),
-                        &p.order_id_tag_prefix.as_deref().unwrap_or("").to_string(),
+                        p.order_id_tag_prefix.as_deref().unwrap_or(""),
                     ]);
                 }
                 t.footer();
@@ -372,31 +413,34 @@ async fn dispatch_portfolio(cmd: PortfolioCmd, client: &ApiClient, format: &str)
         }
         PortfolioCmd::Start { name, mode } => {
             let resp = client.start_portfolio(&name, &mode).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.strategy.start", resp);
             } else {
                 println!("  {} Starting portfolio '{}'", "\u{25CF}".green(), name);
             }
         }
         PortfolioCmd::Pause { name, mode } => {
             let resp = client.pause_portfolio(&name, &mode).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.strategy.pause", resp);
             } else {
                 println!("  {} Pausing portfolio '{}'", "\u{25CF}".yellow(), name);
             }
         }
         PortfolioCmd::Resume { name, mode } => {
             let resp = client.resume_portfolio(&name, &mode).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.strategy.resume", resp);
             } else {
                 println!("  {} Resuming portfolio '{}'", "\u{25CF}".green(), name);
             }
         }
         PortfolioCmd::FlattenStop { name, mode, yes } => {
             if !yes {
-                eprint!("  Flatten and stop portfolio '{}'? This will close all positions. [y/N] ", name);
+                eprint!(
+                    "  Flatten and stop portfolio '{}'? This will close all positions. [y/N] ",
+                    name
+                );
                 use std::io::Write;
                 std::io::stdout().flush()?;
                 let mut input = String::new();
@@ -407,10 +451,14 @@ async fn dispatch_portfolio(cmd: PortfolioCmd, client: &ApiClient, format: &str)
                 }
             }
             let resp = client.flatten_stop_portfolio(&name, &mode).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
+            if format.is_machine() {
+                return print_node_machine(format, client, "node.strategy.flatten_stop", resp);
             } else {
-                println!("  {} Flatten-stop sent for portfolio '{}'", "\u{25CF}".with(NEG), name);
+                println!(
+                    "  {} Flatten-stop sent for portfolio '{}'",
+                    "\u{25CF}".with(NEG),
+                    name
+                );
             }
         }
     }
@@ -481,10 +529,7 @@ fn render_node_card(mode: &str, info: &serde_json::Value, risk: &serde_json::Val
             .get("margin_used_pct")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
-        let leverage = risk
-            .get("leverage")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+        let leverage = risk.get("leverage").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let daily_var = risk
             .get("daily_var")
             .and_then(|v| v.as_f64())
@@ -599,10 +644,7 @@ fn render_nodes_table(
             .get("margin_used_pct")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
-        let leverage = risk
-            .get("leverage")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+        let leverage = risk.get("leverage").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
         if exposure > 0.0 {
             let margin_str = format!("{:.2}%", margin);
@@ -623,4 +665,20 @@ fn render_nodes_table(
     }
 
     println!();
+}
+
+fn print_node_machine<T: serde::Serialize>(
+    format: OutputFormat,
+    client: &ApiClient,
+    command: &'static str,
+    data: T,
+) -> Result<()> {
+    match format {
+        OutputFormat::Llm => print_llm_success(
+            data,
+            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
+        ),
+        OutputFormat::Json => print_json(&data),
+        OutputFormat::Text => Ok(()),
+    }
 }
