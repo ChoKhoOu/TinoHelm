@@ -442,6 +442,46 @@ class Universe:
             row.symbol for row in self._rows if row.is_active_at(naive_ts)
         )
 
+    def get_symbols_between(
+        self,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> list[str]:
+        """Return symbols eligible at any time inside a historical window.
+
+        This is the loading-set companion to :meth:`get_symbols_at`: a PIT
+        backtest must request data for every symbol whose active interval
+        intersects the evaluation window, then let downstream PIT masks null
+        each timestamp where the symbol is not eligible.  Using only the
+        end-anchor constituents would drop symbols delisted during the window
+        and create survivorship bias.
+
+        ``None`` boundaries represent an open interval.  When both are
+        ``None`` the method returns all known symbols because no finite window
+        was supplied.
+        """
+        start_ts = _to_naive_datetime(start) if start is not None else None
+        end_ts = _to_naive_datetime(end) if end is not None else None
+        if start_ts is not None and end_ts is not None and start_ts > end_ts:
+            raise ValueError(
+                f"Universe window start {start_ts!r} is after end {end_ts!r}"
+            )
+
+        out: list[str] = []
+        for row in self._rows:
+            eligible_from = row.listing_date + timedelta(days=_NEW_COIN_ISOLATION_DAYS)
+            active_until = row.delisting_date
+
+            # No active timestamp at or before the requested end.
+            if end_ts is not None and eligible_from > end_ts:
+                continue
+            # Symbol stopped trading before (or exactly at) the requested start.
+            if start_ts is not None and active_until is not None and active_until <= start_ts:
+                continue
+            out.append(row.symbol)
+
+        return sorted(out)
+
     # ------------------------------------------------------------------
     # Iteration helpers
     # ------------------------------------------------------------------

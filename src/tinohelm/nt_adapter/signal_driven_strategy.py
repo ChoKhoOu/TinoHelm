@@ -414,8 +414,9 @@ class SignalDrivenStrategy(Strategy):
     ) -> Any:
         """Compute a factor panel from the cross-section bar dict.
 
-        Default implementation: pull the most-recent
-        ``effective_warmup`` bars per symbol from ``self.cache``, build
+        Default implementation: pull the most-recent ``required_history``
+        bars per symbol from ``self.cache`` (``effective_warmup + 1`` for
+        rolling-return kernels), build
         the wide OHLCV panels the kernel needs (one per
         :class:`tinohelm.factor.types.InputSpec.field_name`), and run
         the kernel.  See :func:`tinohelm.nt_adapter.factor_panel.
@@ -430,7 +431,7 @@ class SignalDrivenStrategy(Strategy):
             * the kernel was not resolved at start-time (we log once and
               return so the strategy effectively becomes a no-op rather
               than crashing every cross-section); or
-            * any symbol has fewer than ``effective_warmup`` bars (the
+            * any symbol has fewer than ``effective_warmup + 1`` bars (the
               warmup gate at ``on_start`` checked the *current* cache,
               but live deployments may temporarily lose history during
               re-subscriptions).
@@ -448,20 +449,25 @@ class SignalDrivenStrategy(Strategy):
             )
             return None
 
+        # Rolling return factors such as ret_N(lookback=20) need 21 closes to
+        # produce a non-null latest row: pct_change(N) compares the current
+        # close to the close N rows back.  Keep factor lookback semantics
+        # unchanged, but require/cache one extra input row in the live adapter.
+        required_history = max(1, int(self._effective_warmup) + 1)
+
         # Build the {symbol_short: list[Bar]} map from the cache.
         bars_by_symbol: dict[str, list] = {}
         for symbol_short, bar_type in self._bar_types.items():
             cached = self.cache.bars(bar_type)
-            # Slice to the warmup window — the kernel only needs that much
-            # history for its rolling computations.  Cache returns newest-
-            # first; build_wide_panel reverses to chronological order.
-            bars_by_symbol[symbol_short] = list(cached[: self._effective_warmup])
+            # Cache returns newest-first; build_wide_panel reverses to
+            # chronological order.
+            bars_by_symbol[symbol_short] = list(cached[:required_history])
 
         return compute_latest_factor_panel(
             factor_kernel=self._factor_kernel,
             factor_spec=self._factor_spec,
             bars_by_symbol=bars_by_symbol,
-            min_history=self._effective_warmup,
+            min_history=required_history,
             extra_kernel_params=dict(self.signal_spec.factor_params),
         )
 
@@ -575,10 +581,10 @@ class SignalDrivenStrategy(Strategy):
         Three regimes handled:
 
         * Live / sandbox: the platform pre-loaded historical bars before
-          ``on_start``.  Cache contains ``>= effective_warmup`` bars per
+          ``on_start``.  Cache contains ``>= effective_warmup + 1`` bars per
           bar_type → no-op.
         * Live with insufficient backfill: cache is non-empty but has
-          fewer than ``effective_warmup`` bars → raise.  This catches
+          fewer than ``effective_warmup + 1`` bars → raise.  This catches
           misconfigured pre-load policies that would otherwise silently
           run the strategy on a too-short window.
         * Backtest: cache is empty at on_start (bars stream in via
@@ -593,10 +599,11 @@ class SignalDrivenStrategy(Strategy):
                 # Backtest mode (no pre-loaded history) — cross-section
                 # gating happens at _compute_factor_panel time.
                 continue
-            if history_len < self._effective_warmup:
+            required_history = max(1, int(self._effective_warmup) + 1)
+            if history_len < required_history:
                 raise RuntimeError(
                     f"warmup insufficient: cache.bars({bar_type})={history_len} "
-                    f"< required={self._effective_warmup} (signal={self._signal_name}, "
+                    f"< required={required_history} (signal={self._signal_name}, "
                     f"symbol={symbol_short})"
                 )
 

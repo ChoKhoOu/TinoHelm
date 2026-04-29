@@ -243,6 +243,16 @@ def test_universe_mask_partial_rows() -> None:
     assert sym2_col[7:].null_count() == 0
 
 
+def test_panel_symbol_outside_universe_raises() -> None:
+    """Aligner must not pass through symbols outside its Universe boundary."""
+    uni = _make_universe(symbols=["SYM1", "SYM2"])
+    panel = _make_panel(symbols=["SYM1", "SYM2", "LEAK"])
+    aligner = Aligner(uni, neutralize=[])
+
+    with pytest.raises(ValueError, match="LEAK"):
+        aligner.align(panel)
+
+
 # ---------------------------------------------------------------------------
 # AC-4: OLS residual correctness
 # ---------------------------------------------------------------------------
@@ -317,6 +327,57 @@ def test_ols_residual_small_for_noisy_exposure() -> None:
 
     mean_abs = float(np.abs(all_vals).mean()) if all_vals else 0.0
     assert mean_abs < 1e-3, f"Expected mean |residual| < 1e-3, got {mean_abs:.2e}"
+
+
+def test_ols_skips_exact_fit_small_cross_section() -> None:
+    """n_valid must exceed intercept + exposures; otherwise return nulls."""
+    symbols = ["SYM1", "SYM2"]
+    panel = pl.DataFrame(
+        {
+            "ts": TIMESTAMPS[:2],
+            "SYM1": [1.0, 2.0],
+            "SYM2": [3.0, 4.0],
+        }
+    ).with_columns(pl.col("ts").cast(pl.Datetime))
+    fake = FakeExposure(
+        exposure_values={
+            "SYM1": [0.0, 0.0],
+            "SYM2": [1.0, 1.0],
+        }
+    )
+    aligner = Aligner(_make_universe(symbols=symbols), neutralize=[fake])
+
+    out = aligner.align(panel)
+
+    assert out["SYM1"].null_count() == 2
+    assert out["SYM2"].null_count() == 2
+
+
+def test_ols_skips_rank_deficient_exposure_matrix() -> None:
+    """Constant exposure is collinear with intercept and should not zero signal."""
+    symbols = ["SYM1", "SYM2", "SYM3"]
+    panel = pl.DataFrame(
+        {
+            "ts": TIMESTAMPS[:2],
+            "SYM1": [1.0, 2.0],
+            "SYM2": [3.0, 4.0],
+            "SYM3": [5.0, 6.0],
+        }
+    ).with_columns(pl.col("ts").cast(pl.Datetime))
+    fake = FakeExposure(
+        exposure_values={
+            "SYM1": [1.0, 1.0],
+            "SYM2": [1.0, 1.0],
+            "SYM3": [1.0, 1.0],
+        }
+    )
+    aligner = Aligner(_make_universe(symbols=symbols), neutralize=[fake])
+
+    out = aligner.align(panel)
+
+    assert out["SYM1"].null_count() == 2
+    assert out["SYM2"].null_count() == 2
+    assert out["SYM3"].null_count() == 2
 
 
 # ---------------------------------------------------------------------------

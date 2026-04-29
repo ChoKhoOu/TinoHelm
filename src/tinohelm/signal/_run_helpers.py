@@ -82,6 +82,8 @@ async def resolve_universe_to_instrument_ids(
     universe_id: int | None,
     universe_ref: str | None,
     anchor_ts: datetime | None,
+    start_ts: datetime | None = None,
+    end_ts: datetime | None = None,
     db: "AsyncSession",
 ) -> tuple[int, str, list[str], list[str], dict]:
     """Resolve a universe reference to concrete PIT symbols + instrument ids.
@@ -96,11 +98,11 @@ async def resolve_universe_to_instrument_ids(
        translates this to HTTP 422).
 
     Once a row is found, :class:`tinohelm.factor.universe.Universe.from_db_row`
-    rebuilds the PIT tracker and ``get_symbols_at(anchor_ts)`` applies both
-    the 7-day new-coin isolation window and the delisting filter.  When
-    ``anchor_ts`` is ``None`` the current UTC naive datetime is used so the
-    default policy ("run against today's universe") matches what a caller
-    expects when they omit ``end``.
+    rebuilds the PIT tracker.  Historical runs with a finite ``start_ts`` or
+    ``end_ts`` persist the union of all symbols active at any point in that
+    window, so the worker can load delisted-in-window names before downstream
+    PIT masks null ineligible timestamps.  Runs without a window keep the
+    current/live behavior and use ``get_symbols_at(anchor_ts)``.
 
     Parameters
     ----------
@@ -110,6 +112,10 @@ async def resolve_universe_to_instrument_ids(
         Fallback lookup key — ``universes.name`` (UNIQUE).
     anchor_ts:
         PIT anchor timestamp.  ``None`` → ``datetime.utcnow()``.
+    start_ts / end_ts:
+        Optional historical evaluation window.  If either side is supplied,
+        the returned symbol list is ``Universe.get_symbols_between(start, end)``
+        rather than end-anchor constituents.
     db:
         Async SQLAlchemy session (caller owns commit / rollback).
 
@@ -120,8 +126,9 @@ async def resolve_universe_to_instrument_ids(
         can persist them into ``signal_runs.config`` + ``signal_runs.universe_id``
         without risking cross-field drift.  ``pit_rules_json`` preserves the
         original listing/delisting boundaries for the worker's historical
-        :class:`DataLayer` PIT mask; ``pit_symbols`` is only the anchor-time
-        loading subset.
+        :class:`DataLayer` PIT mask; ``pit_symbols`` is the data-loading set
+        (historical active-window union when a window is supplied, otherwise
+        the anchor-time live set).
 
     Raises
     ------
@@ -173,11 +180,20 @@ async def resolve_universe_to_instrument_ids(
         anchor_ts = datetime.now(UTC).replace(tzinfo=None)
 
     universe = Universe.from_db_row(row)
-    pit_symbols = universe.get_symbols_at(anchor_ts)
+    if start_ts is not None or end_ts is not None:
+        pit_symbols = universe.get_symbols_between(start_ts, end_ts or anchor_ts)
+    else:
+        pit_symbols = universe.get_symbols_at(anchor_ts)
     if not pit_symbols:
+        scope = (
+            f"window={start_ts.isoformat() if start_ts else None}.."
+            f"{(end_ts or anchor_ts).isoformat() if (end_ts or anchor_ts) else None}"
+            if start_ts is not None or end_ts is not None
+            else f"anchor_ts={anchor_ts.isoformat()}"
+        )
         raise ValueError(
             f"Universe {row.name!r} (id={row.id}) resolved to an empty "
-            f"symbol list at anchor_ts={anchor_ts.isoformat()}.  "
+            f"symbol list at {scope}.  "
             "All members are pre-listing, post-delisting, or inside the "
             "7-day new-coin isolation window — refusing to enqueue a run "
             "that would never trade."

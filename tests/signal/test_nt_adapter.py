@@ -1564,6 +1564,47 @@ class TestComputeFactorPanelBase:
         result = s._compute_factor_panel(1_700_000_000_000_000_000, {})
         assert result is None
 
+    def test_compute_factor_panel_fetches_extra_row_for_rolling_return(self):
+        """ret_N(20) needs 21 closes so the first live rebalance is non-null."""
+        from tinohelm.factor.builtins.momentum import ret_N
+
+        s, _ = self._wire_strategy(lookback=20)
+        s._factor_kernel = ret_N
+        s._factor_spec = ret_N.__factor_spec__
+        s._effective_warmup = 20
+        bars_btc = self._make_close_bars("BTCUSDT-PERP", n=21)
+        bars_eth = self._make_close_bars("ETHUSDT-PERP", n=21)
+
+        def _cache_bars(bar_type):
+            inst = str(bar_type.instrument_id).split(".", 1)[0]
+            return bars_btc if "BTC" in inst else bars_eth
+
+        s.cache.bars.side_effect = _cache_bars
+        s._compute_factor_panel = SignalDrivenStrategy._compute_factor_panel.__get__(s)
+
+        result = s._compute_factor_panel(1_700_000_000_000_000_000, {})
+
+        assert result is not None
+        assert result.height == 21
+        assert result["BTCUSDT-PERP"][-1] is not None
+        assert result["ETHUSDT-PERP"][-1] is not None
+
+    def test_compute_factor_panel_requires_extra_row_for_rolling_return(self):
+        """Only 20 bars for a 20-bar rolling return defers rather than emitting null."""
+        from tinohelm.factor.builtins.momentum import ret_N
+
+        s, _ = self._wire_strategy(lookback=20)
+        s._factor_kernel = ret_N
+        s._factor_spec = ret_N.__factor_spec__
+        s._effective_warmup = 20
+        bars = self._make_close_bars("BTCUSDT-PERP", n=20)
+        s.cache.bars.side_effect = lambda _bar_type: bars
+        s._compute_factor_panel = SignalDrivenStrategy._compute_factor_panel.__get__(s)
+
+        result = s._compute_factor_panel(1_700_000_000_000_000_000, {})
+
+        assert result is None
+
 
 # =============================================================================
 # Cross-currency equity aggregation — regression for _compute_equity

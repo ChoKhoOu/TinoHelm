@@ -164,8 +164,9 @@ class Aligner:
         """Return per-symbol (eligible_from, delisting_date) boundaries.
 
         Only symbols present in *panel* columns are returned.  Symbols in
-        the panel but not in the universe get ``(None, None)`` — meaning no
-        PIT filtering is applied to them.
+        the panel but not in the universe are rejected: an
+        ``Aligner(universe=...)`` boundary must not let upstream extra
+        columns leak into neutralization or output.
 
         Uses :meth:`~tinohelm.factor.universe.Universe.get_symbol_boundaries`
         for an O(symbols) lookup rather than calling ``get_symbols_at`` per
@@ -177,7 +178,7 @@ class Aligner:
             if sym in boundaries:
                 result[sym] = boundaries[sym]
             else:
-                result[sym] = (None, None)
+                raise ValueError(f"symbol {sym!r} is not in aligner universe")
         return result
 
     def _apply_universe_mask(
@@ -299,13 +300,20 @@ class Aligner:
             nan_mask = nan_mask | np.isnan(exp)
 
         valid = ~nan_mask
-        if valid.sum() < 2:
-            # Not enough data to run regression — return all-NaN row
+        n_valid = int(valid.sum())
+        p = 1 + len(exposures)
+        if n_valid <= p:
+            # Not enough degrees of freedom to estimate intercept + exposures
+            # without exact-fitting the cross-section — return all-NaN row.
             return residuals
 
         y_valid = y[valid]
-        X_cols = [np.ones(valid.sum())] + [exp[valid] for exp in exposures]
+        X_cols = [np.ones(n_valid)] + [exp[valid] for exp in exposures]
         X = np.column_stack(X_cols)  # shape (n_valid, K+1)
+        if np.linalg.matrix_rank(X) < p:
+            # Collinear exposures (or constant exposure with intercept) would
+            # produce unstable / exact-fit residuals; skip the timestamp.
+            return residuals
 
         beta, *_ = np.linalg.lstsq(X, y_valid, rcond=None)
         residuals[valid] = y_valid - X @ beta
@@ -470,13 +478,14 @@ class Aligner:
         ts_series = panel["ts"]
         symbols = [c for c in panel.columns if c != "ts"]
 
-        # Step 1: PIT violation check (fail-fast before any computation)
-        if self._providers:
-            self._pit_check(panel, symbols, ts_series)
-
-        # Step 2: Universe PIT mask
+        # Step 1: Universe PIT mask.  This also fails fast when the panel
+        # contains symbols outside the configured universe.
         boundaries = self._build_universe_mask(panel, symbols)
         panel = self._apply_universe_mask(panel, symbols, boundaries)
+
+        # Step 2: PIT violation check (fail-fast before neutralization)
+        if self._providers:
+            self._pit_check(panel, symbols, ts_series)
 
         # Step 3: Cross-section OLS residualization
         if self._providers:

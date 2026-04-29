@@ -710,6 +710,60 @@ def test_run_end_timestamp_offset_is_converted_to_utc(client, temp_signal_module
     assert inserted.config["universe_symbols"] == ["NEWCOINUSDT-PERP"]
 
 
+def test_run_persists_window_symbol_union_to_avoid_survivorship_bias(
+    client,
+    temp_signal_module,
+):
+    """Historical runs load symbols active anywhere in [start, end], not end-only."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    row = MagicMock()
+    row.id = 88
+    row.name = "pit_union"
+    row.pit_rules_json = {
+        "BTCUSDT-PERP": {
+            "listing_date": "2020-01-01",
+            "delisting_date": None,
+        },
+        "FAILUSDT-PERP": {
+            "listing_date": "2020-01-01",
+            "delisting_date": "2024-03-01",
+        },
+    }
+    mock_session = _make_run_db_session(row)
+
+    async def _db():
+        yield mock_session
+
+    async def _rds():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+
+    test_app.dependency_overrides[get_db] = _db
+    test_app.dependency_overrides[get_redis] = _rds
+    try:
+        resp = client.post(
+            "/api/signal/run",
+            json={
+                "signal_name": "my_user_signal",
+                "universe_id": 88,
+                "start": "2024-01-01",
+                "end": "2024-06-01",
+            },
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db_default
+        test_app.dependency_overrides[get_redis] = _override_get_redis_default
+
+    assert resp.status_code == 200, resp.text
+    inserted = mock_session.add.call_args[0][0]
+    assert inserted.config["universe_symbols"] == [
+        "BTCUSDT-PERP",
+        "FAILUSDT-PERP",
+    ]
+
+
 def test_run_404_unknown_signal(client, tmp_path):
     """``/run`` with an unknown signal_name returns 404."""
     from tinohelm.core.paths import paths as _paths

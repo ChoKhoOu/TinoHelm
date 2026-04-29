@@ -342,6 +342,18 @@ interface PerformanceTabProps {
 }
 
 function PerformanceTab({ result }: PerformanceTabProps) {
+  const chartData = useMemo(
+    () =>
+      result
+        ? result.net_pnl_curve.map((v, i) => ({
+            idx: i,
+            net: v,
+            gross: result.gross_pnl_curve[i] ?? null,
+          }))
+        : [],
+    [result],
+  );
+
   if (!result) {
     return (
       <div className="rounded-lg border bg-card p-6 text-center font-mono text-[0.7rem] text-muted-foreground">
@@ -353,16 +365,6 @@ function PerformanceTab({ result }: PerformanceTabProps) {
   const sharpeTrend = result.sharpe >= 1 ? "up" : result.sharpe < 0 ? "down" : "neutral";
   const returnTrend = result.total_return >= 0 ? "up" : "down";
   const mddTrend = "down" as const;
-
-  const chartData = useMemo(
-    () =>
-      result.net_pnl_curve.map((v, i) => ({
-        idx: i,
-        net: v,
-        gross: result.gross_pnl_curve[i] ?? null,
-      })),
-    [result.net_pnl_curve, result.gross_pnl_curve],
-  );
 
   return (
     <div className="flex flex-col gap-5">

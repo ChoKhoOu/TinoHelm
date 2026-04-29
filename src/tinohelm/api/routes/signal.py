@@ -171,6 +171,22 @@ def _resolve_metrics(metrics: list[str] | None) -> list[str]:
     return list(metrics)
 
 
+def _parse_run_timestamp(value: str | None, field_name: str) -> datetime | None:
+    """Parse a run request ISO timestamp using the project UTC-naive convention."""
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid ISO-8601 {field_name} timestamp: {value!r}",
+        ) from exc
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(UTC).replace(tzinfo=None)
+    return ts
+
+
 def _merge_allowed_run_config(
     config_payload: dict,
     user_config: Mapping[str, object] | None,
@@ -405,22 +421,14 @@ async def run_signal(
     # ------------------------------------------------------------------
     # Resolve universe → PIT symbols + NT instrument_ids
     # ------------------------------------------------------------------
-    # Anchor the PIT lookup at ``req.end`` when supplied (so the universe
-    # reflects the *historical* trading state at the end of the run
-    # window), else ``utcnow()``.  ``req.start`` is deliberately not used
-    # — signals need the symbol list that was active at the end of the
-    # window to avoid look-back bias on delisted names.
-    anchor_ts: datetime | None = None
-    if req.end:
-        try:
-            anchor_ts = datetime.fromisoformat(req.end.replace("Z", "+00:00"))
-            if anchor_ts.tzinfo is not None:
-                anchor_ts = anchor_ts.astimezone(UTC).replace(tzinfo=None)
-        except ValueError:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid ISO-8601 end timestamp: {req.end!r}",
-            )
+    # Anchor live/no-window lookup at ``req.end`` when supplied, else
+    # ``utcnow()`` inside the resolver.  Historical runs pass the full
+    # start/end window so the persisted loading set includes every symbol
+    # active at any point in the window; PIT masks still enforce per-row
+    # eligibility in DataLayer/Aligner.
+    start_ts = _parse_run_timestamp(req.start, "start")
+    end_ts = _parse_run_timestamp(req.end, "end")
+    anchor_ts: datetime | None = end_ts
 
     try:
         (
@@ -434,6 +442,8 @@ async def run_signal(
                 universe_id=req.universe_id,
                 universe_ref=spec.universe_ref,
                 anchor_ts=anchor_ts,
+                start_ts=start_ts,
+                end_ts=end_ts,
                 db=db,
             )
         )
