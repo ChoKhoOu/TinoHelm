@@ -70,6 +70,7 @@ from tinohelm.signal.kernels import (
     zscore_clip,
 )
 from tinohelm.factor.engine.planner import _infer_source
+from tinohelm.signal._run_helpers import rebalance_freq_to_ns
 from tinohelm.signal.types import SignalSpec
 from tinohelm.signal.utils import (
     signal_spec_from_dict,
@@ -87,9 +88,7 @@ STAGE_COMPUTING = "computing"
 STAGE_EVALUATING = "evaluating"
 STAGE_PERSISTING = "persisting"
 
-# Default annualisation factor — hourly crypto bars.  Callers may override
-# via job payload key ``"periods_per_year"``.
-_DEFAULT_PERIODS_PER_YEAR = 365 * 24
+_NS_PER_YEAR = 365 * 24 * 60 * 60 * 1_000_000_000
 
 # Map kernel slug → callable.  Kept module-level so tests can monkey-patch.
 _KERNEL_DISPATCH: dict[str, Callable] = {  # type: ignore[type-arg]
@@ -101,6 +100,17 @@ _KERNEL_DISPATCH: dict[str, Callable] = {  # type: ignore[type-arg]
 }
 
 _handle: WorkerHandle = WorkerHandle(name="signal-worker")
+
+
+def _derive_periods_per_year(config_dict: dict[str, Any], spec: SignalSpec) -> int:
+    """Return annualization periods, using explicit override or rebalance cadence."""
+    if config_dict.get("periods_per_year") is not None:
+        periods_per_year = int(config_dict["periods_per_year"])
+        if periods_per_year <= 0:
+            raise ValueError("periods_per_year must be positive")
+        return periods_per_year
+    freq_ns = rebalance_freq_to_ns(spec.rebalance_freq)
+    return max(1, round(_NS_PER_YEAR / freq_ns))
 
 
 # ---------------------------------------------------------------------------
@@ -312,9 +322,7 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         # ----------------------------------------------------------------
         spec = signal_spec_from_dict(signal_name, config_dict)
         validate_supported_signal_execution(spec)
-        periods_per_year = int(
-            config_dict.get("periods_per_year", _DEFAULT_PERIODS_PER_YEAR)
-        )
+        periods_per_year = _derive_periods_per_year(config_dict, spec)
 
         # ----------------------------------------------------------------
         # 6. Stage 1: ALIGNING — load factor panel + future returns

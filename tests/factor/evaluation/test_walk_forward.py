@@ -218,6 +218,7 @@ def _dummy_config() -> EvalConfig:
         end="2024-06-01",
         forward_period=1,
         ic_freq="D",
+        returns_kind="forward_returns",
     )
 
 

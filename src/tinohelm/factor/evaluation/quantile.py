@@ -39,6 +39,29 @@ def _bucketize_canonical(
     Returns ``None`` when bucketization fails (degenerate factor → fewer
     than 2 unique buckets, or polars qcut raises).
     """
+    if "symbol" in paired.columns:
+        # Cross-sectional factor evaluation must bucket within each timestamp.
+        # Global qcut mixes time/regime level shifts into the sort key and can
+        # put an entire rebalance date into one bucket.  Ordinal ranks match
+        # the legacy ascending-label contract while staying deterministic.
+        with_q = (
+            paired.with_columns([
+                pl.col("factor").rank("ordinal").over("ts").alias("__rank"),
+                pl.len().over("ts").alias("__n"),
+            ])
+            .filter(pl.col("__n") >= n_quantiles)
+            .with_columns(
+                (((pl.col("__rank") - 1) * n_quantiles / pl.col("__n"))
+                 .floor()
+                 .cast(pl.Int8)
+                 .alias("q"))
+            )
+            .drop(["__rank", "__n"])
+        )
+        if with_q.height == 0 or with_q["q"].n_unique() < 2:
+            return None
+        return with_q
+
     int_labels = [str(i) for i in range(n_quantiles)]
     try:
         with_q_raw = paired.with_columns(
@@ -102,18 +125,24 @@ def compute_quantile_returns(
 
     avg_returns: dict[str, float] = {}
     cum_returns: dict[str, list[dict]] = {}
+    period_returns = (
+        bucketed
+        .group_by(["ts", "q"])
+        .agg(pl.col("fwd_ret").mean().alias("ret"))
+        .sort(["q", "ts"])
+    )
 
-    unique_qs = sorted(bucketed["q"].unique().to_list())
+    unique_qs = sorted(period_returns["q"].unique().to_list())
     for q in unique_qs:
         label = f"Q{int(q) + 1}"
-        # Maintain chronological order so cum returns make sense.
-        sort_cols = ["ts", "symbol"] if "symbol" in bucketed.columns else ["ts"]
-        group = bucketed.filter(pl.col("q") == q).sort(sort_cols)
-        avg_returns[label] = round(float(group["fwd_ret"].mean()), 8)
+        # Maintain chronological order so cum returns are one portfolio return
+        # per rebalance timestamp, not one compounding step per symbol row.
+        group = period_returns.filter(pl.col("q") == q).sort("ts")
+        avg_returns[label] = round(float(group["ret"].mean()), 8)
 
         # Sample cumulative-return series down to ≤ ~100 points (legacy contract
         # — keeps wire payloads small without losing curve shape).
-        cum = ((1 + group["fwd_ret"]).cum_prod() - 1).to_list()
+        cum = ((1 + group["ret"]).cum_prod() - 1).to_list()
         ts_iso = group["ts"].to_list()
         n = len(cum)
         step = max(1, n // 100)

@@ -41,6 +41,7 @@ before the ``EvalResult`` is returned.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Any
 
@@ -289,10 +290,9 @@ class Evaluator:
     ) -> EvalResult:
         """Fast evaluation — IC / quantile / turnover / distribution / rating.
 
-        ``returns`` may be either:
-          * Forward returns (already shifted) — used directly.
-          * Raw close prices — :func:`forward_returns` is applied if the input
-            looks price-like (no NaN tail).
+        ``returns`` semantics are explicit via ``config.returns_kind``:
+          * ``"close"`` — raw close prices; :func:`forward_returns` is applied.
+          * ``"forward_returns"`` — already shifted returns; used directly.
 
         Pandas inputs are accepted via the duck-typed conversion in
         :func:`_to_ts_value`; the evaluation module itself never imports
@@ -341,12 +341,14 @@ class Evaluator:
         # --- Walk-forward branch -------------------------------------------
         if config.walk_forward is not None:
             wf_evaluator = WalkForwardEvaluator(config.walk_forward)
+            fwd_df, _close_df = self._prepare_returns(returns, config)
+            fwd_config = dataclasses.replace(config, returns_kind="forward_returns")
 
             def _eval_fn(panel: Panel, fwd: Panel) -> EvalResult:
-                result, _, _, _ = self._evaluate_core(panel, fwd, config)
+                result, _, _, _ = self._evaluate_core(panel, fwd, fwd_config)
                 return result
 
-            return wf_evaluator.evaluate(factor_values, returns, eval_fn=_eval_fn)
+            return wf_evaluator.evaluate(factor_values, fwd_df, eval_fn=_eval_fn)
 
         result, factor_df, fwd_df, _close_df = self._evaluate_core(
             factor_values, returns, config
@@ -402,10 +404,10 @@ class Evaluator:
     ) -> tuple[pl.DataFrame, pl.DataFrame | None]:
         """Translate ``returns`` into a forward-return evaluation frame.
 
-        Heuristic: if the input already contains explicit nulls in the tail
-        (consistent with :func:`forward_returns`), treat it as pre-shifted
-        forward returns. Otherwise treat it as close prices and apply
-        :func:`forward_returns`.
+        ``config.returns_kind`` is the only source of truth.  Do not infer
+        semantics from values: a sliced forward-return fold can be strictly
+        positive and have no tail null marker, making it indistinguishable
+        from a close-price slice by shape alone.
 
         Returns
         -------
@@ -416,25 +418,15 @@ class Evaluator:
             :func:`compute_ic_decay` can be skipped in the caller).
         """
         as_frame = _to_ts_value(returns)
-        min_value = as_frame.select(pl.col(_VAL_COL).min()).item()
-        # Close-price panels should be strictly positive.  If callers pass
-        # return-like data (often centered around zero and containing negative
-        # values), treat it as already shifted even when the tail null marker
-        # is absent.  This keeps walk-forward/test slices from being mistaken
-        # for raw prices solely because slicing removed the original null tail.
-        if min_value is not None and float(min_value) <= 0:
+        if config.returns_kind == "forward_returns":
             return as_frame, None
-
-        period = max(0, int(config.forward_period))
-        if period > 0 and as_frame.height >= period:
-            tail = as_frame.tail(period)
-            tail_vals = tail[_VAL_COL].to_list()
-            if tail_vals and all(v is None or (isinstance(v, float) and math.isnan(v)) for v in tail_vals):
-                return as_frame, None
-
-        # Treat as close price; compute forward returns.
-        fwd = forward_returns(as_frame, config.forward_period, log_ret=config.log_ret)
-        return fwd, as_frame
+        if config.returns_kind == "close":
+            fwd = forward_returns(as_frame, config.forward_period, log_ret=config.log_ret)
+            return fwd, as_frame
+        raise ValueError(
+            "unknown EvalConfig.returns_kind="
+            f"{config.returns_kind!r}; expected 'close' or 'forward_returns'"
+        )
 
     def _evaluate_core(
         self,

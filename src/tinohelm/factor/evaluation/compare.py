@@ -70,6 +70,32 @@ def _extract_ic_values(result: EvalResult) -> np.ndarray:
     return np.array(raw, dtype=np.float64)
 
 
+def _extract_ic_frame(result: EvalResult, name: str) -> pl.DataFrame:
+    """Return ``[date, <name>]`` IC frame for date-aligned correlations."""
+    raw = result.ic_series or []
+    if not raw:
+        return pl.DataFrame(
+            {"date": [], name: []},
+            schema={"date": pl.Utf8, name: pl.Float64},
+        )
+    if isinstance(raw[0], dict):
+        rows = [
+            {"date": str(entry["date"]), name: float(entry["ic"])}
+            for entry in raw
+            if entry.get("date") is not None
+            and not _is_bad_metric_value(entry.get("ic"))
+        ]
+        return pl.DataFrame(rows, schema={"date": pl.Utf8, name: pl.Float64})
+    # Defensive fallback for legacy plain arrays: preserve positional labels so
+    # callers with no dates keep the old index-aligned behavior.
+    rows = [
+        {"date": str(i), name: float(v)}
+        for i, v in enumerate(raw)
+        if not _is_bad_metric_value(v)
+    ]
+    return pl.DataFrame(rows, schema={"date": pl.Utf8, name: pl.Float64})
+
+
 # ---------------------------------------------------------------------------
 # compare_results — pairwise bootstrap CI
 # ---------------------------------------------------------------------------
@@ -400,22 +426,24 @@ def compare_multi(
     # ------------------------------------------------------------------ #
     # 3. Dendrogram + IC time-series correlation                          #
     # ------------------------------------------------------------------ #
-    # Collect per-factor IC arrays; require all series same length for
-    # correlation_matrix_ic_time_series.
-    ic_arrays: dict[str, np.ndarray] = {
-        fname: _extract_ic_values(results[fname]) for fname in factor_names
+    # Collect per-factor IC frames and align by date before computing time-
+    # series correlations.  Positional truncation silently pairs different
+    # dates when factors miss different IC buckets.
+    ic_frames: dict[str, pl.DataFrame] = {
+        fname: _extract_ic_frame(results[fname], fname) for fname in factor_names
     }
-    # Factors with sufficient data
-    valid_ic_names = [n for n in factor_names if len(ic_arrays[n]) >= 2]
+    valid_ic_names = [n for n in factor_names if ic_frames[n].height >= 2]
 
     if len(valid_ic_names) >= 2:
-        # Truncate all IC series to the minimum length for alignment.
-        min_len = min(len(ic_arrays[n]) for n in valid_ic_names)
-        aligned_ic: dict[str, pl.Series] = {
-            n: pl.Series(values=ic_arrays[n][:min_len].tolist())
-            for n in valid_ic_names
-        }
         try:
+            aligned = ic_frames[valid_ic_names[0]]
+            for name in valid_ic_names[1:]:
+                aligned = aligned.join(ic_frames[name], on="date", how="inner")
+            aligned_ic: dict[str, pl.Series] = {
+                n: aligned[n] for n in valid_ic_names
+            } if aligned.height >= 2 else {}
+            if not aligned_ic:
+                raise ValueError("fewer than 2 common IC dates")
             corr_df = correlation_matrix_ic_time_series(aligned_ic)
             cluster = hierarchical_cluster(corr_df, method="ward")
             dendrogram: dict = {

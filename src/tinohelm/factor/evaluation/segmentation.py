@@ -30,6 +30,7 @@ No pandas imports at module top (AC-1 contract of the evaluation package).
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Any
 
@@ -255,6 +256,7 @@ def segment_evaluate(
     """
     if eval_config is None:
         eval_config = EvalConfig(universe=(), start="", end="")
+    eval_config = dataclasses.replace(eval_config, returns_kind="forward_returns")
 
     # Extract the ts column from the panel for mask computation.
     if _TS_COL not in panel.columns:

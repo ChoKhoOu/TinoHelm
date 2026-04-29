@@ -252,6 +252,32 @@ class TestRobustnessModule:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Explicit return-kind contract
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_prepare_returns_uses_explicit_forward_returns_kind_for_positive_slice():
+    """All-positive pre-shifted returns must not be treated as close prices."""
+    ts = pd.date_range("2024-01-01", periods=4, freq="1h")
+    positive_fwd = pl.DataFrame({
+        "ts": list(ts.to_pydatetime()),
+        "value": [0.01, 0.02, 0.03, 0.04],
+    })
+    config = EvalConfig(
+        universe=("BTCUSDT-PERP",),
+        start="2024-01-01",
+        end="2024-01-02",
+        forward_period=1,
+        returns_kind="forward_returns",
+    )
+
+    fwd, close = Evaluator._prepare_returns(positive_fwd, config)
+
+    assert close is None
+    assert fwd["value"].to_list() == positive_fwd["value"].to_list()
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Integration — Evaluator.evaluate produces non-empty fields
 # ──────────────────────────────────────────────────────────────────────
 

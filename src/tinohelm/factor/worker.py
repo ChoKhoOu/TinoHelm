@@ -23,6 +23,7 @@ Payload schema consumed from the queue::
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import dataclasses
 import json
 import logging
@@ -220,10 +221,15 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         # 5. Build Orchestrator and run (CPU-bound → thread)
         # ----------------------------------------------------------------
         loop = asyncio.get_running_loop()
+        progress_futures: list[concurrent.futures.Future[None]] = []
 
         def _sync_progress(pct: int, msg: str = "", *, stage: str | None = None) -> None:
             """Bridge: schedule async progress update from a worker thread."""
-            asyncio.run_coroutine_threadsafe(_progress(pct, msg, stage=stage), loop)
+            fut = asyncio.run_coroutine_threadsafe(
+                _progress(pct, msg, stage=stage),
+                loop,
+            )
+            progress_futures.append(fut)
 
         eval_result = await asyncio.to_thread(
             _run_orchestrator,
@@ -234,6 +240,11 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             run_id=run_id,
             progress_cb=_sync_progress,
         )
+        if progress_futures:
+            await asyncio.gather(
+                *(asyncio.wrap_future(fut) for fut in progress_futures),
+                return_exceptions=False,
+            )
 
         # ----------------------------------------------------------------
         # 6. Mark completed
@@ -373,6 +384,7 @@ def _run_orchestrator(
         cost_bps=config_dict.get("cost_bps", 4.0),
         ic_freq=config_dict.get("ic_freq", "D"),
         log_ret=config_dict.get("log_ret", False),
+        returns_kind=config_dict.get("returns_kind", "close"),
         params=params or config_dict.get("params", {}),
     )
 

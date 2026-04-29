@@ -211,9 +211,13 @@ class WalkForwardEvaluator:
         for fold in folds:
             # Slice panel and returns to the test window.
             test_panel = panel.slice(fold.test_start, fold.test_end - fold.test_start)
-            test_returns = forward_returns.slice(
-                fold.test_start, fold.test_end - fold.test_start
-            )
+            if ts_col in forward_returns.columns:
+                test_ts = test_panel[ts_col].to_list()
+                test_returns = forward_returns.filter(pl.col(ts_col).is_in(test_ts))
+            else:
+                test_returns = forward_returns.slice(
+                    fold.test_start, fold.test_end - fold.test_start
+                )
 
             # Run eval on the OOS slice.
             oos_result = eval_fn(test_panel, test_returns)

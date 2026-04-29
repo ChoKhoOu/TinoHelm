@@ -102,6 +102,35 @@ class TestSchema:
         out = compute_quantile_returns(factor, fwd)
         assert isinstance(out["is_monotonic"], bool)
 
+    def test_multi_symbol_buckets_and_compounds_once_per_timestamp(self):
+        """Cross-sectional quantiles must not mix time or compound per symbol."""
+        n_ts = 60
+        ts = _hourly_ts(n_ts)
+        # Large regime shift would dominate a global qcut; per-ts ranking still
+        # assigns S0/S1 to Q1 and S2/S3 to Q2 at every timestamp.
+        shift = np.array([0 if i < n_ts // 2 else 1_000 for i in range(n_ts)])
+        factor = pl.DataFrame({
+            "ts": ts.repeat_by(4).explode(),
+            "symbol": ["S0", "S1", "S2", "S3"] * n_ts,
+            "value": np.column_stack([
+                shift + 0,
+                shift + 1,
+                shift + 2,
+                shift + 3,
+            ]).ravel().astype(float).tolist(),
+        })
+        fwd = pl.DataFrame({
+            "ts": ts.repeat_by(4).explode(),
+            "symbol": ["S0", "S1", "S2", "S3"] * n_ts,
+            "value": ([0.01, 0.01, 0.02, 0.02] * n_ts),
+        })
+
+        out = compute_quantile_returns(factor, fwd, n_quantiles=2)
+
+        assert out["avg_returns"] == {"Q1": 0.01, "Q2": 0.02}
+        assert len(out["cum_returns"]["Q1"]) == n_ts
+        assert len(out["cum_returns"]["Q2"]) == n_ts
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Short-circuit boundaries

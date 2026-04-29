@@ -223,6 +223,38 @@ def test_compare_multi_dendrogram_uses_s12_clustering():
     assert set(labels) == set(results.keys())
 
 
+def test_compare_multi_ic_correlation_aligns_by_date_not_position():
+    """Missing IC dates must be inner-joined before correlation."""
+    results = {
+        "f1": EvalResult(
+            ic_mean=0.0,
+            ir=0.0,
+            ic_series=[
+                {"date": "2024-01-01", "ic": 100.0},
+                {"date": "2024-01-02", "ic": 1.0},
+                {"date": "2024-01-03", "ic": 2.0},
+                {"date": "2024-01-04", "ic": 3.0},
+            ],
+        ),
+        "f2": EvalResult(
+            ic_mean=0.0,
+            ir=0.0,
+            ic_series=[
+                {"date": "2024-01-02", "ic": 10.0},
+                {"date": "2024-01-03", "ic": 20.0},
+                {"date": "2024-01-04", "ic": 30.0},
+                {"date": "2024-01-05", "ic": -100.0},
+            ],
+        ),
+    }
+
+    out = compare_multi(results)
+    corr = out["ic_time_series_corr"]
+    assert corr["factors"] == ["f1", "f2"]
+    assert corr["matrix"][0][1] == pytest.approx(1.0)
+    assert corr["matrix"][1][0] == pytest.approx(1.0)
+
+
 # ---------------------------------------------------------------------------
 # 7. Safe degradation for short ic_series
 # ---------------------------------------------------------------------------

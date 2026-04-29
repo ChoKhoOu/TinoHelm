@@ -33,7 +33,7 @@ the factor-framework rebuild (see ``3-tech-design.md`` §3.7).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import polars as pl
 
@@ -240,6 +240,13 @@ class EvalConfig:
         argument by the IC evaluator.
     log_ret:
         Whether to compute log returns instead of simple returns.
+    returns_kind:
+        Explicit semantic type for the ``returns`` argument passed to
+        :class:`~tinohelm.factor.evaluation.evaluator.Evaluator`.  ``"close"``
+        means the evaluator derives forward returns from raw close prices;
+        ``"forward_returns"`` means callers already supplied a pre-shifted
+        forward-return panel.  This must be explicit because all-positive
+        return windows are indistinguishable from prices by value shape alone.
     params:
         Factor parameter overrides applied for this eval run.  Merged on top
         of :attr:`FactorSpec.params` defaults.
@@ -270,6 +277,7 @@ class EvalConfig:
     cost_bps: float = 4.0
     ic_freq: str = "D"
     log_ret: bool = False
+    returns_kind: Literal["close", "forward_returns"] = "close"
     params: dict[str, Any] = field(default_factory=dict, compare=False, hash=False)
     universe_id: int | None = None
     neutralize: tuple[str, ...] = ()

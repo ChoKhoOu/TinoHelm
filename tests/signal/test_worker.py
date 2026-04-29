@@ -24,7 +24,7 @@ import polars as pl
 import pytest
 
 from tinohelm.signal.evaluator import SignalEvalResult
-from tinohelm.signal.types import CostModel
+from tinohelm.signal.types import CostModel, SignalSpec
 from tinohelm.signal.worker import (
     STAGE_ALIGNING,
     STAGE_COMPUTING,
@@ -116,6 +116,35 @@ def _sample_panels() -> tuple[pl.DataFrame, pl.DataFrame]:
         "S03": returns_data[:, 3].tolist(),
     })
     return factor, returns
+
+
+def _sample_signal_spec(rebalance_freq: str = "1D") -> SignalSpec:
+    return SignalSpec(
+        name="test_signal",
+        factor_ref="ret_N@1.0.0",
+        method="top_k_long_short",
+        weighting="equal",
+        rebalance_freq=rebalance_freq,
+        universe_ref="top10_perp",
+        method_params={"k": 1},
+    )
+
+
+def test_periods_per_year_defaults_to_rebalance_frequency():
+    from tinohelm.signal.worker import _derive_periods_per_year
+
+    assert _derive_periods_per_year({}, _sample_signal_spec("1D")) == 365
+    assert _derive_periods_per_year({}, _sample_signal_spec("5m")) == 105_120
+    assert _derive_periods_per_year({}, _sample_signal_spec("30s")) == 1_051_200
+
+
+def test_periods_per_year_explicit_override_and_validation():
+    from tinohelm.signal.worker import _derive_periods_per_year
+
+    spec = _sample_signal_spec("1D")
+    assert _derive_periods_per_year({"periods_per_year": 252}, spec) == 252
+    with pytest.raises(ValueError, match="periods_per_year must be positive"):
+        _derive_periods_per_year({"periods_per_year": 0}, spec)
 
 
 @pytest.fixture
