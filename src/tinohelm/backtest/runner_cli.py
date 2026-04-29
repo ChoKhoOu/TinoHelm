@@ -22,16 +22,38 @@ from pathlib import Path
 
 import redis
 
-from tinohelm.backtest.events import (
-    publish_completed,
-    publish_progress,
-    publish_stats,
-    update_db_status,
-)
-from tinohelm.core.config import get_settings
-from tinohelm.core.utils import sanitize_for_json
-
 logger = logging.getLogger(__name__)
+
+
+def get_settings():
+    """Lazy wrapper kept patchable for tests and fast for early signal setup."""
+    from tinohelm.core.config import get_settings as _get_settings
+    return _get_settings()
+
+
+def sanitize_for_json(value):
+    from tinohelm.core.utils import sanitize_for_json as _sanitize_for_json
+    return _sanitize_for_json(value)
+
+
+def publish_completed(*args, **kwargs):
+    from tinohelm.backtest.events import publish_completed as _publish_completed
+    return _publish_completed(*args, **kwargs)
+
+
+def publish_progress(*args, **kwargs):
+    from tinohelm.backtest.events import publish_progress as _publish_progress
+    return _publish_progress(*args, **kwargs)
+
+
+def publish_stats(*args, **kwargs):
+    from tinohelm.backtest.events import publish_stats as _publish_stats
+    return _publish_stats(*args, **kwargs)
+
+
+def update_db_status(*args, **kwargs):
+    from tinohelm.backtest.events import update_db_status as _update_db_status
+    return _update_db_status(*args, **kwargs)
 
 # ---------------------------------------------------------------------------
 # Global state for SIGTERM handler — set once in _run_queue_mode()
@@ -40,6 +62,7 @@ logger = logging.getLogger(__name__)
 _current_run_id: str | None = None
 _current_r: redis.Redis | None = None
 _current_db_url: str | None = None
+_terminalizing: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +71,9 @@ _current_db_url: str | None = None
 
 def _handle_sigterm(signum, frame):
     """Cancel current run if SIGTERM/SIGINT arrives mid-execution."""
+    if _terminalizing:
+        logger.info("Ignoring signal %s after run terminalization started", signum)
+        return
     if _current_run_id and _current_r and _current_db_url:
         try:
             update_db_status(_current_db_url, _current_run_id, "cancelled")
@@ -66,18 +92,22 @@ def _run_queue_mode(run_id: str) -> int:
 
     Returns exit code: 0 = success, 1 = failure, 2 = cancelled.
     """
-    global _current_run_id, _current_r, _current_db_url
+    global _current_run_id, _current_r, _current_db_url, _terminalizing
 
     cfg = get_settings()
     r = redis.from_url(cfg.redis.url)
     _current_run_id = run_id
     _current_r = r
     _current_db_url = cfg.database.url
+    _terminalizing = False
 
     # Read job payload: prefer stdin (from consumer), fall back to DB
     job = _load_job_payload(run_id, cfg.database.url)
     if job is None:
         logger.error("No job payload for run %s", run_id)
+        _current_run_id = None
+        _current_r = None
+        _current_db_url = None
         return 1
 
     # Pre-cancel check
@@ -87,6 +117,9 @@ def _run_queue_mode(run_id: str) -> int:
         r.delete(cancel_key)
         update_db_status(cfg.database.url, run_id, "cancelled")
         publish_completed(r, run_id, "cancelled")
+        _current_run_id = None
+        _current_r = None
+        _current_db_url = None
         return 2
 
     update_db_status(cfg.database.url, run_id, "running")
@@ -155,10 +188,26 @@ def _run_queue_mode(run_id: str) -> int:
         # Sanitize NaN/Infinity before any serialization
         results = sanitize_for_json(results)
 
-        # Save artifact JSON
+        # A cancel observed after the engine returns but before terminal writes
+        # must not create contradictory completed+cancelled state.
+        if r.get(cancel_key):
+            r.delete(cancel_key)
+            update_db_status(cfg.database.url, run_id, "cancelled")
+            publish_completed(r, run_id, "cancelled")
+            logger.info("Backtest %s cancelled after engine execution", run_id)
+            return 2
+
+        # From here on completion owns the terminal state. A SIGTERM from a
+        # late cancel watcher must not publish a contradictory cancelled event.
+        _terminalizing = True
+
+        # Save artifact JSON atomically.  Readers should never observe a
+        # partially-written results.json while status polling races completion.
         artifact_path = artifact_dir / "results.json"
-        with open(artifact_path, "w") as f:
-            json.dump(results, f, indent=2, default=str)
+        tmp_artifact_path = artifact_dir / "results.json.tmp"
+        with open(tmp_artifact_path, "w") as f:
+            json.dump(results, f, separators=(",", ":"), allow_nan=False, default=str)
+        tmp_artifact_path.replace(artifact_path)
 
         # Publish stats from results
         stats = results.get("statistics", {})
@@ -174,13 +223,17 @@ def _run_queue_mode(run_id: str) -> int:
             r, run_id, 100,
             elapsed_secs=round(time.monotonic() - job_start_time, 1),
         )
-        publish_completed(r, run_id, "completed", summary=stats)
 
-        # Store result summary in Redis for quick access
+        # Store only a small summary pointer in Redis.  The full payload lives
+        # in the artifact file and can be multi-MB for trade/equity reports.
         r.setex(
             f"tino:backtest:result:{run_id}",
             86400,
-            json.dumps(results, default=str),
+            json.dumps({
+                "status": "completed",
+                "summary": stats,
+                "artifact_path": str(artifact_path),
+            }, default=str),
         )
         r.setex(f"tino:backtest:progress:{run_id}", 86400, "100")
 
@@ -191,14 +244,8 @@ def _run_queue_mode(run_id: str) -> int:
             "completed",
             result_summary=results.get("statistics", {}),
         )
-
-        # Post-completion cancel check: cancel may have arrived mid-run
-        if r.get(cancel_key):
-            r.delete(cancel_key)
-            update_db_status(cfg.database.url, run_id, "cancelled")
-            publish_completed(r, run_id, "cancelled")
-            logger.info("Backtest %s cancelled after execution", run_id)
-            return 2
+        publish_completed(r, run_id, "completed", summary=stats)
+        r.delete(cancel_key)
 
         logger.info("Backtest %s completed successfully", run_id)
         return 0
@@ -209,6 +256,11 @@ def _run_queue_mode(run_id: str) -> int:
         publish_completed(r, run_id, "failed", error=safe_error)
         update_db_status(cfg.database.url, run_id, "failed", error_msg=safe_error)
         return 1
+    finally:
+        _current_run_id = None
+        _current_r = None
+        _current_db_url = None
+        _terminalizing = False
 
 
 # ---------------------------------------------------------------------------

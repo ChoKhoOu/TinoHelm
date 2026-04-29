@@ -121,6 +121,132 @@ def test_run_id_success(tmp_path, monkeypatch):
     )
 
 
+def test_run_id_success_stores_summary_pointer_not_full_result(tmp_path, monkeypatch):
+    """Queue mode should not duplicate full result payloads into Redis."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    heavy_results = {
+        "statistics": _FAKE_STATS,
+        "trade_log": [{"trade_id": f"t-{i}", "pnl": i} for i in range(100)],
+        "equity_curve": [{"ts": i, "equity": 10000 + i} for i in range(100)],
+    }
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=heavy_results)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 0
+    result_setex_calls = [
+        c for c in r.setex.call_args_list
+        if c.args and c.args[0] == "tino:backtest:result:r-1"
+    ]
+    assert len(result_setex_calls) == 1
+    payload = json.loads(result_setex_calls[0].args[2])
+    assert payload["status"] == "completed"
+    assert payload["summary"] == _FAKE_STATS
+    assert payload["artifact_path"].endswith("results.json")
+    assert "trade_log" not in payload
+    assert "equity_curve" not in payload
+
+
+def test_run_id_cancel_after_engine_run_does_not_publish_completed(tmp_path, monkeypatch):
+    """A cancel flag observed after engine completion wins before terminal writes."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+    # First get() is pre-run cancel check; second is post-engine/pre-terminal.
+    r.get.side_effect = [None, b"1"]
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+    mock_update_db = MagicMock()
+    mock_publish_completed = MagicMock()
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", mock_update_db)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", mock_publish_completed)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 2
+    statuses = [c.args[2] for c in mock_update_db.call_args_list if len(c.args) >= 3]
+    assert "cancelled" in statuses
+    assert "completed" not in statuses
+    completed_statuses = [
+        c.args[2] for c in mock_publish_completed.call_args_list if len(c.args) >= 3
+    ]
+    assert completed_statuses == ["cancelled"]
+
+
+def test_sigterm_during_terminalization_does_not_publish_cancel(monkeypatch):
+    """Once finalization starts, SIGTERM must not create completed+cancelled."""
+    from tinohelm.backtest import runner_cli
+
+    mock_update_db = MagicMock()
+    mock_publish_completed = MagicMock()
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", mock_update_db)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", mock_publish_completed)
+    monkeypatch.setattr(runner_cli, "_current_run_id", "r-1")
+    monkeypatch.setattr(runner_cli, "_current_r", MagicMock())
+    monkeypatch.setattr(runner_cli, "_current_db_url", "sqlite:///:memory:")
+    monkeypatch.setattr(runner_cli, "_terminalizing", True)
+
+    runner_cli._handle_sigterm(signal.SIGTERM, None)
+
+    mock_update_db.assert_not_called()
+    mock_publish_completed.assert_not_called()
+
+
+def test_run_id_success_deletes_late_cancel_key_after_terminalization(tmp_path, monkeypatch):
+    """A cancel key set after the final pre-terminal check is cleaned on success."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+    r.get.side_effect = [None, None]
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 0
+    r.delete.assert_any_call("tino:backtest:cancel:r-1")
+
+
 # ---------------------------------------------------------------------------
 # T2: test_run_id_failure
 # ---------------------------------------------------------------------------
@@ -404,7 +530,6 @@ def test_fold_config_full_mode_nan_sanitized(tmp_path, monkeypatch, capsys):
     Infinity in equity_curve — asserts the final JSON string contains neither
     the literal 'NaN' nor 'Infinity'.
     """
-    import math
     from tinohelm.backtest import runner_cli
 
     nan_results = {

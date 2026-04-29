@@ -15,11 +15,9 @@ mocking study.optimize + best_trial, bypassing the optuna guard.
 """
 from __future__ import annotations
 
-import json
-import subprocess
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -185,6 +183,41 @@ _FULL_SHAPE_RESULT = {
     "monthly_returns": [{"month": "2024-01", "return": 0.015}],
     "trade_log": [],
 }
+
+
+# ---------------------------------------------------------------------------
+# Test 0: Simple mode parallel safety
+# ---------------------------------------------------------------------------
+
+def test_parallel_simple_mode_skips_shared_engine_preparation(monkeypatch):
+    """n_workers>1 must not share one mutable BacktestEngine across trials."""
+    from tinohelm.backtest.runner import BacktestRunner
+
+    opt = _make_optimizer(walk_forward_folds=0, n_trials=1)
+    opt.n_workers = 2
+
+    prepare_calls: list[bool] = []
+
+    async def _prepare_engine(self):
+        prepare_calls.append(True)
+        return MagicMock(), MagicMock(), 10_000.0
+
+    monkeypatch.setattr(BacktestRunner, "prepare_engine", _prepare_engine)
+    monkeypatch.setattr(
+        BacktestOptimizer,
+        "_run_backtest_subprocess",
+        lambda self, params, start, end, *, result_mode="slim", **kw: _FULL_SHAPE_RESULT,
+    )
+
+    fake_optuna, _fake_study = _stub_optuna(study_best_value=1.0)
+    monkeypatch.setattr(optimizer_mod, "optuna", fake_optuna)
+    monkeypatch.setattr("redis.from_url", lambda *a, **kw: _make_mock_redis())
+    _noop_db_patch(monkeypatch)
+
+    opt.run()
+
+    assert prepare_calls == []
+    assert opt._shared_engine is None
 
 
 # ---------------------------------------------------------------------------

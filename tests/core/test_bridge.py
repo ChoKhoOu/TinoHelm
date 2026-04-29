@@ -299,6 +299,24 @@ class TestRelay:
         await bridge._relay("payload", clients)
         assert clients == {alive}
 
+    async def test_slow_client_times_out_without_blocking_fast_client(self, bridge):
+        bridge._send_timeout_s = 0.01
+
+        slow = _fake_ws()
+        fast = _fake_ws()
+
+        async def _slow_send(_payload):
+            await asyncio.sleep(0.1)
+
+        slow.send_text.side_effect = _slow_send
+        clients = {slow, fast}
+
+        await asyncio.wait_for(bridge._relay("payload", clients), timeout=0.05)
+
+        fast.send_text.assert_awaited_once_with("payload")
+        assert slow not in clients
+        assert fast in clients
+
 
 # ---------------------------------------------------------------------------
 # EventBridge._publish_to_subscribers — fan-out semantics shared by
@@ -326,16 +344,13 @@ class TestPublishToSubscribers:
 
     async def test_wildcard_and_prefix_same_client_delivers_only_once(self, bridge):
         """A client subscribed on both ``*`` and a specific prefix receives
-        the message twice (once per subscription) — documented behaviour.
-
-        This test locks down the current semantics.  If de-duplication is
-        added later the test must be updated.
+        one logical event, not one copy per matching subscription pattern.
         """
         ws = _fake_ws()
         await bridge.subscribe(ws, None)
         await bridge.subscribe(ws, ["tino:sandbox"])
         await bridge._publish_to_subscribers("tino:sandbox:fills", "payload")
-        assert ws.send_text.await_count == 2
+        ws.send_text.assert_awaited_once_with("payload")
 
     async def test_multiple_prefixes_all_matching_all_get_delivery(self, bridge):
         """If several prefixes are all prefixes of the published channel,
@@ -364,9 +379,12 @@ class TestPublishToSubscribers:
         dead = _fake_ws(dead=True)
         await bridge.subscribe(alive, None)
         await bridge.subscribe(dead, None)
+        await bridge.subscribe(dead, ["tino:sandbox"])
         await bridge._publish_to_subscribers("tino:sandbox:positions", "payload")
-        # Dead client reaped from wildcard set.
-        assert dead not in bridge._clients["*"]
+        # Dead client reaped from every subscription set, not only the set
+        # that happened to be relayed first.
+        assert dead not in bridge._clients.get("*", set())
+        assert dead not in bridge._clients.get("tino:sandbox", set())
         assert alive in bridge._clients["*"]
 
 

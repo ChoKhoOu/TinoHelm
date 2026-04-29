@@ -204,6 +204,34 @@ class TestComputeIcSeries:
             (pl.col("symbol") == "ETH") & (pl.col("fwd_ret") > 0)
         ).height == 0
 
+    def test_build_paired_rejects_asymmetric_symbol_schema(self):
+        ts = _hourly_ts(3)
+        factor = pl.DataFrame({
+            "ts": [*ts.to_list(), *ts.to_list()],
+            "symbol": ["BTC", "BTC", "BTC", "ETH", "ETH", "ETH"],
+            "value": [1.0, 2.0, 3.0, 10.0, 20.0, 30.0],
+        })
+        fwd = pl.DataFrame({"ts": ts, "value": [0.01, 0.02, 0.03]})
+
+        with pytest.raises(ValueError, match="symbol"):
+            _build_paired(factor, fwd)
+
+    def test_build_paired_rejects_duplicate_identity_keys(self):
+        ts = _hourly_ts(2)
+        factor = pl.DataFrame({
+            "ts": [ts[0], ts[0], ts[1]],
+            "symbol": ["BTC", "BTC", "BTC"],
+            "value": [1.0, 2.0, 3.0],
+        })
+        fwd = pl.DataFrame({
+            "ts": [ts[0], ts[1]],
+            "symbol": ["BTC", "BTC"],
+            "value": [0.01, 0.02],
+        })
+
+        with pytest.raises(ValueError, match="duplicate identity"):
+            _build_paired(factor, fwd)
+
     def test_exactly_30_paired_does_not_short_circuit(self):
         factor, fwd = self._make_corr_pair(30)
         out = compute_ic_series(factor, fwd, freq="D")
@@ -284,6 +312,28 @@ class TestComputeIcSeries:
         assert sp.height > 0 and pe.height > 0
         # At least one daily group should disagree.
         assert sp["ic"].to_list() != pe["ic"].to_list()
+
+    def test_unknown_method_is_rejected(self):
+        factor, fwd = self._make_corr_pair(100)
+        with pytest.raises(ValueError, match="method"):
+            compute_ic_series(factor, fwd, method="kendall", freq="D")
+
+    def test_unknown_method_is_rejected_even_when_too_few_pairs(self):
+        factor, fwd = self._make_corr_pair(2)
+        with pytest.raises(ValueError, match="method"):
+            compute_ic_series(factor, fwd, method="kendall", freq="D")
+
+    def test_non_temporal_ts_is_rejected_before_polars_dt_error(self):
+        factor = pl.DataFrame({"ts": list(range(100)), "value": np.arange(100, dtype=float)})
+        fwd = pl.DataFrame({"ts": list(range(100)), "value": np.arange(100, dtype=float)})
+        with pytest.raises(ValueError, match="datetime"):
+            compute_ic_series(factor, fwd, freq="D")
+
+    def test_non_temporal_ts_is_rejected_even_when_too_few_pairs(self):
+        factor = pl.DataFrame({"ts": [0, 1], "value": [1.0, 2.0]})
+        fwd = pl.DataFrame({"ts": [0, 1], "value": [0.01, 0.02]})
+        with pytest.raises(ValueError, match="datetime"):
+            compute_ic_series(factor, fwd, freq="D")
 
     def test_non_finite_ic_rows_are_dropped(self):
         # All-constant factor within daily groups → spearman returns NaN → skipped.
@@ -396,6 +446,24 @@ class TestComputeIcSummary:
         assert out["ic_std"] == 1.0
         assert out["ir"] == 0
         assert out["ic_tstat"] == 0
+
+    def test_non_finite_ic_rows_are_ignored_in_summary(self):
+        ic_df = pl.DataFrame({
+            "date": ["d1", "d2", "d3", "d4"],
+            "ic": [0.1, float("nan"), float("inf"), -0.3],
+        })
+        out = compute_ic_summary(ic_df)
+        assert out["ic_mean"] == -0.1
+        assert out["ic_max_abs"] == 0.3
+        assert out["ic_positive_pct"] == 0.5
+        assert all(math.isfinite(v) for v in out.values())
+
+    def test_all_non_finite_ic_rows_return_zero_summary(self):
+        ic_df = pl.DataFrame({
+            "date": ["d1", "d2", "d3"],
+            "ic": [float("nan"), float("inf"), float("-inf")],
+        })
+        assert compute_ic_summary(ic_df) == _EMPTY_SUMMARY
 
 
 # ──────────────────────────────────────────────────────────────────────

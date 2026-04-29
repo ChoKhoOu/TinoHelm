@@ -26,11 +26,9 @@ try:
 except ImportError:
     optuna = None  # type: ignore[assignment]
 
-logger = logging.getLogger(__name__)
-
 from tinohelm.backtest.optimizer_helpers import (
     FAIL_VALUE,
-    FITNESS_METRICS,
+    FITNESS_METRICS as FITNESS_METRICS,
     PROGRESS_STATUS_COMPLETED,
     PROGRESS_STATUS_RUNNING,
     PatienceTracker,
@@ -52,6 +50,8 @@ from tinohelm.backtest.optimizer_helpers import (
     walk_forward_windows,
 )
 from tinohelm.db.sync_engine import get_sync_engine
+
+logger = logging.getLogger(__name__)
 
 # Backward-compatible re-exports for callers that imported the old private
 # names directly (e.g. ``api/routes/optimize.py``).  The canonical names
@@ -457,7 +457,10 @@ class BacktestOptimizer:
         )
 
         # --- Shared engine for simple mode (avoids reloading data per trial) ---
-        if not use_walk_forward:
+        # A Nautilus BacktestEngine is mutable and reset/run/add_strategy are not
+        # thread-safe.  Reuse it only for serial simple-mode optimisation;
+        # parallel runs must create isolated engines per trial.
+        if not use_walk_forward and self.n_workers == 1:
             try:
                 from tinohelm.backtest.runner import BacktestRunner
 
@@ -477,7 +480,7 @@ class BacktestOptimizer:
                 self._shared_strategy_bundle = pc
                 self._shared_starting_balance = sb
                 logger.info(
-                    "Shared engine prepared for simple mode — "
+                    "Shared engine prepared for serial simple mode — "
                     "data loaded once, will reset() between trials"
                 )
             except Exception:
@@ -485,6 +488,12 @@ class BacktestOptimizer:
                     "Failed to prepare shared engine, falling back to per-trial mode",
                     exc_info=True,
                 )
+        elif not use_walk_forward:
+            logger.info(
+                "Parallel simple mode uses isolated per-trial engines; "
+                "skipping shared BacktestEngine because n_workers=%d",
+                self.n_workers,
+            )
 
         # --- Optuna setup ---
         optuna.logging.set_verbosity(optuna.logging.WARNING)

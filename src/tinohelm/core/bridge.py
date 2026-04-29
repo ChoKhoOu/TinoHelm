@@ -56,6 +56,8 @@ class EventBridge:
         self._clients: dict[str, set[WebSocket]] = defaultdict(set)
         self._task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        self._send_timeout_s: float = 2.0
+        self._max_concurrent_sends: int = 256
 
     async def start(self) -> None:
         """Start the event bridge — connect to Redis and begin listening."""
@@ -122,16 +124,12 @@ class EventBridge:
         of ``_listener`` and ``_heartbeat_poller`` keeps the fan-out semantics
         defined in a single place.
         """
-        # Wildcard subscribers get every message
-        await self._relay(payload, self._clients.get("*", set()))
-
-        # Prefix-pattern subscribers
+        recipients: set[WebSocket] = set(self._clients.get("*", set()))
         for pattern, clients in list(self._clients.items()):
-            if pattern == "*":
+            if pattern == "*" or not channel.startswith(pattern):
                 continue
-            if not channel.startswith(pattern):
-                continue
-            await self._relay(payload, clients)
+            recipients.update(clients)
+        await self._relay(payload, recipients)
 
     async def _listener(self) -> None:
         """Background task: listen to Redis PubSub and relay to WebSocket clients.
@@ -220,11 +218,28 @@ class EventBridge:
 
     async def _relay(self, payload: str, clients: set[WebSocket]) -> None:
         """Send payload to a set of WebSocket clients, removing dead ones."""
-        dead: list[WebSocket] = []
-        for ws in list(clients):
+        if not clients:
+            return
+
+        timeout_s = getattr(self, "_send_timeout_s", 2.0)
+        max_concurrent = max(1, int(getattr(self, "_max_concurrent_sends", 256)))
+
+        async def _send_one(ws: WebSocket) -> WebSocket | None:
             try:
-                await ws.send_text(payload)
+                await asyncio.wait_for(ws.send_text(payload), timeout=timeout_s)
+                return None
             except Exception:
-                dead.append(ws)
+                return ws
+
+        dead: list[WebSocket] = []
+        snapshot = list(clients)
+        for idx in range(0, len(snapshot), max_concurrent):
+            dead.extend(
+                ws for ws in await asyncio.gather(
+                    *(_send_one(ws) for ws in snapshot[idx: idx + max_concurrent]),
+                )
+                if ws is not None
+            )
         for ws in dead:
             clients.discard(ws)
+            await self.unsubscribe(ws)
