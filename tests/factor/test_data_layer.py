@@ -538,9 +538,9 @@ class TestLoadGrouping:
         with pytest.raises(ValueError, match="Unsupported bar frequency"):
             dl.load(DataRequest("BTCUSDT-PERP", "close", "typo", 0, "bar"))
 
-    def test_custom_6m_frequency_resamples_from_1m_source(self, tmp_path: Path):
+    def test_custom_6m_frequency_resamples_from_1m_close_time_source(self, tmp_path: Path):
         catalog_path = tmp_path / "catalog"
-        ts_ns = [_T0_NS + i * _1MIN_NS for i in range(12)]
+        ts_ns = [_T0_NS + i * _1MIN_NS + _1MIN_NS - 1_000_000 for i in range(12)]
         closes = [100.0 + i for i in range(12)]
         _write_catalog_bars(catalog_path, "BTCUSDT-PERP", ts_ns, closes)
 
@@ -558,14 +558,100 @@ class TestLoadGrouping:
         ])
 
         assert _ts_list(panels["close"]) == [
-            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[0] // 1_000),
-            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[6] // 1_000),
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[5] // 1_000),
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[11] // 1_000),
         ]
         assert _sym_values(panels["open"], "BTCUSDT-PERP") == [90.0, 96.0]
         assert _sym_values(panels["high"], "BTCUSDT-PERP") == [125.0, 131.0]
         assert _sym_values(panels["low"], "BTCUSDT-PERP") == [80.0, 86.0]
         assert _sym_values(panels["close"], "BTCUSDT-PERP") == [105.0, 111.0]
         assert _sym_values(panels["volume"], "BTCUSDT-PERP") == [30.0, 30.0]
+
+        filtered = dl.load(
+            DataRequest(
+                "BTCUSDT-PERP",
+                "close",
+                "6m",
+                0,
+                "bar",
+            ),
+            start=datetime(2021, 5, 3, 0, 6),
+        )["close"]
+        assert _ts_list(filtered) == [
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[11] // 1_000),
+        ]
+        assert _sym_values(filtered, "BTCUSDT-PERP") == [111.0]
+
+        exact_start = dl.load(
+            DataRequest(
+                "BTCUSDT-PERP",
+                "open",
+                "6m",
+                0,
+                "bar",
+            ),
+            start=datetime(2021, 5, 3, 0, 5, 59, 999000),
+        )["open"]
+        assert _ts_list(exact_start) == [
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[5] // 1_000),
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[11] // 1_000),
+        ]
+        assert _sym_values(exact_start, "BTCUSDT-PERP") == [90.0, 96.0]
+
+        mid_bar_end = dl.load(
+            DataRequest(
+                "BTCUSDT-PERP",
+                "close",
+                "6m",
+                0,
+                "bar",
+            ),
+            end=datetime(2021, 5, 3, 0, 10),
+        )["close"]
+        assert _ts_list(mid_bar_end) == [
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[5] // 1_000),
+        ]
+        assert _sym_values(mid_bar_end, "BTCUSDT-PERP") == [105.0]
+
+    def test_fallback_resample_reads_bounded_source_window(self, tmp_path: Path, monkeypatch):
+        catalog_path = tmp_path / "catalog"
+        catalog_path.mkdir()
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        requested_start = datetime(2021, 5, 3, 0, 5, 59, 999000)
+        requested_end = datetime(2021, 5, 3, 0, 10)
+        calls: list[dict[str, object]] = []
+
+        def fake_read_bar_frame(**kwargs):
+            calls.append(kwargs)
+            if kwargs["frequency"] != "1m":
+                return None, []
+            return pl.DataFrame(), []
+
+        monkeypatch.setattr(dl, "_read_bar_frame", fake_read_bar_frame)
+
+        dl.load(
+            DataRequest("BTCUSDT-PERP", "close", "6m", 0, "bar"),
+            start=requested_start,
+            end=requested_end,
+        )
+
+        direct_call = calls[0]
+        assert direct_call["frequency"] == "6m"
+        assert direct_call["start"] == requested_start
+        assert direct_call["end"] == requested_end
+
+        fallback_call = next(call for call in calls if call["frequency"] == "1m")
+        assert fallback_call["start"] is not None
+        assert fallback_call["end"] is not None
+        assert fallback_call["start"] != requested_start
+        assert fallback_call["end"] != requested_end
+        assert fallback_call["start"] == datetime(2021, 5, 3, 0, 0, 59, 999000)
+        assert fallback_call["end"] == datetime(2021, 5, 3, 0, 15)
 
     def test_bar_reader_uses_klines_source_root_before_legacy_flat_path(self, tmp_path: Path):
         catalog_path = tmp_path / "catalog"

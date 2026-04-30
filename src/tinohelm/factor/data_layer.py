@@ -263,6 +263,27 @@ def _candidate_source_frequencies(target: _BarInterval) -> list[str]:
     return [token for _, token in sorted(candidates, reverse=True)]
 
 
+def _fallback_source_window(
+    start: datetime | None,
+    end: datetime | None,
+    target: _BarInterval,
+    source: _BarInterval,
+) -> tuple[datetime | None, datetime | None]:
+    """Bound fallback source reads while preserving complete target bars."""
+    expansion_ns = max(target.ns - source.ns, 0)
+    source_start = (
+        _ns_to_datetime(_datetime_to_ns(start) - expansion_ns)
+        if start is not None
+        else None
+    )
+    source_end = (
+        _ns_to_datetime(_datetime_to_ns(end) + expansion_ns)
+        if end is not None
+        else None
+    )
+    return source_start, source_end
+
+
 def _apply_lookback_start(
     start: datetime | None,
     frequency: str,
@@ -764,13 +785,15 @@ class DataLayer:
             return self._bar_frame_to_series(frame, fields, available_fields, empty)
 
         for source_frequency in _candidate_source_frequencies(target):
+            source = _parse_bar_frequency(source_frequency)
+            source_start, source_end = _fallback_source_window(start, end, target, source)
             frame, available_fields = self._read_bar_frame(
                 symbol=symbol,
                 field_names=fields,
                 frequency=source_frequency,
                 source_type=source_type,
-                start=start,
-                end=end,
+                start=source_start,
+                end=source_end,
             )
             if frame is None:
                 continue
@@ -905,6 +928,7 @@ class DataLayer:
 
         out = (
             frame.sort(_TS_COL)
+            .with_columns(pl.col(_TS_COL).alias("_child_close_ts"))
             .group_by_dynamic(
                 _TS_COL,
                 every=target.polars_every,
@@ -912,7 +936,9 @@ class DataLayer:
                 closed="left",
                 label="left",
             )
-            .agg(aggregations)
+            .agg([pl.col("_child_close_ts").max().alias("_resampled_ts"), *aggregations])
+            .with_columns(pl.col("_resampled_ts").alias(_TS_COL))
+            .drop("_resampled_ts")
             .sort(_TS_COL)
         )
         if start is not None:
