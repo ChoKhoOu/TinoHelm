@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import csv
 import json
-import math
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -34,6 +32,7 @@ import pytest
 from tinohelm.factor.data_layer import DataLayer, _parse_ts, load_aligned
 from tinohelm.factor.types import DataRequest
 from tinohelm.factor.universe import Universe
+from tinohelm.strategy.loader_helpers import make_bar_type_str
 
 
 def test_parse_ts_converts_offset_to_utc_naive() -> None:
@@ -44,48 +43,21 @@ def test_parse_ts_converts_offset_to_utc_naive() -> None:
 
 
 # ---------------------------------------------------------------------------
-# NT imports (lazy — only imported in fixtures that need them)
+# Test catalog writer (NT-free)
 # ---------------------------------------------------------------------------
 
-def _make_bar_objects(symbol_str: str, timestamps_ns: list[int], closes: list[float]):
-    """Create minimal NT Bar objects for writing to a test catalog.
-
-    Uses NT model directly (no tinohelm.data.catalog helpers, so tests don't
-    depend on the Binance API cache).
-    """
-    from nautilus_trader.model.data import Bar, BarType, BarSpecification
-    from nautilus_trader.model.enums import AggregationSource, BarAggregation, PriceType
-    from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
-    from nautilus_trader.model.objects import Price, Quantity
-
-    inst_id = InstrumentId(Symbol(symbol_str), Venue("BINANCE"))
-    bar_type = BarType(
-        instrument_id=inst_id,
-        bar_spec=BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
-        aggregation_source=AggregationSource.EXTERNAL,
-    )
-    bars = []
-    for ts_ns, close in zip(timestamps_ns, closes):
-        bars.append(Bar(
-            bar_type=bar_type,
-            open=Price.from_str(f"{close - 10:.1f}"),
-            high=Price.from_str(f"{close + 20:.1f}"),
-            low=Price.from_str(f"{close - 20:.1f}"),
-            close=Price.from_str(f"{close:.1f}"),
-            volume=Quantity.from_str("5.0"),
-            ts_event=ts_ns,
-            ts_init=ts_ns,
-        ))
-    return bars, bar_type
-
-
 def _write_catalog_bars(catalog_path: Path, symbol_str: str, timestamps_ns: list[int], closes: list[float]):
-    """Write NT Bar objects to a ParquetDataCatalog."""
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
-    bars, _ = _make_bar_objects(symbol_str, timestamps_ns, closes)
-    cat = ParquetDataCatalog(str(catalog_path))
-    cat.write_data(bars)
+    """Write a minimal bar Parquet fixture matching DataLayer's direct reader."""
+    bar_dir = catalog_path / "data" / "bar" / make_bar_type_str(symbol_str, "1m")
+    bar_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "ts_event": timestamps_ns,
+        "open": [close - 10.0 for close in closes],
+        "high": [close + 20.0 for close in closes],
+        "low": [close - 20.0 for close in closes],
+        "close": [float(close) for close in closes],
+        "volume": [5.0 for _ in closes],
+    }).write_parquet(bar_dir / "bars.parquet")
 
 
 def _make_universe_csv(tmp_path: Path, rows: list[dict]) -> Path:
@@ -109,12 +81,17 @@ def _make_funding_json(funding_dir: Path, symbol: str, records: list[dict]) -> P
 
 
 def _stub_make_instrument(monkeypatch):
-    """Monkeypatch tinohelm.data.catalog._make_instrument to avoid Binance API calls."""
-    from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
+    """Legacy no-network stub kept for tests that still call it."""
+    try:
+        from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
 
-    class _FakeInstrument:
-        def __init__(self, symbol_str: str):
-            self.id = InstrumentId(Symbol(symbol_str), Venue("BINANCE"))
+        class _FakeInstrument:
+            def __init__(self, symbol_str: str):
+                self.id = InstrumentId(Symbol(symbol_str), Venue("BINANCE"))
+    except ModuleNotFoundError:
+        class _FakeInstrument:
+            def __init__(self, symbol_str: str):
+                self.id = f"{symbol_str}.BINANCE"
 
     monkeypatch.setattr(
         "tinohelm.data.catalog._make_instrument",
@@ -130,6 +107,12 @@ def _ts_list(panel: pl.DataFrame) -> list[datetime]:
 def _sym_values(panel: pl.DataFrame, symbol: str) -> list[float | None]:
     """Return panel[symbol] as a Python list (None for nulls)."""
     return panel[symbol].to_list()
+
+
+def _fixed_precision_bytes(value: float) -> bytes:
+    """Encode a test value like Nautilus fixed-precision Int128 binary."""
+    scaled = int(round(value * 10_000_000_000_000_000))
+    return scaled.to_bytes(16, byteorder="little", signed=True)
 
 
 # ---------------------------------------------------------------------------
@@ -517,20 +500,47 @@ class TestParallelLoad:
 class TestLoadGrouping:
     """Multiple fields return separate Panel entries in the result dict."""
 
-    def test_close_and_volume_separate_panels(self, tmp_path: Path, monkeypatch):
-        _stub_make_instrument(monkeypatch)
-
+    def test_duplicate_field_across_frequencies_is_rejected(self, tmp_path: Path):
         catalog_path = tmp_path / "catalog"
         catalog_path.mkdir()
 
-        ts_ns = [_T0_NS + i * _1MIN_NS for i in range(4)]
-        _write_catalog_bars(catalog_path, "BTCUSDT-PERP", ts_ns, [100.0, 101.0, 102.0, 103.0])
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        with pytest.raises(ValueError, match="output key collision"):
+            dl.load([
+                DataRequest("BTCUSDT-PERP", "close", "1m", 0, "bar"),
+                DataRequest("BTCUSDT-PERP", "close", "5m", 0, "bar"),
+            ])
+
+    def test_close_and_volume_separate_panels(self, tmp_path: Path, monkeypatch):
+        catalog_path = tmp_path / "catalog"
+        catalog_path.mkdir()
 
         uni_path = _make_universe_csv(tmp_path, [
             {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
         ])
         uni = Universe.load_csv(uni_path)
-        dl = DataLayer(uni, catalog_root=catalog_path)
+        dl = DataLayer(uni, catalog_root=catalog_path, max_workers=1)
+
+        ts_values = [datetime(2021, 5, 3, 0, i) for i in range(4)]
+
+        def fake_load_bar_fields(symbol, field_names, frequency, start, end):
+            values_by_field = {
+                "close": [100.0, 101.0, 102.0, 103.0],
+                "volume": [5.0, 5.0, 5.0, 5.0],
+            }
+            return {
+                field: pl.DataFrame(
+                    {"ts": ts_values, "value": values_by_field[field]},
+                    schema={"ts": pl.Datetime("ns"), "value": pl.Float64},
+                )
+                for field in field_names
+            }
+
+        monkeypatch.setattr(dl, "_load_bar_fields", fake_load_bar_fields)
 
         reqs = [
             DataRequest("BTCUSDT-PERP", "close", "1m", 0, "bar"),
@@ -541,6 +551,202 @@ class TestLoadGrouping:
         assert "close" in panels
         assert "volume" in panels
         assert panels["close"].shape == panels["volume"].shape
+
+    def test_multi_field_same_symbol_reads_once_without_nt(self, tmp_path: Path, monkeypatch):
+        catalog_path = tmp_path / "catalog"
+        catalog_path.mkdir()
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        uni = Universe.load_csv(uni_path)
+        dl = DataLayer(uni, catalog_root=catalog_path, max_workers=1)
+
+        ts_values = [
+            datetime(2021, 5, 3, 0, 0),
+            datetime(2021, 5, 3, 0, 1),
+            datetime(2021, 5, 3, 0, 2),
+        ]
+        field_values = {
+            "close": [100.0, 101.0, 102.0],
+            "high": [110.0, 111.0, 112.0],
+            "low": [90.0, 91.0, 92.0],
+            "volume": [5.0, 6.0, 7.0],
+        }
+        calls: list[tuple[str, tuple[str, ...]]] = []
+
+        def fake_load_bar_fields(symbol, field_names, frequency, start, end):
+            calls.append((symbol, tuple(field_names)))
+            assert frequency == "1m"
+            return {
+                field: pl.DataFrame(
+                    {"ts": ts_values, "value": values},
+                    schema={"ts": pl.Datetime("ns"), "value": pl.Float64},
+                )
+                for field, values in field_values.items()
+                if field in field_names
+            }
+
+        monkeypatch.setattr(dl, "_load_bar_fields", fake_load_bar_fields)
+
+        reqs = [
+            DataRequest("BTCUSDT-PERP", "close", "1m", 0, "bar"),
+            DataRequest("BTCUSDT-PERP", "high", "1m", 0, "bar"),
+            DataRequest("BTCUSDT-PERP", "low", "1m", 0, "bar"),
+            DataRequest("BTCUSDT-PERP", "volume", "1m", 0, "bar"),
+        ]
+        panels = dl.load(reqs)
+
+        assert calls == [("BTCUSDT-PERP", ("close", "high", "low", "volume"))]
+        assert set(panels) == {"close", "high", "low", "volume"}
+        for field, values in field_values.items():
+            assert panels[field].columns == ["ts", "BTCUSDT-PERP"]
+            assert _sym_values(panels[field], "BTCUSDT-PERP") == values
+
+    def test_grouped_bar_lookbacks_remain_per_field_without_nt(self, tmp_path: Path, monkeypatch):
+        catalog_path = tmp_path / "catalog"
+        catalog_path.mkdir()
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        uni = Universe.load_csv(uni_path)
+        dl = DataLayer(uni, catalog_root=catalog_path, max_workers=1)
+
+        ts_values = [datetime(2021, 5, 3, 0, i) for i in range(6)]
+
+        def fake_load_bar_fields(symbol, field_names, frequency, start, end):
+            return {
+                field: pl.DataFrame(
+                    {"ts": ts_values, "value": [float(i) for i in range(6)]},
+                    schema={"ts": pl.Datetime("ns"), "value": pl.Float64},
+                )
+                for field in field_names
+            }
+
+        monkeypatch.setattr(dl, "_load_bar_fields", fake_load_bar_fields)
+
+        user_start = datetime(2021, 5, 3, 0, 3)
+        panels = dl.load([
+            DataRequest("BTCUSDT-PERP", "close", "1m", 2, "bar"),
+            DataRequest("BTCUSDT-PERP", "high", "1m", 0, "bar"),
+        ], start=user_start)
+
+        assert _ts_list(panels["close"])[0] == datetime(2021, 5, 3, 0, 1)
+        assert _ts_list(panels["high"])[0] == user_start
+
+    def test_direct_bar_reader_uses_pure_bar_type_without_make_instrument(self, tmp_path: Path, monkeypatch):
+        catalog_path = tmp_path / "catalog"
+        catalog_path.mkdir()
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        uni = Universe.load_csv(uni_path)
+        dl = DataLayer(uni, catalog_root=catalog_path)
+
+        def fail_make_instrument(symbol):
+            raise AssertionError("_make_instrument must not be called")
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", fail_make_instrument)
+
+        series = dl._load_bar_field("BTCUSDT-PERP", "close", "1m", None, None)
+        assert series.is_empty()
+
+    def test_direct_bar_reader_projects_numeric_columns_without_nt(self, tmp_path: Path):
+        catalog_path = tmp_path / "catalog"
+        bar_dir = catalog_path / "data" / "bar" / make_bar_type_str("BTCUSDT-PERP", "1m")
+        bar_dir.mkdir(parents=True)
+        pl.DataFrame({
+            "ts_event": [_T0_NS, _T0_NS + _1MIN_NS],
+            "close": [100.0, 101.0],
+            "high": [110.0, 111.0],
+            "unused": [1.0, 2.0],
+        }).write_parquet(bar_dir / "bars.parquet")
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        fields = dl._load_bar_fields("BTCUSDT-PERP", ["close", "high"], "1m", None, None)
+        assert fields["close"]["value"].to_list() == [100.0, 101.0]
+        assert fields["high"]["value"].to_list() == [110.0, 111.0]
+
+    def test_direct_bar_reader_decodes_binary_columns_without_nt(self, tmp_path: Path):
+        catalog_path = tmp_path / "catalog"
+        bar_dir = catalog_path / "data" / "bar" / make_bar_type_str("BTCUSDT-PERP", "1m")
+        bar_dir.mkdir(parents=True)
+        pl.DataFrame({
+            "ts_event": [_T0_NS, _T0_NS + _1MIN_NS],
+            "close": [_fixed_precision_bytes(100.25), _fixed_precision_bytes(101.5)],
+        }).write_parquet(bar_dir / "bars.parquet")
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        series = dl._load_bar_field("BTCUSDT-PERP", "close", "1m", None, None)
+        assert series["value"].to_list() == [100.25, 101.5]
+
+    def test_direct_bar_reader_decodes_nautilus_written_bars(self, tmp_path: Path):
+        pytest.importorskip("nautilus_trader")
+
+        from nautilus_trader.model.data import Bar, BarSpecification, BarType
+        from nautilus_trader.model.enums import AggregationSource, BarAggregation, PriceType
+        from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
+        from nautilus_trader.model.objects import Price, Quantity
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        catalog_path = tmp_path / "catalog"
+        inst_id = InstrumentId(Symbol("BTCUSDT-PERP"), Venue("BINANCE"))
+        bar_type = BarType(
+            instrument_id=inst_id,
+            bar_spec=BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
+            aggregation_source=AggregationSource.EXTERNAL,
+        )
+        bars = [
+            Bar(
+                bar_type=bar_type,
+                open=Price.from_str("100.1"),
+                high=Price.from_str("110.2"),
+                low=Price.from_str("90.3"),
+                close=Price.from_str("101.4"),
+                volume=Quantity.from_str("5.5"),
+                ts_event=_T0_NS,
+                ts_init=_T0_NS,
+            ),
+            Bar(
+                bar_type=bar_type,
+                open=Price.from_str("101.1"),
+                high=Price.from_str("111.2"),
+                low=Price.from_str("91.3"),
+                close=Price.from_str("102.4"),
+                volume=Quantity.from_str("6.5"),
+                ts_event=_T0_NS + _1MIN_NS,
+                ts_init=_T0_NS + _1MIN_NS,
+            ),
+        ]
+        ParquetDataCatalog(str(catalog_path)).write_data(bars)
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        fields = dl._load_bar_fields(
+            "BTCUSDT-PERP",
+            ["open", "high", "low", "close", "volume"],
+            "1m",
+            None,
+            None,
+        )
+        assert fields["open"]["value"].to_list() == pytest.approx([100.1, 101.1])
+        assert fields["high"]["value"].to_list() == pytest.approx([110.2, 111.2])
+        assert fields["low"]["value"].to_list() == pytest.approx([90.3, 91.3])
+        assert fields["close"]["value"].to_list() == pytest.approx([101.4, 102.4])
+        assert fields["volume"]["value"].to_list() == pytest.approx([5.5, 6.5])
 
 
 # ---------------------------------------------------------------------------
