@@ -129,6 +129,46 @@ def test_align_rejects_empty_common_symbol_intersection(zero_cost: CostModel) ->
         )
 
 
+def test_align_rejects_weight_symbols_missing_from_returns(zero_cost: CostModel) -> None:
+    """A partially missing return panel must not drop live exposure columns."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match="future_returns missing symbols required"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5], "ETH": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.01, 0.02]}),
+            zero_cost,
+        )
+
+
+@pytest.mark.parametrize(
+    ("weight_panel", "future_returns", "message"),
+    [
+        (
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [0, 1]}),
+            "future_returns has no symbol columns",
+        ),
+        (
+            pl.DataFrame({"ts": [0, 1]}),
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.01, 0.02]}),
+            "weight_panel has no symbol columns",
+        ),
+    ],
+)
+def test_align_rejects_one_sided_symbol_schema(
+    weight_panel: pl.DataFrame,
+    future_returns: pl.DataFrame,
+    message: str,
+    zero_cost: CostModel,
+) -> None:
+    """Exactly one side having symbol columns is invalid schema, not zero periods."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match=message):
+        evaluator.evaluate(weight_panel, future_returns, zero_cost)
+
+
 @pytest.mark.parametrize("side", ["weight_panel", "future_returns"])
 def test_align_rejects_duplicate_ts_before_join(side: str, zero_cost: CostModel) -> None:
     """Duplicate timestamps would Cartesian-expand the inner join."""
@@ -152,6 +192,18 @@ def test_evaluate_rejects_infinite_future_returns(zero_cost: CostModel) -> None:
         evaluator.evaluate(
             pl.DataFrame({"ts": [0, 1], "BTC": [1.0, 1.0]}),
             pl.DataFrame({"ts": [0, 1], "BTC": [0.01, float("inf")]}),
+            zero_cost,
+        )
+
+
+def test_evaluate_rejects_missing_return_for_active_weight(zero_cost: CostModel) -> None:
+    """A held asset with a missing return must not contribute implicit zero PnL."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match="non-finite cells for active weights"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5], "ETH": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [0, 1], "BTC": [None, 0.02], "ETH": [0.01, 0.01]}),
             zero_cost,
         )
 

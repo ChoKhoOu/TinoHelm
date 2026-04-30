@@ -120,6 +120,55 @@ class TestAsyncioRunFromFreshLoop:
         assert "trade_log" in result, "result must contain 'trade_log' key"
 
 
+class TestTerminalizationCallbackBeforeArtifactExport:
+    def test_callback_runs_before_artifact_writes(self, monkeypatch, tmp_path):
+        """Queue-mode terminalization marker must start before runner artifact I/O."""
+        runner = _mk_minimal_runner()
+        runner.artifacts_dir = tmp_path
+        events: list[str] = []
+
+        mock_engine = MagicMock()
+        mock_bundle = MagicMock()
+        mock_bundle.actors = []
+
+        async def _fake_setup_engine():
+            runner._nt_symbols = ["BTCUSDT-PERP.BINANCE"]
+            runner._total_bar_count = 0
+            runner._loaded_bar_type_strs = []
+            runner._all_bar_type_strs = []
+            runner._benchmark_daily_closes = {}
+            return mock_engine, mock_bundle, 10_000.0
+
+        def _before_artifact_export() -> None:
+            events.append("terminalizing")
+
+        runner._before_artifact_export = _before_artifact_export
+        monkeypatch.setattr(runner, "_setup_engine", _fake_setup_engine)
+        monkeypatch.setattr(runner, "_load_funding_rates", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner, "_load_auxiliary_price_data", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner, "_extract_results", MagicMock(return_value={"statistics": {}}))
+        monkeypatch.setattr(runner, "_export_reports", MagicMock(side_effect=lambda _engine: events.append("reports")))
+        monkeypatch.setattr(
+            runner,
+            "_generate_tearsheet",
+            MagicMock(side_effect=lambda _engine, _bars: events.append("tearsheet")),
+        )
+
+        import tinohelm.backtest.runner as runner_module
+        monkeypatch.setattr(runner_module, "create_strategies", MagicMock(return_value=[]))
+        monkeypatch.setattr(runner_module, "create_actors", MagicMock(return_value=[]))
+        monkeypatch.setattr(
+            "tinohelm.backtest.tearsheet.enhance_tearsheet",
+            lambda _artifact_dir, _results: events.append("enhance"),
+        )
+
+        result = asyncio.run(runner.run())
+
+        assert result == {"statistics": {}}
+        assert events == ["terminalizing", "reports", "tearsheet", "enhance"]
+        mock_engine.dispose.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # T3: static source-code guard
 # ---------------------------------------------------------------------------

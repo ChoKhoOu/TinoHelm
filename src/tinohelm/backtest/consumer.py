@@ -207,30 +207,59 @@ async def _cancel_watcher(
     *,
     poll_interval: float = 2.0,
     sigterm_grace: float = 5.0,
+    terminalizing_grace: float = 30.0,
 ) -> None:
     cancel_key = f"tino:backtest:cancel:{run_id}"
+    terminalizing_key = _terminalizing_key(run_id)
     while proc.returncode is None:
         try:
             flag = await rds.get(cancel_key)
             if flag:
                 logger.info("Cancel flag set for %s — SIGTERM", run_id)
-                await rds.delete(cancel_key)
                 proc.send_signal(signal.SIGTERM)
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=sigterm_grace)
                 except asyncio.TimeoutError:
-                    if await rds.get(_terminalizing_key(run_id)):
-                        logger.warning(
-                            "Subprocess %s is terminalizing after SIGTERM grace; "
-                            "waiting without SIGKILL escalation",
+                    terminalizing = False
+                    try:
+                        terminalizing = bool(await rds.get(terminalizing_key))
+                    except Exception:
+                        logger.exception(
+                            "Failed to read terminalizing marker for %s; escalating as unsafe",
                             run_id,
                         )
+                    if terminalizing:
+                        logger.warning(
+                            "Subprocess %s is terminalizing after SIGTERM grace; "
+                            "waiting up to %.1fs before SIGKILL escalation",
+                            run_id,
+                            terminalizing_grace,
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                proc.wait(), timeout=terminalizing_grace,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                "Terminalizing subprocess %s stuck after %.1fs — SIGKILL",
+                                run_id,
+                                terminalizing_grace,
+                            )
+                            proc.kill()
+                            await proc.wait()
+                    else:
+                        logger.warning(
+                            "Subprocess %s did not exit in %.1fs — SIGKILL",
+                            run_id,
+                            sigterm_grace,
+                        )
+                        proc.kill()
                         await proc.wait()
-                        return
-                    logger.warning("Subprocess %s did not exit in %.1fs — SIGKILL",
-                                   run_id, sigterm_grace)
-                    proc.kill()
-                    await proc.wait()
+                finally:
+                    try:
+                        await rds.delete(cancel_key)
+                    except Exception:
+                        logger.exception("Failed to delete cancel key %s", cancel_key)
                 return
         except asyncio.CancelledError:
             raise

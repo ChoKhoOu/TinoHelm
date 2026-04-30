@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.backtest.models import FillModel, LatencyModel
@@ -170,6 +170,7 @@ class BacktestRunner:
         self.tags = tags
         self.data_type = data_type
         self.artifacts_dir: Path | None = None
+        self._before_artifact_export: Callable[[], None] | None = None
         self._engine: BacktestEngine | None = None
         self._redis_client = None  # sync Redis for progress reporting
         self._run_id: str = ""
@@ -1091,15 +1092,20 @@ class BacktestRunner:
                 (stats.get("total_pnl", 0.0) or 0.0) - funding_cost, 4
             )
 
-        # Export raw reports before dispose (if artifacts_dir is set)
-        if self.artifacts_dir is not None:
-            self._export_reports(engine)
-            self._generate_tearsheet(engine, self._loaded_bar_type_strs)
-            from tinohelm.backtest.tearsheet import enhance_tearsheet
-            enhance_tearsheet(self.artifacts_dir, results)
-
-        # Cleanup
-        engine.dispose()
+        # Export raw reports before dispose (if artifacts_dir is set).  Queue
+        # mode uses _before_artifact_export to publish a terminalization marker
+        # before any CSV/HTML artifact writes can be interrupted by late cancel.
+        try:
+            if self._before_artifact_export is not None:
+                self._before_artifact_export()
+            if self.artifacts_dir is not None:
+                self._export_reports(engine)
+                self._generate_tearsheet(engine, self._loaded_bar_type_strs)
+                from tinohelm.backtest.tearsheet import enhance_tearsheet
+                enhance_tearsheet(self.artifacts_dir, results)
+        finally:
+            # Cleanup
+            engine.dispose()
 
         logger.info("Backtest complete: %s", self.strategy_path)
         return results

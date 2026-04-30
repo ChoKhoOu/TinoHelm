@@ -66,6 +66,18 @@ _terminalizing: bool = False
 _TERMINALIZING_TTL_SECONDS = 60
 
 
+class _BacktestCancelledAfterEngine(Exception):
+    """Internal control-flow signal for post-engine, pre-terminal cancel."""
+
+
+def _best_effort(label: str, func, *args, **kwargs) -> None:
+    """Run a post-terminal side effect without changing the terminal outcome."""
+    try:
+        func(*args, **kwargs)
+    except Exception:
+        logger.exception("Best-effort %s failed", label)
+
+
 def _terminalizing_key(run_id: str) -> str:
     """Redis marker consumed by the parent cancel watcher."""
     return f"tino:backtest:terminalizing:{run_id}"
@@ -123,7 +135,7 @@ def _run_queue_mode(run_id: str) -> int:
         logger.info("Run %s was cancelled before execution", run_id)
         r.delete(cancel_key)
         update_db_status(cfg.database.url, run_id, "cancelled")
-        publish_completed(r, run_id, "cancelled")
+        _best_effort("publish pre-run cancellation", publish_completed, r, run_id, "cancelled")
         _current_run_id = None
         _current_r = None
         _current_db_url = None
@@ -175,6 +187,28 @@ def _run_queue_mode(run_id: str) -> int:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         runner.artifacts_dir = artifact_dir
 
+        def _begin_terminalization() -> None:
+            """Own terminal state before any post-engine artifact/DB/Redis writes."""
+            global _terminalizing
+            if _terminalizing:
+                return
+            if r.get(cancel_key):
+                r.delete(cancel_key)
+                update_db_status(cfg.database.url, run_id, "cancelled")
+                _best_effort(
+                    "publish post-engine cancellation",
+                    publish_completed,
+                    r,
+                    run_id,
+                    "cancelled",
+                )
+                logger.info("Backtest %s cancelled after engine execution", run_id)
+                raise _BacktestCancelledAfterEngine()
+            r.setex(terminalizing_key, _TERMINALIZING_TTL_SECONDS, "1")
+            _terminalizing = True
+
+        runner._before_artifact_export = _begin_terminalization
+
         # Publish progress: runner constructed, data loading next
         publish_progress(
             r, run_id, 2,
@@ -195,21 +229,11 @@ def _run_queue_mode(run_id: str) -> int:
         # Sanitize NaN/Infinity before any serialization
         results = sanitize_for_json(results)
 
-        # A cancel observed after the engine returns but before terminal writes
-        # must not create contradictory completed+cancelled state.
-        if r.get(cancel_key):
-            r.delete(cancel_key)
-            update_db_status(cfg.database.url, run_id, "cancelled")
-            publish_completed(r, run_id, "cancelled")
-            logger.info("Backtest %s cancelled after engine execution", run_id)
-            return 2
-
-        # From here on completion owns the terminal state. A SIGTERM from a
-        # late cancel watcher must not publish a contradictory cancelled event.
-        # The Redis marker lets the parent watcher avoid SIGKILL escalation while
-        # this child is writing artifact/Redis/DB completion state.
-        _terminalizing = True
-        r.setex(terminalizing_key, _TERMINALIZING_TTL_SECONDS, "1")
+        # BacktestRunner normally calls this before internal CSV/HTML export.
+        # Unit tests or alternate runner implementations may not, so keep a
+        # fallback before the queue-mode results.json / DB / Redis writes.
+        if not _terminalizing:
+            _begin_terminalization()
 
         # Save artifact JSON atomically.  Readers should never observe a
         # partially-written results.json while status polling races completion.
@@ -254,17 +278,28 @@ def _run_queue_mode(run_id: str) -> int:
             "completed",
             result_summary=results.get("statistics", {}),
         )
-        publish_completed(r, run_id, "completed", summary=stats)
-        r.delete(cancel_key)
+        _best_effort("publish completion", publish_completed, r, run_id, "completed", summary=stats)
+        _best_effort("delete cancel key", r.delete, cancel_key)
 
         logger.info("Backtest %s completed successfully", run_id)
         return 0
 
+    except _BacktestCancelledAfterEngine:
+        return 2
     except Exception as e:
         logger.exception("Backtest %s failed: %s", run_id, e)
         safe_error = "Internal backtest error. Check subprocess logs for details."
-        publish_completed(r, run_id, "failed", error=safe_error)
-        update_db_status(cfg.database.url, run_id, "failed", error_msg=safe_error)
+        _best_effort("publish failure", publish_completed, r, run_id, "failed", error=safe_error)
+        try:
+            update_db_status(
+                cfg.database.url,
+                run_id,
+                "failed",
+                error_msg=safe_error,
+                only_if_not_terminal=True,
+            )
+        except Exception:
+            logger.exception("Failed to write failed status for %s", run_id)
         return 1
     finally:
         if _terminalizing:

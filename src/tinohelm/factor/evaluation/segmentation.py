@@ -32,8 +32,6 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from typing import Any
-
 import numpy as np
 import polars as pl
 
@@ -87,6 +85,8 @@ def _evaluate_slice(
         evaluator = Evaluator()
         result, _, _, _ = evaluator._evaluate_core(panel, fwd_df, eval_config)
         return result
+    except ValueError:
+        raise
     except Exception:
         return _empty_eval_result()
 

@@ -146,7 +146,7 @@ async def test_cancel_watcher_sigkill_on_timeout():
 
 
 async def test_cancel_watcher_does_not_sigkill_terminalizing_subprocess():
-    """Late cancel must not SIGKILL a child already writing terminal success state."""
+    """Late cancel must not SIGKILL a child that finishes inside terminalization grace."""
     from tinohelm.backtest.consumer import _cancel_watcher
 
     proc = _make_proc(returncode=None)
@@ -177,9 +177,48 @@ async def test_cancel_watcher_does_not_sigkill_terminalizing_subprocess():
         rds,
         poll_interval=0.01,
         sigterm_grace=0.01,
+        terminalizing_grace=0.1,
     )
 
     proc.kill.assert_not_called()
+
+
+async def test_cancel_watcher_sigkills_stuck_terminalizing_subprocess():
+    """Terminalizing marker is a bounded grace, not an infinite worker-slot leak."""
+    from tinohelm.backtest.consumer import _cancel_watcher
+
+    proc = _make_proc(returncode=None)
+    wait_calls = 0
+
+    async def _wait_side_effect():
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls <= 2:
+            await asyncio.sleep(9999)
+        return -9
+
+    proc.wait = _wait_side_effect
+    rds = _make_rds()
+
+    async def _get(key: str):
+        if key == "tino:backtest:cancel:r-stuck-terminalizing":
+            return b"1"
+        if key == "tino:backtest:terminalizing:r-stuck-terminalizing":
+            return b"1"
+        return None
+
+    rds.get.side_effect = _get
+
+    await _cancel_watcher(
+        "r-stuck-terminalizing",
+        proc,
+        rds,
+        poll_interval=0.01,
+        sigterm_grace=0.01,
+        terminalizing_grace=0.01,
+    )
+
+    proc.kill.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -127,9 +127,9 @@ class SignalEvaluator:
         future_returns:
             Shape ``(T, N+1)``.  Same layout as ``weight_panel``.  Column
             values are the *forward* returns for the corresponding
-            ``ts`` row.  Symbol columns must match ``weight_panel`` (they
-            can be a superset; an inner join on ``"ts"`` is performed and
-            only common symbol columns are used).
+            ``ts`` row.  It must contain every symbol column present in
+            ``weight_panel``; extra return columns are ignored.  Alignment
+            uses an inner join on ``"ts"``.
         cost_model:
             :class:`~tinohelm.signal.types.CostModel` declaring per-side
             costs (fee + slippage - rebate).
@@ -184,6 +184,17 @@ class SignalEvaluator:
                 total_return=0.0,
                 n_periods=0,
                 cost_drag=0.0,
+            )
+
+        # Missing returns for active exposure are data-quality errors.  A NaN
+        # weight means "not in universe" and is treated as zero exposure; a
+        # non-zero finite weight with NaN return must not become implicit 0 PnL.
+        active_weights = np.nan_to_num(weights, nan=0.0) != 0.0
+        missing_active_returns = active_weights & ~np.isfinite(returns)
+        if np.any(missing_active_returns):
+            raise ValueError(
+                "future_returns contains non-finite cells for active weights; "
+                "fix market data or zero the corresponding exposure explicitly"
             )
 
         # -- Gross period returns ------------------------------------------
@@ -305,20 +316,33 @@ class SignalEvaluator:
                 "future_returns missing required 'ts' column; "
                 f"got {future_returns.columns!r}"
             )
-        # Determine common symbol columns (preserve weight_panel order).
+        # Determine symbol columns.  Every weight symbol must have a return;
+        # extra return symbols are ignored to preserve the existing superset
+        # contract for future_returns.
         weight_sym_cols = [c for c in weight_panel.columns if c != "ts"]
-        ret_sym_cols = {c for c in future_returns.columns if c != "ts"}
-        sym_cols = [c for c in weight_sym_cols if c in ret_sym_cols]
+        ret_sym_cols = [c for c in future_returns.columns if c != "ts"]
+        ret_sym_set = set(ret_sym_cols)
 
-        if not sym_cols:
-            if weight_sym_cols and ret_sym_cols:
+        if weight_sym_cols and not ret_sym_cols:
+            raise ValueError("future_returns has no symbol columns")
+        if ret_sym_cols and not weight_sym_cols:
+            raise ValueError("weight_panel has no symbol columns")
+        if not weight_sym_cols and not ret_sym_cols:
+            return np.empty((0, 0)), np.empty((0, 0)), 0
+
+        missing = [c for c in weight_sym_cols if c not in ret_sym_set]
+        if missing:
+            if len(missing) == len(weight_sym_cols):
                 raise ValueError(
                     "no common symbol columns between weight_panel and future_returns; "
-                    f"weight_panel={weight_sym_cols!r}, "
-                    f"future_returns={sorted(ret_sym_cols)!r}"
+                    "future_returns missing symbols required by weight_panel: "
+                    f"{missing!r}"
                 )
-            # One or both panels contain no symbols — return 0 periods.
-            return np.empty((0, 0)), np.empty((0, 0)), 0
+            raise ValueError(
+                "future_returns missing symbols required by weight_panel: "
+                f"{missing!r}"
+            )
+        sym_cols = weight_sym_cols
 
         SignalEvaluator._ensure_unique_ts(weight_panel, "weight_panel")
         SignalEvaluator._ensure_unique_ts(future_returns, "future_returns")

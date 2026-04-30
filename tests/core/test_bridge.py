@@ -255,9 +255,9 @@ class TestUnsubscribe:
 # ---------------------------------------------------------------------------
 
 def _fake_ws(*, dead: bool = False) -> AsyncMock:
-    """A WebSocket stand-in with an async ``send_text``.  Set ``dead=True`` to
-    simulate a disconnected client that raises on every send."""
+    """A WebSocket stand-in with async ``send_text`` and ``close`` methods."""
     ws = AsyncMock()
+    ws.close = AsyncMock()
     if dead:
         ws.send_text.side_effect = RuntimeError("socket closed")
     return ws
@@ -279,6 +279,8 @@ class TestRelay:
         await bridge._relay("payload", clients)
         assert dead not in clients
         assert alive in clients
+        dead.close.assert_awaited_once_with(code=1011, reason="send timeout")
+        alive.close.assert_not_awaited()
 
     async def test_delivers_to_alive_even_when_first_is_dead(self, bridge):
         """A failing client must not prevent delivery to siblings."""
@@ -316,6 +318,8 @@ class TestRelay:
         fast.send_text.assert_awaited_once_with("payload")
         assert slow not in clients
         assert fast in clients
+        slow.close.assert_awaited_once_with(code=1011, reason="send timeout")
+        fast.close.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

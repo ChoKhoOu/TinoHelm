@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
+from contextlib import suppress
 
 import redis.asyncio as aioredis
 from fastapi import WebSocket
@@ -243,3 +244,7 @@ class EventBridge:
         for ws in dead:
             clients.discard(ws)
             await self.unsubscribe(ws)
+            with suppress(Exception):
+                await asyncio.wait_for(
+                    ws.close(code=1011, reason="send timeout"), timeout=1.0,
+                )
