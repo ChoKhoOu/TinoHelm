@@ -31,8 +31,9 @@ pip install -e ".[optimize]"      # With Optuna support
 alembic upgrade head
 
 # Rust CLI (LLM-first, no TUI)
-make                         # Build release binary and install tino into /usr/local/bin if writable, else ~/.local/bin
-make BINDIR=~/.local/bin      # Optional alternate install dir
+make                         # Build release binary, install tino, and fail if PATH cannot resolve the new binary
+make verify-install          # Verify /usr/local/bin or fallback BINDIR is the tino resolved by a fresh shell
+make BINDIR=/path/on/PATH    # Optional alternate install dir
 make build                   # Build only: cli/target/release/tino
 make package                 # Package dist/tino-<target>.tar.gz
 tino --help

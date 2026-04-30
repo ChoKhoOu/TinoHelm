@@ -28,15 +28,15 @@ The Rust CLI is the primary interface: one-shot commands, raw JSON, and stable `
 make
 ```
 
-This builds the release binary and installs `tino` to `/usr/local/bin/tino` when that directory is writable, otherwise to `~/.local/bin/tino`. The installed binary can then be called from any directory as long as the install directory is on `PATH`.
+Plain `make` builds the release binary, installs `tino` to `/usr/local/bin/tino` when that directory is writable, otherwise to `~/.local/bin/tino`, and verifies that a fresh shell can resolve the newly installed binary from `PATH`. If `PATH` would still find an older `tino` or no `tino` at all, the default install fails instead of silently producing a non-global command. Explicit `BINDIR=...` overrides are treated as packaging/test installs when that directory is not already first on `PATH`; use `make verify-install` with the same `BINDIR` after adjusting `PATH` to enforce global resolution.
 
 Useful variants:
 
 ```bash
 make build                       # build only: cli/target/release/tino
 make package                     # package dist/tino-<target>.tar.gz
-make BINDIR=~/.local/bin         # install somewhere else
-make BINDIR=/usr/local/bin       # system-wide install if writable
+make verify-install              # verify installed binary and PATH resolution
+make BINDIR=/path/on/PATH        # explicit alternate install directory
 make uninstall                   # remove the installed binary
 ```
 
