@@ -45,16 +45,35 @@ struct ApiConfig {
 }
 
 impl Config {
-    /// Load config with priority: flags > env > credentials file > user.yaml > default.
+    /// Load URL and API key config with priority: flags > env > credentials file > user.yaml > default.
     pub fn load(flag_url: Option<&str>, flag_api_key: Option<&str>) -> Result<Self> {
         let yaml = Self::read_yaml_config();
+        let api_url = Self::resolve_api_url(flag_url, yaml.as_ref());
+        let (api_key, api_key_source) = Self::resolve_api_key(flag_api_key, yaml.as_ref())?;
 
-        let api_url = if let Some(url) = flag_url {
+        Ok(Self {
+            api_url,
+            api_key,
+            api_key_source,
+        })
+    }
+
+    /// Load only non-secret URL config. This intentionally does not touch API key files.
+    pub fn load_url_only(flag_url: Option<&str>) -> Self {
+        let yaml = Self::read_yaml_config();
+        Self {
+            api_url: Self::resolve_api_url(flag_url, yaml.as_ref()),
+            api_key: None,
+            api_key_source: ApiKeySource::None,
+        }
+    }
+
+    fn resolve_api_url(flag_url: Option<&str>, yaml: Option<&YamlConfig>) -> String {
+        if let Some(url) = flag_url {
             url.to_string()
         } else if let Ok(url) = std::env::var("TINO_API_URL") {
             url
         } else if let Some(url) = yaml
-            .as_ref()
             .and_then(|cfg| cfg.api.as_ref())
             .and_then(|api| api.url.clone())
         {
@@ -63,33 +82,31 @@ impl Config {
             DEFAULT_API_URL.to_string()
         }
         .trim_end_matches('/')
-        .to_string();
+        .to_string()
+    }
 
-        let (api_key, api_key_source) = if let Some(key) = flag_api_key.and_then(Self::clean_key) {
-            (Some(key), ApiKeySource::Flag)
+    fn resolve_api_key(
+        flag_api_key: Option<&str>,
+        yaml: Option<&YamlConfig>,
+    ) -> Result<(Option<String>, ApiKeySource)> {
+        if let Some(key) = flag_api_key.and_then(Self::clean_key) {
+            Ok((Some(key), ApiKeySource::Flag))
         } else if let Ok(key) = std::env::var("TINO_API_KEY") {
             match Self::clean_key(&key) {
-                Some(key) => (Some(key), ApiKeySource::Env),
-                None => (None, ApiKeySource::None),
+                Some(key) => Ok((Some(key), ApiKeySource::Env)),
+                None => Ok((None, ApiKeySource::None)),
             }
-        } else if let Some((path, key)) = Self::read_credentials_file(yaml.as_ref())? {
-            (Some(key), ApiKeySource::CredentialsFile(path))
+        } else if let Some((path, key)) = Self::read_credentials_file(yaml)? {
+            Ok((Some(key), ApiKeySource::CredentialsFile(path)))
         } else if let Some(key) = yaml
-            .as_ref()
             .and_then(|cfg| cfg.api.as_ref())
             .and_then(|api| api.key.as_deref())
             .and_then(Self::clean_key)
         {
-            (Some(key), ApiKeySource::UserYaml)
+            Ok((Some(key), ApiKeySource::UserYaml))
         } else {
-            (None, ApiKeySource::None)
-        };
-
-        Ok(Self {
-            api_url,
-            api_key,
-            api_key_source,
-        })
+            Ok((None, ApiKeySource::None))
+        }
     }
 
     pub fn auth_label(&self) -> &'static str {
@@ -226,6 +243,48 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("tino-config-test-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn url_only_load_does_not_touch_bad_credentials_file() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_api_url = std::env::var_os("TINO_API_URL");
+        let old_api_key = std::env::var_os("TINO_API_KEY");
+        let home = unique_home();
+        let config_dir = home.join(".tino").join("config");
+        let bad_key_path = home.join("bad-key-dir");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&bad_key_path).unwrap();
+        std::fs::write(
+            config_dir.join("user.yaml"),
+            format!(
+                "api:\n  url: http://example.test:9000/\n  key_file: {}\n",
+                bad_key_path.display()
+            ),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("TINO_API_URL");
+        std::env::remove_var("TINO_API_KEY");
+
+        let cfg = Config::load_url_only(None);
+        assert_eq!(cfg.api_url, "http://example.test:9000");
+        assert_eq!(cfg.api_key_source, ApiKeySource::None);
+        assert!(Config::load(None, None).is_err());
+
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(api_url) = old_api_url {
+            std::env::set_var("TINO_API_URL", api_url);
+        }
+        if let Some(api_key) = old_api_key {
+            std::env::set_var("TINO_API_KEY", api_key);
+        }
+        std::fs::remove_dir_all(home).ok();
     }
 
     #[test]

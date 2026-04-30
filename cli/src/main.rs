@@ -86,6 +86,31 @@ fn command_requires_api_client(command: &Commands) -> bool {
     !matches!(command, Commands::Auth { .. } | Commands::Version)
 }
 
+fn command_resolves_api_key(command: &Commands) -> bool {
+    command_requires_api_client(command)
+        || matches!(
+            command,
+            Commands::Auth {
+                command: cli::auth::AuthCmd::Status
+            }
+        )
+}
+
+fn command_label(command: &Commands) -> &'static str {
+    match command {
+        Commands::Auth { .. } => "auth",
+        Commands::Api { .. } => "api",
+        Commands::Version => "version",
+        Commands::Backtest { .. } => "backtest",
+        Commands::Strategy { .. } => "strategy",
+        Commands::Data { .. } => "data",
+        Commands::Node { .. } => "node",
+        Commands::Factor { .. } => "factor",
+        Commands::Signal { .. } => "signal",
+        Commands::Universe { .. } => "universe",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +127,23 @@ mod tests {
     }
 
     #[test]
+    fn only_api_backed_commands_and_auth_status_resolve_api_keys() {
+        assert!(command_resolves_api_key(&Commands::Auth {
+            command: cli::auth::AuthCmd::Status,
+        }));
+        assert!(!command_resolves_api_key(&Commands::Auth {
+            command: cli::auth::AuthCmd::Login {
+                api_key: Some("secret".to_string()),
+                stdin: false,
+            },
+        }));
+        assert!(!command_resolves_api_key(&Commands::Auth {
+            command: cli::auth::AuthCmd::Logout,
+        }));
+        assert!(!command_resolves_api_key(&Commands::Version));
+    }
+
+    #[test]
     fn api_backed_commands_require_api_client() {
         assert!(command_requires_api_client(&Commands::Api {
             command: cli::api::ApiCmd::Routes { filter: None },
@@ -112,14 +154,37 @@ mod tests {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli_args = Cli::parse();
-    let cfg = config::Config::load(cli_args.api_url.as_deref(), cli_args.api_key.as_deref())?;
+    let format = cli_args.format;
+    let command_name = command_label(&cli_args.command);
+    let cfg = if command_resolves_api_key(&cli_args.command) {
+        match config::Config::load(cli_args.api_url.as_deref(), cli_args.api_key.as_deref()) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                if format.is_machine() {
+                    let fallback_cfg = config::Config::load_url_only(cli_args.api_url.as_deref());
+                    print_machine_error(
+                        format,
+                        envelope_error_from_anyhow(&err),
+                        output::EnvelopeMeta::new(
+                            command_name,
+                            &fallback_cfg.api_url,
+                            fallback_cfg.auth_label(),
+                        ),
+                    )?;
+                    std::process::exit(1);
+                }
+                return Err(err);
+            }
+        }
+    } else {
+        config::Config::load_url_only(cli_args.api_url.as_deref())
+    };
     let api_client = if command_requires_api_client(&cli_args.command) {
         Some(api::ApiClient::new(&cfg.api_url, cfg.api_key.clone()))
     } else {
         None
     };
 
-    let format = cli_args.format;
     macro_rules! dispatch_with_client {
         ($client:ident, $body:expr) => {{
             match api_client
@@ -200,28 +265,49 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(err) = result {
         if format.is_machine() {
-            let error = output::EnvelopeError {
-                kind: "command".to_string(),
-                message: err.to_string(),
-                status_code: None,
-                body: None,
-            };
-            if format == OutputFormat::Llm {
-                output::print_llm_error(
-                    error,
-                    output::EnvelopeMeta::new(command_name, &cfg.api_url, cfg.auth_label()),
-                )?;
-            } else {
-                output::print_json(&serde_json::json!({
-                    "ok": false,
-                    "error": error,
-                    "meta": output::EnvelopeMeta::new(command_name, &cfg.api_url, cfg.auth_label()),
-                }))?;
-            }
+            print_machine_error(
+                format,
+                envelope_error_from_anyhow(&err),
+                output::EnvelopeMeta::new(command_name, &cfg.api_url, cfg.auth_label()),
+            )?;
             std::process::exit(1);
         }
         return Err(err);
     }
 
     Ok(())
+}
+
+fn envelope_error_from_anyhow(err: &anyhow::Error) -> output::EnvelopeError {
+    if let Some(http) = err.downcast_ref::<api::ApiHttpError>() {
+        return output::EnvelopeError {
+            kind: "http".to_string(),
+            message: http.body.to_string(),
+            status_code: Some(http.status_code),
+            body: Some(http.body.clone()),
+        };
+    }
+
+    output::EnvelopeError {
+        kind: "command".to_string(),
+        message: err.to_string(),
+        status_code: None,
+        body: None,
+    }
+}
+
+fn print_machine_error(
+    format: OutputFormat,
+    error: output::EnvelopeError,
+    meta: output::EnvelopeMeta<'_>,
+) -> anyhow::Result<()> {
+    if format == OutputFormat::Llm {
+        output::print_llm_error(error, meta)
+    } else {
+        output::print_json(&serde_json::json!({
+            "ok": false,
+            "error": error,
+            "meta": meta,
+        }))
+    }
 }

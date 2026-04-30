@@ -3,7 +3,8 @@
 
 BIN := tino
 CLI_DIR := cli
-CARGO ?= cargo
+RUSTUP_CARGO := $(HOME)/.cargo/bin/cargo
+CARGO ?= $(shell if [ -x "$(RUSTUP_CARGO)" ]; then printf '%s' "$(RUSTUP_CARGO)"; else printf 'cargo'; fi)
 INSTALL ?= install
 RM ?= rm -f
 BINDIR ?= $(HOME)/.cargo/bin

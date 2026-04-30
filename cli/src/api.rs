@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, Url};
+use serde::de::DeserializeOwned;
 
 use crate::types::*;
 
@@ -195,6 +196,22 @@ impl ApiClient {
         })
     }
 
+    async fn typed_json<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        let response = self.request_json(method, path, query, body, &[]).await?;
+        serde_json::from_value(response.body)
+            .with_context(|| format!("Cannot decode API response from {path}"))
+    }
+
+    fn json_body<T: serde::Serialize>(value: &T) -> Result<serde_json::Value> {
+        serde_json::to_value(value).context("Cannot serialize API request body")
+    }
+
     fn resolve_url(&self, path: &str) -> String {
         if path.starts_with("http://") || path.starts_with("https://") {
             path.to_string()
@@ -228,112 +245,90 @@ impl ApiClient {
     // ---- Backtest ----
 
     pub async fn list_backtests(&self) -> Result<BacktestRunList> {
-        let resp = self
-            .client
-            .get(format!("{}/api/backtest/runs", self.base_url))
-            .send()
+        self.typed_json(Method::GET, "/api/backtest/runs", &[], None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn get_status(&self, run_id: &str) -> Result<BacktestRunStatus> {
-        let resp = self
-            .client
-            .get(format!("{}/api/backtest/{}/status", self.base_url, run_id))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::GET,
+            &format!("/api/backtest/{}/status", run_id),
+            &[],
+            None,
+        )
+        .await
     }
 
     pub async fn get_result(&self, run_id: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(format!("{}/api/backtest/{}/result", self.base_url, run_id))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::GET,
+            &format!("/api/backtest/{}/result", run_id),
+            &[],
+            None,
+        )
+        .await
     }
 
     pub async fn run_backtest(&self, req: &BacktestRunRequest) -> Result<BacktestRunResponse> {
-        let resp = self
-            .client
-            .post(format!("{}/api/backtest/run", self.base_url))
-            .json(req)
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::POST,
+            "/api/backtest/run",
+            &[],
+            Some(Self::json_body(req)?),
+        )
+        .await
     }
 
     pub async fn cancel_backtest(&self, run_id: &str) -> Result<BacktestCancelResponse> {
-        let resp = self
-            .client
-            .post(format!("{}/api/backtest/{}/cancel", self.base_url, run_id))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::POST,
+            &format!("/api/backtest/{}/cancel", run_id),
+            &[],
+            None,
+        )
+        .await
     }
 
     pub async fn delete_backtest(&self, run_id: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .delete(format!("{}/api/backtest/{}", self.base_url, run_id))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::DELETE,
+            &format!("/api/backtest/{}", run_id),
+            &[],
+            None,
+        )
+        .await
     }
 
     // ---- Optimization ----
 
     pub async fn optimize_backtest(&self, req: &OptimizeRequest) -> Result<OptimizeResponse> {
-        let resp = self
-            .client
-            .post(format!("{}/api/backtest/optimize", self.base_url))
-            .json(req)
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::POST,
+            "/api/backtest/optimize",
+            &[],
+            Some(Self::json_body(req)?),
+        )
+        .await
     }
 
     pub async fn optimize_status(&self, opt_id: u64) -> Result<OptimizeStatus> {
-        let resp = self
-            .client
-            .get(format!(
-                "{}/api/backtest/optimize/{}/status",
-                self.base_url, opt_id
-            ))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::GET,
+            &format!("/api/backtest/optimize/{}/status", opt_id),
+            &[],
+            None,
+        )
+        .await
     }
 
     pub async fn optimize_result(&self, opt_id: u64) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(format!(
-                "{}/api/backtest/optimize/{}/result",
-                self.base_url, opt_id
-            ))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::GET,
+            &format!("/api/backtest/optimize/{}/result", opt_id),
+            &[],
+            None,
+        )
+        .await
     }
 
     pub async fn optimize_list(
@@ -341,106 +336,73 @@ impl ApiClient {
         limit: u32,
         strategy: Option<&str>,
     ) -> Result<serde_json::Value> {
-        let mut url = format!(
-            "{}/api/backtest/optimize/runs?limit={}",
-            self.base_url, limit
-        );
-        if let Some(s) = strategy {
-            url.push_str(&format!("&strategy={}", s));
+        let mut query = vec![("limit".to_string(), limit.to_string())];
+        if let Some(strategy) = strategy {
+            query.push(("strategy".to_string(), strategy.to_string()));
         }
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        self.typed_json(Method::GET, "/api/backtest/optimize/runs", &query, None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     // ---- Strategy ----
 
     pub async fn list_strategies(&self) -> Result<Vec<Strategy>> {
-        let resp = self
-            .client
-            .get(format!("{}/api/strategies", self.base_url))
-            .send()
+        self.typed_json(Method::GET, "/api/strategies", &[], None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn get_strategy(&self, name: &str) -> Result<Strategy> {
-        let resp = self
-            .client
-            .get(format!("{}/api/strategies/{}", self.base_url, name))
-            .send()
+        self.typed_json(Method::GET, &format!("/api/strategies/{}", name), &[], None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn get_strategy_params(&self, name: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(format!("{}/api/strategies/{}/params", self.base_url, name))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::GET,
+            &format!("/api/strategies/{}/params", name),
+            &[],
+            None,
+        )
+        .await
     }
 
     pub async fn validate_strategy(&self, name: &str) -> Result<ValidateResult> {
-        let resp = self
-            .client
-            .post(format!(
-                "{}/api/strategies/{}/validate",
-                self.base_url, name
-            ))
-            .send()
+        let path = format!("/api/strategies/{}/validate", name);
+        match self
+            .typed_json::<ValidateResult>(Method::POST, &path, &[], None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let status = resp.status();
-        if status.as_u16() == 422 {
-            // FastAPI wraps HTTPException body in {"detail": ...}
-            let wrapper: serde_json::Value = resp.json().await?;
-            if let Some(detail) = wrapper.get("detail") {
-                let result: ValidateResult = serde_json::from_value(detail.clone())?;
-                return Ok(result);
+        {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                if let Some(http) = err.downcast_ref::<ApiHttpError>() {
+                    if http.status_code == 422 {
+                        if let Some(detail) = http.body.get("detail") {
+                            return serde_json::from_value(detail.clone())
+                                .context("Cannot decode validation detail response");
+                        }
+                    }
+                }
+                Err(err)
             }
-            anyhow::bail!("Validation failed with unexpected 422 response");
         }
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn rescan_strategies(&self) -> Result<RescanResult> {
-        let resp = self
-            .client
-            .post(format!("{}/api/strategies/rescan", self.base_url))
-            .send()
+        self.typed_json(Method::POST, "/api/strategies/rescan", &[], None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn create_strategy(
         &self,
         req: &StrategyCreateRequest,
     ) -> Result<StrategyCreateResponse> {
-        let resp = self
-            .client
-            .post(format!("{}/api/strategies/create", self.base_url))
-            .json(req)
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::POST,
+            "/api/strategies/create",
+            &[],
+            Some(Self::json_body(req)?),
+        )
+        .await
     }
 
     // ---- Data ----
@@ -452,75 +414,48 @@ impl ApiClient {
             "start": req.start,
             "end": req.end,
         });
-        let resp = self
-            .client
-            .post(format!("{}/api/data/fetch-batch", self.base_url))
-            .json(&payload)
-            .send()
+        self.typed_json(Method::POST, "/api/data/fetch-batch", &[], Some(payload))
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn list_data(&self) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(format!("{}/api/data/catalog", self.base_url))
-            .send()
+        self.typed_json(Method::GET, "/api/data/catalog", &[], None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn fetch_data_batch(&self, req: &DataFetchBatchRequest) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(format!("{}/api/data/fetch-batch", self.base_url))
-            .json(req)
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::POST,
+            "/api/data/fetch-batch",
+            &[],
+            Some(Self::json_body(req)?),
+        )
+        .await
     }
 
     pub async fn compact_data(&self, req: &DataCompactRequest) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(format!("{}/api/data/compact", self.base_url))
-            .json(req)
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::POST,
+            "/api/data/compact",
+            &[],
+            Some(Self::json_body(req)?),
+        )
+        .await
     }
 
     pub async fn validate_data(&self, symbol: &str, interval: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(format!(
-                "{}/api/data/validate/{}/{}",
-                self.base_url, symbol, interval
-            ))
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::GET,
+            &format!("/api/data/validate/{}/{}", symbol, interval),
+            &[],
+            None,
+        )
+        .await
     }
 
     pub async fn scan_data(&self) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(format!("{}/api/data/scan", self.base_url))
-            .send()
+        self.typed_json(Method::POST, "/api/data/scan", &[], None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     // ---- Trading ----
@@ -531,24 +466,18 @@ impl ApiClient {
         is_open: Option<bool>,
         strategy_id_tag: Option<&str>,
     ) -> Result<Vec<TradingPosition>> {
-        let mut url = format!("{}/api/trading/positions?", self.base_url);
-        if let Some(nt) = node_type {
-            url.push_str(&format!("node_type={}&", nt));
+        let mut query = Vec::new();
+        if let Some(node_type) = node_type {
+            query.push(("node_type".to_string(), node_type.to_string()));
         }
-        if let Some(open) = is_open {
-            url.push_str(&format!("is_open={}&", open));
+        if let Some(is_open) = is_open {
+            query.push(("is_open".to_string(), is_open.to_string()));
         }
-        if let Some(tag) = strategy_id_tag {
-            url.push_str(&format!("strategy_id_tag={}&", Self::url_encode(tag)));
+        if let Some(strategy_id_tag) = strategy_id_tag {
+            query.push(("strategy_id_tag".to_string(), strategy_id_tag.to_string()));
         }
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        self.typed_json(Method::GET, "/api/trading/positions", &query, None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn list_fills(
@@ -557,35 +486,21 @@ impl ApiClient {
         limit: u32,
         strategy_id_tag: Option<&str>,
     ) -> Result<Vec<TradingFill>> {
-        let mut url = format!("{}/api/trading/fills?limit={}", self.base_url, limit);
-        if let Some(nt) = node_type {
-            url.push_str(&format!("&node_type={}", Self::url_encode(nt)));
+        let mut query = vec![("limit".to_string(), limit.to_string())];
+        if let Some(node_type) = node_type {
+            query.push(("node_type".to_string(), node_type.to_string()));
         }
-        if let Some(tag) = strategy_id_tag {
-            url.push_str(&format!("&strategy_id_tag={}", Self::url_encode(tag)));
+        if let Some(strategy_id_tag) = strategy_id_tag {
+            query.push(("strategy_id_tag".to_string(), strategy_id_tag.to_string()));
         }
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        self.typed_json(Method::GET, "/api/trading/fills", &query, None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn trading_summary(&self, node_type: &str) -> Result<TradingSummary> {
-        let resp = self
-            .client
-            .get(format!(
-                "{}/api/trading/summary?node_type={}",
-                self.base_url, node_type
-            ))
-            .send()
+        let query = [("node_type".to_string(), node_type.to_string())];
+        self.typed_json(Method::GET, "/api/trading/summary", &query, None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     // ---- Orders ----
@@ -596,35 +511,23 @@ impl ApiClient {
         status: Option<&str>,
         limit: u32,
     ) -> Result<Vec<TradingOrder>> {
-        let mut url = format!("{}/api/orders?limit={}", self.base_url, limit);
-        if let Some(nt) = node_type {
-            url.push_str(&format!("&node_type={}", Self::url_encode(nt)));
+        let mut query = vec![("limit".to_string(), limit.to_string())];
+        if let Some(node_type) = node_type {
+            query.push(("node_type".to_string(), node_type.to_string()));
         }
-        if let Some(s) = status {
-            url.push_str(&format!("&status={}", Self::url_encode(s)));
+        if let Some(status) = status {
+            query.push(("status".to_string(), status.to_string()));
         }
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        self.typed_json(Method::GET, "/api/orders", &query, None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     // ---- Node Strategies ----
 
     pub async fn list_node_strategies(&self, mode: &str) -> Result<NodeStrategiesResponse> {
-        let resp = self
-            .client
-            .get(format!("{}/api/node/strategies", self.base_url))
-            .query(&[("mode", mode)])
-            .send()
+        let query = [("mode".to_string(), mode.to_string())];
+        self.typed_json(Method::GET, "/api/node/strategies", &query, None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     async fn portfolio_action(
@@ -637,15 +540,13 @@ impl ApiClient {
             name: name.to_string(),
             mode: mode.to_string(),
         };
-        let resp = self
-            .client
-            .post(format!("{}/api/node/strategy/{}", self.base_url, action))
-            .json(&body)
-            .send()
-            .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
+        self.typed_json(
+            Method::POST,
+            &format!("/api/node/strategy/{}", action),
+            &[],
+            Some(Self::json_body(&body)?),
+        )
+        .await
     }
 
     pub async fn start_portfolio(&self, name: &str, mode: &str) -> Result<serde_json::Value> {
@@ -671,26 +572,14 @@ impl ApiClient {
     // ---- Node ----
 
     pub async fn node_status(&self) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(format!("{}/api/node/status", self.base_url))
-            .send()
+        self.typed_json(Method::GET, "/api/node/status", &[], None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn node_kill(&self, node_type: &str, level: u8) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(format!("{}/api/node/kill", self.base_url))
-            .json(&serde_json::json!({"mode": node_type, "level": level}))
-            .send()
+        let body = serde_json::json!({"mode": node_type, "level": level});
+        self.typed_json(Method::POST, "/api/node/kill", &[], Some(body))
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn lifecycle_command(
@@ -703,33 +592,17 @@ impl ApiClient {
             "action": action,
             "mode": mode,
         });
-        if let Some(sid) = strategy_id {
-            body["strategy_id"] = serde_json::Value::String(sid.to_string());
+        if let Some(strategy_id) = strategy_id {
+            body["strategy_id"] = serde_json::Value::String(strategy_id.to_string());
         }
-        let resp = self
-            .client
-            .post(format!("{}/api/node/lifecycle", self.base_url))
-            .json(&body)
-            .send()
+        self.typed_json(Method::POST, "/api/node/lifecycle", &[], Some(body))
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     pub async fn lifecycle_state(&self, mode: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(format!(
-                "{}/api/node/lifecycle/state?mode={}",
-                self.base_url,
-                Self::url_encode(mode)
-            ))
-            .send()
+        let query = [("mode".to_string(), mode.to_string())];
+        self.typed_json(Method::GET, "/api/node/lifecycle/state", &query, None)
             .await
-            .context(Self::connect_hint(&self.base_url))?;
-        let body = resp.error_for_status()?.json().await?;
-        Ok(body)
     }
 
     /// Minimal percent-encoding for query parameter values.
