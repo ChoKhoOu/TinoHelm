@@ -175,6 +175,7 @@ def _run_queue_mode(run_id: str) -> int:
             warmup_bars=job.get("warmup_bars"),
             tags=job.get("tags"),
             data_type=job.get("data_type", "klines"),
+            extra_data_types=job.get("extra_data_types") or [],
         )
         # Enable bar-level progress tracking via ProgressReporter actor
         runner._redis_client = r
@@ -443,6 +444,8 @@ def _run_fold_mode(fold_config_path: str) -> int:
             interval=cfg_dict.get("interval", "1m"),
             start=start_dt,
             end=end_dt,
+            data_type=cfg_dict.get("data_type", "klines"),
+            extra_data_types=cfg_dict.get("extra_data_types") or [],
         )
 
         result = asyncio.run(runner.run())

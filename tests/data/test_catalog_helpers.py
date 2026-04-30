@@ -201,10 +201,9 @@ class TestResolveCatalogPath:
         assert WRITE_CATEGORY["fundingRate"] not in WRITABLE_CATEGORIES
         assert resolve_catalog_path("/tmp/cat", "fundingRate") == Path("/tmp/cat")
 
-    def test_book_ticker_returns_base(self):
-        # bookTicker maps to "quote_tick" which has no catalog writer yet.
-        assert WRITE_CATEGORY["bookTicker"] not in WRITABLE_CATEGORIES
-        assert resolve_catalog_path("/tmp/cat", "bookTicker") == Path("/tmp/cat")
+    def test_book_ticker_under_quotes(self):
+        assert WRITE_CATEGORY["bookTicker"] in WRITABLE_CATEGORIES
+        assert resolve_catalog_path("/tmp/cat", "bookTicker") == Path("/tmp/cat") / "quotes" / "bookTicker"
 
     def test_book_depth_returns_base(self):
         assert resolve_catalog_path("/tmp/cat", "bookDepth") == Path("/tmp/cat")
@@ -671,13 +670,13 @@ class TestCatalogBackwardCompat:
             assert WRITE_CATEGORY[src] == cat
             assert cat in WRITABLE_CATEGORIES
 
-    def test_source_to_category_excludes_non_writable(self):
+    def test_source_to_category_excludes_raw_non_writable(self):
         # Any source type whose category is NOT writable by catalog must
-        # be absent from the compat map (e.g. fundingRate, bookTicker).
+        # be absent from the compat map (e.g. fundingRate, metrics).
         for src in catalog._SOURCE_TO_CATEGORY:
             assert WRITE_CATEGORY[src] in WRITABLE_CATEGORIES
         assert "fundingRate" not in catalog._SOURCE_TO_CATEGORY
-        assert "bookTicker" not in catalog._SOURCE_TO_CATEGORY
+        assert catalog._SOURCE_TO_CATEGORY["bookTicker"] == "quote_tick"
 
     def test_resolve_catalog_path_reexported(self):
         # Public re-export so callers (runner, pipeline, data API) can keep

@@ -37,6 +37,12 @@ pub enum BacktestCmd {
         /// Strategy parameters (key=value)
         #[arg(long = "param", value_parser = parse_param)]
         params: Vec<(String, String)>,
+        /// Bar data source type (klines, markPriceKlines, indexPriceKlines, premiumIndexKlines)
+        #[arg(long = "data-type", default_value = "klines")]
+        data_type: String,
+        /// Optional quote/trade replay data type to inject (repeatable: bookTicker, aggTrades, trades)
+        #[arg(long = "extra-data-type")]
+        extra_data_types: Vec<String>,
         /// Probability of slippage (0.0-1.0)
         #[arg(long, default_value = "0")]
         slippage_prob: f64,
@@ -608,6 +614,8 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             capital,
             leverage,
             params,
+            data_type,
+            extra_data_types,
             slippage_prob,
             random_seed,
         } => {
@@ -650,6 +658,8 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                 leverage,
                 params: param_json,
                 fill_model,
+                data_type,
+                extra_data_types,
             };
 
             let resp = client.run_backtest(&req).await?;
@@ -1243,5 +1253,29 @@ mod tests {
         assert_eq!(jdisplay(&value, "score"), "1.25");
         assert_eq!(jdisplay(&value, "done"), "true");
         assert_eq!(jdisplay(&value, "missing"), "-");
+    }
+
+    #[test]
+    fn backtest_request_serializes_market_data_fields() {
+        let req = BacktestRunRequest {
+            strategy: "s".to_string(),
+            symbols: vec!["BTCUSDT-PERP".to_string()],
+            intervals: vec!["1m".to_string()],
+            start_date: "2025-01-01".to_string(),
+            end_date: "2025-01-02".to_string(),
+            initial_capital: 10_000.0,
+            leverage: 1.0,
+            params: None,
+            fill_model: None,
+            data_type: "markPriceKlines".to_string(),
+            extra_data_types: vec!["bookTicker".to_string(), "aggTrades".to_string()],
+        };
+
+        let body = serde_json::to_value(req).unwrap();
+        assert_eq!(body["data_type"], "markPriceKlines");
+        assert_eq!(
+            body["extra_data_types"],
+            serde_json::json!(["bookTicker", "aggTrades"])
+        );
     }
 }

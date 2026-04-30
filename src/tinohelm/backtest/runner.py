@@ -40,6 +40,10 @@ from tinohelm.strategy.loader import (
 logger = logging.getLogger(__name__)
 
 
+def _ordered_unique_extra(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
 # ---------------------------------------------------------------------------
 # Progress reporter — lightweight actor for bar-level progress tracking
 # ---------------------------------------------------------------------------
@@ -131,6 +135,7 @@ class BacktestRunner:
         warmup_bars: int | None = None,
         tags: str | None = None,
         data_type: str = "klines",
+        extra_data_types: list[str] | None = None,
     ) -> None:
         self.strategy_path = strategy_path
         self.config_path = config_path
@@ -169,6 +174,7 @@ class BacktestRunner:
         self.warmup_bars = warmup_bars
         self.tags = tags
         self.data_type = data_type
+        self.extra_data_types = list(extra_data_types or [])
         self.artifacts_dir: Path | None = None
         self._before_artifact_export: Callable[[], None] | None = None
         self._engine: BacktestEngine | None = None
@@ -199,6 +205,115 @@ class BacktestRunner:
 
         self._catalog_cache.pop(str(resolve_catalog_path(self.catalog_path, source_type)), None)
         self._catalog_cache.pop(str(self.catalog_path), None)
+
+    @staticmethod
+    def _normalize_extra_data_type(data_type: str) -> str | None:
+        token = str(data_type).strip()
+        mapping = {
+            "bookTicker": "bookTicker",
+            "book_ticker": "bookTicker",
+            "bookticker": "bookTicker",
+            "quote_tick": "bookTicker",
+            "quotes": "bookTicker",
+            "aggTrades": "aggTrades",
+            "aggtrades": "aggTrades",
+            "agg_trades": "aggTrades",
+            "trades": "trades",
+            "trade_tick": "aggTrades",
+            "trade": "aggTrades",
+        }
+        return mapping.get(token) or mapping.get(token.lower())
+
+    def _load_replay_data_from_catalog(self, symbol: str, source_type: str) -> list:
+        """Cache-first load optional QuoteTick/TradeTick replay data."""
+        from tinohelm.data.catalog import resolve_catalog_path
+        from tinohelm.strategy.loader_helpers import normalize_symbol
+
+        root = resolve_catalog_path(self.catalog_path, source_type)
+        catalog = self._catalog_for_path(root)
+        instrument_id = normalize_symbol(symbol)
+        start = self.start
+        end = self.end
+        try:
+            if source_type == "bookTicker":
+                return catalog.quote_ticks(instrument_ids=[instrument_id], start=start, end=end) or []
+            return catalog.trade_ticks(instrument_ids=[instrument_id], start=start, end=end) or []
+        except Exception:
+            logger.warning("Optional replay load failed for %s %s", symbol, source_type, exc_info=True)
+            return []
+
+    def _load_or_fetch_replay_data(self, symbol: str, source_type: str) -> list:
+        """Load optional replay ticks, enqueueing a fetch once when possible."""
+        ticks = self._load_replay_data_from_catalog(symbol, source_type)
+        if ticks:
+            return ticks
+        if self._redis_client is None:
+            logger.info("Optional replay data missing for %s %s; Redis unavailable, skipping", symbol, source_type)
+            return []
+        try:
+            import asyncio
+            success = asyncio.run(self._submit_and_wait_fetch(symbol, None, source_type))
+        except RuntimeError:
+            logger.warning("Optional replay fetch skipped for %s %s inside running event loop", symbol, source_type)
+            return []
+        except Exception:
+            logger.warning("Optional replay fetch failed for %s %s", symbol, source_type, exc_info=True)
+            return []
+        if not success:
+            return []
+        self._invalidate_catalog_cache_for_source(source_type)
+        return self._load_replay_data_from_catalog(symbol, source_type)
+
+    async def _load_or_fetch_replay_data_async(self, symbol: str, source_type: str) -> list:
+        """Async version used from BacktestRunner.run()."""
+        ticks = self._load_replay_data_from_catalog(symbol, source_type)
+        if ticks:
+            return ticks
+        if self._redis_client is None:
+            logger.info("Optional replay data missing for %s %s; Redis unavailable, skipping", symbol, source_type)
+            return []
+        try:
+            success = await self._submit_and_wait_fetch(symbol, None, source_type)
+        except Exception:
+            logger.warning("Optional replay fetch failed for %s %s", symbol, source_type, exc_info=True)
+            return []
+        if not success:
+            return []
+        self._invalidate_catalog_cache_for_source(source_type)
+        return self._load_replay_data_from_catalog(symbol, source_type)
+
+    def _inject_optional_replay_data(self, engine: BacktestEngine) -> None:
+        """Inject requested quote/trade ticks without changing bar-only defaults."""
+        if not self.extra_data_types:
+            return
+        source_types = _ordered_unique_extra(
+            normalized for item in self.extra_data_types
+            if (normalized := self._normalize_extra_data_type(item)) is not None
+        )
+        for symbol in self.symbols:
+            for source_type in source_types:
+                ticks = self._load_or_fetch_replay_data(symbol, source_type)
+                if not ticks:
+                    logger.info("No optional replay data for %s %s; continuing bar backtest", symbol, source_type)
+                    continue
+                engine.add_data(ticks, sort=False)
+                logger.info("Injected %d optional replay ticks for %s %s", len(ticks), symbol, source_type)
+
+    async def _inject_optional_replay_data_async(self, engine: BacktestEngine) -> None:
+        if not self.extra_data_types:
+            return
+        source_types = _ordered_unique_extra(
+            normalized for item in self.extra_data_types
+            if (normalized := self._normalize_extra_data_type(item)) is not None
+        )
+        for symbol in self.symbols:
+            for source_type in source_types:
+                ticks = await self._load_or_fetch_replay_data_async(symbol, source_type)
+                if not ticks:
+                    logger.info("No optional replay data for %s %s; continuing bar backtest", symbol, source_type)
+                    continue
+                engine.add_data(ticks, sort=False)
+                logger.info("Injected %d optional replay ticks for %s %s", len(ticks), symbol, source_type)
 
     def _try_load_bars(self, bar_type_str: str, source_type: str = "klines") -> list | None:
         """Load bars from the resolved catalog path for a specific source_type.
@@ -1054,6 +1169,8 @@ class BacktestRunner:
         # Load mark price and index price data for strategies
         if self.symbols and self.start and self.end:
             await self._load_auxiliary_price_data(engine, self._nt_symbols)
+
+        await self._inject_optional_replay_data_async(engine)
 
         self._report_progress(9)  # Auxiliary price data loaded
 

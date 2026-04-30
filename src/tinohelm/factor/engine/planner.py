@@ -290,13 +290,18 @@ class Planner:
 _FUNDING_RATE_FIELDS: frozenset[str] = frozenset({"funding_rate", "mark_price"})
 _OPEN_INTEREST_FIELDS: frozenset[str] = frozenset({
     "open_interest", "sum_open_interest", "open_interest_value",
+    "toptrader_long_short_ratio_count", "toptrader_long_short_ratio_sum",
+    "global_long_short_ratio", "taker_long_short_vol_ratio",
 })
 _TRADE_TICK_FIELDS: frozenset[str] = frozenset({
     "trade_tick", "trade_price", "trade_qty", "trade_side",
+    "signed_trade_qty", "buy_qty", "sell_qty", "trade_imbalance",
 })
 _QUOTE_TICK_FIELDS: frozenset[str] = frozenset({
     "quote_tick", "orderbook_imbalance", "bid_price", "bid_qty", "ask_price", "ask_qty",
+    "mid_price", "spread_bps", "depth_l1_usd",
 })
+_BOOK_DEPTH_FIELDS: frozenset[str] = frozenset({"book_depth", "book_depth_notional", "depth", "notional"})
 _MARKET_CAP_FIELDS: frozenset[str] = frozenset({"market_cap"})
 
 
@@ -310,6 +315,8 @@ def _infer_source(field_name: str) -> str:
         return "trade_tick"
     if field_name in _QUOTE_TICK_FIELDS:
         return "quote_tick"
+    if field_name in _BOOK_DEPTH_FIELDS:
+        return "book_depth"
     if field_name in _MARKET_CAP_FIELDS:
         return "market_cap"
     return "bar"

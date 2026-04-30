@@ -17,7 +17,6 @@ The BacktestRunner full-E2E is skipped per task spec (requires factor DataLayer 
 """
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -205,9 +204,7 @@ def test_aligner_pit_and_neutralization(synthetic_market_data):
 def test_correlation_and_clustering(synthetic_market_data):
     """correlation_matrix returns F×(F+1) frame; hierarchical_cluster returns correct linkage shape."""
     d = synthetic_market_data
-    close, high, low, volume, funding = (
-        d["close"], d["high"], d["low"], d["volume"], d["funding_rate"]
-    )
+    close, high, low, volume = d["close"], d["high"], d["low"], d["volume"]
 
     factor_panels = {
         "ret_N":             ret_N(close, params={"lookback": 5}),
@@ -302,8 +299,6 @@ def test_five_signal_kernels_constraint_satisfaction(synthetic_market_data):
         ("zscore_clip",         zscore_clip,         {"clip": 3.0}),
         ("rank_to_weight",      rank_to_weight,      {"power": 1.0}),
     ]
-
-    sym_cols_factor = [c for c in factor_panel.columns if c != "ts"]
 
     for kernel_name, kernel_fn, params in kernels_and_params:
         weight_panel = kernel_fn(factor_panel, params=params, constraints=constraints)
@@ -558,25 +553,24 @@ def test_ac_6_1_1_zero_pandas_imports():
 
 
 # ---------------------------------------------------------------------------
-# Test 9: experimental factors raise NotImplementedError (not silently return)
+# Test 9: experimental downloadable-data factors execute on supported panels
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
-def test_experimental_factors_raise_not_implemented():
-    """Experimental factors raise NotImplementedError — they do NOT return empty panels."""
+def test_experimental_downloadable_data_factors_execute():
+    """Experimental factors backed by downloadable data are no longer pending stubs."""
     from tinohelm.factor.builtins.microstructure import trade_imbalance
     from tinohelm.factor.builtins.crypto_data import oi_change, orderbook_imbalance_L1
 
     dummy = pl.DataFrame({"ts": [1, 2], "BTC": [1.0, 2.0]})
 
-    with pytest.raises(NotImplementedError):
-        trade_imbalance(dummy, dummy, params={})
+    trade = trade_imbalance(dummy, params={"lookback": 1})
+    oi = oi_change(dummy, params={"lookback": 1})
+    obi = orderbook_imbalance_L1(dummy, params={})
 
-    with pytest.raises(NotImplementedError):
-        oi_change(dummy, params={})
-
-    with pytest.raises(NotImplementedError):
-        orderbook_imbalance_L1(dummy, params={})
+    assert trade.columns == ["ts", "BTC"]
+    assert oi["BTC"].to_list()[1] == 1.0
+    assert obi.equals(dummy)
 
 
 # ---------------------------------------------------------------------------

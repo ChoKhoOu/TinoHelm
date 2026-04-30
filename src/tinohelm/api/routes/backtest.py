@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as aioredis
@@ -56,6 +56,8 @@ class BacktestRunRequest(BaseModel):
     fill_model: dict | None = None
     # Bar data source type (klines, markPriceKlines, indexPriceKlines, premiumIndexKlines)
     data_type: str = "klines"
+    # Explicit optional replay data; defaults empty to preserve bar-only behavior.
+    extra_data_types: list[str] = Field(default_factory=list)
     # Fee config — e.g. "0.02%" or "0.0002"
     maker_fee: str | None = None
     taker_fee: str | None = None
@@ -321,6 +323,7 @@ async def create_backtest_run(
             "leverage": body.leverage,
         },
         "data_type": body.data_type,
+        "extra_data_types": body.extra_data_types,
         "fill_model": body.fill_model,
         "maker_fee": body.maker_fee,
         "taker_fee": body.taker_fee,
