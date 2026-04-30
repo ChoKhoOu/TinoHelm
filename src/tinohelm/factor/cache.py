@@ -284,6 +284,7 @@ class FactorCache:
         factor_name: str,
         code_hash: str,
         extra_size: int = 0,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         with self._manifest_lock:
             manifest = self._load_manifest()
@@ -296,6 +297,11 @@ class FactorCache:
                     "size_bytes": 0,
                 }
             entry["size_bytes"] = entry.get("size_bytes", 0) + extra_size
+            entry["updated_at"] = datetime.now().isoformat()
+            if metadata:
+                entry_metadata = dict(entry.get("metadata") or {})
+                entry_metadata.update(metadata)
+                entry["metadata"] = entry_metadata
             manifest[key] = entry
             self._save_manifest(manifest)
 
@@ -541,7 +547,24 @@ class FactorCache:
             added_bytes += epath.stat().st_size
 
         if factor_values is not None or eval_result is not None:
-            self._update_manifest(key, factor_name, code_hash, added_bytes)
+            metadata: dict[str, Any] = {}
+            if eval_result is not None:
+                metadata["effective_params"] = dict(eval_result.effective_params or {})
+                metadata["cache_key"] = eval_result.cache_key
+                metadata["cache_hit"] = eval_result.cache_hit
+                metadata["factor_code_hash"] = eval_result.factor_code_hash
+                metadata["factor_source_file"] = eval_result.factor_source_file
+                metadata["factor_module_path"] = eval_result.factor_module_path
+                metadata["warnings"] = list(eval_result.warnings or [])
+                if eval_result.walk_forward is not None:
+                    metadata["walk_forward_status"] = eval_result.walk_forward.get("status")
+            self._update_manifest(
+                key,
+                factor_name,
+                code_hash,
+                added_bytes,
+                metadata=metadata,
+            )
 
     def invalidate(self, name: str | None = None) -> int:
         """Delete cached entries.

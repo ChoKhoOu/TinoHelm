@@ -29,6 +29,7 @@ a ``dict[str, str]`` mapping factor name → error message string.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
@@ -240,6 +241,7 @@ class Scheduler:
         kernel: Any,
         factor_data: dict[str, Panel],
         backend: AbstractBackend,
+        params: dict | None = None,
     ) -> Panel:
         """Invoke *kernel* with the appropriate calling convention.
 
@@ -260,10 +262,37 @@ class Scheduler:
         Panel
             The output DataFrame produced by the kernel.
         """
+        call_kwargs = dict(factor_data)
+        if params is not None:
+            try:
+                sig = inspect.signature(kernel)
+                sig_params = sig.parameters
+                accepts_kwargs = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig_params.values()
+                )
+            except (TypeError, ValueError):
+                sig_params = {}
+                accepts_kwargs = False
+
+            # Convention A: kernels can accept the full merged dictionary.
+            if "params" in sig_params or accepts_kwargs:
+                call_kwargs["params"] = params
+
+            # Convention B: scalar factor parameters declared in the kernel
+            # signature (e.g. `def ret_N(close, lookback: int = 20)`) receive
+            # their merged override directly. Panel inputs already present in
+            # factor_data win over params with the same name.
+            for name, value in params.items():
+                if name in {"backend", "params"} or name in call_kwargs:
+                    continue
+                if name in sig_params or accepts_kwargs:
+                    call_kwargs[name] = value
+
         if spec.needs_backend:
-            result = kernel(backend, **factor_data)
+            result = kernel(backend, **call_kwargs)
         else:
-            result = kernel(**factor_data)
+            result = kernel(**call_kwargs)
 
         if not isinstance(result, pl.DataFrame):
             raise TypeError(

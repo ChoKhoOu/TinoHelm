@@ -164,10 +164,23 @@ async fn main() -> anyhow::Result<()> {
             dispatch_with_client!(client, cli::api::dispatch(command, client, format).await),
         ),
         Commands::Version => {
+            let git_sha = option_env!("GIT_SHA")
+                .or(option_env!("VERGEN_GIT_SHA"))
+                .or(option_env!("TINO_GIT_SHA"));
+            let build_time = option_env!("BUILD_TIME")
+                .or(option_env!("VERGEN_BUILD_TIMESTAMP"))
+                .or(option_env!("TINO_BUILD_TIME"));
             let data = serde_json::json!({
                 "name": "tino",
+                "cli_version": env!("CARGO_PKG_VERSION"),
                 "version": env!("CARGO_PKG_VERSION"),
                 "description": env!("CARGO_PKG_DESCRIPTION"),
+                "api_version_endpoint": "/api/version",
+                "factor_version_endpoint": "/api/factor/version",
+                "factor_capabilities_endpoint": "/api/factor/capabilities",
+                "cli_package_path": env!("CARGO_MANIFEST_DIR"),
+                "git_sha": git_sha,
+                "build_time": build_time,
                 "tui": false,
             });
             let result = match format {
@@ -241,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
 fn envelope_error_from_anyhow(err: &anyhow::Error) -> output::EnvelopeError {
     if let Some(http) = err.downcast_ref::<api::ApiHttpError>() {
         return output::EnvelopeError {
+            code: None,
             kind: "http".to_string(),
             message: http.body.to_string(),
             status_code: Some(http.status_code),
@@ -249,6 +263,7 @@ fn envelope_error_from_anyhow(err: &anyhow::Error) -> output::EnvelopeError {
     }
 
     output::EnvelopeError {
+        code: None,
         kind: "command".to_string(),
         message: err.to_string(),
         status_code: None,

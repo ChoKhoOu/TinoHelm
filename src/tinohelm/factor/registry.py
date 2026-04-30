@@ -29,6 +29,7 @@ import importlib.util
 import inspect
 import logging
 import pkgutil
+import dataclasses
 from pathlib import Path
 from typing import Callable
 
@@ -54,6 +55,24 @@ def _collect_specs_from_module(module: object) -> dict[str, tuple[FactorSpec, Ca
         if isinstance(spec, FactorSpec):
             results[spec.name] = (spec, obj)
     return results
+
+
+def _with_source_metadata(
+    spec: FactorSpec,
+    *,
+    func: Callable,
+    source_file: Path | None,
+    code_hash: str | None = None,
+) -> FactorSpec:
+    """Return ``spec`` with stable source/debug metadata filled in."""
+    module_path = f"{getattr(func, '__module__', '')}.{getattr(func, '__name__', spec.name)}".strip(".")
+    resolved_source = str(source_file) if source_file is not None else inspect.getsourcefile(func)
+    return dataclasses.replace(
+        spec,
+        source_file=resolved_source,
+        module_path=module_path or spec.module_path,
+        code_hash=code_hash or spec.code_hash,
+    )
 
 
 class Registry:
@@ -110,7 +129,6 @@ class Registry:
 
         # 4. Update spec cache with current merged state
         for name, spec in merged.items():
-            kernel = self._kernel_cache.get(name)
             current_hash = self._spec_cache.get(name, ("", None))[0]
             self._spec_cache[name] = (current_hash, spec)
 
@@ -166,7 +184,7 @@ class Registry:
 
         # Collect from the package __init__ itself
         for name, (spec, func) in _collect_specs_from_module(builtins_pkg).items():
-            collected[name] = spec
+            collected[name] = _with_source_metadata(spec, func=func, source_file=None)
             self._kernel_cache[name] = func
 
         # Walk sub-modules
@@ -184,7 +202,7 @@ class Registry:
                 continue
 
             for name, (spec, func) in _collect_specs_from_module(sub_mod).items():
-                collected[name] = spec
+                collected[name] = _with_source_metadata(spec, func=func, source_file=None)
                 self._kernel_cache[name] = func
 
         logger.debug(
@@ -253,9 +271,15 @@ class Registry:
 
             for name, (spec, func) in file_specs.items():
                 cache_key = f"user:{py_file}:{current_hash}"
-                self._spec_cache[name] = (cache_key, spec)
+                enriched = _with_source_metadata(
+                    spec,
+                    func=func,
+                    source_file=py_file,
+                    code_hash=current_hash,
+                )
+                self._spec_cache[name] = (cache_key, enriched)
                 self._kernel_cache[name] = func
-                collected[name] = spec
+                collected[name] = enriched
                 logger.debug(
                     "Registered user factor %r from %s (hash=%s…)",
                     name,

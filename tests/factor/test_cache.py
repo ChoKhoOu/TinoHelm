@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime, timezone
+import json
 
 import numpy as np
 import polars as pl
@@ -166,6 +167,40 @@ class TestFullMissThenHit:
         assert hit.eval_result.ic_mean == pytest.approx(0.05, rel=1e-6)
         assert hit.eval_result.ir == pytest.approx(0.50, rel=1e-6)
         assert hit.eval_result.is_monotonic is True
+
+    def test_manifest_records_effective_params_metadata(
+        self,
+        cache: FactorCache,
+        config: EvalConfig,
+        sample_panel: pl.DataFrame,
+        sample_eval_result: EvalResult,
+    ) -> None:
+        key = _key(cache, config)
+        sample_eval_result.effective_params = {"lookback": 20, "zscore": True}
+        sample_eval_result.cache_key = key
+        sample_eval_result.cache_hit = False
+        sample_eval_result.factor_code_hash = "abc123"
+        sample_eval_result.factor_source_file = "/tmp/momentum.py"
+        sample_eval_result.factor_module_path = "momentum.momentum"
+
+        cache.store(
+            key,
+            factor_name="momentum",
+            code_hash="abc123",
+            factor_values=sample_panel,
+            eval_result=sample_eval_result,
+        )
+
+        manifest = json.loads(cache._manifest_path.read_text())
+        assert manifest[key]["metadata"]["effective_params"] == {
+            "lookback": 20,
+            "zscore": True,
+        }
+        assert manifest[key]["metadata"]["cache_key"] == key
+        assert manifest[key]["metadata"]["cache_hit"] is False
+        assert manifest[key]["metadata"]["factor_code_hash"] == "abc123"
+        assert manifest[key]["metadata"]["factor_source_file"] == "/tmp/momentum.py"
+        assert manifest[key]["metadata"]["factor_module_path"] == "momentum.momentum"
 
 
 class TestCodeHashChangeInvalidatesKey:

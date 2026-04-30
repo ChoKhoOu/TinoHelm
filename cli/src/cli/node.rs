@@ -710,6 +710,7 @@ fn reject_machine_confirmation(
     }
 
     let error = EnvelopeError {
+        code: None,
         kind: "confirmation_required".to_string(),
         message: "Refusing to prompt in machine output mode; rerun with --yes to confirm this destructive command.".to_string(),
         status_code: None,

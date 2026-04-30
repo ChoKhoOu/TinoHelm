@@ -9,7 +9,8 @@ use reqwest::Method;
 use crate::api::{ApiClient, ApiHttpError};
 use crate::cli::style::{accent, dim, divider, header, kv, muted, Table};
 use crate::output::{
-    print_json, print_llm_error, print_llm_success, EnvelopeError, EnvelopeMeta, OutputFormat,
+    print_json, print_llm_error, print_llm_success, Envelope, EnvelopeError, EnvelopeMeta,
+    OutputFormat,
 };
 
 #[derive(Subcommand)]
@@ -212,6 +213,43 @@ pub async fn call_and_print(
                 meta.path = Some(path);
                 meta.status_code = Some(resp.status_code);
                 meta.elapsed_ms = Some(resp.elapsed_ms);
+                if let Some((ok, data, error)) = unwrap_api_envelope(&resp.body, resp.status_code) {
+                    return print_json(&Envelope {
+                        ok,
+                        data,
+                        error,
+                        meta,
+                    });
+                }
+                if path.starts_with("/api/factor/report/")
+                    && resp.body.get("status").and_then(|v| v.as_str()) == Some("failed")
+                {
+                    let code = resp
+                        .body
+                        .get("error_code")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| Some("factor_run_failed".to_string()));
+                    let message = resp
+                        .body
+                        .get("error")
+                        .or_else(|| resp.body.get("message"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Factor run failed")
+                        .to_string();
+                    return print_json(&Envelope {
+                        ok: false,
+                        data: Some(resp.body.clone()),
+                        error: Some(EnvelopeError {
+                            code,
+                            kind: "api".to_string(),
+                            message,
+                            status_code: Some(resp.status_code),
+                            body: Some(resp.body.clone()),
+                        }),
+                        meta,
+                    });
+                }
                 print_llm_success(resp.body, meta)
             }
             OutputFormat::Json => print_json(&resp.body),
@@ -301,11 +339,57 @@ pub async fn download_and_print(
     }
 }
 
+fn unwrap_api_envelope(
+    body: &serde_json::Value,
+    status_code: u16,
+) -> Option<(bool, Option<serde_json::Value>, Option<EnvelopeError>)> {
+    let ok = body.get("ok").and_then(|v| v.as_bool())?;
+    if !(body.get("data").is_some() || body.get("error").is_some()) {
+        return None;
+    }
+
+    let data = body.get("data").cloned();
+    let error = if ok {
+        None
+    } else {
+        let body_error = body
+            .get("error")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let (code, message) = match &body_error {
+            serde_json::Value::Object(obj) => {
+                let code = obj
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let message = obj
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("API response reported ok=false")
+                    .to_string();
+                (code, message)
+            }
+            serde_json::Value::String(s) => (None, s.to_string()),
+            _ => (None, "API response reported ok=false".to_string()),
+        };
+        Some(EnvelopeError {
+            code,
+            kind: "api".to_string(),
+            message,
+            status_code: Some(status_code),
+            body: Some(body_error),
+        })
+    };
+
+    Some((ok, data, error))
+}
+
 fn print_api_error(err: anyhow::Error, mut meta: EnvelopeMeta<'_>) -> Result<()> {
     if let Some(http) = err.downcast_ref::<ApiHttpError>() {
         meta.status_code = Some(http.status_code);
         return print_llm_error(
             EnvelopeError {
+                code: None,
                 kind: "http".to_string(),
                 message: http.body.to_string(),
                 status_code: Some(http.status_code),
@@ -316,6 +400,7 @@ fn print_api_error(err: anyhow::Error, mut meta: EnvelopeMeta<'_>) -> Result<()>
     }
     print_llm_error(
         EnvelopeError {
+            code: None,
             kind: "client".to_string(),
             message: err.to_string(),
             status_code: None,
@@ -470,7 +555,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_chars;
+    use super::{truncate_chars, unwrap_api_envelope};
 
     #[test]
     fn truncate_chars_leaves_short_strings_unchanged() {
@@ -485,5 +570,31 @@ mod tests {
     #[test]
     fn truncate_chars_is_utf8_safe() {
         assert_eq!(truncate_chars("资金费率异常回落", 6), "资金费率异…");
+    }
+
+    #[test]
+    fn unwrap_api_envelope_requires_envelope_shape() {
+        let body = serde_json::json!({"ok": true, "message": "done"});
+        assert!(unwrap_api_envelope(&body, 200).is_none());
+    }
+
+    #[test]
+    fn unwrap_api_envelope_preserves_data_payload() {
+        let body = serde_json::json!({"ok": true, "data": {"value": 7}, "error": null});
+        let (ok, data, error) = unwrap_api_envelope(&body, 200).expect("envelope");
+        assert!(ok);
+        assert_eq!(data, Some(serde_json::json!({"value": 7})));
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn unwrap_api_envelope_accepts_string_error() {
+        let body = serde_json::json!({"ok": false, "error": "bad request"});
+        let (ok, data, error) = unwrap_api_envelope(&body, 422).expect("envelope");
+        assert!(!ok);
+        assert!(data.is_none());
+        let error = error.expect("error");
+        assert_eq!(error.message, "bad request");
+        assert_eq!(error.status_code, Some(422));
     }
 }

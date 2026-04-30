@@ -11,9 +11,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
+import platform
 import re
-from datetime import datetime
+import subprocess
+import sys
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import redis.asyncio as aioredis
@@ -28,11 +33,19 @@ from tinohelm.db.models import FactorRun
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from tinohelm.factor.types import EvalResult
+
 router = APIRouter(prefix="/api/factor", tags=["factor"])
 
 QUEUE_KEY = "tino:factor:queue"
 CANCEL_KEY_PREFIX = "tino:factor:cancel:"
 _CANCEL_TTL_SECONDS = 3600
+VALID_SEGMENT_PROVIDERS: tuple[str, ...] = (
+    "btc_trend",
+    "vol_regime",
+    "funding_level",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +58,11 @@ class ExploreRequest(BaseModel):
     factor_name: str
     config: dict
     params: dict | None = None
+    summary: bool = False
+    # Tri-state: omitted preserves legacy full-detail output unless summary=true,
+    # where LLM-friendly callers expect compact output by default.
+    detail: bool | None = None
+    fields: list[str] | None = None
 
 
 class RunRequest(BaseModel):
@@ -54,6 +72,9 @@ class RunRequest(BaseModel):
     config: dict
     params: dict | None = None
     full: bool = False
+    summary: bool = False
+    detail: bool | None = None
+    fields: list[str] | None = None
 
 
 class CreateRequest(BaseModel):
@@ -106,8 +127,228 @@ def _spec_to_dict(spec: object) -> dict:
     d["input_fields"] = [inp["field_name"] for inp in d.pop("input_specs", [])]
     d["params_schema"] = d.pop("params", {})
     d.pop("output_spec", None)
-    d.pop("code_hash", None)
+    if not d.get("metadata"):
+        d["metadata"] = {}
+    if not d.get("warnings"):
+        d["warnings"] = []
+    if d.get("name") == "vwap_mid_reversion_proxy":
+        d["metadata"].update({
+            "research_only_reason": "1m OHLCV proxy; not exact trade+quote execution-premium data.",
+            "proxy_level": "1m_ohlcv_bar_proxy",
+            "data_granularity": "1m_ohlcv_bars",
+            "required_exact_data": ["trade_ticks", "quote_ticks", "l1_mid"],
+        })
+        d["warnings"].append({
+            "code": "research_proxy_not_execution_premium",
+            "message": "Do not describe this factor as exact buy/sell VWAP versus L1 mid execution premium.",
+        })
     return d
+
+
+def _effective_params(spec: object, config: object) -> dict:
+    merged = dict(getattr(spec, "params", {}) or {})
+    merged.update(dict(getattr(config, "params", {}) or {}))
+    return merged
+
+
+def _validate_segments(segments: tuple[str, ...]) -> None:
+    invalid = [s for s in segments if s not in VALID_SEGMENT_PROVIDERS]
+    if invalid:
+        raise ValueError({
+            "code": "unknown_segment_provider",
+            "message": "Unknown factor segment provider(s).",
+            "invalid_values": invalid,
+            "valid_values": list(VALID_SEGMENT_PROVIDERS),
+        })
+
+
+def _parse_and_validate_config(config_dict: dict, *, params: dict | None = None):
+    from tinohelm.factor.config import parse_eval_config
+
+    config = parse_eval_config(config_dict, params=params)
+    _validate_segments(config.segments)
+    return config
+
+
+def _report_payload(
+    *,
+    run_id: str,
+    factor_name: str,
+    status: str,
+    progress: int | None,
+    error: str | None,
+    result: dict | None,
+    summary: bool = False,
+    detail: bool = True,
+    fields: list[str] | None = None,
+) -> dict:
+    """Build the API report payload without hiding job status.
+
+    The HTTP/API response stays backward-compatible (`status` at top level),
+    while the Rust CLI maps `status=failed` to a top-level LLM envelope error.
+    """
+    if status == "completed":
+        data = {
+            "run_id": run_id,
+            "factor_name": factor_name,
+            "status": "completed",
+            "transport_ok": True,
+            "job_ok": True,
+            "job_status": status,
+            "meta": _stored_result_meta(result),
+        }
+        if summary:
+            data["summary"] = _select_fields(
+                _stored_result_summary(result, run_id=run_id, status=status),
+                fields,
+            )
+        if detail:
+            data["result"] = _select_fields(result or {}, fields) if fields else result
+        if not summary and not detail:
+            data["summary"] = _select_fields(
+                _stored_result_summary(result, run_id=run_id, status=status),
+                fields,
+            )
+        return data
+
+    safe_message = (error or f"Factor run is {status}")[-4000:]
+    failed = status == "failed"
+    return {
+        "run_id": run_id,
+        "factor_name": factor_name,
+        "status": status,
+        "progress": progress,
+        "error": error,
+        "message": safe_message,
+        "transport_ok": True,
+        "job_ok": False if failed else None,
+        "job_status": status,
+        "error_code": "factor_run_failed" if failed else None,
+    }
+
+
+def _stored_result_summary(
+    result: dict | None,
+    *,
+    run_id: str | None = None,
+    status: str | None = None,
+) -> dict:
+    result = result or {}
+    data = {
+        "ic_mean": result.get("ic_mean"),
+        "ir": result.get("ir"),
+        "t_stat": result.get("ic_tstat"),
+        "tstat": result.get("ic_tstat"),
+        "rating": result.get("rating"),
+        "monotonicity": result.get("is_monotonic"),
+        "warnings": result.get("warnings", []),
+        "effective_params": result.get("effective_params", {}),
+        "cache_key": result.get("cache_key"),
+        "cache_hit": result.get("cache_hit"),
+        "factor_code_hash": result.get("factor_code_hash"),
+        "source_file": result.get("factor_source_file"),
+        "module_path": result.get("factor_module_path"),
+        "walk_forward_status": (result.get("walk_forward") or {}).get("status"),
+        "detail_available": True,
+    }
+    if run_id is not None:
+        data["run_id"] = run_id
+    if status is not None:
+        data["status"] = status
+    return data
+
+
+def _eval_summary(result: object, *, run_id: str | None = None, status: str | None = None) -> dict:
+    data = {
+        "ic_mean": getattr(result, "ic_mean", None),
+        "ir": getattr(result, "ir", None),
+        "t_stat": getattr(result, "ic_tstat", None),
+        "tstat": getattr(result, "ic_tstat", None),
+        "rating": getattr(result, "rating", None),
+        "monotonicity": getattr(result, "is_monotonic", None),
+        "warnings": getattr(result, "warnings", []),
+        "effective_params": getattr(result, "effective_params", {}),
+        "cache_key": getattr(result, "cache_key", None),
+        "cache_hit": getattr(result, "cache_hit", None),
+        "factor_code_hash": getattr(result, "factor_code_hash", None),
+        "source_file": getattr(result, "factor_source_file", None),
+        "module_path": getattr(result, "factor_module_path", None),
+        "detail_available": True,
+    }
+    if run_id is not None:
+        data["run_id"] = run_id
+    if status is not None:
+        data["status"] = status
+    return data
+
+
+def _select_fields(payload: dict, fields: list[str] | None) -> dict:
+    if not fields:
+        return payload
+    return {key: payload.get(key) for key in fields if key in payload}
+
+
+def _resolve_detail(summary: bool, detail: bool | None) -> bool:
+    """Resolve summary/detail tri-state output controls.
+
+    Backward compatibility: callers that send neither flag still get the
+    historical full detail payload. LLM callers can send only summary=true and
+    receive compact output without also remembering detail=false.
+    """
+    if detail is not None:
+        return detail
+    return not summary
+
+
+def _stored_result_meta(result: dict | None) -> dict:
+    result = result or {}
+    return {
+        "effective_params": result.get("effective_params", {}),
+        "cache_key": result.get("cache_key"),
+        "cache_hit": result.get("cache_hit"),
+        "factor_code_hash": result.get("factor_code_hash"),
+        "source_file": result.get("factor_source_file"),
+        "module_path": result.get("factor_module_path"),
+    }
+
+
+def _eval_meta(result: object) -> dict:
+    return {
+        "effective_params": getattr(result, "effective_params", {}),
+        "cache_key": getattr(result, "cache_key", None),
+        "cache_hit": getattr(result, "cache_hit", None),
+        "factor_code_hash": getattr(result, "factor_code_hash", None),
+        "source_file": getattr(result, "factor_source_file", None),
+        "module_path": getattr(result, "factor_module_path", None),
+    }
+
+
+def _git_sha() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[4],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        ).strip()
+    except Exception:
+        return os.environ.get("GIT_SHA") or os.environ.get("TINO_GIT_SHA")
+
+
+def _platform_version() -> str:
+    try:
+        return pkg_version("tinohelm")
+    except PackageNotFoundError:
+        from tinohelm import __version__
+
+        return __version__
+
+
+def _api_package_path() -> str:
+    import tinohelm
+
+    return str(Path(tinohelm.__file__).resolve().parent)
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +389,43 @@ async def list_factors(
     if not include_experimental:
         items = [item for item in items if not item.get("experimental", False)]
     return items
+
+
+@router.get("/capabilities")
+async def factor_capabilities() -> dict:
+    return {
+        "segments": {
+            "valid_values": list(VALID_SEGMENT_PROVIDERS),
+            "error_code": "unknown_segment_provider",
+        },
+        "request_body_inputs": ["--body", "--body-file", "--stdin"],
+        "params": {
+            "normal_run_path_receives_params": True,
+            "params_grid_path": True,
+        },
+        "result_controls": ["summary", "detail", "fields"],
+    }
+
+
+@router.get("/version")
+async def factor_version() -> dict:
+    from tinohelm.factor.registry import Registry
+
+    registry = Registry()
+    registry.scan()
+    return {
+        "api_version": "factor-api/v1",
+        "platform_version": _platform_version(),
+        "python_version": sys.version.split()[0],
+        "system": platform.platform(),
+        "api_package_path": _api_package_path(),
+        "git_sha": _git_sha(),
+        "build_time": os.environ.get("BUILD_TIME") or os.environ.get("TINO_BUILD_TIME"),
+        "factor_registry_paths": {
+            "user_dir": str(registry._user_dir),
+            "builtins_package": registry._builtins_package,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +483,6 @@ async def explore_factor(req: ExploreRequest) -> dict:
     from tinohelm.factor.evaluation.evaluator import Evaluator
     from tinohelm.factor.observer import Observer
     from tinohelm.factor.registry import Registry
-    from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.universe import Universe
     from tinohelm.core.config import get_settings
     import asyncio
@@ -221,9 +498,10 @@ async def explore_factor(req: ExploreRequest) -> dict:
 
     config_dict = req.config
     try:
-        config = parse_eval_config(config_dict, params=req.params)
+        config = _parse_and_validate_config(config_dict, params=req.params)
     except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid config: {exc}")
+        detail = exc.args[0] if exc.args and isinstance(exc.args[0], dict) else f"Invalid config: {exc}"
+        raise HTTPException(status_code=422, detail=detail)
 
     universe_obj = Universe.from_symbols(config.universe)
     data_layer = DataLayer(universe_obj, catalog_root=Path(catalog_path))
@@ -259,7 +537,7 @@ async def explore_factor(req: ExploreRequest) -> dict:
     # and turnover aggregates are already produced by ``Evaluator.evaluate``, so
     # exposing them here keeps /explore self-contained for the frontend panel
     # without triggering the expensive /run path.
-    return {
+    full_payload = {
         "factor_name": req.factor_name,
         "ic_mean": result.ic_mean,
         "ic_std": result.ic_std,
@@ -282,7 +560,29 @@ async def explore_factor(req: ExploreRequest) -> dict:
         "oos_ic_series": result.oos_ic_series,
         "segment_results": result.segment_results,
         "neutralization_config": result.neutralization_config,
+        "effective_params": result.effective_params,
+        "cache_key": result.cache_key,
+        "cache_hit": result.cache_hit,
+        "factor_code_hash": result.factor_code_hash,
+        "factor_source_file": result.factor_source_file,
+        "factor_module_path": result.factor_module_path,
+        "meta": _eval_meta(result),
+        "warnings": result.warnings,
     }
+    detail = _resolve_detail(req.summary, req.detail)
+    if req.summary and not detail:
+        return {"factor_name": req.factor_name, "summary": _select_fields(_eval_summary(result), req.fields)}
+    if req.summary and detail:
+        return {
+            "factor_name": req.factor_name,
+            "summary": _select_fields(_eval_summary(result), req.fields),
+            "result": _select_fields(full_payload, req.fields) if req.fields else full_payload,
+        }
+    if req.fields:
+        return _select_fields(full_payload, req.fields)
+    if not detail:
+        return {"factor_name": req.factor_name, "summary": _select_fields(_eval_summary(result), req.fields)}
+    return full_payload
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +601,6 @@ async def submit_run(
     returns ``{run_id, status: "queued"}``.
     """
     # Validate factor_name exists in registry (same guard as /explore).
-    from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.registry import Registry
 
     registry = Registry()
@@ -310,18 +609,24 @@ async def submit_run(
         raise HTTPException(status_code=404, detail=f"Factor '{req.factor_name}' not found")
 
     try:
-        parsed_config = parse_eval_config(req.config, params=req.params)
+        parsed_config = _parse_and_validate_config(req.config, params=req.params)
     except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid config: {exc}")
+        detail = exc.args[0] if exc.args and isinstance(exc.args[0], dict) else f"Invalid config: {exc}"
+        raise HTTPException(status_code=422, detail=detail)
 
     run_id = str(uuid4())
+
+    stored_config = dict(req.config)
+    if req.params is not None:
+        stored_config["params"] = dict(req.params)
+    stored_config["_tino_run_options"] = {"full": req.full}
 
     neutralize = list(parsed_config.neutralize)
     run = FactorRun(
         id=run_id,
         factor_name=req.factor_name,
         status="queued",
-        config=req.config,
+        config=stored_config,
         progress=0,
         universe_id=parsed_config.universe_id,
         neutralization_config=(
@@ -334,7 +639,7 @@ async def submit_run(
     payload = json.dumps({
         "run_id": run_id,
         "factor_name": req.factor_name,
-        "config": req.config,
+        "config": stored_config,
         "params": req.params,
         "full": req.full,
     })
@@ -401,6 +706,9 @@ async def cancel_factor_run(
 @router.get("/report/{run_id}")
 async def get_report(
     run_id: str,
+    summary: bool = Query(False),
+    detail: bool | None = Query(None),
+    fields: str | None = Query(None, description="Comma-separated result/summary fields to keep"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Return the full EvalResult for a completed FactorRun; 404 if not found."""
@@ -411,21 +719,22 @@ async def get_report(
     if run is None:
         raise HTTPException(status_code=404, detail="FactorRun not found")
 
-    if run.status != "completed":
-        return {
-            "run_id": run_id,
-            "factor_name": run.factor_name,
-            "status": run.status,
-            "progress": run.progress,
-            "error": run.error,
-        }
-
-    return {
-        "run_id": run_id,
-        "factor_name": run.factor_name,
-        "status": "completed",
-        "result": run.result,
-    }
+    requested_fields = (
+        [item.strip() for item in fields.split(",") if item.strip()]
+        if fields
+        else None
+    )
+    return _report_payload(
+        run_id=run_id,
+        factor_name=run.factor_name,
+        status=run.status,
+        progress=run.progress,
+        error=run.error,
+        result=run.result,
+        summary=summary,
+        detail=_resolve_detail(summary, detail),
+        fields=requested_fields,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -681,7 +990,7 @@ async def params_grid_endpoint(req: ParamsGridRequest) -> dict:
 async def _load_eval_result_from_db(
     run_id: str,
     db: AsyncSession,
-) -> "EvalResult":
+) -> EvalResult:
     """Load a :class:`~tinohelm.factor.types.EvalResult` from a completed FactorRun.
 
     Raises :exc:`fastapi.HTTPException` (404) if the run does not exist, and

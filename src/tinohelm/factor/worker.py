@@ -58,6 +58,19 @@ class FactorRunCancelled(Exception):
     """Raised internally when a factor run observes its Redis cancel flag."""
 
 
+def _queue_payload_from_run(run: FactorRun) -> str:
+    """Rebuild a full Redis payload from the persisted FactorRun snapshot."""
+    config = dict(run.config or {})
+    run_options = dict(config.get("_tino_run_options") or {})
+    return json.dumps({
+        "run_id": run.id,
+        "factor_name": run.factor_name,
+        "config": config,
+        "params": config.get("params"),
+        "full": bool(run_options.get("full", False)),
+    })
+
+
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     """Reset FactorRun rows stuck in 'running' back to 'queued' and re-enqueue.
 
@@ -89,20 +102,22 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
         # After a successful commit, rebuild the Redis queue from the DB's
         # authoritative "queued" state (includes both newly-recovered rows and
         # any pre-existing queued rows).
-        queued_ids = (
+        queued_runs = (
             await db.execute(
-                select(FactorRun.id)
+                select(FactorRun)
                 .where(FactorRun.status == "queued")
                 .order_by(FactorRun.created_at.asc())
             )
         ).scalars().all()
 
         # Clear the old queue and re-populate atomically to avoid duplicates.
-        # Use rpush to preserve chronological (created_at ASC) order.
-        if queued_ids:
+        # The live enqueue path uses LPUSH and consumers use BRPOP, so pushing
+        # queued runs in created_at ASC order with LPUSH preserves FIFO: newest
+        # ends up at the head, oldest at the tail, and BRPOP consumes oldest first.
+        if queued_runs:
             await rds.delete(QUEUE_KEY)
-            for run_id in queued_ids:
-                await rds.rpush(QUEUE_KEY, run_id)
+            for run in queued_runs:
+                await rds.lpush(QUEUE_KEY, _queue_payload_from_run(run))
 
     if recovered:
         logger.info("Recovered %d interrupted factor run(s)", recovered)
@@ -185,6 +200,11 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             # If caller didn't embed config in the payload, load from DB row.
             if config_dict is None:
                 config_dict = run.config or {}
+            config_run_options = dict((config_dict or {}).get("_tino_run_options") or {})
+            if params is None:
+                params = (config_dict or {}).get("params")
+            if "full" not in payload:
+                full = bool(config_run_options.get("full", False))
             if not factor_name:
                 factor_name = run.factor_name
 

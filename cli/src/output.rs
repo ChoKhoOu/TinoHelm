@@ -27,6 +27,8 @@ pub struct Envelope<'a, T: Serialize> {
 
 #[derive(Debug, Serialize)]
 pub struct EnvelopeError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub kind: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]

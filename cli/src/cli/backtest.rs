@@ -1123,6 +1123,7 @@ fn print_backtest_error_machine(
     body: serde_json::Value,
 ) -> Result<()> {
     let error = EnvelopeError {
+        code: None,
         kind: kind.into(),
         message: message.into(),
         status_code: None,

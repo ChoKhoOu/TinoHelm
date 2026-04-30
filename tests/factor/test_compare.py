@@ -72,7 +72,10 @@ def test_compare_returns_metric_diffs():
     assert isinstance(diffs, list)
     assert len(diffs) == 2  # ic_mean + ir
 
-    required_keys = {"name", "a", "b", "delta", "ci_low", "ci_high", "significant"}
+    required_keys = {
+        "name", "a", "b", "delta", "a_minus_b", "b_minus_a",
+        "delta_basis", "direction", "better_run", "ci_low", "ci_high", "significant",
+    }
     for entry in diffs:
         assert required_keys.issubset(entry.keys()), f"Missing keys: {required_keys - set(entry.keys())}"
         assert entry["name"] in ("ic_mean", "ir")
@@ -106,18 +109,19 @@ def test_bootstrap_runs_n_iterations():
 
 
 def test_significant_when_ci_excludes_zero():
-    """IC series with a large mean difference should produce significant='improved'."""
-    # eval_a: IC near 0; eval_b: IC near 0.5 — unmistakably different
+    """IC series with a large mean difference should preserve A/B direction."""
+    # eval_a: IC near 0; eval_b: IC near 0.5 — b is higher than a
     eval_a = _make_result([0.0] * 100)
     eval_b = _make_result([0.5] * 100)
 
     out = compare_results(eval_a, eval_b, n_bootstrap=1000, random_seed=42)
     ic_mean_entry = next(d for d in out["metric_diffs"] if d["name"] == "ic_mean")
 
-    # With zero-variance series the CI is degenerate but delta should be clear
-    # The CI may be [0.5, 0.5] which satisfies ci_low > 0 → "improved"
-    assert ic_mean_entry["delta"] == pytest.approx(0.5, abs=1e-9)
-    assert ic_mean_entry["significant"] == "improved"
+    # With zero-variance series the CI is degenerate but delta should be clear.
+    assert ic_mean_entry["delta"] == pytest.approx(-0.5, abs=1e-9)
+    assert ic_mean_entry["a_minus_b"] == pytest.approx(-0.5, abs=1e-9)
+    assert ic_mean_entry["b_minus_a"] == pytest.approx(0.5, abs=1e-9)
+    assert ic_mean_entry["significant"] == "degraded"
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +339,22 @@ def test_compare_results_bootstrap_pairs_common_dates_only():
     assert ic_mean_entry["ci_low"] is not None
     assert ic_mean_entry["ci_high"] is not None
     # Only the shared dates 2024-01-02 and 2024-01-03 are bootstrapped; the
-    # large non-overlapping outliers must not dominate the paired CI.
-    assert 0.0 <= ic_mean_entry["ci_low"] <= 0.11
-    assert 0.0 <= ic_mean_entry["ci_high"] <= 0.11
+    # large non-overlapping outliers must not dominate the paired CI. A is
+    # lower than B on both shared dates, so a_minus_b CI is negative.
+    assert -0.11 <= ic_mean_entry["ci_low"] <= 0.0
+    assert -0.11 <= ic_mean_entry["ci_high"] <= 0.0
+
+
+def test_compare_results_delta_is_a_minus_b_with_explicit_reverse():
+    """Pairwise compare should not hide operand direction behind ambiguous delta."""
+    eval_a = _make_result([0.30, 0.20, 0.10], ic_mean=0.20, ir=2.0)
+    eval_b = _make_result([0.10, 0.05, 0.00], ic_mean=0.05, ir=0.5)
+
+    out = compare_results(eval_a, eval_b, n_bootstrap=50, random_seed=42)
+
+    ic_mean = next(d for d in out["metric_diffs"] if d["name"] == "ic_mean")
+    assert ic_mean["a_minus_b"] == pytest.approx(0.15)
+    assert ic_mean["b_minus_a"] == pytest.approx(-0.15)
+    assert ic_mean["delta"] == pytest.approx(0.15)
+    assert ic_mean["delta_basis"] == "a_minus_b"
+    assert ic_mean["better_run"] == "a"

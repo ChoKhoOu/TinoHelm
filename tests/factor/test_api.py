@@ -15,8 +15,6 @@ Endpoint coverage:
 from __future__ import annotations
 
 import json
-import re
-import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,8 +25,10 @@ from fastapi import FastAPI
 # ---- Build minimal test app without lifespan side-effects ----
 
 from tinohelm.api.routes import factor as factor_module
+from tinohelm.api.routes import settings as settings_module
 
 test_app = FastAPI()
+test_app.include_router(settings_module.router)
 test_app.include_router(factor_module.router)
 
 
@@ -81,6 +81,35 @@ def client():
         yield c
 
     test_app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# 0. Runtime/capability discovery
+# ---------------------------------------------------------------------------
+
+def test_runtime_version_endpoint_exposes_source_metadata(client):
+    resp = client.get("/api/version")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["api_package_path"]
+    assert "platform_version" in body
+    assert "git_sha" in body
+    assert "factor_registry_paths" in body
+
+
+def test_factor_version_and_capabilities_endpoints(client):
+    version_resp = client.get("/api/factor/version")
+    assert version_resp.status_code == 200, version_resp.text
+    version_body = version_resp.json()
+    assert version_body["api_package_path"]
+    assert version_body["factor_registry_paths"]
+
+    caps_resp = client.get("/api/factor/capabilities")
+    assert caps_resp.status_code == 200, caps_resp.text
+    caps = caps_resp.json()
+    assert "btc_trend" in caps["segments"]["valid_values"]
+    assert "--body-file" in caps["request_body_inputs"]
+    assert caps["params"]["normal_run_path_receives_params"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +366,52 @@ def test_submit_run_returns_run_id_queued(client):
     mock_session.commit.assert_called_once()
 
 
+def test_submit_run_persists_params_and_full_for_recovery(client):
+    """DB config snapshot must be sufficient to rebuild the queue after restart."""
+    mock_rds = AsyncMock()
+    mock_rds.lpush = AsyncMock(return_value=1)
+    mock_session = _make_async_db_session()
+
+    async def _db_override():
+        yield mock_session
+
+    async def _redis_override():
+        return mock_rds
+
+    from tinohelm.api.deps import get_db, get_redis
+    test_app.dependency_overrides[get_db] = _db_override
+    test_app.dependency_overrides[get_redis] = _redis_override
+
+    try:
+        payload = {
+            "factor_name": "ret_N",
+            "config": {
+                "universe": ["BTCUSDT-PERP"],
+                "start": "2024-01-01",
+                "end": "2024-02-01",
+            },
+            "params": {"n": 17},
+            "full": True,
+        }
+        resp = client.post("/api/factor/run", json=payload)
+    finally:
+        from tinohelm.api.deps import get_settings_dep
+        test_app.dependency_overrides[get_db] = _override_get_db
+        test_app.dependency_overrides[get_redis] = _override_get_redis
+        test_app.dependency_overrides[get_settings_dep] = _override_get_settings
+
+    assert resp.status_code == 200, resp.text
+    added_run = mock_session.add.call_args[0][0]
+    assert added_run.config["params"] == {"n": 17}
+    assert added_run.config["_tino_run_options"] == {"full": True}
+
+    queued_payload = json.loads(mock_rds.lpush.call_args[0][1])
+    assert queued_payload["config"]["params"] == {"n": 17}
+    assert queued_payload["config"]["_tino_run_options"] == {"full": True}
+    assert queued_payload["params"] == {"n": 17}
+    assert queued_payload["full"] is True
+
+
 # ---------------------------------------------------------------------------
 # 6. GET /api/factor/runs
 # ---------------------------------------------------------------------------
@@ -466,6 +541,74 @@ def test_get_report_completed(client):
     body = resp.json()
     assert body["status"] == "completed"
     assert body["result"]["ic_mean"] == 0.05
+
+
+def test_get_report_summary_defaults_to_compact_without_detail(client):
+    mock_run = MagicMock()
+    mock_run.id = "completed-run-2"
+    mock_run.factor_name = "ret_N"
+    mock_run.status = "completed"
+    mock_run.result = {
+        "ic_mean": 0.05,
+        "ir": 0.6,
+        "rating": 2,
+        "distribution_histogram": [{"bin": i} for i in range(50)],
+    }
+
+    mock_session = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_run
+    mock_session.execute = AsyncMock(return_value=result)
+
+    async def _db_with_completed_run():
+        yield mock_session
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db_with_completed_run
+    try:
+        resp = client.get("/api/factor/report/completed-run-2?summary=true&fields=ic_mean,ir")
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["summary"] == {"ic_mean": 0.05, "ir": 0.6}
+    assert "result" not in body
+
+
+def test_get_report_summary_detail_fields_filter_detail_payload(client):
+    mock_run = MagicMock()
+    mock_run.id = "completed-run-3"
+    mock_run.factor_name = "ret_N"
+    mock_run.status = "completed"
+    mock_run.result = {
+        "ic_mean": 0.05,
+        "ir": 0.6,
+        "rating": 2,
+        "distribution_histogram": [{"bin": i} for i in range(50)],
+    }
+
+    mock_session = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_run
+    mock_session.execute = AsyncMock(return_value=result)
+
+    async def _db_with_completed_run():
+        yield mock_session
+
+    from tinohelm.api.deps import get_db
+    test_app.dependency_overrides[get_db] = _db_with_completed_run
+    try:
+        resp = client.get(
+            "/api/factor/report/completed-run-3?summary=true&detail=true&fields=ic_mean,ir"
+        )
+    finally:
+        test_app.dependency_overrides[get_db] = _override_get_db
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["summary"] == {"ic_mean": 0.05, "ir": 0.6}
+    assert body["result"] == {"ic_mean": 0.05, "ir": 0.6}
 
 
 # ---------------------------------------------------------------------------

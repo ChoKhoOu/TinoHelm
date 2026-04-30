@@ -162,6 +162,8 @@ def factor(
     experimental: bool = False,
     deprecated: bool = False,
     signal_compatible: bool = True,
+    metadata: dict[str, Any] | None = None,
+    warnings: list[dict[str, Any]] | None = None,
 ) -> Callable:  # type: ignore[type-arg]
     """Decorator that attaches a :class:`FactorSpec` to a factor function.
 
@@ -270,6 +272,9 @@ def factor(
             experimental=experimental,
             deprecated=deprecated,
             signal_compatible=signal_compatible,
+            module_path=f"{func.__module__}.{func_name}",
+            metadata=dict(metadata) if metadata is not None else {},
+            warnings=list(warnings) if warnings is not None else [],
         )
 
         # 6. Attach spec and return original function unchanged

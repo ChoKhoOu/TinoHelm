@@ -27,6 +27,7 @@ Test fixtures construct synthetic panels directly with polars to match.
 """
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -161,6 +162,24 @@ def vol_10(close: Panel) -> Panel:
     )
 
 
+@factor(category="测试", lookback=1, params={"scale": 1.0})
+def param_scale(close: Panel, params=None) -> Panel:
+    scale = float((params or {}).get("scale", 1.0))
+    cols = _value_cols(close)
+    return close.with_columns([(pl.col(c) * scale).alias(c) for c in cols])
+
+
+@factor(category="测试", lookback=1, params={"scale": 1.0})
+def scalar_param_scale(close: Panel, scale: float = 1.0) -> Panel:
+    cols = _value_cols(close)
+    return close.with_columns([(pl.col(c) * float(scale)).alias(c) for c in cols])
+
+
+@factor(category="测试", lookback=1)
+def volume_passthrough(volume: Panel) -> Panel:
+    return volume
+
+
 # ---------------------------------------------------------------------------
 # Fixtures — orchestrator + collaborators
 # ---------------------------------------------------------------------------
@@ -170,6 +189,9 @@ def registry() -> Registry:
     r = Registry(user_dir=Path("/tmp/nonexistent_factor_dir_for_test"))
     _register_factor(r, ret_5, ret_5.__factor_spec__)
     _register_factor(r, vol_10, vol_10.__factor_spec__)
+    _register_factor(r, param_scale, param_scale.__factor_spec__)
+    _register_factor(r, scalar_param_scale, scalar_param_scale.__factor_spec__)
+    _register_factor(r, volume_passthrough, volume_passthrough.__factor_spec__)
     return r
 
 
@@ -257,6 +279,19 @@ class TestSingleFactorRun:
         result = orchestrator.run("ret_5", config)
         assert len(result.distribution_stats) > 0
         assert len(result.distribution_histogram) > 0
+
+    def test_non_close_factor_loads_close_in_same_request(
+        self,
+        orchestrator: Orchestrator,
+        data_layer: _StubDataLayer,
+        config: EvalConfig,
+    ):
+        orchestrator.run("volume_passthrough", config)
+        first_request = data_layer._calls[0][0]
+        fields = {(r.symbol, r.field_name, r.frequency, r.source) for r in first_request}
+        for sym in SYMBOLS:
+            assert (sym, "volume", "1m", "bar") in fields
+            assert (sym, "close", "1m", "bar") in fields
 
     def test_no_nan_or_inf_in_scalar_fields(
         self, orchestrator: Orchestrator, config: EvalConfig
@@ -354,6 +389,41 @@ class TestCacheBehavior:
         # Both results numerically identical
         assert first.ic_mean == second.ic_mean
         assert first.turnover == second.turnover
+        assert first.cache_key
+        assert first.cache_hit is False
+        assert second.cache_key == first.cache_key
+        assert second.cache_hit is True
+        assert second.factor_code_hash == first.factor_code_hash
+
+    def test_params_reach_kernel_and_partition_cache(
+        self,
+        orchestrator: Orchestrator,
+        config: EvalConfig,
+    ):
+        low_config = dataclasses.replace(config, params={"scale": 1.0})
+        high_config = dataclasses.replace(config, params={"scale": -1.0})
+
+        low = orchestrator.run("param_scale", low_config, params={"scale": 1.0})
+        high = orchestrator.run("param_scale", high_config, params={"scale": -1.0})
+
+        assert high.ic_mean == pytest.approx(-low.ic_mean)
+        assert low.effective_params == {"scale": 1.0}
+        assert high.effective_params == {"scale": -1.0}
+
+    def test_scalar_params_reach_kernel_and_partition_cache(
+        self,
+        orchestrator: Orchestrator,
+        config: EvalConfig,
+    ):
+        low_config = dataclasses.replace(config, params={"scale": 1.0})
+        high_config = dataclasses.replace(config, params={"scale": -1.0})
+
+        low = orchestrator.run("scalar_param_scale", low_config, params={"scale": 1.0})
+        high = orchestrator.run("scalar_param_scale", high_config, params={"scale": -1.0})
+
+        assert high.ic_mean == pytest.approx(-low.ic_mean)
+        assert low.effective_params == {"scale": 1.0}
+        assert high.effective_params == {"scale": -1.0}
 
     def test_cache_hit_span_tag_true(
         self,

@@ -411,3 +411,61 @@ async def test_cancel_flag_mid_pipeline_breaks(mock_session_factory, mock_eval_r
     ]
     assert any(event["type"] == "factor.cancelled" for event in event_payloads)
     assert not any(event["type"] == "factor.completed" for event in event_payloads)
+
+
+@pytest.mark.asyncio
+async def test_recover_interrupted_jobs_rebuilds_fifo_queue_for_brpop_consumers():
+    """Recovery must preserve the live LPUSH/BRPOP FIFO queue contract."""
+    old_run = _make_mock_db_run(
+        run_id="old-run",
+        config={
+            "universe": ["BTCUSDT-PERP"],
+            "start": "2024-01-01",
+            "end": "2024-01-02",
+            "params": {"n": 5},
+            "_tino_run_options": {"full": False},
+        },
+    )
+    new_run = _make_mock_db_run(
+        run_id="new-run",
+        config={
+            "universe": ["BTCUSDT-PERP"],
+            "start": "2024-01-01",
+            "end": "2024-01-02",
+            "params": {"n": 9},
+            "_tino_run_options": {"full": True},
+        },
+    )
+
+    update_result = MagicMock(rowcount=2)
+    select_result = MagicMock()
+    select_result.scalars.return_value.all.return_value = [old_run, new_run]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[update_result, select_result])
+    session.commit = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    rds = AsyncMock()
+    rds.delete = AsyncMock()
+    rds.lpush = AsyncMock()
+
+    with patch("tinohelm.factor.worker.get_session_factory", return_value=factory):
+        from tinohelm.factor.worker import QUEUE_KEY, recover_interrupted_jobs
+
+        recovered = await recover_interrupted_jobs(rds)
+
+    assert recovered == 2
+    rds.delete.assert_awaited_once_with(QUEUE_KEY)
+    assert not getattr(rds, "rpush").await_args_list
+
+    pushed_ids = [json.loads(c.args[1])["run_id"] for c in rds.lpush.await_args_list]
+    assert pushed_ids == ["old-run", "new-run"]
+
+    simulated_redis_list: list[str] = []
+    for pushed_id in pushed_ids:
+        simulated_redis_list.insert(0, pushed_id)
+    assert simulated_redis_list == ["new-run", "old-run"]
+    assert simulated_redis_list.pop() == "old-run"

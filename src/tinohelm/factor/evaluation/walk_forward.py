@@ -207,6 +207,7 @@ class WalkForwardEvaluator:
         folds = generate_folds(ts_series, self.spec)
 
         oos_ic_series: list[dict] = []
+        warnings: list[dict] = []
 
         for fold in folds:
             # Slice panel and returns to the test window.
@@ -219,8 +220,57 @@ class WalkForwardEvaluator:
                     fold.test_start, fold.test_end - fold.test_start
                 )
 
+            if test_panel.height == 0 or test_returns.height == 0:
+                warning = {
+                    "code": "walk_forward_fold_empty",
+                    "message": "Walk-forward fold has no aligned OOS rows.",
+                    "fold": fold.fold_id,
+                    "train_start": fold.train_start,
+                    "train_end": fold.train_end,
+                    "test_start": fold.test_start,
+                    "test_end": fold.test_end,
+                }
+                warnings.append(warning)
+                oos_ic_series.append({
+                    "fold": fold.fold_id,
+                    "train_start": fold.train_start,
+                    "train_end": fold.train_end,
+                    "test_start": fold.test_start,
+                    "test_end": fold.test_end,
+                    "status": "insufficient_data",
+                    "ic_mean": None,
+                    "ic_std": None,
+                    "sharpe": None,
+                    "warning_code": "walk_forward_fold_empty",
+                })
+                continue
+
             # Run eval on the OOS slice.
             oos_result = eval_fn(test_panel, test_returns)
+            if not getattr(oos_result, "ic_series", None) or oos_result.ic_mean is None:
+                warning = {
+                    "code": "walk_forward_fold_no_valid_ic",
+                    "message": "Walk-forward fold had rows but no valid aligned IC observations.",
+                    "fold": fold.fold_id,
+                    "train_start": fold.train_start,
+                    "train_end": fold.train_end,
+                    "test_start": fold.test_start,
+                    "test_end": fold.test_end,
+                }
+                warnings.append(warning)
+                oos_ic_series.append({
+                    "fold": fold.fold_id,
+                    "train_start": fold.train_start,
+                    "train_end": fold.train_end,
+                    "test_start": fold.test_start,
+                    "test_end": fold.test_end,
+                    "status": "insufficient_data",
+                    "ic_mean": None,
+                    "ic_std": None,
+                    "sharpe": None,
+                    "warning_code": "walk_forward_fold_no_valid_ic",
+                })
+                continue
 
             # Sharpe of IC = IR across the per-period IC series within this fold.
             ic_std = oos_result.ic_std if oos_result.ic_std else 0.0
@@ -237,7 +287,8 @@ class WalkForwardEvaluator:
                     "train_end": fold.train_end,
                     "test_start": fold.test_start,
                     "test_end": fold.test_end,
-                    "ic_mean": float(oos_result.ic_mean) if oos_result.ic_mean else 0.0,
+                    "status": "ok",
+                    "ic_mean": float(oos_result.ic_mean) if oos_result.ic_mean is not None else None,
                     "ic_std": float(ic_std),
                     "sharpe": float(sharpe),
                 }
@@ -246,10 +297,34 @@ class WalkForwardEvaluator:
         # Aggregate across folds.
         if not oos_ic_series:
             result = EvalResult()
+            result.ic_mean = None
+            result.ic_std = None
+            result.ir = None
+            result.ic_tstat = None
             result.oos_ic_series = []
+            result.warnings = [{
+                "code": "walk_forward_no_folds",
+                "message": "Walk-forward configuration produced no folds.",
+            }]
+            result.walk_forward = {"status": "insufficient_data", "folds": []}
             return result
 
-        ic_means = np.array([d["ic_mean"] for d in oos_ic_series])
+        valid_fold_rows = [d for d in oos_ic_series if d.get("status") == "ok" and d.get("ic_mean") is not None]
+        if not valid_fold_rows:
+            result = EvalResult()
+            result.ic_mean = None
+            result.ic_std = None
+            result.ir = None
+            result.ic_tstat = None
+            result.oos_ic_series = oos_ic_series
+            result.warnings = warnings or [{
+                "code": "walk_forward_no_valid_folds",
+                "message": "Walk-forward produced folds but no valid OOS metrics.",
+            }]
+            result.walk_forward = {"status": "insufficient_data", "folds": oos_ic_series}
+            return result
+
+        ic_means = np.array([d["ic_mean"] for d in valid_fold_rows], dtype=np.float64)
         mean_ic = float(np.mean(ic_means))
         std_ic = float(np.std(ic_means))
         ir = mean_ic / std_ic if std_ic > 1e-12 else 0.0
@@ -259,6 +334,13 @@ class WalkForwardEvaluator:
         result.ic_std = std_ic
         result.ir = ir
         result.oos_ic_series = oos_ic_series
+        result.warnings = warnings
+        result.walk_forward = {
+            "status": "ok" if not warnings else "partial",
+            "folds": oos_ic_series,
+            "valid_folds": len(valid_fold_rows),
+            "total_folds": len(oos_ic_series),
+        }
         return result
 
 

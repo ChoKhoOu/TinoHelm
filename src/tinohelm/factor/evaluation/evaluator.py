@@ -243,10 +243,15 @@ def _scrub_result(result: EvalResult) -> EvalResult:
         "fee_drag_monthly",
     ):
         val = getattr(result, fname)
+        if val is None:
+            # Preserve explicit undefined metrics (e.g. insufficient-data
+            # walk-forward). Do not make them look like economically valid 0s.
+            setattr(result, fname, None)
+            continue
         cleaned = _finite_or_none(val)
-        # Preserve the numeric field as 0.0 when scrubbed to None so
-        # downstream typed consumers don't choke. Fields that legitimately
-        # can be None (e.g. half_life) are handled separately.
+        # Historical contract: non-finite arithmetic artifacts scrub to 0.0 for
+        # typed consumers. Explicit None above means "not enough data" and is
+        # preserved.
         setattr(result, fname, cleaned if cleaned is not None else 0.0)
 
     # Collections
@@ -261,6 +266,10 @@ def _scrub_result(result: EvalResult) -> EvalResult:
     result.oos_ic_series = _finite_or_none(result.oos_ic_series) or []
     result.segment_results = _finite_or_none(result.segment_results) or {}
     result.neutralization_config = _finite_or_none(result.neutralization_config) or {}
+    result.effective_params = _finite_or_none(result.effective_params) or {}
+    result.warnings = _finite_or_none(result.warnings) or []
+    result.base_eval = _finite_or_none(result.base_eval)
+    result.walk_forward = _finite_or_none(result.walk_forward)
 
     return result
 
@@ -348,12 +357,15 @@ class Evaluator:
             wf_evaluator = WalkForwardEvaluator(config.walk_forward)
             fwd_df, _close_df = self._prepare_returns(returns, config)
             fwd_config = dataclasses.replace(config, returns_kind="forward_returns")
+            base_result, _, _, _ = self._evaluate_core(factor_values, fwd_df, fwd_config)
 
             def _eval_fn(panel: Panel, fwd: Panel) -> EvalResult:
                 result, _, _, _ = self._evaluate_core(panel, fwd, fwd_config)
                 return result
 
-            return wf_evaluator.evaluate(factor_values, fwd_df, eval_fn=_eval_fn)
+            wf_result = wf_evaluator.evaluate(factor_values, fwd_df, eval_fn=_eval_fn)
+            wf_result.base_eval = dataclasses.asdict(base_result)
+            return _scrub_result(wf_result)
 
         result, factor_df, fwd_df, _close_df = self._evaluate_core(
             factor_values, returns, config
