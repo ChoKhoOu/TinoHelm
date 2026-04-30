@@ -449,18 +449,41 @@ fn print_routes_table(routes: &[serde_json::Value]) {
             "DELETE" => format!("{}", method.red()),
             _ => method.to_string(),
         };
-        let path_short = if path.len() > 45 {
-            format!("{}…", &path[..44])
-        } else {
-            path.to_string()
-        };
-        let summary_short = if summary.len() > 40 {
-            format!("{}…", &summary[..39])
-        } else {
-            summary.to_string()
-        };
+        let path_short = truncate_chars(path, 45);
+        let summary_short = truncate_chars(summary, 40);
         t.row(&[&method_colored, &accent(&path_short), &dim(&summary_short)]);
     }
     t.footer();
     println!("    {}", muted(&format!("{} route(s)", routes.len())));
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let prefix: String = value.chars().take(max_chars - 1).collect();
+    format!("{prefix}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncate_chars_leaves_short_strings_unchanged() {
+        assert_eq!(truncate_chars("12345", 5), "12345");
+    }
+
+    #[test]
+    fn truncate_chars_shortens_ascii_to_width_with_ellipsis() {
+        assert_eq!(truncate_chars("123456", 5), "1234…");
+    }
+
+    #[test]
+    fn truncate_chars_is_utf8_safe() {
+        assert_eq!(truncate_chars("资金费率异常回落", 6), "资金费率异…");
+    }
 }

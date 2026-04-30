@@ -4,7 +4,9 @@ use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
-use crate::output::{print_json, print_llm_success, EnvelopeMeta, OutputFormat};
+use crate::output::{
+    print_json, print_llm_error, print_llm_success, EnvelopeError, EnvelopeMeta, OutputFormat,
+};
 
 #[derive(Subcommand)]
 pub enum NodeCmd {
@@ -245,6 +247,7 @@ async fn dispatch_lifecycle(
             yes,
         } => {
             if !yes {
+                reject_machine_confirmation(format, client, "node.lifecycle.flatten")?;
                 let target = strategy_id.as_deref().unwrap_or("ALL");
                 eprint!("  Flatten positions for {}? [y/N] ", target);
                 let mut input = String::new();
@@ -265,6 +268,7 @@ async fn dispatch_lifecycle(
         }
         LifecycleCmd::Halt { mode, yes } => {
             if !yes {
+                reject_machine_confirmation(format, client, "node.lifecycle.halt")?;
                 eprint!("  Halt all trading on {} node? [y/N] ", mode);
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
@@ -298,6 +302,7 @@ async fn dispatch_lifecycle(
         }
         LifecycleCmd::Shutdown { mode, yes } => {
             if !yes {
+                reject_machine_confirmation(format, client, "node.lifecycle.shutdown")?;
                 eprint!("  Shutdown {} node? [y/N] ", mode);
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
@@ -437,6 +442,7 @@ async fn dispatch_portfolio(
         }
         PortfolioCmd::FlattenStop { name, mode, yes } => {
             if !yes {
+                reject_machine_confirmation(format, client, "node.strategy.flatten_stop")?;
                 eprint!(
                     "  Flatten and stop portfolio '{}'? This will close all positions. [y/N] ",
                     name
@@ -665,6 +671,34 @@ fn render_nodes_table(
     }
 
     println!();
+}
+
+fn reject_machine_confirmation(
+    format: OutputFormat,
+    client: &ApiClient,
+    command: &'static str,
+) -> Result<()> {
+    if !format.is_machine() {
+        return Ok(());
+    }
+
+    let error = EnvelopeError {
+        kind: "confirmation_required".to_string(),
+        message: "Refusing to prompt in machine output mode; rerun with --yes to confirm this destructive command.".to_string(),
+        status_code: None,
+        body: Some(serde_json::json!({ "required_flag": "--yes" })),
+    };
+    let meta = EnvelopeMeta::new(command, client.base_url(), client.auth_label());
+    if format == OutputFormat::Llm {
+        print_llm_error(error, meta)?;
+    } else {
+        print_json(&serde_json::json!({
+            "ok": false,
+            "error": error,
+            "meta": meta,
+        }))?;
+    }
+    std::process::exit(1);
 }
 
 fn print_node_machine<T: serde::Serialize>(

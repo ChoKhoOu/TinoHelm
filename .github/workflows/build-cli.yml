@@ -32,6 +32,30 @@ jobs:
           ./target/debug/tino --help >/tmp/tino-help.txt
           ./target/debug/tino version -f json | python3 -m json.tool >/tmp/tino-version.json
 
+          set +e
+          ./target/debug/tino -f json node lifecycle flatten --mode sandbox >/tmp/tino-confirmation-json.out 2>/tmp/tino-confirmation-json.err
+          confirmation_json_status=$?
+          ./target/debug/tino -f llm node lifecycle halt --mode sandbox >/tmp/tino-confirmation-llm.out 2>/tmp/tino-confirmation-llm.err
+          confirmation_llm_status=$?
+          set -e
+          test "$confirmation_json_status" -ne 0
+          test "$confirmation_llm_status" -ne 0
+          test ! -s /tmp/tino-confirmation-json.err
+          test ! -s /tmp/tino-confirmation-llm.err
+          python3 - <<'PY'
+          import json
+          for path, command in [
+              ("/tmp/tino-confirmation-json.out", "node.lifecycle.flatten"),
+              ("/tmp/tino-confirmation-llm.out", "node.lifecycle.halt"),
+          ]:
+              with open(path) as f:
+                  payload = json.load(f)
+              assert payload["ok"] is False
+              assert payload["error"]["kind"] == "confirmation_required"
+              assert payload["error"]["body"]["required_flag"] == "--yes"
+              assert payload["meta"]["command"] == command
+          PY
+
       - name: Verify Makefile install
         run: |
           make install BINDIR=/tmp/tino-bin
