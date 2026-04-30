@@ -628,3 +628,25 @@ class TestResearchCacheSplit:
         np.testing.assert_array_equal(loaded.ts, panel.ts)
         assert loaded.symbols == panel.symbols
         np.testing.assert_allclose(loaded.values, panel.values, equal_nan=True)
+
+    def test_corrupt_matrix_panel_cache_returns_miss(
+        self,
+        cache: FactorCache,
+    ) -> None:
+        panel = MatrixPanel(
+            ts=np.array(["2024-01-01"], dtype="datetime64[ns]"),
+            symbols=("BTCUSDT-PERP",),
+            values=np.array([[1.0]], dtype=np.float64),
+        )
+        key = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v1",
+            periods=(1,),
+            log_ret=False,
+            interval="1m",
+        )
+
+        cache.put_matrix_panel("forward_returns", key, panel)
+        cache._matrix_path("forward_returns", key).write_bytes(b"not parquet")
+
+        assert cache.get_matrix_panel("forward_returns", key) is None

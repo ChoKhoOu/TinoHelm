@@ -7,6 +7,13 @@ from tinohelm.factor.research.reader import ResearchDataRequest, ResearchParquet
 from tinohelm.strategy.loader_helpers import make_bar_type_str
 
 
+_NAUTILUS_FIXED_PRECISION_SCALE = 10_000_000_000_000_000
+
+
+def _fixed_precision_bytes(value: int) -> bytes:
+    return (value * _NAUTILUS_FIXED_PRECISION_SCALE).to_bytes(16, byteorder="little", signed=True)
+
+
 def _request(**overrides):
     values = {
         "symbols": ("BTCUSDT",),
@@ -66,6 +73,20 @@ def test_projection_and_time_filter(tmp_path):
 
     assert bars.frame.columns == ["ts", "symbol", "open", "close"]
     assert bars.frame["close"].to_list() == [20.0]
+
+
+def test_numeric_string_bar_values_still_cast_to_float(tmp_path):
+    root = tmp_path / "bar" / "klines"
+    root.mkdir(parents=True)
+    pl.DataFrame({
+        "ts_event": [datetime(2024, 1, 1)],
+        "symbol": ["BTCUSDT"],
+        "close": ["100.5"],
+    }).write_parquet(root / "bars.parquet")
+
+    bars = ResearchParquetReader(tmp_path).load_bars(_request())
+
+    assert bars.frame["close"].to_list() == [100.5]
 
 
 def test_timezone_aware_time_filter_is_normalized_to_utc_naive(tmp_path):
@@ -322,6 +343,34 @@ def test_nt_layout_reads_base_catalog_for_default_klines_source(tmp_path):
     assert bars.frame["close"].to_list() == [100.0]
 
 
+def test_nt_layout_decodes_fixed_precision_binary_bar_values(tmp_path):
+    root = tmp_path / "bar" / "klines" / "data" / "bar"
+    bar_dir = root / make_bar_type_str("BTCUSDT-PERP", "1m")
+    bar_dir.mkdir(parents=True)
+    pl.DataFrame({
+        "ts_event": [1_704_067_200_000_000_000],
+        "open": [_fixed_precision_bytes(90)],
+        "high": [_fixed_precision_bytes(110)],
+        "low": [_fixed_precision_bytes(80)],
+        "close": [_fixed_precision_bytes(100)],
+        "volume": [_fixed_precision_bytes(10)],
+    }).write_parquet(bar_dir / "fixed.parquet")
+
+    bars = ResearchParquetReader(tmp_path).load_bars(_request(
+        symbols=("BTCUSDT-PERP",),
+        fields=("open", "high", "low", "close", "volume"),
+        interval="1m",
+    ))
+
+    assert bars.frame.select(["open", "high", "low", "close", "volume"]).row(0) == (
+        90.0,
+        110.0,
+        80.0,
+        100.0,
+        10.0,
+    )
+
+
 def test_nt_layout_accepts_mid_price_type_for_mark_price_source(tmp_path):
     root = tmp_path / "bar" / "markPriceKlines" / "data" / "bar"
     bar_dir = root / make_bar_type_str("BTCUSDT-PERP", "1m").replace("-LAST-EXTERNAL", "-MID-EXTERNAL")
@@ -453,6 +502,28 @@ def test_known_bar_source_does_not_fallback_to_root_level_parquet(tmp_path):
     bars = ResearchParquetReader(tmp_path).load_bars(_request(source="markPriceKlines"))
 
     assert bars.frame.height == 0
+
+
+def test_unknown_source_is_rejected_before_base_fallback(tmp_path):
+    pl.DataFrame({
+        "ts_event": [datetime(2024, 1, 1)],
+        "symbol": ["BTCUSDT"],
+        "close": [100],
+    }).write_parquet(tmp_path / "klines.parquet")
+
+    with pytest.raises(ValueError, match="unsupported bar source"):
+        ResearchParquetReader(tmp_path).load_bars(_request(source="klinss"))
+
+
+def test_non_bar_source_is_rejected_before_base_fallback(tmp_path):
+    pl.DataFrame({
+        "ts_event": [datetime(2024, 1, 1)],
+        "symbol": ["BTCUSDT"],
+        "close": [100],
+    }).write_parquet(tmp_path / "klines.parquet")
+
+    with pytest.raises(ValueError, match="unsupported bar source"):
+        ResearchParquetReader(tmp_path).load_bars(_request(source="fundingRate"))
 
 
 def test_legacy_base_fallback_keeps_kline_family_sources_isolated(tmp_path):

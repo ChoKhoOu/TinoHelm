@@ -10,6 +10,8 @@ import numpy as np
 import polars as pl
 
 from tinohelm.data.catalog_helpers import interval_to_nanoseconds, resolve_catalog_path
+from tinohelm.data.pipeline_helpers import WRITE_CATEGORY
+from tinohelm.factor.data_layer import _bar_value_expr
 from tinohelm.factor.research.panel import CanonicalBars, canonicalize_long_bars
 from tinohelm.strategy.loader_helpers import make_bar_type_str, parse_interval
 
@@ -38,6 +40,7 @@ class ResearchParquetReader:
 
     def load_bars(self, request: ResearchDataRequest) -> CanonicalBars:
         interval_to_nanoseconds(request.interval)
+        _validate_bar_source(request.source)
         _validate_requested_symbol_aliases(request.symbols)
         roots = self._candidate_roots(request.source)
         files = self._candidate_files(roots, request)
@@ -161,7 +164,7 @@ class ResearchParquetReader:
         raw_symbol_expr = _symbol_expr(symbol_col, bar_type_col, symbol_from_path)
         symbol_expr = _canonical_symbol_expr(raw_symbol_expr, request.symbols)
         expressions = [ts_expr.alias("ts"), symbol_expr.alias("symbol")]
-        expressions.extend(pl.col(field).cast(pl.Float64).alias(field) for field in request.fields)
+        expressions.extend(_bar_field_expr(field, schema[field]).alias(field) for field in request.fields)
         out = scan.select(expressions)
 
         filters = []
@@ -295,6 +298,12 @@ def _price_types_for_source(source: str) -> tuple[str, ...]:
     return ("LAST", "MID")
 
 
+def _validate_bar_source(source: str) -> None:
+    if WRITE_CATEGORY.get(source) != "bar":
+        supported = sorted(data_type for data_type, category in WRITE_CATEGORY.items() if category == "bar")
+        raise ValueError(f"unsupported bar source {source!r}; supported bar sources: {supported!r}")
+
+
 def _symbol_from_bar_type_name(name: str) -> str:
     try:
         instrument, _step, _unit, _price_type, _source = name.rsplit("-", 4)
@@ -423,6 +432,12 @@ def _timestamp_expr(column: str, dtype: pl.DataType, file_path: Path) -> pl.Expr
             "use timestamp_ns or ts_event for nanosecond epochs"
         )
     return expr.cast(pl.Datetime("ns"))
+
+
+def _bar_field_expr(field: str, dtype: pl.DataType) -> pl.Expr:
+    if dtype.is_numeric() or dtype == pl.Binary:
+        return _bar_value_expr(field, dtype)
+    return pl.col(field).cast(pl.Float64)
 
 
 def _symbol_expr(symbol_col: str | None, bar_type_col: str | None, symbol_from_path: str | None) -> pl.Expr:

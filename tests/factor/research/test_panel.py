@@ -57,6 +57,9 @@ def test_matrix_validate_rejects_shape_mismatch_non_monotonic_ts_and_duplicate_s
     with pytest.raises(ValueError, match="shape"):
         MatrixPanel(ts, ("BTCUSDT",), np.ones((2, 2))).validate()
 
+    with pytest.raises(ValueError, match="1D"):
+        MatrixPanel(ts.reshape(2, 1), ("BTCUSDT",), np.ones((2, 1))).validate()
+
     bad_ts = np.array(["2024-01-02", "2024-01-01"], dtype="datetime64[ns]")
     with pytest.raises(ValueError, match="increasing"):
         MatrixPanel(bad_ts, ("BTCUSDT",), np.ones((2, 1))).validate()
@@ -124,3 +127,21 @@ def test_canonicalize_rejects_duplicate_requested_symbols():
 
     with pytest.raises(ValueError, match="reserved"):
         canonicalize_long_bars(frame, ["close"], "klines", "1m", symbols=("ts",))
+
+
+def test_canonicalize_rejects_null_identity_keys():
+    null_symbol = pl.DataFrame({
+        "ts": ["2024-01-01"],
+        "symbol": [None],
+        "close": [1],
+    }).with_columns(pl.col("ts").str.to_datetime())
+    with pytest.raises(ValueError, match="symbol.*null"):
+        canonicalize_long_bars(null_symbol, ["close"], "klines", "1m")
+
+    null_ts = pl.DataFrame({
+        "ts": [None],
+        "symbol": ["BTCUSDT"],
+        "close": [1],
+    }, schema={"ts": pl.Datetime("ns"), "symbol": pl.Utf8, "close": pl.Int64})
+    with pytest.raises(ValueError, match="ts.*null"):
+        canonicalize_long_bars(null_ts, ["close"], "klines", "1m")

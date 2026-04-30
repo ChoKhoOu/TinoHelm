@@ -431,7 +431,15 @@ class FactorCache:
         path = self._matrix_path(namespace, key)
         if not path.exists():
             return None
-        return wide_to_matrix(pl.read_parquet(path))
+        try:
+            return wide_to_matrix(pl.read_parquet(path))
+        except (OSError, ValueError, pl.exceptions.PolarsError) as exc:  # pragma: no cover
+            log.warning("FactorCache: failed to read matrix panel %s: %s", path, exc)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as unlink_exc:  # pragma: no cover
+                log.warning("FactorCache: cannot delete corrupt matrix panel %s: %s", path, unlink_exc)
+            return None
 
     def put_matrix_panel(self, namespace: str, key: str, panel: MatrixPanel) -> None:
         """Atomically store a matrix panel under a namespaced cache key."""

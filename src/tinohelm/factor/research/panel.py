@@ -33,6 +33,8 @@ class MatrixPanel:
     values: np.ndarray
 
     def validate(self) -> None:
+        if np.asarray(self.ts).ndim != 1:
+            raise ValueError("MatrixPanel.ts must be a 1D array")
         if self.values.ndim != 2:
             raise ValueError("MatrixPanel.values must be a 2D array")
         expected_shape = (len(self.ts), len(self.symbols))
@@ -63,6 +65,8 @@ def _validate_symbols(symbols: Sequence[str], label: str) -> None:
 
 def _timestamps_to_ns(values: np.ndarray) -> np.ndarray:
     arr = np.asarray(values)
+    if arr.ndim != 1:
+        raise ValueError("MatrixPanel.ts must be a 1D array")
     if np.issubdtype(arr.dtype, np.datetime64):
         ts = arr.astype("datetime64[ns]")
         if np.any(np.isnat(ts)):
@@ -120,6 +124,10 @@ def canonicalize_long_bars(
     ]
     expressions.extend(pl.col(field).cast(pl.Float64).alias(field) for field in fields)
     out = frame.select(expressions).sort([_TS, _SYMBOL])
+    if out[_TS].null_count():
+        raise ValueError("bars identity column 'ts' must not contain null values")
+    if out[_SYMBOL].null_count():
+        raise ValueError("bars identity column 'symbol' must not contain null values")
     assert_unique_ts_symbol(out)
     canonical_symbols = tuple(symbols) if symbols is not None else tuple(sorted(out[_SYMBOL].unique().to_list()))
     _validate_symbols(canonical_symbols, "CanonicalBars symbols")
