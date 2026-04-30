@@ -220,13 +220,24 @@ def _make_bar_type_strict(symbol: str, frequency: str) -> str:
     return f"{normalize_symbol(symbol)}-{interval.nt_part}-LAST-EXTERNAL"
 
 
-def _bar_catalog_roots(base_root: Path, source_type: str) -> list[Path]:
-    """Return preferred catalog roots for bar reads: source-specific then legacy."""
+def _bar_catalog_roots(base_root: Path, source_type: str | None) -> list[Path]:
+    """Return preferred catalog roots for bar reads."""
     from tinohelm.data.catalog_helpers import resolve_catalog_path
+    from tinohelm.data.pipeline_helpers import WRITE_CATEGORY
 
     base = Path(base_root)
+    source_type = source_type or _DEFAULT_BAR_SOURCE_TYPE
+    bar_source_types = {src for src, category in WRITE_CATEGORY.items() if category == "bar"}
+    if source_type not in bar_source_types:
+        raise ValueError(
+            f"Unknown bar source_type {source_type!r}. Supported: {sorted(bar_source_types)}"
+        )
+
     resolved = resolve_catalog_path(base, source_type)
-    candidates = [resolved, base]
+    candidates = [resolved]
+
+    if source_type == _DEFAULT_BAR_SOURCE_TYPE:
+        candidates.append(base)
 
     # If the caller already passed a resolved source root (e.g. .../bar/klines),
     # prefer it over appending another /bar/klines suffix.
@@ -798,14 +809,17 @@ class DataLayer:
             if frame is None:
                 continue
             if frame.is_empty():
-                return empty
+                continue
             resampled = self._resample_bar_frame(
                 frame,
                 available_fields,
                 target=target,
+                source=source,
                 start=start,
                 end=end,
             )
+            if resampled.is_empty():
+                continue
             return self._bar_frame_to_series(resampled, fields, available_fields, empty)
 
         logger.debug(
@@ -903,12 +917,16 @@ class DataLayer:
         available_fields: Sequence[str],
         *,
         target: _BarInterval,
+        source: _BarInterval,
         start: datetime | None,
         end: datetime | None,
     ) -> pl.DataFrame:
         """Aggregate lower-cadence OHLCV bars to ``target`` cadence."""
         if frame.is_empty():
             return frame
+
+        expected_children = target.ns // source.ns
+        expected_span = target.ns - source.ns
 
         aggregations: list[pl.Expr] = []
         for field in available_fields:
@@ -928,7 +946,10 @@ class DataLayer:
 
         out = (
             frame.sort(_TS_COL)
-            .with_columns(pl.col(_TS_COL).alias("_child_close_ts"))
+            .with_columns(
+                pl.col(_TS_COL).alias("_child_close_ts"),
+                pl.col(_TS_COL).dt.timestamp("ns").alias("_child_close_ns"),
+            )
             .group_by_dynamic(
                 _TS_COL,
                 every=target.polars_every,
@@ -936,9 +957,19 @@ class DataLayer:
                 closed="left",
                 label="left",
             )
-            .agg([pl.col("_child_close_ts").max().alias("_resampled_ts"), *aggregations])
+            .agg([
+                pl.col("_child_close_ts").max().alias("_resampled_ts"),
+                pl.col("_child_close_ns").count().alias("_child_count"),
+                pl.col("_child_close_ns").min().alias("_child_min_ns"),
+                pl.col("_child_close_ns").max().alias("_child_max_ns"),
+                *aggregations,
+            ])
+            .filter(
+                (pl.col("_child_count") == expected_children)
+                & ((pl.col("_child_max_ns") - pl.col("_child_min_ns")) == expected_span)
+            )
             .with_columns(pl.col("_resampled_ts").alias(_TS_COL))
-            .drop("_resampled_ts")
+            .drop("_resampled_ts", "_child_count", "_child_min_ns", "_child_max_ns")
             .sort(_TS_COL)
         )
         if start is not None:

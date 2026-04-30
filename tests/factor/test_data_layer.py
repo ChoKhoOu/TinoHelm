@@ -672,6 +672,62 @@ class TestLoadGrouping:
         panel = dl.load(DataRequest("BTCUSDT-PERP", "close", "1m", 0, "bar"))["close"]
         assert _sym_values(panel, "BTCUSDT-PERP") == [100.0, 101.0]
 
+    def test_explicit_non_default_bar_source_does_not_fall_back_to_base_klines(self, tmp_path: Path):
+        catalog_path = tmp_path / "catalog"
+        ts_ns = [_T0_NS + i * _1MIN_NS for i in range(2)]
+        _write_catalog_bars(
+            catalog_path,
+            "BTCUSDT-PERP",
+            ts_ns,
+            [100.0, 101.0],
+        )
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        panel = dl.load(
+            DataRequest(
+                "BTCUSDT-PERP",
+                "close",
+                "1m",
+                0,
+                "bar",
+                source_type="markPriceKlines",
+            )
+        )["close"]
+
+        assert panel.is_empty()
+
+    def test_fallback_resample_drops_incomplete_child_buckets(self, tmp_path: Path):
+        catalog_path = tmp_path / "catalog"
+        # close-time 1m source timestamps.  Minute 3 is missing in the first
+        # 6m bucket; the second bucket is complete and should be kept.
+        source_indices = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11]
+        ts_ns = [
+            _T0_NS + i * _1MIN_NS + _1MIN_NS - 1_000_000
+            for i in source_indices
+        ]
+        _write_catalog_bars(
+            catalog_path,
+            "BTCUSDT-PERP",
+            ts_ns,
+            [100.0 + i for i in source_indices],
+        )
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        panel = dl.load(DataRequest("BTCUSDT-PERP", "volume", "6m", 0, "bar"))["volume"]
+
+        assert _ts_list(panel) == [
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[-1] // 1_000),
+        ]
+        assert _sym_values(panel, "BTCUSDT-PERP") == [30.0]
+
     def test_close_and_volume_separate_panels(self, tmp_path: Path, monkeypatch):
         catalog_path = tmp_path / "catalog"
         catalog_path.mkdir()
