@@ -244,7 +244,14 @@ class EventBridge:
         for ws in dead:
             clients.discard(ws)
             await self.unsubscribe(ws)
+
+        async def _close_one(ws: WebSocket) -> None:
             with suppress(Exception):
                 await asyncio.wait_for(
                     ws.close(code=1011, reason="send timeout"), timeout=1.0,
                 )
+
+        for idx in range(0, len(dead), max_concurrent):
+            await asyncio.gather(
+                *(_close_one(ws) for ws in dead[idx: idx + max_concurrent]),
+            )

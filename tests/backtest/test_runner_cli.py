@@ -403,6 +403,50 @@ def test_post_artifact_redis_side_effect_failure_still_completes(
     assert "failed" not in statuses
 
 
+def test_completed_db_write_failure_makes_queue_mode_fail_after_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    """rc=0 is only valid after the durable completed DB write commits."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+    r.get.side_effect = [None, None]
+
+    update_db_status = MagicMock()
+
+    def _update_db_status(_db_url, _run_id, status, *args, **kwargs):
+        if status == "completed":
+            assert kwargs.get("strict") is True
+            raise RuntimeError("db completed write down")
+        return True
+
+    update_db_status.side_effect = _update_db_status
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", update_db_status)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 1
+    assert (settings.paths.artifacts / "r-1" / "results.json").exists()
+    statuses = [c.args[2] for c in update_db_status.call_args_list if len(c.args) >= 3]
+    assert statuses.count("completed") == 1
+    assert "failed" in statuses
+
+
 # ---------------------------------------------------------------------------
 # T2: test_run_id_failure
 # ---------------------------------------------------------------------------

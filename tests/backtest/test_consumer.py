@@ -221,6 +221,37 @@ async def test_cancel_watcher_sigkills_stuck_terminalizing_subprocess():
     proc.kill.assert_called_once()
 
 
+async def test_shutdown_termination_honors_terminalizing_grace():
+    """The shutdown path uses the same bounded terminalization grace as cancel."""
+    from tinohelm.backtest.consumer import _terminate_process_with_terminalizing_grace
+
+    proc = _make_proc(returncode=None)
+    wait_calls = 0
+
+    async def _wait_side_effect():
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            await asyncio.sleep(9999)
+        return 0
+
+    proc.wait = _wait_side_effect
+    rds = _make_rds()
+    rds.get = AsyncMock(return_value=b"1")
+
+    await _terminate_process_with_terminalizing_grace(
+        "r-shutdown-terminalizing",
+        proc,
+        rds,
+        reason="shutdown",
+        sigterm_grace=0.01,
+        terminalizing_grace=0.1,
+    )
+
+    proc.send_signal.assert_called_once_with(signal.SIGTERM)
+    proc.kill.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Test 4: shutdown propagates SIGTERM to inflight subprocess
 # ---------------------------------------------------------------------------

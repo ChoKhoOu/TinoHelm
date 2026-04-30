@@ -321,6 +321,28 @@ class TestRelay:
         slow.close.assert_awaited_once_with(code=1011, reason="send timeout")
         fast.close.assert_not_awaited()
 
+    async def test_dead_client_closes_are_concurrent(self, bridge):
+        """Close cleanup must not serialize one 1s timeout per dead websocket."""
+        bridge._max_concurrent_sends = 8
+        dead1 = _fake_ws(dead=True)
+        dead2 = _fake_ws(dead=True)
+
+        async def _slow_close(*_args, **_kwargs):
+            await asyncio.sleep(0.2)
+
+        dead1.close.side_effect = _slow_close
+        dead2.close.side_effect = _slow_close
+        clients = {dead1, dead2}
+
+        start = asyncio.get_running_loop().time()
+        await bridge._relay("payload", clients)
+        elapsed = asyncio.get_running_loop().time() - start
+
+        assert elapsed < 0.35
+        assert clients == set()
+        dead1.close.assert_awaited_once_with(code=1011, reason="send timeout")
+        dead2.close.assert_awaited_once_with(code=1011, reason="send timeout")
+
 
 # ---------------------------------------------------------------------------
 # EventBridge._publish_to_subscribers — fan-out semantics shared by

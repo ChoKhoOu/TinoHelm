@@ -232,6 +232,22 @@ class TestComputeIcSeries:
         with pytest.raises(ValueError, match="duplicate identity"):
             _build_paired(factor, fwd)
 
+    def test_build_paired_rejects_missing_factor_identity_keys(self):
+        ts = _hourly_ts(3)
+        factor = pl.DataFrame({
+            "ts": [*ts.to_list(), *ts.to_list()],
+            "symbol": ["BTC", "BTC", "BTC", "ETH", "ETH", "ETH"],
+            "value": [1.0, 2.0, 3.0, 10.0, 20.0, 30.0],
+        })
+        fwd = pl.DataFrame({
+            "ts": ts.to_list(),
+            "symbol": ["BTC", "BTC", "BTC"],
+            "value": [0.01, 0.02, 0.03],
+        })
+
+        with pytest.raises(ValueError, match="missing identity keys"):
+            _build_paired(factor, fwd)
+
     def test_exactly_30_paired_does_not_short_circuit(self):
         factor, fwd = self._make_corr_pair(30)
         out = compute_ic_series(factor, fwd, freq="D")

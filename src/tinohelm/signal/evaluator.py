@@ -357,6 +357,13 @@ class SignalEvaluator:
 
         T = len(joined)
         if T == 0:
+            if weight_panel.height > 0 and future_returns.height > 0:
+                weight_range = SignalEvaluator._ts_range_summary(weight_panel)
+                return_range = SignalEvaluator._ts_range_summary(future_returns)
+                raise ValueError(
+                    "weight_panel and future_returns have no overlapping ts rows; "
+                    f"weight_panel={weight_range}, future_returns={return_range}"
+                )
             N = len(sym_cols)
             return np.empty((0, N)), np.empty((0, N)), 0
 
@@ -367,6 +374,17 @@ class SignalEvaluator:
         SignalEvaluator._reject_infinite_values(returns_arr, "future_returns")
 
         return weights_arr, returns_arr, T
+
+    @staticmethod
+    def _ts_range_summary(frame: pl.DataFrame) -> dict[str, object]:
+        """Compact timestamp coverage summary for alignment errors."""
+        if frame.height == 0:
+            return {"count": 0, "min": None, "max": None}
+        summary = frame.select(
+            pl.col("ts").min().alias("min"),
+            pl.col("ts").max().alias("max"),
+        ).row(0, named=True)
+        return {"count": frame.height, "min": summary["min"], "max": summary["max"]}
 
     @staticmethod
     def _ensure_unique_ts(frame: pl.DataFrame, name: str) -> None:

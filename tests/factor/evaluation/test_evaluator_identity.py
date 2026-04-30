@@ -1,9 +1,14 @@
 """Fail-closed identity validation for high-level factor Evaluator."""
 from __future__ import annotations
 
+import datetime as dt
 import inspect
 
+import polars as pl
+import pytest
+
 from tinohelm.factor.evaluation.evaluator import Evaluator
+from tinohelm.factor.types import EvalConfig
 
 
 def test_evaluate_core_validates_identity_uniqueness_before_common_key_join() -> None:
@@ -14,3 +19,23 @@ def test_evaluate_core_validates_identity_uniqueness_before_common_key_join() ->
 
     assert validation_pos != -1, "_evaluate_core must validate factor identity keys"
     assert validation_pos < join_pos, "identity validation must run before common_keys join"
+
+
+def test_evaluate_core_rejects_missing_factor_keys_before_inner_join() -> None:
+    """High-level Evaluator must not compute metrics on a biased symbol subset."""
+    ts = [dt.datetime(2026, 1, 1) + dt.timedelta(hours=i) for i in range(3)]
+    factor = pl.DataFrame({
+        "ts": ts,
+        "BTC": [1.0, 2.0, 3.0],
+        "ETH": [10.0, 20.0, 30.0],
+    })
+    fwd = pl.DataFrame({"ts": ts, "BTC": [0.01, 0.02, 0.03]})
+    config = EvalConfig(
+        universe=("BTC", "ETH"),
+        start="2026-01-01T00:00:00",
+        end="2026-01-01T02:00:00",
+        returns_kind="forward_returns",
+    )
+
+    with pytest.raises(ValueError, match="missing identity keys"):
+        Evaluator().evaluate(factor, fwd, config)

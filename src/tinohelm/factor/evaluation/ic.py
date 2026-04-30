@@ -106,6 +106,33 @@ def _ensure_unique_identity_keys(df: pl.DataFrame, keys: list[str], name: str) -
         )
 
 
+def _ensure_factor_keys_covered(
+    factor: pl.DataFrame,
+    fwd_ret: pl.DataFrame,
+    keys: list[str],
+) -> None:
+    """Reject finite factor cells that would be silently dropped by inner join."""
+    if factor.height == 0 or fwd_ret.height == 0:
+        return
+
+    factor_keys = (
+        factor
+        .filter(pl.col(_VAL_COL).is_not_null() & pl.col(_VAL_COL).is_finite())
+        .select(keys)
+        .unique(maintain_order=True)
+    )
+    if factor_keys.height == 0:
+        return
+
+    fwd_keys = fwd_ret.select(keys).unique(maintain_order=True)
+    missing = factor_keys.join(fwd_keys, on=keys, how="anti")
+    if missing.height > 0:
+        raise ValueError(
+            "fwd_ret missing identity keys required by factor; "
+            f"keys={keys!r}, missing_sample={missing.head(5).to_dicts()!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # forward_returns — shared helper (used by ic.py + quantile.py + turnover.py)
 # ---------------------------------------------------------------------------
@@ -168,6 +195,7 @@ def _build_paired(factor: pl.DataFrame, fwd_ret: pl.DataFrame) -> pl.DataFrame:
     keys = _join_keys(factor, fwd_ret)
     _ensure_unique_identity_keys(factor, keys, "factor")
     _ensure_unique_identity_keys(fwd_ret, keys, "fwd_ret")
+    _ensure_factor_keys_covered(factor, fwd_ret, keys)
 
     paired = (
         factor.rename({_VAL_COL: "factor"})

@@ -263,6 +263,7 @@ def _run_queue_mode(run_id: str) -> int:
             run_id,
             "completed",
             result_summary=stats,
+            strict=True,
         )
 
         _best_effort(

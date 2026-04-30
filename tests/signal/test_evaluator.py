@@ -184,6 +184,18 @@ def test_align_rejects_duplicate_ts_before_join(side: str, zero_cost: CostModel)
         evaluator.evaluate(weight_panel, future_returns, zero_cost)
 
 
+def test_align_rejects_no_overlapping_timestamps(zero_cost: CostModel) -> None:
+    """Non-empty panels with matching symbols but disjoint ts are invalid alignment."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match="no overlapping ts"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [2, 3], "BTC": [0.01, 0.02]}),
+            zero_cost,
+        )
+
+
 def test_evaluate_rejects_infinite_future_returns(zero_cost: CostModel) -> None:
     """Direct callers must not leak +/-inf into JSON-persisted metrics/curves."""
     evaluator = SignalEvaluator()
