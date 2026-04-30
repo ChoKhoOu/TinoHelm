@@ -79,7 +79,7 @@ def _evaluate_slice(
     Returns ``EvalResult()`` (zero) when the slice is empty rather than raising.
     The evaluator's own short-circuit handles slices with < 30 paired observations.
     """
-    if panel.height == 0 or fwd_df.height == 0:
+    if panel.height == 0:
         return _empty_eval_result()
     try:
         evaluator = Evaluator()
