@@ -18,14 +18,15 @@ asserts the canonical format.
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
+from datetime import datetime, timezone
 
 import numpy as np
 import polars as pl
 import pytest
 
-from tinohelm.factor.cache import CacheHit, FactorCache
+from tinohelm.factor.cache import FactorCache
+from tinohelm.factor.research.panel import MatrixPanel
 from tinohelm.factor.types import EvalConfig, EvalResult
 
 
@@ -355,3 +356,297 @@ class TestNaNInfScrubbing:
         assert r.ic_std == pytest.approx(0.10, rel=1e-6)
         assert r.rating == 2
         assert r.half_life == 10
+
+
+class TestResearchCacheSplit:
+    def test_factor_value_key_is_stable_when_only_eval_config_changes(
+        self,
+        config: EvalConfig,
+    ) -> None:
+        factor_key_1 = FactorCache.build_factor_values_key(
+            factor_name="momentum",
+            code_hash="code-v1",
+            params={"lookback": 20},
+            universe=config.universe,
+            interval="1m",
+            start=config.start,
+            end=config.end,
+            required_fields=("close",),
+            raw_data_key="raw-bars-v1",
+        )
+        mutated_eval_config = EvalConfig(
+            universe=config.universe,
+            start=config.start,
+            end=config.end,
+            forward_period=10,
+            quantiles=3,
+            cost_bps=config.cost_bps,
+            ic_freq=config.ic_freq,
+            log_ret=config.log_ret,
+            params=config.params,
+        )
+        factor_key_2 = FactorCache.build_factor_values_key(
+            factor_name="momentum",
+            code_hash="code-v1",
+            params={"lookback": 20},
+            universe=config.universe,
+            interval="1m",
+            start=config.start,
+            end=config.end,
+            required_fields=("close",),
+            raw_data_key="raw-bars-v1",
+        )
+
+        assert factor_key_1 == factor_key_2
+        assert FactorCache.build_eval_key(factor_key_1, config) != FactorCache.build_eval_key(
+            factor_key_2, mutated_eval_config
+        )
+
+    def test_raw_and_factor_keys_change_with_data_version(self, config: EvalConfig) -> None:
+        raw_v1 = FactorCache.build_raw_data_key(
+            source="klines",
+            interval="1m",
+            universe=config.universe,
+            fields=("close", "volume"),
+            start=config.start,
+            end=config.end,
+            data_version="v1",
+        )
+        raw_v2 = FactorCache.build_raw_data_key(
+            source="klines",
+            interval="1m",
+            universe=config.universe,
+            fields=("close", "volume"),
+            start=config.start,
+            end=config.end,
+            data_version="v2",
+        )
+        factor_v1 = FactorCache.build_factor_values_key(
+            factor_name="momentum",
+            code_hash="code-v1",
+            params={},
+            universe=config.universe,
+            interval="1m",
+            start=config.start,
+            end=config.end,
+            required_fields=("close",),
+            raw_data_key=raw_v1,
+        )
+        factor_v2 = FactorCache.build_factor_values_key(
+            factor_name="momentum",
+            code_hash="code-v1",
+            params={},
+            universe=config.universe,
+            interval="1m",
+            start=config.start,
+            end=config.end,
+            required_fields=("close",),
+            raw_data_key=raw_v2,
+        )
+
+        assert raw_v1 != raw_v2
+        assert factor_v1 != factor_v2
+
+    def test_raw_data_key_normalizes_field_order(self, config: EvalConfig) -> None:
+        key_a = FactorCache.build_raw_data_key(
+            source="klines",
+            interval="1m",
+            universe=config.universe,
+            fields=("close", "volume", "close"),
+            start=config.start,
+            end=config.end,
+            data_version="v1",
+        )
+        key_b = FactorCache.build_raw_data_key(
+            source="klines",
+            interval="1m",
+            universe=config.universe,
+            fields=("volume", "close"),
+            start=config.start,
+            end=config.end,
+            data_version="v1",
+        )
+
+        assert key_a == key_b
+
+    def test_factor_value_key_is_bound_to_raw_data_key(self, config: EvalConfig) -> None:
+        factor_klines = FactorCache.build_factor_values_key(
+            factor_name="momentum",
+            code_hash="code-v1",
+            params={},
+            universe=config.universe,
+            interval="1m",
+            start=config.start,
+            end=config.end,
+            required_fields=("volume", "close"),
+            raw_data_key="raw-klines",
+        )
+        factor_mark = FactorCache.build_factor_values_key(
+            factor_name="momentum",
+            code_hash="code-v1",
+            params={},
+            universe=config.universe,
+            interval="1m",
+            start=config.start,
+            end=config.end,
+            required_fields=("close", "volume"),
+            raw_data_key="raw-mark-price",
+        )
+        factor_klines_reordered = FactorCache.build_factor_values_key(
+            factor_name="momentum",
+            code_hash="code-v1",
+            params={},
+            universe=config.universe,
+            interval="1m",
+            start=config.start,
+            end=config.end,
+            required_fields=("close", "volume"),
+            raw_data_key="raw-klines",
+        )
+
+        assert factor_klines != factor_mark
+        assert factor_klines == factor_klines_reordered
+
+    def test_raw_data_key_accepts_datetime_boundaries(self, config: EvalConfig) -> None:
+        key = FactorCache.build_raw_data_key(
+            source="klines",
+            interval="1m",
+            universe=config.universe,
+            fields=("close",),
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            data_version="v1",
+        )
+
+        assert len(key) == 64
+        int(key, 16)
+
+    def test_forward_returns_key_normalizes_duplicate_periods(self) -> None:
+        key_a = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v1",
+            periods=(5, 1, 5),
+            log_ret=False,
+            interval="1m",
+        )
+        key_b = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v1",
+            periods=(5, 1),
+            log_ret=False,
+            interval="1m",
+        )
+
+        assert key_a == key_b
+
+        key_c = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v1",
+            periods=(1, 5),
+            log_ret=False,
+            interval="1m",
+        )
+        assert key_a == key_c
+
+    def test_forward_returns_key_changes_with_close_content_key(self) -> None:
+        key_a = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v1",
+            periods=(1, 5),
+            log_ret=False,
+            interval="1m",
+        )
+        key_b = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v2",
+            periods=(1, 5),
+            log_ret=False,
+            interval="1m",
+        )
+
+        assert key_a != key_b
+
+    def test_matrix_panel_cache_is_cleared_by_full_invalidate(
+        self,
+        cache: FactorCache,
+    ) -> None:
+        panel = MatrixPanel(
+            ts=np.array(["2024-01-01"], dtype="datetime64[ns]"),
+            symbols=("BTCUSDT-PERP",),
+            values=np.array([[1.0]], dtype=np.float64),
+        )
+        key = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v1",
+            periods=(1,),
+            log_ret=False,
+            interval="1m",
+        )
+        cache.put_matrix_panel("forward_returns", key, panel)
+
+        cache.invalidate()
+
+        assert cache.get_matrix_panel("forward_returns", key) is None
+
+    def test_legacy_cache_key_path_traversal_is_rejected(self, cache: FactorCache) -> None:
+        with pytest.raises(ValueError, match="invalid cache key"):
+            cache.lookup("../outside")
+
+    def test_matrix_cache_namespace_and_key_path_traversal_are_rejected(self, cache: FactorCache) -> None:
+        panel = MatrixPanel(
+            ts=np.array(["2024-01-01"], dtype="datetime64[ns]"),
+            symbols=("BTCUSDT-PERP",),
+            values=np.array([[1.0]], dtype=np.float64),
+        )
+
+        with pytest.raises(ValueError, match="invalid cache namespace"):
+            cache.put_matrix_panel("../namespace", "safe-key", panel)
+        with pytest.raises(ValueError, match="invalid cache key"):
+            cache.put_matrix_panel("forward_returns", "../key", panel)
+
+    def test_matrix_panel_namespace_roundtrip_preserves_axes_values_and_nan(
+        self,
+        cache: FactorCache,
+    ) -> None:
+        panel = MatrixPanel(
+            ts=np.array(["2024-01-01", "2024-01-02"], dtype="datetime64[ns]"),
+            symbols=("BTCUSDT-PERP", "ETHUSDT-PERP"),
+            values=np.array([[1.0, np.nan], [2.0, 4.0]], dtype=np.float64),
+        )
+        key = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v1",
+            periods=(1, 5),
+            log_ret=False,
+            interval="1m",
+        )
+
+        cache.put_matrix_panel("forward_returns", key, panel)
+        loaded = cache.get_matrix_panel("forward_returns", key)
+
+        assert loaded is not None
+        np.testing.assert_array_equal(loaded.ts, panel.ts)
+        assert loaded.symbols == panel.symbols
+        np.testing.assert_allclose(loaded.values, panel.values, equal_nan=True)
+
+    def test_corrupt_matrix_panel_cache_returns_miss(
+        self,
+        cache: FactorCache,
+    ) -> None:
+        panel = MatrixPanel(
+            ts=np.array(["2024-01-01"], dtype="datetime64[ns]"),
+            symbols=("BTCUSDT-PERP",),
+            values=np.array([[1.0]], dtype=np.float64),
+        )
+        key = FactorCache.build_forward_returns_key(
+            close_panel_key="close-v1",
+            close_content_key="close-content-v1",
+            periods=(1,),
+            log_ret=False,
+            interval="1m",
+        )
+
+        cache.put_matrix_panel("forward_returns", key, panel)
+        cache._matrix_path("forward_returns", key).write_bytes(b"not parquet")
+
+        assert cache.get_matrix_panel("forward_returns", key) is None

@@ -30,10 +30,12 @@ import json
 import logging
 import math
 import os
+import re
+import shutil
 import tempfile
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +43,12 @@ import numpy as np
 import polars as pl
 
 from tinohelm.core.paths import paths
+from tinohelm.factor.research.panel import MatrixPanel, matrix_to_wide, wide_to_matrix
 from tinohelm.factor.types import EvalConfig, EvalResult, Panel
 
 log = logging.getLogger(__name__)
+_KEY_RE = re.compile(r"^[A-Za-z0-9_.=-]+$")
+_NAMESPACE_RE = re.compile(r"^[A-Za-z0-9_.=-]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -71,9 +76,70 @@ def _stable_json(obj: Any) -> str:
             if math.isnan(o) or math.isinf(o):
                 return None
             return round(o, 10)
+        if isinstance(o, (datetime, date)):
+            return o.isoformat()
         return o
 
     return json.dumps(_make_serializable(obj), sort_keys=True, separators=(",", ":"))
+
+
+def _hash_payload(namespace: str, payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        f"{namespace}|{_stable_json(payload)}".encode("utf-8")
+    ).hexdigest()
+
+
+def _normalize_tuple(values: Any) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        return (values,)
+    return tuple(str(value) for value in values)
+
+
+def _normalize_set_tuple(values: Any) -> tuple[str, ...]:
+    return tuple(sorted(set(_normalize_tuple(values))))
+
+
+def _normalize_positive_ints(values: Any) -> tuple[int, ...]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw in values:
+        value = int(raw)
+        if value <= 0:
+            raise ValueError("forward return periods must all be > 0")
+        if value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return tuple(sorted(normalized))
+
+
+def _validate_path_component(value: str, label: str) -> str:
+    if not value or value in {".", ".."} or not _KEY_RE.fullmatch(value):
+        raise ValueError(f"invalid {label}: {value!r}")
+    return value
+
+
+def _validate_namespace(namespace: str) -> str:
+    if not namespace or namespace in {".", ".."} or not _NAMESPACE_RE.fullmatch(namespace):
+        raise ValueError(f"invalid cache namespace: {namespace!r}")
+    return namespace
+
+
+def _write_parquet_atomic(frame: pl.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=f".{path.stem}_")
+    os.close(fd)
+    tmp = Path(tmp_path)
+    try:
+        frame.write_parquet(tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _scrub(obj: Any) -> Any:
@@ -167,10 +233,19 @@ class FactorCache:
         self._eval_dir.mkdir(parents=True, exist_ok=True)
 
     def _values_path(self, key: str) -> Path:
-        return self._values_dir / f"{key}.parquet"
+        safe_key = _validate_path_component(key, "cache key")
+        return self._values_dir / f"{safe_key}.parquet"
 
     def _eval_path(self, key: str) -> Path:
-        return self._eval_dir / f"{key}.json"
+        safe_key = _validate_path_component(key, "cache key")
+        return self._eval_dir / f"{safe_key}.json"
+
+    def _matrix_dir(self, namespace: str) -> Path:
+        return self._root / "matrix" / _validate_namespace(namespace)
+
+    def _matrix_path(self, namespace: str, key: str) -> Path:
+        safe_key = _validate_path_component(key, "cache key")
+        return self._matrix_dir(namespace) / f"{safe_key}.parquet"
 
     # ------------------------------------------------------------------ #
     # Manifest helpers
@@ -264,6 +339,113 @@ class FactorCache:
             + _stable_json(data_range)
         )
         return hashlib.sha256(payload.encode()).hexdigest()
+
+    @staticmethod
+    def build_raw_data_key(
+        *,
+        source: str,
+        interval: str,
+        universe: tuple[str, ...] | list[str],
+        fields: tuple[str, ...] | list[str],
+        start: Any,
+        end: Any,
+        data_version: str,
+    ) -> str:
+        """Key for source/interval/field-specific canonical raw bars."""
+        return _hash_payload("raw_data", {
+            "source": source,
+            "interval": interval,
+            "universe": _normalize_tuple(universe),
+            "fields": _normalize_set_tuple(fields),
+            "start": start,
+            "end": end,
+            "data_version": data_version,
+        })
+
+    @staticmethod
+    def build_factor_values_key(
+        *,
+        factor_name: str,
+        code_hash: str,
+        params: dict[str, Any],
+        universe: tuple[str, ...] | list[str],
+        interval: str,
+        start: Any,
+        end: Any,
+        required_fields: tuple[str, ...] | list[str],
+        raw_data_key: str,
+    ) -> str:
+        """Key for raw factor values, intentionally excluding eval knobs."""
+        return _hash_payload("factor_values", {
+            "factor_name": factor_name,
+            "code_hash": code_hash,
+            "params": params,
+            "universe": _normalize_tuple(universe),
+            "interval": interval,
+            "start": start,
+            "end": end,
+            "required_fields": _normalize_set_tuple(required_fields),
+            "raw_data_key": raw_data_key,
+        })
+
+    @staticmethod
+    def build_forward_returns_key(
+        *,
+        close_panel_key: str,
+        close_content_key: str,
+        periods: tuple[int, ...] | list[int],
+        log_ret: bool,
+        interval: str,
+        expected_step_ns: int | None = None,
+    ) -> str:
+        """Key for reusable forward-return matrices derived from close prices."""
+        normalized_periods = _normalize_positive_ints(periods)
+        return _hash_payload("forward_returns", {
+            "close_panel_key": close_panel_key,
+            "close_content_key": close_content_key,
+            "periods": normalized_periods,
+            "log_ret": bool(log_ret),
+            "interval": interval,
+            "expected_step_ns": expected_step_ns,
+        })
+
+    @staticmethod
+    def build_eval_key(
+        factor_values_key: str,
+        eval_config: EvalConfig | dict[str, Any],
+        *,
+        returns_key: str | None = None,
+        eval_version: str = "v1",
+    ) -> str:
+        """Key for metrics/evaluation output; changes with eval-only config."""
+        config_payload = dataclasses.asdict(eval_config) if dataclasses.is_dataclass(eval_config) else eval_config
+        return _hash_payload("eval", {
+            "factor_values_key": factor_values_key,
+            "returns_key": returns_key,
+            "eval_version": eval_version,
+            "eval_config": config_payload,
+        })
+
+    def get_matrix_panel(self, namespace: str, key: str) -> MatrixPanel | None:
+        """Read a namespaced matrix-panel cache entry, returning ``None`` on miss."""
+        path = self._matrix_path(namespace, key)
+        if not path.exists():
+            return None
+        try:
+            return wide_to_matrix(pl.read_parquet(path))
+        except (OSError, ValueError, pl.exceptions.PolarsError) as exc:  # pragma: no cover
+            log.warning("FactorCache: failed to read matrix panel %s: %s", path, exc)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as unlink_exc:  # pragma: no cover
+                log.warning("FactorCache: cannot delete corrupt matrix panel %s: %s", path, unlink_exc)
+            return None
+
+    def put_matrix_panel(self, namespace: str, key: str, panel: MatrixPanel) -> None:
+        """Atomically store a matrix panel under a namespaced cache key."""
+        panel.validate()
+        path = self._matrix_path(namespace, key)
+        _write_parquet_atomic(matrix_to_wide(panel), path)
 
     def lookup(self, key: str) -> CacheHit | None:
         """Look up a cache key and return what is available.
@@ -375,8 +557,11 @@ class FactorCache:
             Number of manifest entries removed.
         """
         manifest = self._load_manifest()
+        matrix_dir = self._root / "matrix"
         if name is None:
             keys_to_delete = list(manifest.keys())
+            if matrix_dir.exists():
+                shutil.rmtree(matrix_dir)
         else:
             keys_to_delete = [k for k, v in manifest.items() if v.get("factor_name") == name]
 
