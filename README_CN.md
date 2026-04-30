@@ -26,12 +26,13 @@ Rust CLI 是主要交互界面：单次命令、原始 JSON，以及给 LLM/自�
 make
 ```
 
-默认会构建 release 产物，并安装到 `~/.cargo/bin/tino`；只要 `~/.cargo/bin` 在 `PATH` 里，之后在任意目录都能直接调用 `tino`。
+默认会构建 release 产物；如果 `/usr/local/bin` 可写，就安装到 `/usr/local/bin/tino`，否则安装到 `~/.local/bin/tino`。只要安装目录在 `PATH` 里，之后在任意目录都能直接调用 `tino`。
 
 常用变体：
 
 ```bash
 make build                       # 只构建：cli/target/release/tino
+make package                     # 打包：dist/tino-<target>.tar.gz
 make BINDIR=~/.local/bin         # 安装到其他目录
 make BINDIR=/usr/local/bin       # 安装为系统级命令，前提是目录可写
 make uninstall                   # 删除已安装的 tino

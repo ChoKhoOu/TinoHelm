@@ -28,12 +28,13 @@ The Rust CLI is the primary interface: one-shot commands, raw JSON, and stable `
 make
 ```
 
-This builds the release binary and installs `tino` to `~/.cargo/bin/tino` by default, so it can be called from anywhere when `~/.cargo/bin` is on `PATH`.
+This builds the release binary and installs `tino` to `/usr/local/bin/tino` when that directory is writable, otherwise to `~/.local/bin/tino`. The installed binary can then be called from any directory as long as the install directory is on `PATH`.
 
 Useful variants:
 
 ```bash
 make build                       # build only: cli/target/release/tino
+make package                     # package dist/tino-<target>.tar.gz
 make BINDIR=~/.local/bin         # install somewhere else
 make BINDIR=/usr/local/bin       # system-wide install if writable
 make uninstall                   # remove the installed binary

@@ -31,9 +31,10 @@ pip install -e ".[optimize]"      # With Optuna support
 alembic upgrade head
 
 # Rust CLI (LLM-first, no TUI)
-make                         # Build release binary and install tino into ~/.cargo/bin
+make                         # Build release binary and install tino into /usr/local/bin if writable, else ~/.local/bin
 make BINDIR=~/.local/bin      # Optional alternate install dir
 make build                   # Build only: cli/target/release/tino
+make package                 # Package dist/tino-<target>.tar.gz
 tino --help
 tino -f llm api get /api/node/status
 tino backtest run <strategy> --symbol BTCUSDT-PERP --interval 5m --start 2025-02-01 --end 2025-03-01
