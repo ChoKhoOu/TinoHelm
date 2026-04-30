@@ -196,6 +196,37 @@ fn jstr<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("-")
 }
 
+fn jdisplay(v: &serde_json::Value, key: &str) -> String {
+    match v.get(key) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        Some(serde_json::Value::Null) | None => "-".to_string(),
+        Some(other) => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jdisplay_reads_string_integer_float_and_bool_values() {
+        let value = serde_json::json!({
+            "id": 42,
+            "name": "run",
+            "score": 1.25,
+            "done": true
+        });
+
+        assert_eq!(jdisplay(&value, "id"), "42");
+        assert_eq!(jdisplay(&value, "name"), "run");
+        assert_eq!(jdisplay(&value, "score"), "1.25");
+        assert_eq!(jdisplay(&value, "done"), "true");
+        assert_eq!(jdisplay(&value, "missing"), "-");
+    }
+}
+
 // ── Status card ──────────────────────────────────────────────────────────
 
 fn print_status_card(data: &crate::types::BacktestRunStatus, run_id: &str) {
@@ -1052,23 +1083,23 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                     .unwrap_or_default();
                 let strat = jstr(r, "strategy_name");
                 let sym = jstr(r, "symbol");
-                let n_trials = jstr(r, "n_trials");
+                let n_trials = jdisplay(r, "n_trials");
                 let fit = jstr(r, "fitness_objective");
                 let st = jstr(r, "status");
                 let best = r.get("best_value").and_then(|v| v.as_f64());
-                let done = jstr(r, "trials_completed");
+                let done = jdisplay(r, "trials_completed");
 
                 t.row(&[
                     &id,
                     &strat[..16.min(strat.len())],
                     &sym[..14.min(sym.len())],
-                    n_trials,
+                    &n_trials,
                     fit,
                     &color_status(st),
                     &best
                         .map(|b| color_value(Some(b), ".4f"))
                         .unwrap_or_else(|| muted("-")),
-                    done,
+                    &done,
                 ]);
             }
             t.footer();
@@ -1099,7 +1130,7 @@ fn print_optimize_result(data: &serde_json::Value) {
     println!("  {}", bold("Optimization Result"));
     divider(50);
 
-    kv("ID", jstr(data, "optimization_id"), 12);
+    kv("ID", &jdisplay(data, "optimization_id"), 12);
     kv("Status", &color_status(jstr(data, "status")), 12);
     kv("Objective", jstr(data, "fitness_objective"), 12);
 

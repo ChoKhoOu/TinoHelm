@@ -82,16 +82,62 @@ enum Commands {
     },
 }
 
+fn command_requires_api_client(command: &Commands) -> bool {
+    !matches!(command, Commands::Auth { .. } | Commands::Version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_commands_do_not_require_api_client() {
+        assert!(!command_requires_api_client(&Commands::Auth {
+            command: cli::auth::AuthCmd::Status,
+        }));
+        assert!(!command_requires_api_client(&Commands::Auth {
+            command: cli::auth::AuthCmd::Logout,
+        }));
+        assert!(!command_requires_api_client(&Commands::Version));
+    }
+
+    #[test]
+    fn api_backed_commands_require_api_client() {
+        assert!(command_requires_api_client(&Commands::Api {
+            command: cli::api::ApiCmd::Routes { filter: None },
+        }));
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli_args = Cli::parse();
     let cfg = config::Config::load(cli_args.api_url.as_deref(), cli_args.api_key.as_deref())?;
-    let client = api::ApiClient::new(&cfg.api_url, cfg.api_key.clone())?;
+    let api_client = if command_requires_api_client(&cli_args.command) {
+        Some(api::ApiClient::new(&cfg.api_url, cfg.api_key.clone()))
+    } else {
+        None
+    };
 
     let format = cli_args.format;
+    macro_rules! dispatch_with_client {
+        ($client:ident, $body:expr) => {{
+            match api_client
+                .as_ref()
+                .expect("API-backed command must initialize ApiClient")
+            {
+                Ok($client) => $body,
+                Err(err) => Err(anyhow::anyhow!(err.to_string())),
+            }
+        }};
+    }
+
     let (command_name, result): (&'static str, anyhow::Result<()>) = match cli_args.command {
         Commands::Auth { command } => ("auth", cli::auth::dispatch(command, &cfg, format)),
-        Commands::Api { command } => ("api", cli::api::dispatch(command, &client, format).await),
+        Commands::Api { command } => (
+            "api",
+            dispatch_with_client!(client, cli::api::dispatch(command, client, format).await),
+        ),
         Commands::Version => {
             let data = serde_json::json!({
                 "name": "tino",
@@ -115,39 +161,63 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Backtest { command } => (
             "backtest",
-            cli::backtest::dispatch(command, &client, format).await,
+            dispatch_with_client!(
+                client,
+                cli::backtest::dispatch(command, client, format).await
+            ),
         ),
         Commands::Strategy { command } => (
             "strategy",
-            cli::strategy::dispatch(command, &client, format).await,
+            dispatch_with_client!(
+                client,
+                cli::strategy::dispatch(command, client, format).await
+            ),
         ),
-        Commands::Data { command } => ("data", cli::data::dispatch(command, &client, format).await),
-        Commands::Node { command } => ("node", cli::node::dispatch(command, &client, format).await),
+        Commands::Data { command } => (
+            "data",
+            dispatch_with_client!(client, cli::data::dispatch(command, client, format).await),
+        ),
+        Commands::Node { command } => (
+            "node",
+            dispatch_with_client!(client, cli::node::dispatch(command, client, format).await),
+        ),
         Commands::Factor { command } => (
             "factor",
-            cli::factor::dispatch(command, &client, format).await,
+            dispatch_with_client!(client, cli::factor::dispatch(command, client, format).await),
         ),
         Commands::Signal { command } => (
             "signal",
-            cli::signal::dispatch(command, &client, format).await,
+            dispatch_with_client!(client, cli::signal::dispatch(command, client, format).await),
         ),
         Commands::Universe { command } => (
             "universe",
-            cli::universe::dispatch(command, &client, format).await,
+            dispatch_with_client!(
+                client,
+                cli::universe::dispatch(command, client, format).await
+            ),
         ),
     };
 
     if let Err(err) = result {
-        if format == OutputFormat::Llm {
-            output::print_llm_error(
-                output::EnvelopeError {
-                    kind: "command".to_string(),
-                    message: err.to_string(),
-                    status_code: None,
-                    body: None,
-                },
-                output::EnvelopeMeta::new(command_name, &cfg.api_url, cfg.auth_label()),
-            )?;
+        if format.is_machine() {
+            let error = output::EnvelopeError {
+                kind: "command".to_string(),
+                message: err.to_string(),
+                status_code: None,
+                body: None,
+            };
+            if format == OutputFormat::Llm {
+                output::print_llm_error(
+                    error,
+                    output::EnvelopeMeta::new(command_name, &cfg.api_url, cfg.auth_label()),
+                )?;
+            } else {
+                output::print_json(&serde_json::json!({
+                    "ok": false,
+                    "error": error,
+                    "meta": output::EnvelopeMeta::new(command_name, &cfg.api_url, cfg.auth_label()),
+                }))?;
+            }
             std::process::exit(1);
         }
         return Err(err);

@@ -266,9 +266,9 @@ pub struct TradingOrder {
     pub created_at: Option<String>,
 }
 
-// ---- Node Portfolios ----
+// ---- Node Strategies ----
 
-/// Portfolio state on a trading node
+/// Strategy state on a trading node.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodePortfolio {
     pub state: String, // "available", "starting", "running", "paused", "flattening"
@@ -277,7 +277,13 @@ pub struct NodePortfolio {
     pub order_id_tag_prefix: Option<String>,
     #[serde(default)]
     pub was_running: bool,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub interval: String,
 }
+
+pub type NodeStrategyStatus = NodePortfolio;
 
 /// Request body for portfolio lifecycle commands
 #[derive(Debug, Serialize)]
@@ -286,11 +292,47 @@ pub struct PortfolioActionRequest {
     pub mode: String,
 }
 
-/// Response from GET /api/node/portfolios
+/// Response from GET /api/node/strategies.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NodeStrategiesResponse {
+    #[serde(default)]
+    pub strategies: std::collections::HashMap<String, NodeStrategyStatus>,
+}
+
+/// Deprecated compatibility shape for older /api/node/portfolios responses.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PortfoliosResponse {
     #[serde(default)]
     pub portfolios: std::collections::HashMap<String, NodePortfolio>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_strategies_response_reads_strategies_field() {
+        let parsed: NodeStrategiesResponse = serde_json::from_value(serde_json::json!({
+            "strategies": {
+                "mean_reversion": {
+                    "state": "running",
+                    "strategy_ids": ["mean_reversion-BTCUSDT-PERP"],
+                    "source_path": "/tmp/strategies/mean_reversion",
+                    "order_id_tag_prefix": "01",
+                    "was_running": true,
+                    "symbols": ["BTCUSDT-PERP"],
+                    "interval": "1m"
+                }
+            }
+        }))
+        .unwrap();
+
+        let item = parsed.strategies.get("mean_reversion").unwrap();
+        assert_eq!(item.state, "running");
+        assert_eq!(item.strategy_ids, vec!["mean_reversion-BTCUSDT-PERP"]);
+        assert!(item.was_running);
+    }
 }
 
 // ---- WebSocket events ----

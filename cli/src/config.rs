@@ -109,15 +109,37 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Cannot create {}", parent.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| format!("Cannot chmod 0700 {}", parent.display()))?;
+            }
         }
-        std::fs::write(&path, format!("{}\n", api_key.trim()))
-            .with_context(|| format!("Cannot write {}", path.display()))?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&path, perms)?;
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .with_context(|| format!("Cannot write {}", path.display()))?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("Cannot chmod 0600 {}", path.display()))?;
+            file.write_all(api_key.trim().as_bytes())
+                .with_context(|| format!("Cannot write {}", path.display()))?;
+            file.write_all(b"\n")
+                .with_context(|| format!("Cannot write {}", path.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&path, format!("{}\n", api_key.trim()))
+                .with_context(|| format!("Cannot write {}", path.display()))?;
         }
         Ok(path)
     }
@@ -188,4 +210,52 @@ fn expand_home(path: PathBuf) -> PathBuf {
         }
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn unique_home() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("tino-config-test-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_credentials_creates_private_directory_and_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let home = unique_home();
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let path = Config::write_credentials("secret-token").unwrap();
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret-token\n");
+
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        std::fs::remove_dir_all(home).ok();
+    }
 }

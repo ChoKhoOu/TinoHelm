@@ -55,7 +55,7 @@ impl ApiClient {
             default_headers.insert(
                 "X-API-Key",
                 HeaderValue::from_str(key)
-                    .context("TINO_API_KEY contains invalid HTTP header characters")?,
+                    .context("API key contains invalid HTTP header characters")?,
             );
         }
         let client = Client::builder()
@@ -615,7 +615,7 @@ impl ApiClient {
 
     // ---- Node Strategies ----
 
-    pub async fn list_portfolios(&self, mode: &str) -> Result<PortfoliosResponse> {
+    pub async fn list_node_strategies(&self, mode: &str) -> Result<NodeStrategiesResponse> {
         let resp = self
             .client
             .get(format!("{}/api/node/strategies", self.base_url))

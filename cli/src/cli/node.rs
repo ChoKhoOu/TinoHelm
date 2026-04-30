@@ -374,14 +374,14 @@ async fn dispatch_portfolio(
 ) -> Result<()> {
     match cmd {
         PortfolioCmd::List { mode } => {
-            let resp = client.list_portfolios(&mode).await?;
+            let resp = client.list_node_strategies(&mode).await?;
             if format.is_machine() {
-                return print_node_machine(format, client, "node.strategy.list", resp.portfolios);
+                return print_node_machine(format, client, "node.strategy.list", resp.strategies);
             }
-            if resp.portfolios.is_empty() {
-                println!("  No portfolios found on {} node", mode);
+            if resp.strategies.is_empty() {
+                println!("  No strategies found on {} node", mode);
             } else {
-                header(&format!("Portfolios  {}", mode_label(&mode)));
+                header(&format!("Strategies  {}", mode_label(&mode)));
                 let t = Table::new(&[
                     ("Name", 25, "left"),
                     ("State", 12, "left"),
@@ -389,10 +389,10 @@ async fn dispatch_portfolio(
                     ("Prefix", 8, "left"),
                 ]);
                 t.header();
-                let mut names: Vec<_> = resp.portfolios.keys().collect();
+                let mut names: Vec<_> = resp.strategies.keys().collect();
                 names.sort();
                 for name in names {
-                    let p = &resp.portfolios[name];
+                    let p = &resp.strategies[name];
                     let was = if p.was_running { " (*)" } else { "" };
                     let state_colored = match p.state.as_str() {
                         "running" => format!("{}", p.state.clone().green()),

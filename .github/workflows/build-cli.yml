@@ -10,7 +10,28 @@ on:
       - 'cli/**'
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    name: Check CLI contract
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Rust CLI
+        working-directory: cli
+        run: |
+          cargo fmt --check
+          cargo check --locked
+          cargo test --locked
+          cargo build --locked
+          ./target/debug/tino --help >/tmp/tino-help.txt
+          ./target/debug/tino version -f json | python3 -m json.tool >/tmp/tino-version.json
+
   build:
+    needs: check
     strategy:
       matrix:
         include:
@@ -55,7 +76,7 @@ jobs:
 
       - name: Build release binary
         working-directory: cli
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |

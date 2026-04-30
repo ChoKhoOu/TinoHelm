@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde_json::json;
 
@@ -128,5 +128,7 @@ fn read_key(api_key: Option<String>, stdin: bool) -> Result<String> {
     if key.is_empty() {
         anyhow::bail!("API key is empty");
     }
+    reqwest::header::HeaderValue::from_str(&key)
+        .context("API key contains invalid HTTP header characters")?;
     Ok(key)
 }

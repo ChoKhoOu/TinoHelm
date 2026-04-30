@@ -219,8 +219,11 @@ cli/src/
 │   ├── api.rs       # generic `tino api call/get/post/routes`; covers every FastAPI route
 │   ├── auth.rs      # `tino auth status|login|logout`
 │   ├── backtest.rs  # typed human-friendly backtest shortcuts
+│   ├── data.rs      # data fetch/list/info/compact/validate/scan shortcuts
 │   ├── factor.rs    # typed factor research shortcuts
+│   ├── node.rs      # sandbox/live node lifecycle + node strategy controls
 │   ├── signal.rs    # typed signal research/export shortcuts
+│   ├── strategy.rs  # strategy CRUD/validate/rescan/params shortcuts
 │   ├── universe.rs  # universe sync/get helpers
 │   └── style.rs     # terminal text styling only, not TUI
 └── types.rs         # serde structs for typed shortcuts
@@ -235,7 +238,7 @@ cli/src/
 Do not wait for typed Rust structs before exposing new backend operations. Add or use `tino api call METHOD /path --body-file req.json` first; typed subcommands are convenience wrappers for common workflows.
 
 ### Auth Rule
-Backend auth uses `X-API-Key`. Client priority is `--api-key` > `TINO_API_KEY` > `~/.tino/credentials/api_key` > `~/.tino/config/user.yaml`. Never print secret values; only print source labels such as `env`, `credentials_file`, or `none`.
+Backend auth uses `X-API-Key`. Client priority is `--api-key` > `TINO_API_KEY` > `~/.tino/credentials/api_key` > `~/.tino/config/user.yaml`. Never print secret values; only print source labels such as `env`, `credentials_file`, or `none`. `tino auth login --api-key ...` persists the key under `~/.tino/credentials/api_key` with a private credentials directory/file; agent/CI usage should prefer ephemeral env/flag credentials unless the workspace is private.
 
 ### Worker Pool (Python backend)
 - Keep-alive worker (`idle_timeout=0`): always running

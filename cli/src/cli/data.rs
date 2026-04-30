@@ -166,30 +166,16 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
         }
         DataCmd::Info { symbol } => {
             let result = client.list_data().await?;
+            let payload = data_info_payload(&result, &symbol);
             if format.is_machine() {
-                return print_data_machine(format, client, "data.info", result);
+                return print_data_machine(format, client, "data.info", payload);
             }
 
-            // Filter items for this symbol
-            let empty_vec = vec![];
-            let all_items = if result.is_array() {
-                result.as_array().unwrap_or(&empty_vec)
-            } else {
-                result
-                    .get("items")
-                    .and_then(|v| v.as_array())
-                    .unwrap_or(&empty_vec)
-            };
-
-            let items: Vec<&serde_json::Value> = all_items
-                .iter()
-                .filter(|item| {
-                    item.get("symbol")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.contains(&symbol))
-                        .unwrap_or(false)
-                })
-                .collect();
+            let items = payload
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
 
             header(&format!("Data: {}", accent(&symbol)));
             divider(50);
@@ -392,6 +378,35 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
     Ok(())
 }
 
+fn catalog_items(result: &serde_json::Value) -> Vec<&serde_json::Value> {
+    if let Some(items) = result.as_array() {
+        return items.iter().collect();
+    }
+    result
+        .get("items")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().collect())
+        .unwrap_or_default()
+}
+
+fn data_info_payload(result: &serde_json::Value, symbol: &str) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = catalog_items(result)
+        .into_iter()
+        .filter(|item| {
+            item.get("symbol")
+                .and_then(|v| v.as_str())
+                .map(|s| s.contains(symbol))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    serde_json::json!({
+        "symbol": symbol,
+        "count": items.len(),
+        "items": items,
+    })
+}
+
 fn print_data_machine<T: serde::Serialize>(
     format: OutputFormat,
     client: &ApiClient,
@@ -405,5 +420,30 @@ fn print_data_machine<T: serde::Serialize>(
         ),
         OutputFormat::Json => print_json(&data),
         OutputFormat::Text => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_info_payload_filters_items_before_machine_output() {
+        let catalog = serde_json::json!({
+            "items": [
+                {"symbol": "BTCUSDT-PERP", "interval": "1m"},
+                {"symbol": "ETHUSDT-PERP", "interval": "1m"},
+                {"symbol": "ETHUSDT-PERP", "interval": "5m"}
+            ]
+        });
+
+        let payload = data_info_payload(&catalog, "ETHUSDT");
+
+        assert_eq!(payload["symbol"], "ETHUSDT");
+        assert_eq!(payload["count"], 2);
+        let items = payload["items"].as_array().unwrap();
+        assert!(items
+            .iter()
+            .all(|item| item["symbol"].as_str().unwrap().contains("ETHUSDT")));
     }
 }
