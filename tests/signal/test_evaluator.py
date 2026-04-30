@@ -117,6 +117,109 @@ def test_align_requires_ts_column(zero_cost: CostModel) -> None:
         )
 
 
+def test_align_rejects_empty_common_symbol_intersection(zero_cost: CostModel) -> None:
+    """Mismatched symbol identity must fail closed instead of returning zero metrics."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match="no common symbol columns"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [0, 1], "ETH": [0.01, 0.02]}),
+            zero_cost,
+        )
+
+
+def test_align_rejects_weight_symbols_missing_from_returns(zero_cost: CostModel) -> None:
+    """A partially missing return panel must not drop live exposure columns."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match="future_returns missing symbols required"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5], "ETH": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.01, 0.02]}),
+            zero_cost,
+        )
+
+
+@pytest.mark.parametrize(
+    ("weight_panel", "future_returns", "message"),
+    [
+        (
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [0, 1]}),
+            "future_returns has no symbol columns",
+        ),
+        (
+            pl.DataFrame({"ts": [0, 1]}),
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.01, 0.02]}),
+            "weight_panel has no symbol columns",
+        ),
+    ],
+)
+def test_align_rejects_one_sided_symbol_schema(
+    weight_panel: pl.DataFrame,
+    future_returns: pl.DataFrame,
+    message: str,
+    zero_cost: CostModel,
+) -> None:
+    """Exactly one side having symbol columns is invalid schema, not zero periods."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match=message):
+        evaluator.evaluate(weight_panel, future_returns, zero_cost)
+
+
+@pytest.mark.parametrize("side", ["weight_panel", "future_returns"])
+def test_align_rejects_duplicate_ts_before_join(side: str, zero_cost: CostModel) -> None:
+    """Duplicate timestamps would Cartesian-expand the inner join."""
+    evaluator = SignalEvaluator()
+    weight_panel = pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5]})
+    future_returns = pl.DataFrame({"ts": [0, 1], "BTC": [0.01, 0.02]})
+    if side == "weight_panel":
+        weight_panel = pl.DataFrame({"ts": [0, 0], "BTC": [0.5, 0.6]})
+    else:
+        future_returns = pl.DataFrame({"ts": [0, 0], "BTC": [0.01, 0.02]})
+
+    with pytest.raises(ValueError, match=f"{side} contains duplicate ts"):
+        evaluator.evaluate(weight_panel, future_returns, zero_cost)
+
+
+def test_align_rejects_no_overlapping_timestamps(zero_cost: CostModel) -> None:
+    """Non-empty panels with matching symbols but disjoint ts are invalid alignment."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match="no overlapping ts"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [2, 3], "BTC": [0.01, 0.02]}),
+            zero_cost,
+        )
+
+
+def test_evaluate_rejects_infinite_future_returns(zero_cost: CostModel) -> None:
+    """Direct callers must not leak +/-inf into JSON-persisted metrics/curves."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match="future_returns contains non-finite"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0, 1], "BTC": [1.0, 1.0]}),
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.01, float("inf")]}),
+            zero_cost,
+        )
+
+
+def test_evaluate_rejects_missing_return_for_active_weight(zero_cost: CostModel) -> None:
+    """A held asset with a missing return must not contribute implicit zero PnL."""
+    evaluator = SignalEvaluator()
+
+    with pytest.raises(ValueError, match="non-finite cells for active weights"):
+        evaluator.evaluate(
+            pl.DataFrame({"ts": [0, 1], "BTC": [0.5, 0.5], "ETH": [0.5, 0.5]}),
+            pl.DataFrame({"ts": [0, 1], "BTC": [None, 0.02], "ETH": [0.01, 0.01]}),
+            zero_cost,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — all-zero weights → sharpe=0 / mdd=0 / turnover=0
 # ---------------------------------------------------------------------------

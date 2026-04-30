@@ -6,8 +6,6 @@ import json
 import signal
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -96,7 +94,8 @@ async def test_cancel_watcher_sends_sigterm():
     )
 
     proc.send_signal.assert_called_once_with(signal.SIGTERM)
-    rds.delete.assert_called_once_with("tino:backtest:cancel:r-1")
+    rds.delete.assert_any_await("tino:backtest:terminalizing:r-1")
+    rds.delete.assert_any_await("tino:backtest:cancel:r-1")
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +124,14 @@ async def test_cancel_watcher_sigkill_on_timeout():
 
     proc.wait = _wait_side_effect
 
-    rds = _make_rds(get_result=b"1")  # cancel flag is set immediately
+    rds = _make_rds()  # cancel flag is set immediately
+
+    async def _get(key: str):
+        if key == "tino:backtest:cancel:r-timeout":
+            return b"1"
+        return None
+
+    rds.get.side_effect = _get
 
     # Use short grace to speed up test; sigterm_grace=0.1s
     await _cancel_watcher(
@@ -138,6 +144,118 @@ async def test_cancel_watcher_sigkill_on_timeout():
 
     proc.send_signal.assert_called_once_with(signal.SIGTERM)
     proc.kill.assert_called_once()
+
+
+async def test_cancel_watcher_does_not_sigkill_terminalizing_subprocess():
+    """Late cancel must not SIGKILL a child that finishes inside terminalization grace."""
+    from tinohelm.backtest.consumer import _cancel_watcher
+
+    proc = _make_proc(returncode=None)
+    first_wait_cancelled = False
+
+    async def _wait_side_effect():
+        nonlocal first_wait_cancelled
+        if not first_wait_cancelled:
+            first_wait_cancelled = True
+            await asyncio.sleep(9999)
+        return 0
+
+    proc.wait = _wait_side_effect
+    rds = _make_rds()
+
+    async def _get(key: str):
+        if key == "tino:backtest:cancel:r-terminalizing":
+            return b"1"
+        if key == "tino:backtest:terminalizing:r-terminalizing":
+            return b"1"
+        return None
+
+    rds.get.side_effect = _get
+
+    await _cancel_watcher(
+        "r-terminalizing",
+        proc,
+        rds,
+        poll_interval=0.01,
+        sigterm_grace=0.01,
+        terminalizing_grace=0.1,
+    )
+
+    proc.kill.assert_not_called()
+    rds.delete.assert_any_await("tino:backtest:terminalizing:r-terminalizing")
+    rds.delete.assert_any_await("tino:backtest:cancel:r-terminalizing")
+
+
+async def test_cancel_watcher_sigkills_stuck_terminalizing_subprocess():
+    """Terminalizing marker is a bounded grace, not an infinite worker-slot leak."""
+    from tinohelm.backtest.consumer import _cancel_watcher
+
+    proc = _make_proc(returncode=None)
+    wait_calls = 0
+
+    async def _wait_side_effect():
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls <= 2:
+            await asyncio.sleep(9999)
+        return -9
+
+    proc.wait = _wait_side_effect
+    rds = _make_rds()
+
+    async def _get(key: str):
+        if key == "tino:backtest:cancel:r-stuck-terminalizing":
+            return b"1"
+        if key == "tino:backtest:terminalizing:r-stuck-terminalizing":
+            return b"1"
+        return None
+
+    rds.get.side_effect = _get
+
+    await _cancel_watcher(
+        "r-stuck-terminalizing",
+        proc,
+        rds,
+        poll_interval=0.01,
+        sigterm_grace=0.01,
+        terminalizing_grace=0.01,
+    )
+
+    proc.kill.assert_called_once()
+    rds.delete.assert_any_await("tino:backtest:terminalizing:r-stuck-terminalizing")
+    rds.delete.assert_any_await("tino:backtest:cancel:r-stuck-terminalizing")
+
+
+async def test_shutdown_termination_honors_terminalizing_grace():
+    """The shutdown path uses the same bounded terminalization grace as cancel."""
+    from tinohelm.backtest.consumer import _terminate_process_with_terminalizing_grace
+
+    proc = _make_proc(returncode=None)
+    wait_calls = 0
+
+    async def _wait_side_effect():
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            await asyncio.sleep(9999)
+        return 0
+
+    proc.wait = _wait_side_effect
+    rds = _make_rds()
+    rds.get = AsyncMock(return_value=b"1")
+
+    await _terminate_process_with_terminalizing_grace(
+        "r-shutdown-terminalizing",
+        proc,
+        rds,
+        reason="shutdown",
+        sigterm_grace=0.01,
+        terminalizing_grace=0.1,
+    )
+
+    proc.send_signal.assert_called_once_with(signal.SIGTERM)
+    proc.kill.assert_not_called()
+    rds.delete.assert_any_await("tino:backtest:terminalizing:r-shutdown-terminalizing")
 
 
 # ---------------------------------------------------------------------------
@@ -164,9 +282,6 @@ async def test_shutdown_sigterm_inflight():
     proc.wait = _wait
     # After SIGTERM we expect wait() to be called again (proc.wait() in the except block)
     # but this second call should resolve immediately (proc.returncode was set)
-    # We handle this by tracking call count
-    proc_wait_after_sigterm = asyncio.Event()
-
     # Track send_signal calls
     sigterm_sent = asyncio.Event()
     original_send = proc.send_signal

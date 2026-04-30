@@ -213,6 +213,34 @@ class TestEmptySegmentReturnsEvalResult:
         assert isinstance(neg, EvalResult)
         assert neg.ir == 0.0
 
+    def test_schema_errors_are_not_swallowed_as_empty_segments(self):
+        """Duplicate identity rows must surface instead of becoming zero metrics."""
+        panel = pl.DataFrame(
+            {
+                "ts": [*_hourly_ts(30).to_list(), _hourly_ts(30)[0]],
+                "value": [0.1] * 31,
+            }
+        )
+        fwd = pl.DataFrame(
+            {
+                "ts": [*_hourly_ts(30).to_list(), _hourly_ts(30)[0]],
+                "value": [0.01] * 31,
+            }
+        )
+        funding = pl.Series("funding", [0.001] * 31)
+
+        with pytest.raises(ValueError, match="duplicate identity"):
+            segment_evaluate(panel, fwd, funding_series=funding, eval_config=_CONFIG)
+
+    def test_empty_forward_returns_with_finite_segment_raises(self):
+        """Non-empty factor segments require forward-return coverage."""
+        panel = _make_panel(40, seed=31)
+        fwd = _make_fwd(40, seed=31).head(0)
+        funding = pl.Series("funding", [0.001] * 40)
+
+        with pytest.raises(ValueError, match="missing identity keys"):
+            segment_evaluate(panel, fwd, funding_series=funding, eval_config=_CONFIG)
+
     def test_segment_evaluate_no_series_returns_empty_dict(self):
         """When no series are supplied, the output dict is empty."""
         result = segment_evaluate(_PANEL, _FWD, eval_config=_CONFIG)

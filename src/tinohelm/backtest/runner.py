@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.backtest.models import FillModel, LatencyModel
@@ -26,7 +26,7 @@ from tinohelm.backtest.runner_helpers import (
     compute_bar_progress_fields,
     compute_warmup_adjusted_start,
     extract_benchmark_daily_closes,
-    interval_to_minutes as _interval_to_minutes,
+    interval_to_minutes as _interval_to_minutes,  # noqa: F401 - backward-compatible shim
     resolve_symbols_intervals,
 )
 from tinohelm.strategy.loader import (
@@ -170,10 +170,12 @@ class BacktestRunner:
         self.tags = tags
         self.data_type = data_type
         self.artifacts_dir: Path | None = None
+        self._before_artifact_export: Callable[[], None] | None = None
         self._engine: BacktestEngine | None = None
         self._redis_client = None  # sync Redis for progress reporting
         self._run_id: str = ""
         self._job_start_time: float = 0.0  # set by worker for elapsed tracking
+        self._catalog_cache: dict[str, ParquetDataCatalog] = {}
 
         # Strategy bundle (explicit or auto-wrapped from legacy params)
         self._strategy_bundle = strategy_bundle
@@ -181,6 +183,22 @@ class BacktestRunner:
     # Timeframes ordered from lowest to highest for composite source resolution.
     # Sourced from ``runner_helpers.TIMEFRAME_PRIORITY`` (single source of truth).
     _TIMEFRAME_PRIORITY: list[str] = list(_TIMEFRAME_PRIORITY_TUPLE)
+
+    def _catalog_for_path(self, path: str | Path) -> ParquetDataCatalog:
+        """Return a cached ParquetDataCatalog for the runner lifetime."""
+        key = str(path)
+        catalog = self._catalog_cache.get(key)
+        if catalog is None:
+            catalog = ParquetDataCatalog(key)
+            self._catalog_cache[key] = catalog
+        return catalog
+
+    def _invalidate_catalog_cache_for_source(self, source_type: str) -> None:
+        """Drop cached catalog handles that may be stale after a data fetch."""
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        self._catalog_cache.pop(str(resolve_catalog_path(self.catalog_path, source_type)), None)
+        self._catalog_cache.pop(str(self.catalog_path), None)
 
     def _try_load_bars(self, bar_type_str: str, source_type: str = "klines") -> list | None:
         """Load bars from the resolved catalog path for a specific source_type.
@@ -194,7 +212,7 @@ class BacktestRunner:
         # 1. Resolved source_type path (new layout)
         resolved = str(resolve_catalog_path(self.catalog_path, source_type))
         try:
-            cat = ParquetDataCatalog(resolved)
+            cat = self._catalog_for_path(resolved)
             bars = cat.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
             if bars:
                 return bars
@@ -203,7 +221,7 @@ class BacktestRunner:
 
         # 2. Legacy base path fallback
         try:
-            cat = ParquetDataCatalog(str(self.catalog_path))
+            cat = self._catalog_for_path(self.catalog_path)
             bars = cat.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
             if bars:
                 return bars
@@ -286,6 +304,7 @@ class BacktestRunner:
             return None
 
         # Reload from catalog using the correct source_type path
+        self._invalidate_catalog_cache_for_source(self.data_type)
         bar_type_str = _make_bar_type_str(sym, ivl)
         return self._try_load_bars(bar_type_str, source_type=self.data_type)
 
@@ -581,6 +600,7 @@ class BacktestRunner:
         if self._redis_client:
             success = await self._submit_and_wait_fetch(sym, ivl, data_type=source_type)
             if success:
+                self._invalidate_catalog_cache_for_source(source_type)
                 bars = self._try_load_bars(bar_type_str, source_type=source_type)
 
         if not bars:
@@ -866,7 +886,7 @@ class BacktestRunner:
         engine.add_venue(**venue_kwargs)
 
         # Load data from catalog
-        catalog = ParquetDataCatalog(str(self.catalog_path))
+        catalog = self._catalog_for_path(self.catalog_path)
 
         # Load instruments for each symbol
         nt_symbols: list[str] = []
@@ -886,7 +906,7 @@ class BacktestRunner:
         loaded_bar_type_strs: list[str] = []
         total_bar_count: int = 0
         benchmark_daily_closes: dict[str, dict[str, float]] = {}
-        pending_bars: list[list] = []
+        pending_bars_by_loaded_type: dict[str, list] = {}
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
@@ -894,9 +914,11 @@ class BacktestRunner:
                     catalog, sym, nt_sym, ivl,
                 )
                 if bars:
-                    total_bar_count += len(bars)
-                    loaded_bar_type_strs.append(source_bt_str or bt_str)
-                    pending_bars.append(bars)
+                    loaded_bt_str = source_bt_str or bt_str
+                    if loaded_bt_str not in pending_bars_by_loaded_type:
+                        total_bar_count += len(bars)
+                        loaded_bar_type_strs.append(loaded_bt_str)
+                        pending_bars_by_loaded_type[loaded_bt_str] = bars
                     all_bar_type_strs.append(bt_str)
                     # Extract daily close prices for benchmark B&H (NT-free helper)
                     if nt_sym not in benchmark_daily_closes:
@@ -912,7 +934,7 @@ class BacktestRunner:
             for raw_sym, nt_sym in missing_instrument_syms:
                 resolved = str(resolve_catalog_path(self.catalog_path, self.data_type))
                 try:
-                    resolved_cat = ParquetDataCatalog(resolved)
+                    resolved_cat = self._catalog_for_path(resolved)
                     instruments = resolved_cat.instruments(instrument_ids=[nt_sym])
                     if instruments:
                         for inst in instruments:
@@ -928,7 +950,7 @@ class BacktestRunner:
                     logger.info("Loaded instrument %s from base catalog after auto-fetch", nt_sym)
 
         # Add bar data to engine (instruments are now guaranteed loaded)
-        for bars in pending_bars:
+        for bars in pending_bars_by_loaded_type.values():
             engine.add_data(bars, sort=False)
         if all_bar_type_strs:
             engine.sort_data()
@@ -1070,15 +1092,20 @@ class BacktestRunner:
                 (stats.get("total_pnl", 0.0) or 0.0) - funding_cost, 4
             )
 
-        # Export raw reports before dispose (if artifacts_dir is set)
-        if self.artifacts_dir is not None:
-            self._export_reports(engine)
-            self._generate_tearsheet(engine, self._loaded_bar_type_strs)
-            from tinohelm.backtest.tearsheet import enhance_tearsheet
-            enhance_tearsheet(self.artifacts_dir, results)
-
-        # Cleanup
-        engine.dispose()
+        # Export raw reports before dispose (if artifacts_dir is set).  Queue
+        # mode uses _before_artifact_export to publish a terminalization marker
+        # before any CSV/HTML artifact writes can be interrupted by late cancel.
+        try:
+            if self._before_artifact_export is not None:
+                self._before_artifact_export()
+            if self.artifacts_dir is not None:
+                self._export_reports(engine)
+                self._generate_tearsheet(engine, self._loaded_bar_type_strs)
+                from tinohelm.backtest.tearsheet import enhance_tearsheet
+                enhance_tearsheet(self.artifacts_dir, results)
+        finally:
+            # Cleanup
+            engine.dispose()
 
         logger.info("Backtest complete: %s", self.strategy_path)
         return results

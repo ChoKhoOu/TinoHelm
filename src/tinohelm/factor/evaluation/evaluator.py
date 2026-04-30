@@ -51,6 +51,8 @@ import polars as pl
 from tinohelm.factor.evaluation.cost import edge_waterfall
 from tinohelm.factor.evaluation.distribution import compute_distribution
 from tinohelm.factor.evaluation.ic import (
+    _ensure_factor_keys_covered,
+    _ensure_unique_identity_keys,
     _join_keys,
     compute_ic_decay,
     compute_ic_series,
@@ -449,10 +451,11 @@ class Evaluator:
         # asset/time axis (mirrors pandas ``align(join="inner")`` without
         # producing the symbol² row explosion caused by joining on ``ts`` only).
         key_cols = _join_keys(factor_df, fwd_df)
-        common_keys = (
-            factor_df.select(key_cols)
-            .join(fwd_df.select(key_cols), on=key_cols, how="inner")
-            .unique(maintain_order=True)
+        _ensure_unique_identity_keys(factor_df, key_cols, "factor")
+        _ensure_unique_identity_keys(fwd_df, key_cols, "fwd_ret")
+        _ensure_factor_keys_covered(factor_df, fwd_df, key_cols)
+        common_keys = factor_df.select(key_cols).join(
+            fwd_df.select(key_cols), on=key_cols, how="inner",
         )
         factor_df = factor_df.join(common_keys, on=key_cols, how="inner")
         fwd_df = fwd_df.join(common_keys, on=key_cols, how="inner")

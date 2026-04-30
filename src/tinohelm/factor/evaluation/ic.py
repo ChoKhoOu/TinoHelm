@@ -76,11 +76,67 @@ def _ensure_ts_value_frame(df: pl.DataFrame, name: str) -> pl.DataFrame:
 
 
 def _join_keys(left: pl.DataFrame, right: pl.DataFrame) -> list[str]:
-    """Return identity-preserving join keys for evaluation frames."""
+    """Return identity-preserving join keys for evaluation frames.
+
+    Symbol identity is intentionally fail-closed: either both frames carry a
+    ``symbol`` column, or neither does.  Falling back to ``ts`` when only one
+    side is multi-symbol silently broadcasts/cross-pairs returns across assets.
+    """
+    left_has_symbol = _SYMBOL_COL in left.columns
+    right_has_symbol = _SYMBOL_COL in right.columns
+    if left_has_symbol != right_has_symbol:
+        raise ValueError(
+            "factor and fwd_ret must both include 'symbol' or both omit it; "
+            f"got left columns={left.columns!r}, right columns={right.columns!r}"
+        )
     keys = [_TS_COL]
-    if _SYMBOL_COL in left.columns and _SYMBOL_COL in right.columns:
+    if left_has_symbol:
         keys.append(_SYMBOL_COL)
     return keys
+
+
+def _ensure_unique_identity_keys(df: pl.DataFrame, keys: list[str], name: str) -> None:
+    """Reject duplicate join keys before an inner join can cartesian-expand."""
+    if df.height <= 1:
+        return
+    if bool(df.select(keys).is_duplicated().any()):
+        raise ValueError(
+            f"{name} has duplicate identity rows for {keys!r}; "
+            "dedupe or aggregate before IC evaluation"
+        )
+
+
+def _ensure_factor_keys_covered(
+    factor: pl.DataFrame,
+    fwd_ret: pl.DataFrame,
+    keys: list[str],
+) -> None:
+    """Reject finite factor cells that would be silently dropped by inner join."""
+    if factor.height == 0:
+        return
+
+    factor_keys = (
+        factor
+        .filter(pl.col(_VAL_COL).is_not_null() & pl.col(_VAL_COL).is_finite())
+        .select(keys)
+        .unique(maintain_order=True)
+    )
+    if factor_keys.height == 0:
+        return
+
+    if fwd_ret.height == 0:
+        raise ValueError(
+            "fwd_ret missing identity keys required by factor; "
+            f"keys={keys!r}, missing_sample={factor_keys.head(5).to_dicts()!r}"
+        )
+
+    fwd_keys = fwd_ret.select(keys).unique(maintain_order=True)
+    missing = factor_keys.join(fwd_keys, on=keys, how="anti")
+    if missing.height > 0:
+        raise ValueError(
+            "fwd_ret missing identity keys required by factor; "
+            f"keys={keys!r}, missing_sample={missing.head(5).to_dicts()!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +199,9 @@ def _build_paired(factor: pl.DataFrame, fwd_ret: pl.DataFrame) -> pl.DataFrame:
     _ensure_ts_value_frame(factor, "factor")
     _ensure_ts_value_frame(fwd_ret, "fwd_ret")
     keys = _join_keys(factor, fwd_ret)
+    _ensure_unique_identity_keys(factor, keys, "factor")
+    _ensure_unique_identity_keys(fwd_ret, keys, "fwd_ret")
+    _ensure_factor_keys_covered(factor, fwd_ret, keys)
 
     paired = (
         factor.rename({_VAL_COL: "factor"})
@@ -171,41 +230,43 @@ def compute_ic_series(
     canonical column order) so :func:`compute_ic_summary` short-circuits to
     the zero summary.
     """
+    if method not in {"spearman", "pearson"}:
+        raise ValueError("method must be 'spearman' or 'pearson'")
+    _ensure_ts_value_frame(factor, "factor")
+    _ensure_ts_value_frame(fwd_ret, "fwd_ret")
+    for frame_name, frame in (("factor", factor), ("fwd_ret", fwd_ret)):
+        ts_dtype = frame.schema[_TS_COL]
+        if not ts_dtype.is_temporal():
+            raise ValueError(
+                f"{frame_name}.{_TS_COL!r} must be a datetime/date column for IC "
+                f"frequency bucketing; got {ts_dtype}"
+            )
+
     paired = _build_paired(factor, fwd_ret)
     empty_schema = {"date": pl.Utf8, "ic": pl.Float64}
     if paired.height < 30:
         return pl.DataFrame(schema=empty_schema)
 
     bucket = pl.col(_TS_COL).dt.truncate(_to_polars_freq(freq)).alias("bucket")
-    paired_bucketed = paired.with_columns(bucket)
-
-    results: list[dict] = []
-    # ``maintain_order=True`` → buckets emitted in chronological order, mirroring
-    # ``pd.Grouper`` iteration order (legacy regression-test contract).
-    for (bucket_dt,), group in paired_bucketed.group_by(["bucket"], maintain_order=True):
-        if group.height < 20:
-            continue
-        if method == "spearman":
-            ic_arr = group.select(
-                pl.corr(pl.col("factor"), pl.col("fwd_ret"), method="spearman").alias("ic")
-            )
-            ic_val = ic_arr.item()
-        else:
-            ic_arr = group.select(
-                pl.corr(pl.col("factor"), pl.col("fwd_ret"), method="pearson").alias("ic")
-            )
-            ic_val = ic_arr.item()
-        if ic_val is None or not np.isfinite(ic_val):
-            continue
-        # ``bucket_dt`` is a python datetime → ``isoformat`` mirrors legacy.
-        results.append({
-            "date": bucket_dt.isoformat() if hasattr(bucket_dt, "isoformat") else str(bucket_dt),
-            "ic": round(float(ic_val), 6),
-        })
-
-    if not results:
+    grouped = (
+        paired.with_columns(bucket)
+        .group_by("bucket", maintain_order=True)
+        .agg(
+            pl.len().alias("n"),
+            pl.corr(pl.col("factor"), pl.col("fwd_ret"), method=method).alias("ic"),
+        )
+        .filter((pl.col("n") >= 20) & pl.col("ic").is_not_null() & pl.col("ic").is_finite())
+    )
+    if grouped.height == 0:
         return pl.DataFrame(schema=empty_schema)
-    return pl.DataFrame(results, schema=empty_schema)
+
+    return grouped.select(
+        pl.col("bucket").map_elements(
+            lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x),
+            return_dtype=pl.Utf8,
+        ).alias("date"),
+        pl.col("ic").round(6).alias("ic"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +297,8 @@ def compute_ic_summary(ic_series: pl.DataFrame) -> dict[str, float]:
     if ic_series.height == 0 or "ic" not in ic_series.columns:
         return dict(_EMPTY_SUMMARY)
 
-    ics = ic_series["ic"].to_numpy()
+    ics = np.asarray(ic_series["ic"].to_numpy(), dtype=float)
+    ics = ics[np.isfinite(ics)]
     if len(ics) == 0:
         return dict(_EMPTY_SUMMARY)
 

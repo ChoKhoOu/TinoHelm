@@ -17,6 +17,85 @@ logger = logging.getLogger(__name__)
 _shutdown_event: asyncio.Event = asyncio.Event()
 
 
+def _terminalizing_key(run_id: str) -> str:
+    """Redis marker set by runner_cli while terminal writes are in progress."""
+    return f"tino:backtest:terminalizing:{run_id}"
+
+
+async def _is_terminalizing(run_id: str, rds: aioredis.Redis) -> bool:
+    """Best-effort read of the child terminalization marker."""
+    try:
+        return bool(await rds.get(_terminalizing_key(run_id)))
+    except Exception:
+        logger.exception(
+            "Failed to read terminalizing marker for %s; escalating as unsafe",
+            run_id,
+        )
+        return False
+
+
+async def _clear_terminalizing_marker(run_id: str, rds: aioredis.Redis) -> None:
+    """Best-effort parent cleanup for long-lived terminalization markers."""
+    try:
+        await rds.delete(_terminalizing_key(run_id))
+    except Exception:
+        logger.exception("Failed to delete terminalizing marker for %s", run_id)
+
+
+async def _terminate_process_with_terminalizing_grace(
+    run_id: str,
+    proc: asyncio.subprocess.Process,
+    rds: aioredis.Redis,
+    *,
+    reason: str,
+    sigterm_grace: float,
+    terminalizing_grace: float = 30.0,
+) -> None:
+    """SIGTERM a child, but honor bounded terminalization grace before SIGKILL."""
+    try:
+        if proc.returncode is not None:
+            return
+
+        logger.info("Sending SIGTERM to subprocess %s (%s)", run_id, reason)
+        proc.send_signal(signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=sigterm_grace)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        if await _is_terminalizing(run_id, rds):
+            logger.warning(
+                "Subprocess %s is terminalizing after SIGTERM grace during %s; "
+                "waiting up to %.1fs before SIGKILL escalation",
+                run_id,
+                reason,
+                terminalizing_grace,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=terminalizing_grace)
+                return
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Terminalizing subprocess %s stuck after %.1fs during %s — SIGKILL",
+                    run_id,
+                    terminalizing_grace,
+                    reason,
+                )
+        else:
+            logger.warning(
+                "Subprocess %s did not exit in %.1fs during %s — SIGKILL",
+                run_id,
+                sigterm_grace,
+                reason,
+            )
+
+        proc.kill()
+        await proc.wait()
+    finally:
+        await _clear_terminalizing_marker(run_id, rds)
+
+
 async def start_consumers(
     n: int,
     redis_url: str,
@@ -74,6 +153,7 @@ async def _consumer_loop(
 ) -> None:
     logger.info("bt-consumer-%d started", slot_idx)
     proc: asyncio.subprocess.Process | None = None
+    current_run_id: str | None = None
 
     while not _shutdown_event.is_set():
         try:
@@ -87,6 +167,7 @@ async def _consumer_loop(
                 logger.exception("Malformed job on queue (dropped): %s", job_json[:200])
                 continue
             run_id = job["run_id"]
+            current_run_id = run_id
             logger.info("bt-consumer-%d picked up run %s", slot_idx, run_id)
 
             proc = await asyncio.create_subprocess_exec(
@@ -125,18 +206,18 @@ async def _consumer_loop(
             await _fallback_db_status(run_id, returncode, db_url, rds)
 
             proc = None
+            current_run_id = None
 
         except asyncio.CancelledError:
-            # Shutdown path — give inflight subprocess a grace period
+            # Shutdown path — give inflight subprocess a marker-aware grace period.
             if proc is not None and proc.returncode is None:
-                logger.info("Sending SIGTERM to inflight subprocess on shutdown")
-                proc.send_signal(signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=10.0)
-                except asyncio.TimeoutError:
-                    logger.warning("Inflight subprocess did not exit in 10s — SIGKILL")
-                    proc.kill()
-                    await proc.wait()
+                await _terminate_process_with_terminalizing_grace(
+                    current_run_id or "<unknown>",
+                    proc,
+                    rds,
+                    reason="shutdown",
+                    sigterm_grace=10.0,
+                )
             raise
 
         except Exception:
@@ -202,22 +283,25 @@ async def _cancel_watcher(
     *,
     poll_interval: float = 2.0,
     sigterm_grace: float = 5.0,
+    terminalizing_grace: float = 30.0,
 ) -> None:
     cancel_key = f"tino:backtest:cancel:{run_id}"
     while proc.returncode is None:
         try:
             flag = await rds.get(cancel_key)
             if flag:
-                logger.info("Cancel flag set for %s — SIGTERM", run_id)
-                await rds.delete(cancel_key)
-                proc.send_signal(signal.SIGTERM)
+                await _terminate_process_with_terminalizing_grace(
+                    run_id,
+                    proc,
+                    rds,
+                    reason="cancel",
+                    sigterm_grace=sigterm_grace,
+                    terminalizing_grace=terminalizing_grace,
+                )
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=sigterm_grace)
-                except asyncio.TimeoutError:
-                    logger.warning("Subprocess %s did not exit in %.1fs — SIGKILL",
-                                   run_id, sigterm_grace)
-                    proc.kill()
-                    await proc.wait()
+                    await rds.delete(cancel_key)
+                except Exception:
+                    logger.exception("Failed to delete cancel key %s", cancel_key)
                 return
         except asyncio.CancelledError:
             raise

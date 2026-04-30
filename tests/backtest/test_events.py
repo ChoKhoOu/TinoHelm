@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from tinohelm.backtest.events import (
@@ -25,7 +26,7 @@ def _make_redis() -> MagicMock:
     return MagicMock()
 
 
-def _make_sqlite_db() -> tuple[str, "Engine"]:
+def _make_sqlite_db() -> tuple[str, Engine]:
     """Create an in-memory SQLite engine with BacktestRun table."""
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -311,3 +312,21 @@ def test_update_db_status_only_if_not_terminal_updates_running():
             f"Expected status=failed after CAS on running row, got {row.status!r}"
         )
         assert row.error == "Subprocess exited with code -9"
+
+
+def test_update_db_status_reports_row_miss_and_strict_raises():
+    """Strict terminal writes must be observable when no DB row is updated."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with __import__("unittest.mock", fromlist=["patch"]).patch(
+        "tinohelm.backtest.events.get_sync_engine", return_value=engine
+    ):
+        assert update_db_status("sqlite:///:memory:", "missing-run", "completed") is False
+        with pytest.raises(RuntimeError, match="matched no rows"):
+            update_db_status(
+                "sqlite:///:memory:",
+                "missing-run",
+                "completed",
+                strict=True,
+            )

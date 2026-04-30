@@ -105,11 +105,18 @@ def update_db_status(
     error_msg: str | None = None,
     *,
     only_if_not_terminal: bool = False,
-) -> None:
+    strict: bool = False,
+) -> bool:
     """Update the backtest_runs table using a synchronous DB session.
 
     The worker/runner_cli runs in a subprocess, so we use a cached sync engine
     to perform the update without depending on the async stack.
+
+    Returns ``True`` when the UPDATE matched a row, ``False`` when it failed or
+    when the compare-and-swap condition made it a no-op.  By default failures
+    are logged and swallowed for best-effort parent safety-net paths; pass
+    ``strict=True`` for durable terminal writes that must be observable by the
+    caller.
 
     Args:
         only_if_not_terminal: When ``True``, the UPDATE is conditional —
@@ -118,6 +125,9 @@ def update_db_status(
             parent-process safety-net writes act as atomic compare-and-swap
             without overwriting a terminal state already written by the
             subprocess.
+        strict: Re-raise DB failures and row-miss/no-op outcomes instead of
+            swallowing them.  Use this for subprocess-owned terminal success
+            writes; a run must not return rc=0 if ``completed`` was not durable.
     """
     try:
         engine = get_sync_engine(db_url)
@@ -135,7 +145,20 @@ def update_db_status(
                 stmt = stmt.where(
                     BacktestRun.status.not_in(list(_TERMINAL_STATUSES))
                 )
-            session.execute(stmt.values(**values))
+            result = session.execute(stmt.values(**values))
             session.commit()
+            matched = result.rowcount is None or result.rowcount > 0
+            if not matched:
+                msg = (
+                    f"DB status update for run {run_id} matched no rows "
+                    f"(status={status!r}, only_if_not_terminal={only_if_not_terminal})"
+                )
+                if strict:
+                    raise RuntimeError(msg)
+                logger.warning(msg)
+            return matched
     except Exception:
         logger.exception("Failed to update DB status for run %s", run_id)
+        if strict:
+            raise
+        return False

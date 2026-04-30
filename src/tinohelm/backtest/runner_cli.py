@@ -22,16 +22,38 @@ from pathlib import Path
 
 import redis
 
-from tinohelm.backtest.events import (
-    publish_completed,
-    publish_progress,
-    publish_stats,
-    update_db_status,
-)
-from tinohelm.core.config import get_settings
-from tinohelm.core.utils import sanitize_for_json
-
 logger = logging.getLogger(__name__)
+
+
+def get_settings():
+    """Lazy wrapper kept patchable for tests and fast for early signal setup."""
+    from tinohelm.core.config import get_settings as _get_settings
+    return _get_settings()
+
+
+def sanitize_for_json(value):
+    from tinohelm.core.utils import sanitize_for_json as _sanitize_for_json
+    return _sanitize_for_json(value)
+
+
+def publish_completed(*args, **kwargs):
+    from tinohelm.backtest.events import publish_completed as _publish_completed
+    return _publish_completed(*args, **kwargs)
+
+
+def publish_progress(*args, **kwargs):
+    from tinohelm.backtest.events import publish_progress as _publish_progress
+    return _publish_progress(*args, **kwargs)
+
+
+def publish_stats(*args, **kwargs):
+    from tinohelm.backtest.events import publish_stats as _publish_stats
+    return _publish_stats(*args, **kwargs)
+
+
+def update_db_status(*args, **kwargs):
+    from tinohelm.backtest.events import update_db_status as _update_db_status
+    return _update_db_status(*args, **kwargs)
 
 # ---------------------------------------------------------------------------
 # Global state for SIGTERM handler — set once in _run_queue_mode()
@@ -40,6 +62,24 @@ logger = logging.getLogger(__name__)
 _current_run_id: str | None = None
 _current_r: redis.Redis | None = None
 _current_db_url: str | None = None
+_terminalizing: bool = False
+
+
+class _BacktestCancelledAfterEngine(Exception):
+    """Internal control-flow signal for post-engine, pre-terminal cancel."""
+
+
+def _best_effort(label: str, func, *args, **kwargs) -> None:
+    """Run a post-terminal side effect without changing the terminal outcome."""
+    try:
+        func(*args, **kwargs)
+    except Exception:
+        logger.exception("Best-effort %s failed", label)
+
+
+def _terminalizing_key(run_id: str) -> str:
+    """Redis marker consumed by the parent cancel watcher."""
+    return f"tino:backtest:terminalizing:{run_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +88,9 @@ _current_db_url: str | None = None
 
 def _handle_sigterm(signum, frame):
     """Cancel current run if SIGTERM/SIGINT arrives mid-execution."""
+    if _terminalizing:
+        logger.info("Ignoring signal %s after run terminalization started", signum)
+        return
     if _current_run_id and _current_r and _current_db_url:
         try:
             update_db_status(_current_db_url, _current_run_id, "cancelled")
@@ -66,27 +109,35 @@ def _run_queue_mode(run_id: str) -> int:
 
     Returns exit code: 0 = success, 1 = failure, 2 = cancelled.
     """
-    global _current_run_id, _current_r, _current_db_url
+    global _current_run_id, _current_r, _current_db_url, _terminalizing
 
     cfg = get_settings()
     r = redis.from_url(cfg.redis.url)
     _current_run_id = run_id
     _current_r = r
     _current_db_url = cfg.database.url
+    _terminalizing = False
 
     # Read job payload: prefer stdin (from consumer), fall back to DB
     job = _load_job_payload(run_id, cfg.database.url)
     if job is None:
         logger.error("No job payload for run %s", run_id)
+        _current_run_id = None
+        _current_r = None
+        _current_db_url = None
         return 1
 
     # Pre-cancel check
     cancel_key = f"tino:backtest:cancel:{run_id}"
+    terminalizing_key = _terminalizing_key(run_id)
     if r.get(cancel_key):
         logger.info("Run %s was cancelled before execution", run_id)
         r.delete(cancel_key)
         update_db_status(cfg.database.url, run_id, "cancelled")
-        publish_completed(r, run_id, "cancelled")
+        _best_effort("publish pre-run cancellation", publish_completed, r, run_id, "cancelled")
+        _current_run_id = None
+        _current_r = None
+        _current_db_url = None
         return 2
 
     update_db_status(cfg.database.url, run_id, "running")
@@ -135,6 +186,46 @@ def _run_queue_mode(run_id: str) -> int:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         runner.artifacts_dir = artifact_dir
 
+        def _begin_terminalization() -> None:
+            """Own terminal state before any post-engine artifact/DB/Redis writes."""
+            global _terminalizing
+            if _terminalizing:
+                return
+
+            # Local state must flip before any Redis I/O so SIGTERM is ignored
+            # throughout finalization even if Redis marker/cancel checks fail.
+            _terminalizing = True
+
+            cancel_requested = False
+            try:
+                cancel_requested = bool(r.get(cancel_key))
+            except Exception:
+                logger.exception(
+                    "Cancel-key read failed during terminalization for %s; "
+                    "continuing durable completion",
+                    run_id,
+                )
+
+            if cancel_requested:
+                _best_effort("delete post-engine cancel key", r.delete, cancel_key)
+                update_db_status(cfg.database.url, run_id, "cancelled")
+                _best_effort(
+                    "publish post-engine cancellation",
+                    publish_completed,
+                    r,
+                    run_id,
+                    "cancelled",
+                )
+                logger.info("Backtest %s cancelled after engine execution", run_id)
+                raise _BacktestCancelledAfterEngine()
+
+            # Keep a long-lived marker for the whole finalization window; the
+            # child clears it in finally.  Redis marker failure only weakens the
+            # parent-side grace heuristic and must not fail a completed run.
+            _best_effort("set terminalizing marker", r.set, terminalizing_key, "1")
+
+        runner._before_artifact_export = _begin_terminalization
+
         # Publish progress: runner constructed, data loading next
         publish_progress(
             r, run_id, 2,
@@ -145,70 +236,126 @@ def _run_queue_mode(run_id: str) -> int:
         # The one place in this codebase that creates a BacktestEngine
         results = asyncio.run(runner.run())
 
-        # Progress: engine done, saving artifacts
-        publish_progress(
-            r, run_id, 95,
+        # Progress: engine done, saving artifacts. Redis progress is advisory;
+        # failures here must not turn a successful engine run into DB failed.
+        _best_effort(
+            "publish engine-complete progress",
+            publish_progress,
+            r,
+            run_id,
+            95,
             elapsed_secs=round(time.monotonic() - job_start_time, 1),
         )
-        r.setex(f"tino:backtest:progress:{run_id}", 86400, "95")
+        _best_effort(
+            "store engine-complete progress",
+            r.setex,
+            f"tino:backtest:progress:{run_id}",
+            86400,
+            "95",
+        )
 
         # Sanitize NaN/Infinity before any serialization
         results = sanitize_for_json(results)
 
-        # Save artifact JSON
-        artifact_path = artifact_dir / "results.json"
-        with open(artifact_path, "w") as f:
-            json.dump(results, f, indent=2, default=str)
+        # BacktestRunner normally calls this before internal CSV/HTML export.
+        # Unit tests or alternate runner implementations may not, so keep a
+        # fallback before the queue-mode results.json / DB / Redis writes.
+        if not _terminalizing:
+            _begin_terminalization()
 
-        # Publish stats from results
+        # Save artifact JSON atomically.  Readers should never observe a
+        # partially-written results.json while status polling races completion.
+        artifact_path = artifact_dir / "results.json"
+        tmp_artifact_path = artifact_dir / "results.json.tmp"
+        with open(tmp_artifact_path, "w") as f:
+            json.dump(results, f, separators=(",", ":"), allow_nan=False, default=str)
+        tmp_artifact_path.replace(artifact_path)
+
+        # Persist the terminal DB state immediately after durable artifact write.
+        # From here on Redis events/cache pointers are advisory side effects and
+        # must not overwrite a successful backtest as failed.
         stats = results.get("statistics", {})
-        publish_stats(
-            r, run_id,
+        update_db_status(
+            cfg.database.url,
+            run_id,
+            "completed",
+            result_summary=stats,
+            strict=True,
+        )
+
+        _best_effort(
+            "publish stats",
+            publish_stats,
+            r,
+            run_id,
             trades=int(stats.get("total_trades", 0)),
             pnl=float(stats.get("pnl_total", 0)),
             win_rate=float(stats.get("win_rate", 0)),
         )
 
-        # Publish completion
-        publish_progress(
-            r, run_id, 100,
+        _best_effort(
+            "publish completion progress",
+            publish_progress,
+            r,
+            run_id,
+            100,
             elapsed_secs=round(time.monotonic() - job_start_time, 1),
         )
-        publish_completed(r, run_id, "completed", summary=stats)
 
-        # Store result summary in Redis for quick access
-        r.setex(
+        # Store only a small summary pointer in Redis.  The full payload lives
+        # in the artifact file and can be multi-MB for trade/equity reports.
+        pointer_json = json.dumps({
+            "status": "completed",
+            "summary": stats,
+            "artifact_path": str(artifact_path),
+        }, default=str)
+        _best_effort(
+            "store result pointer",
+            r.setex,
             f"tino:backtest:result:{run_id}",
             86400,
-            json.dumps(results, default=str),
+            pointer_json,
         )
-        r.setex(f"tino:backtest:progress:{run_id}", 86400, "100")
-
-        # Update database record
-        update_db_status(
-            cfg.database.url,
-            run_id,
-            "completed",
-            result_summary=results.get("statistics", {}),
+        _best_effort(
+            "store completion progress",
+            r.setex,
+            f"tino:backtest:progress:{run_id}",
+            86400,
+            "100",
         )
-
-        # Post-completion cancel check: cancel may have arrived mid-run
-        if r.get(cancel_key):
-            r.delete(cancel_key)
-            update_db_status(cfg.database.url, run_id, "cancelled")
-            publish_completed(r, run_id, "cancelled")
-            logger.info("Backtest %s cancelled after execution", run_id)
-            return 2
+        _best_effort("publish completion", publish_completed, r, run_id, "completed", summary=stats)
+        _best_effort("delete cancel key", r.delete, cancel_key)
 
         logger.info("Backtest %s completed successfully", run_id)
         return 0
 
+    except _BacktestCancelledAfterEngine:
+        return 2
     except Exception as e:
         logger.exception("Backtest %s failed: %s", run_id, e)
         safe_error = "Internal backtest error. Check subprocess logs for details."
-        publish_completed(r, run_id, "failed", error=safe_error)
-        update_db_status(cfg.database.url, run_id, "failed", error_msg=safe_error)
+        _best_effort("publish failure", publish_completed, r, run_id, "failed", error=safe_error)
+        try:
+            update_db_status(
+                cfg.database.url,
+                run_id,
+                "failed",
+                error_msg=safe_error,
+                only_if_not_terminal=True,
+            )
+        except Exception:
+            logger.exception("Failed to write failed status for %s", run_id)
         return 1
+    finally:
+        if _terminalizing:
+            try:
+                r.delete(terminalizing_key)
+            except Exception:
+                logger.exception("Failed to delete terminalizing marker for %s", run_id)
+        _current_run_id = None
+        _current_r = None
+        _current_db_url = None
+        _terminalizing = False
 
 
 # ---------------------------------------------------------------------------

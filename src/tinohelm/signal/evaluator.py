@@ -127,9 +127,9 @@ class SignalEvaluator:
         future_returns:
             Shape ``(T, N+1)``.  Same layout as ``weight_panel``.  Column
             values are the *forward* returns for the corresponding
-            ``ts`` row.  Symbol columns must match ``weight_panel`` (they
-            can be a superset; an inner join on ``"ts"`` is performed and
-            only common symbol columns are used).
+            ``ts`` row.  It must contain every symbol column present in
+            ``weight_panel``; extra return columns are ignored.  Alignment
+            uses an inner join on ``"ts"``.
         cost_model:
             :class:`~tinohelm.signal.types.CostModel` declaring per-side
             costs (fee + slippage - rebate).
@@ -184,6 +184,17 @@ class SignalEvaluator:
                 total_return=0.0,
                 n_periods=0,
                 cost_drag=0.0,
+            )
+
+        # Missing returns for active exposure are data-quality errors.  A NaN
+        # weight means "not in universe" and is treated as zero exposure; a
+        # non-zero finite weight with NaN return must not become implicit 0 PnL.
+        active_weights = np.nan_to_num(weights, nan=0.0) != 0.0
+        missing_active_returns = active_weights & ~np.isfinite(returns)
+        if np.any(missing_active_returns):
+            raise ValueError(
+                "future_returns contains non-finite cells for active weights; "
+                "fix market data or zero the corresponding exposure explicitly"
             )
 
         # -- Gross period returns ------------------------------------------
@@ -305,13 +316,36 @@ class SignalEvaluator:
                 "future_returns missing required 'ts' column; "
                 f"got {future_returns.columns!r}"
             )
-        # Determine common symbol columns (preserve weight_panel order).
-        ret_sym_cols = {c for c in future_returns.columns if c != "ts"}
-        sym_cols = [c for c in weight_panel.columns if c != "ts" and c in ret_sym_cols]
+        # Determine symbol columns.  Every weight symbol must have a return;
+        # extra return symbols are ignored to preserve the existing superset
+        # contract for future_returns.
+        weight_sym_cols = [c for c in weight_panel.columns if c != "ts"]
+        ret_sym_cols = [c for c in future_returns.columns if c != "ts"]
+        ret_sym_set = set(ret_sym_cols)
 
-        if not sym_cols:
-            # No common columns — return 0 periods.
+        if weight_sym_cols and not ret_sym_cols:
+            raise ValueError("future_returns has no symbol columns")
+        if ret_sym_cols and not weight_sym_cols:
+            raise ValueError("weight_panel has no symbol columns")
+        if not weight_sym_cols and not ret_sym_cols:
             return np.empty((0, 0)), np.empty((0, 0)), 0
+
+        missing = [c for c in weight_sym_cols if c not in ret_sym_set]
+        if missing:
+            if len(missing) == len(weight_sym_cols):
+                raise ValueError(
+                    "no common symbol columns between weight_panel and future_returns; "
+                    "future_returns missing symbols required by weight_panel: "
+                    f"{missing!r}"
+                )
+            raise ValueError(
+                "future_returns missing symbols required by weight_panel: "
+                f"{missing!r}"
+            )
+        sym_cols = weight_sym_cols
+
+        SignalEvaluator._ensure_unique_ts(weight_panel, "weight_panel")
+        SignalEvaluator._ensure_unique_ts(future_returns, "future_returns")
 
         # Inner-join on ts; suffix "_ret" applied to right-side duplicates.
         joined = weight_panel.join(
@@ -323,14 +357,49 @@ class SignalEvaluator:
 
         T = len(joined)
         if T == 0:
+            if weight_panel.height > 0 and future_returns.height > 0:
+                weight_range = SignalEvaluator._ts_range_summary(weight_panel)
+                return_range = SignalEvaluator._ts_range_summary(future_returns)
+                raise ValueError(
+                    "weight_panel and future_returns have no overlapping ts rows; "
+                    f"weight_panel={weight_range}, future_returns={return_range}"
+                )
             N = len(sym_cols)
             return np.empty((0, N)), np.empty((0, N)), 0
 
         weights_arr = joined.select(sym_cols).to_numpy().astype(np.float64, copy=True)
         ret_cols_in_joined = [f"{c}_ret" for c in sym_cols]
         returns_arr = joined.select(ret_cols_in_joined).to_numpy().astype(np.float64, copy=True)
+        SignalEvaluator._reject_infinite_values(weights_arr, "weight_panel")
+        SignalEvaluator._reject_infinite_values(returns_arr, "future_returns")
 
         return weights_arr, returns_arr, T
+
+    @staticmethod
+    def _ts_range_summary(frame: pl.DataFrame) -> dict[str, object]:
+        """Compact timestamp coverage summary for alignment errors."""
+        if frame.height == 0:
+            return {"count": 0, "min": None, "max": None}
+        summary = frame.select(
+            pl.col("ts").min().alias("min"),
+            pl.col("ts").max().alias("max"),
+        ).row(0, named=True)
+        return {"count": frame.height, "min": summary["min"], "max": summary["max"]}
+
+    @staticmethod
+    def _ensure_unique_ts(frame: pl.DataFrame, name: str) -> None:
+        """Fail before join if a panel would create many-to-many timestamp rows."""
+        if bool(frame["ts"].is_duplicated().any()):
+            raise ValueError(f"{name} contains duplicate ts rows; refusing many-to-many join")
+
+    @staticmethod
+    def _reject_infinite_values(values: np.ndarray, name: str) -> None:
+        """Reject +/-inf while preserving existing NaN-as-missing semantics."""
+        if np.isinf(values).any():
+            raise ValueError(
+                f"{name} contains non-finite values (inf/-inf); "
+                "use NaN for missing values"
+            )
 
     @staticmethod
     def _compute_mdd(pnl_curve: np.ndarray) -> float:
