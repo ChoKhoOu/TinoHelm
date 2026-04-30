@@ -111,46 +111,6 @@ fn command_label(command: &Commands) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn local_commands_do_not_require_api_client() {
-        assert!(!command_requires_api_client(&Commands::Auth {
-            command: cli::auth::AuthCmd::Status,
-        }));
-        assert!(!command_requires_api_client(&Commands::Auth {
-            command: cli::auth::AuthCmd::Logout,
-        }));
-        assert!(!command_requires_api_client(&Commands::Version));
-    }
-
-    #[test]
-    fn only_api_backed_commands_and_auth_status_resolve_api_keys() {
-        assert!(command_resolves_api_key(&Commands::Auth {
-            command: cli::auth::AuthCmd::Status,
-        }));
-        assert!(!command_resolves_api_key(&Commands::Auth {
-            command: cli::auth::AuthCmd::Login {
-                api_key: Some("secret".to_string()),
-                stdin: false,
-            },
-        }));
-        assert!(!command_resolves_api_key(&Commands::Auth {
-            command: cli::auth::AuthCmd::Logout,
-        }));
-        assert!(!command_resolves_api_key(&Commands::Version));
-    }
-
-    #[test]
-    fn api_backed_commands_require_api_client() {
-        assert!(command_requires_api_client(&Commands::Api {
-            command: cli::api::ApiCmd::Routes { filter: None },
-        }));
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli_args = Cli::parse();
@@ -309,5 +269,45 @@ fn print_machine_error(
             "error": error,
             "meta": meta,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_commands_do_not_require_api_client() {
+        assert!(!command_requires_api_client(&Commands::Auth {
+            command: cli::auth::AuthCmd::Status,
+        }));
+        assert!(!command_requires_api_client(&Commands::Auth {
+            command: cli::auth::AuthCmd::Logout,
+        }));
+        assert!(!command_requires_api_client(&Commands::Version));
+    }
+
+    #[test]
+    fn only_api_backed_commands_and_auth_status_resolve_api_keys() {
+        assert!(command_resolves_api_key(&Commands::Auth {
+            command: cli::auth::AuthCmd::Status,
+        }));
+        assert!(!command_resolves_api_key(&Commands::Auth {
+            command: cli::auth::AuthCmd::Login {
+                api_key: Some("secret".to_string()),
+                stdin: false,
+            },
+        }));
+        assert!(!command_resolves_api_key(&Commands::Auth {
+            command: cli::auth::AuthCmd::Logout,
+        }));
+        assert!(!command_resolves_api_key(&Commands::Version));
+    }
+
+    #[test]
+    fn api_backed_commands_require_api_client() {
+        assert!(command_requires_api_client(&Commands::Api {
+            command: cli::api::ApiCmd::Routes { filter: None },
+        }));
     }
 }

@@ -28,6 +28,7 @@ jobs:
           cargo fmt --check
           cargo check --locked
           cargo test --locked
+          cargo clippy --all-targets -- -D warnings
           cargo build --locked
           ./target/debug/tino --help >/tmp/tino-help.txt
           ./target/debug/tino version -f json | python3 -m json.tool >/tmp/tino-version.json

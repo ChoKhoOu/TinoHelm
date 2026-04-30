@@ -34,6 +34,7 @@ build:
 check: fmt
 	$(CARGO) check --manifest-path "$(CLI_DIR)/Cargo.toml" --locked
 	$(CARGO) test --manifest-path "$(CLI_DIR)/Cargo.toml" --locked
+	$(CARGO) clippy --manifest-path "$(CLI_DIR)/Cargo.toml" --all-targets -- -D warnings
 
 fmt:
 	$(CARGO) fmt --manifest-path "$(CLI_DIR)/Cargo.toml" --check
@@ -50,7 +51,7 @@ clean:
 help:
 	@printf 'make                  Build release CLI and install tino to $(BINDIR)\n'
 	@printf 'make build            Build release CLI only\n'
-	@printf 'make check            Run fmt/check/test for the CLI\n'
+	@printf 'make check            Run fmt/check/test/clippy for the CLI\n'
 	@printf 'make test             Run CLI tests\n'
 	@printf 'make uninstall        Remove $(BINDIR)/$(BIN)\n'
 	@printf 'make BINDIR=/path     Override install directory, e.g. /usr/local/bin\n'

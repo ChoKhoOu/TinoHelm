@@ -230,25 +230,6 @@ fn validate_kill_args(level: u8, strategy_id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kill_level_one_requires_strategy_id() {
-        assert!(validate_kill_args(1, Some("strategy-a")).is_ok());
-        assert!(validate_kill_args(1, None).is_err());
-        assert!(validate_kill_args(1, Some("   ")).is_err());
-    }
-
-    #[test]
-    fn kill_level_is_limited_to_backend_contract() {
-        assert!(validate_kill_args(2, None).is_ok());
-        assert!(validate_kill_args(3, None).is_ok());
-        assert!(validate_kill_args(4, None).is_err());
-    }
-}
-
 async fn dispatch_lifecycle(
     cmd: LifecycleCmd,
     client: &ApiClient,
@@ -760,5 +741,24 @@ fn print_node_machine<T: serde::Serialize>(
         ),
         OutputFormat::Json => print_json(&data),
         OutputFormat::Text => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_level_one_requires_strategy_id() {
+        assert!(validate_kill_args(1, Some("strategy-a")).is_ok());
+        assert!(validate_kill_args(1, None).is_err());
+        assert!(validate_kill_args(1, Some("   ")).is_err());
+    }
+
+    #[test]
+    fn kill_level_is_limited_to_backend_contract() {
+        assert!(validate_kill_args(2, None).is_ok());
+        assert!(validate_kill_args(3, None).is_ok());
+        assert!(validate_kill_args(4, None).is_err());
     }
 }

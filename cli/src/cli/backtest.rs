@@ -208,27 +208,6 @@ fn jdisplay(v: &serde_json::Value, key: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn jdisplay_reads_string_integer_float_and_bool_values() {
-        let value = serde_json::json!({
-            "id": 42,
-            "name": "run",
-            "score": 1.25,
-            "done": true
-        });
-
-        assert_eq!(jdisplay(&value, "id"), "42");
-        assert_eq!(jdisplay(&value, "name"), "run");
-        assert_eq!(jdisplay(&value, "score"), "1.25");
-        assert_eq!(jdisplay(&value, "done"), "true");
-        assert_eq!(jdisplay(&value, "missing"), "-");
-    }
-}
-
 // ── Status card ──────────────────────────────────────────────────────────
 
 fn print_status_card(data: &crate::types::BacktestRunStatus, run_id: &str) {
@@ -1244,4 +1223,25 @@ fn print_optimize_result(data: &serde_json::Value) {
     }
 
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jdisplay_reads_string_integer_float_and_bool_values() {
+        let value = serde_json::json!({
+            "id": 42,
+            "name": "run",
+            "score": 1.25,
+            "done": true
+        });
+
+        assert_eq!(jdisplay(&value, "id"), "42");
+        assert_eq!(jdisplay(&value, "name"), "run");
+        assert_eq!(jdisplay(&value, "score"), "1.25");
+        assert_eq!(jdisplay(&value, "done"), "true");
+        assert_eq!(jdisplay(&value, "missing"), "-");
+    }
 }
