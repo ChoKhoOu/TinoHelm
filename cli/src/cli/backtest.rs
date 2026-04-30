@@ -1,10 +1,13 @@
+use crate::cli::style::{LONG_COLOR, NEG, POS, SHORT_COLOR};
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
-use crate::cli::style::{POS, NEG, LONG_COLOR, SHORT_COLOR};
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
+use crate::output::{
+    print_json, print_llm_error, print_llm_success, EnvelopeError, EnvelopeMeta, OutputFormat,
+};
 use crate::types::{BacktestRunRequest, OptimizeRequest};
 
 #[derive(Subcommand)]
@@ -70,12 +73,12 @@ pub enum BacktestCmd {
     Optimize {
         /// Strategy name
         strategy: String,
-        /// Symbol (e.g., BTCUSDT-PERP), repeatable
+        /// Symbol (e.g., BTCUSDT-PERP)
         #[arg(long, short)]
-        symbol: Vec<String>,
-        /// Interval (e.g., 5m), repeatable
+        symbol: String,
+        /// Interval (e.g., 5m)
         #[arg(long, short, default_value = "5m")]
-        interval: Vec<String>,
+        interval: String,
         /// Start date (YYYY-MM-DD)
         #[arg(long)]
         start: String,
@@ -153,11 +156,17 @@ fn parse_param(s: &str) -> std::result::Result<(String, String), String> {
 fn parse_param_range(s: &str) -> std::result::Result<(String, serde_json::Value), String> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() < 3 {
-        return Err(format!("invalid param range: expected name:min:max[:step[:type]], got '{s}'"));
+        return Err(format!(
+            "invalid param range: expected name:min:max[:step[:type]], got '{s}'"
+        ));
     }
     let name = parts[0].to_string();
-    let min_val: f64 = parts[1].parse().map_err(|_| format!("invalid min for '{}'", name))?;
-    let max_val: f64 = parts[2].parse().map_err(|_| format!("invalid max for '{}'", name))?;
+    let min_val: f64 = parts[1]
+        .parse()
+        .map_err(|_| format!("invalid min for '{}'", name))?;
+    let max_val: f64 = parts[2]
+        .parse()
+        .map_err(|_| format!("invalid max for '{}'", name))?;
     let mut spec = serde_json::json!({
         "type": "float",
         "min": min_val,
@@ -181,11 +190,22 @@ fn jf64(v: &serde_json::Value, key: &str) -> Option<f64> {
 }
 
 fn ju64(v: &serde_json::Value, key: &str) -> Option<u64> {
-    v.get(key).and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
+    v.get(key)
+        .and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
 }
 
 fn jstr<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("-")
+}
+
+fn jdisplay(v: &serde_json::Value, key: &str) -> String {
+    match v.get(key) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        Some(serde_json::Value::Null) | None => "-".to_string(),
+        Some(other) => other.to_string(),
+    }
 }
 
 // ── Status card ──────────────────────────────────────────────────────────
@@ -209,9 +229,7 @@ fn print_status_card(data: &crate::types::BacktestRunStatus, run_id: &str) {
     // Summary for completed runs
     if st == "completed" {
         if let Some(ref result) = data.result {
-            let stats = result
-                .get("statistics")
-                .unwrap_or(&serde_json::Value::Null);
+            let stats = result.get("statistics").unwrap_or(&serde_json::Value::Null);
             let pnl = jf64(stats, "total_pnl");
             let ret = jf64(stats, "total_return_pct");
             let sharpe = jf64(stats, "sharpe_ratio");
@@ -232,9 +250,7 @@ fn print_status_card(data: &crate::types::BacktestRunStatus, run_id: &str) {
                 ),
                 format!(
                     "Trades: {}",
-                    trades
-                        .map(|t| t.to_string())
-                        .unwrap_or_else(|| muted("-"))
+                    trades.map(|t| t.to_string()).unwrap_or_else(|| muted("-"))
                 ),
                 match wr {
                     Some(w) => format!("WinRate: {:.1}%", w * 100.0),
@@ -344,8 +360,8 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
         let l_fill = bar_w.saturating_sub(w_fill);
         let bar = format!(
             "{}{}",
-            format!("{}", "\u{2588}".repeat(w_fill).with(POS)),
-            format!("{}", "\u{2588}".repeat(l_fill).with(NEG)),
+            "\u{2588}".repeat(w_fill).with(POS),
+            "\u{2588}".repeat(l_fill).with(NEG),
         );
         let wr_str = wr
             .map(|w| format!("{:.1}%", w * 100.0))
@@ -398,8 +414,8 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
         let s_fill = bar_w.saturating_sub(l_fill);
         let dir_bar = format!(
             "{}{}",
-            format!("{}", "\u{2588}".repeat(l_fill).with(LONG_COLOR)),
-            format!("{}", "\u{2588}".repeat(s_fill).with(SHORT_COLOR)),
+            "\u{2588}".repeat(l_fill).with(LONG_COLOR),
+            "\u{2588}".repeat(s_fill).with(SHORT_COLOR),
         );
         bx.line(&format!(
             "  [{}]  Long {:.0}% / Short {:.0}%",
@@ -411,7 +427,7 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
 
     bx.pair(
         "Avg Hold",
-        &jstr(stats, "avg_holding_time").to_string(),
+        jstr(stats, "avg_holding_time"),
         "Total Fees",
         &format_value(jf64(stats, "total_fees"), ".4f", ""),
     );
@@ -440,8 +456,8 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
             let mx = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let rng = if mx > mn { mx - mn } else { 1.0 };
             let spark_chars = [
-                '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
-                '\u{2587}', '\u{2588}',
+                '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+                '\u{2588}',
             ];
             let target = values.len().min(58);
             let step = (values.len() / target).max(1);
@@ -453,7 +469,7 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
                     spark_chars[idx.min(7)]
                 })
                 .collect();
-            bx.line(&format!("  {}", format!("{}", spark.cyan())));
+            bx.line(&format!("  {}", spark.cyan()));
             let low_s = format!("Low: {:.2}", mn);
             let high_s = format!("High: {:.2}", mx);
             let gap = 58usize.saturating_sub(low_s.len() + high_s.len());
@@ -581,7 +597,7 @@ fn trade_pnl(t: &serde_json::Value) -> f64 {
 
 // ── Dispatch ─────────────────────────────────────────────────────────────
 
-pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Result<()> {
+pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
     match cmd {
         BacktestCmd::Run {
             strategy,
@@ -637,15 +653,12 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             };
 
             let resp = client.run_backtest(&req).await?;
-            if format == "json" {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "run_id": resp.run_id,
-                        "status": resp.status
-                    }))?
-                );
-                return Ok(());
+            if format.is_machine() {
+                let data = serde_json::json!({
+                    "run_id": resp.run_id,
+                    "status": resp.status
+                });
+                return print_backtest_machine(format, client, "backtest.run", data);
             }
 
             let sym_display = if symbols.is_empty() {
@@ -669,9 +682,8 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
         }
         BacktestCmd::List => {
             let data = client.list_backtests().await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&data.runs)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_backtest_machine(format, client, "backtest.list", data.runs);
             }
 
             let t = Table::new(&[
@@ -744,25 +756,21 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
         }
         BacktestCmd::Result { run_id } => {
             let data = client.get_result(&run_id).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&data)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_backtest_machine(format, client, "backtest.result", data);
             }
             print_result_report(&data, &run_id);
         }
         BacktestCmd::Status { run_id } => {
             let data = client.get_status(&run_id).await?;
-            if format == "json" {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "run_id": data.run_id,
-                        "status": data.status,
-                        "progress_pct": data.progress_pct,
-                        "error": data.error,
-                    }))?
-                );
-                return Ok(());
+            if format.is_machine() {
+                let data = serde_json::json!({
+                    "run_id": data.run_id,
+                    "status": data.status,
+                    "progress_pct": data.progress_pct,
+                    "error": data.error,
+                });
+                return print_backtest_machine(format, client, "backtest.status", data);
             }
             print_status_card(&data, &run_id);
         }
@@ -771,6 +779,52 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
 
             let mut elapsed = 0u64;
             let poll_interval = 2u64;
+
+            if format.is_machine() {
+                let mut last_status = String::from("unknown");
+                while elapsed < timeout {
+                    let data = client.get_status(&run_id).await?;
+                    let st = data.status.clone();
+                    last_status = st.clone();
+                    if matches!(st.as_str(), "completed" | "failed" | "error" | "cancelled") {
+                        if st == "completed" {
+                            print_backtest_machine(
+                                format,
+                                client,
+                                "backtest.wait",
+                                serde_json::json!(data),
+                            )?;
+                            return Ok(());
+                        }
+                        print_backtest_error_machine(
+                            format,
+                            client,
+                            "backtest.wait",
+                            "backtest_failed",
+                            format!("Backtest finished with status '{st}'"),
+                            serde_json::json!(data),
+                        )?;
+                        std::process::exit(1);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
+                    elapsed += poll_interval;
+                }
+                print_backtest_error_machine(
+                    format,
+                    client,
+                    "backtest.wait",
+                    "backtest_timeout",
+                    format!("Backtest did not finish within {timeout}s"),
+                    serde_json::json!({
+                        "run_id": run_id,
+                        "status": "timeout",
+                        "last_status": last_status,
+                        "timeout_sec": timeout,
+                    }),
+                )?;
+                std::process::exit(1);
+            }
+
             println!();
             let mut last_status = String::from("unknown");
 
@@ -783,10 +837,7 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 std::io::stdout().flush()?;
                 last_status = st.clone();
 
-                if matches!(
-                    st.as_str(),
-                    "completed" | "failed" | "error" | "cancelled"
-                ) {
+                if matches!(st.as_str(), "completed" | "failed" | "error" | "cancelled") {
                     println!();
                     print_status_card(&data, &run_id);
                     if st != "completed" {
@@ -801,7 +852,7 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             println!();
             eprintln!(
                 "  {} after {}s. Last status: {}",
-                format!("{}", "Timeout".with(NEG).bold()),
+                "Timeout".with(NEG).bold(),
                 timeout,
                 last_status,
             );
@@ -809,15 +860,12 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
         }
         BacktestCmd::Cancel { run_id } => {
             let data = client.cancel_backtest(&run_id).await?;
-            if format == "json" {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "run_id": data.run_id,
-                        "status": data.status,
-                    }))?
-                );
-                return Ok(());
+            if format.is_machine() {
+                let data = serde_json::json!({
+                    "run_id": data.run_id,
+                    "status": data.status,
+                });
+                return print_backtest_machine(format, client, "backtest.cancel", data);
             }
             println!();
             println!(
@@ -850,15 +898,14 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             let param_ranges = if params.is_empty() {
                 None
             } else {
-                let map: serde_json::Map<String, serde_json::Value> =
-                    params.into_iter().collect();
+                let map: serde_json::Map<String, serde_json::Value> = params.into_iter().collect();
                 Some(serde_json::Value::Object(map))
             };
 
             let req = OptimizeRequest {
                 strategy: strategy.clone(),
-                symbols: symbol.clone(),
-                intervals: interval.clone(),
+                symbol: symbol.clone(),
+                interval: interval.clone(),
                 start_date: start.clone(),
                 end_date: end.clone(),
                 n_trials: trials,
@@ -877,9 +924,12 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             let resp = client.optimize_backtest(&req).await?;
             let opt_id = resp.optimization_id;
 
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"optimization_id": opt_id}))?);
-                return Ok(());
+            if format.is_machine() {
+                let data = serde_json::json!({
+                    "optimization_id": opt_id,
+                    "status": resp.status,
+                });
+                return print_backtest_machine(format, client, "backtest.optimize", data);
             }
 
             header("Optimization Started");
@@ -907,9 +957,9 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 let best = sd.best_value;
                 let pruned = sd.pruned_trials.unwrap_or(0);
 
-                let pct = if total > 0 { done * 100 / total } else { 0 };
+                let pct = done.saturating_mul(100).checked_div(total).unwrap_or(0);
                 let bar_w: u32 = 30;
-                let filled = if total > 0 { bar_w * done / total } else { 0 };
+                let filled = bar_w.saturating_mul(done).checked_div(total).unwrap_or(0);
                 let bar = format!(
                     "{}{}",
                     "=".repeat(filled as usize),
@@ -926,13 +976,16 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 };
 
                 use std::io::Write;
-                print!("\r  [{}] {}/{} ({}%){}{}  ", bar, done, total, pct, best_s, pruned_s);
+                print!(
+                    "\r  [{}] {}/{} ({}%){}{}  ",
+                    bar, done, total, pct, best_s, pruned_s
+                );
                 std::io::stdout().flush()?;
 
                 if matches!(st.as_str(), "completed" | "failed" | "error") {
                     println!();
                     if st != "completed" {
-                        println!("  {}", format!("{}", "FAILED".with(NEG).bold()));
+                        println!("  {}", "FAILED".with(NEG).bold());
                         let sd_json = serde_json::to_string_pretty(&serde_json::json!({
                             "status": st, "trials_completed": done,
                         }))?;
@@ -949,9 +1002,8 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
         }
         BacktestCmd::OptimizeStatus { opt_id } => {
             let sd = client.optimize_status(opt_id).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!(sd))?);
-                return Ok(());
+            if format.is_machine() {
+                return print_backtest_machine(format, client, "backtest.optimize_status", sd);
             }
             let st = &sd.status;
             let done = sd.trials_completed.unwrap_or(0);
@@ -969,30 +1021,31 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
                 "      Trials: {}/{}  Best: {}",
                 done,
                 total,
-                best.map(|b| color_value(Some(b), ".4f")).unwrap_or_else(|| muted("-")),
+                best.map(|b| color_value(Some(b), ".4f"))
+                    .unwrap_or_else(|| muted("-")),
             );
             println!();
         }
         BacktestCmd::OptimizeResult { opt_id } => {
             let data = client.optimize_result(opt_id).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&data)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_backtest_machine(format, client, "backtest.optimize_result", data);
             }
             print_optimize_result(&data);
         }
         BacktestCmd::OptimizeList { limit, strategy } => {
             let data = client.optimize_list(limit, strategy.as_deref()).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&data)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_backtest_machine(format, client, "backtest.optimize_list", data);
             }
 
             let empty_vec = vec![];
             let runs = if data.is_array() {
                 data.as_array().unwrap_or(&empty_vec)
             } else {
-                data.get("runs").and_then(|v| v.as_array()).unwrap_or(&empty_vec)
+                data.get("runs")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or(&empty_vec)
             };
 
             if runs.is_empty() {
@@ -1013,24 +1066,30 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
             t.header();
 
             for r in runs {
-                let id = r.get("optimization_id").and_then(|v| v.as_u64()).map(|v| v.to_string()).unwrap_or_default();
+                let id = r
+                    .get("optimization_id")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
                 let strat = jstr(r, "strategy_name");
                 let sym = jstr(r, "symbol");
-                let n_trials = jstr(r, "n_trials");
+                let n_trials = jdisplay(r, "n_trials");
                 let fit = jstr(r, "fitness_objective");
                 let st = jstr(r, "status");
                 let best = r.get("best_value").and_then(|v| v.as_f64());
-                let done = jstr(r, "trials_completed");
+                let done = jdisplay(r, "trials_completed");
 
                 t.row(&[
                     &id,
                     &strat[..16.min(strat.len())],
                     &sym[..14.min(sym.len())],
-                    n_trials,
+                    &n_trials,
                     fit,
                     &color_status(st),
-                    &best.map(|b| color_value(Some(b), ".4f")).unwrap_or_else(|| muted("-")),
-                    done,
+                    &best
+                        .map(|b| color_value(Some(b), ".4f"))
+                        .unwrap_or_else(|| muted("-")),
+                    &done,
                 ]);
             }
             t.footer();
@@ -1039,13 +1098,57 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: &str) -> Res
     Ok(())
 }
 
+fn print_backtest_machine<T: serde::Serialize>(
+    format: OutputFormat,
+    client: &ApiClient,
+    command: &'static str,
+    data: T,
+) -> Result<()> {
+    match format {
+        OutputFormat::Llm => print_llm_success(
+            data,
+            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
+        ),
+        OutputFormat::Json => print_json(&data),
+        OutputFormat::Text => unreachable!("text output is handled by the caller"),
+    }
+}
+
+fn print_backtest_error_machine(
+    format: OutputFormat,
+    client: &ApiClient,
+    command: &'static str,
+    kind: impl Into<String>,
+    message: impl Into<String>,
+    body: serde_json::Value,
+) -> Result<()> {
+    let error = EnvelopeError {
+        kind: kind.into(),
+        message: message.into(),
+        status_code: None,
+        body: Some(body),
+    };
+    match format {
+        OutputFormat::Llm => print_llm_error(
+            error,
+            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
+        ),
+        OutputFormat::Json => print_json(&serde_json::json!({
+            "ok": false,
+            "error": error,
+            "meta": EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
+        })),
+        OutputFormat::Text => unreachable!("text output is handled by the caller"),
+    }
+}
+
 fn print_optimize_result(data: &serde_json::Value) {
     println!();
     divider(50);
     println!("  {}", bold("Optimization Result"));
     divider(50);
 
-    kv("ID", &jstr(data, "optimization_id").to_string(), 12);
+    kv("ID", &jdisplay(data, "optimization_id"), 12);
     kv("Status", &color_status(jstr(data, "status")), 12);
     kv("Objective", jstr(data, "fitness_objective"), 12);
 
@@ -1102,7 +1205,8 @@ fn print_optimize_result(data: &serde_json::Value) {
                         i + 1,
                         ts,
                         te,
-                        tv.map(|v| color_value(Some(v), ".4f")).unwrap_or_else(|| muted("-")),
+                        tv.map(|v| color_value(Some(v), ".4f"))
+                            .unwrap_or_else(|| muted("-")),
                     );
                 }
             }
@@ -1119,4 +1223,25 @@ fn print_optimize_result(data: &serde_json::Value) {
     }
 
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jdisplay_reads_string_integer_float_and_bool_values() {
+        let value = serde_json::json!({
+            "id": 42,
+            "name": "run",
+            "score": 1.25,
+            "done": true
+        });
+
+        assert_eq!(jdisplay(&value, "id"), "42");
+        assert_eq!(jdisplay(&value, "name"), "run");
+        assert_eq!(jdisplay(&value, "score"), "1.25");
+        assert_eq!(jdisplay(&value, "done"), "true");
+        assert_eq!(jdisplay(&value, "missing"), "-");
+    }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Rust tino CLI/TUI binary.
+# Build the Rust tino CLI binary.
 #
 # Usage:
 #   ./cli/build.sh              # Release build

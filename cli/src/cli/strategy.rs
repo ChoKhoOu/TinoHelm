@@ -4,6 +4,7 @@ use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
+use crate::output::{print_json, print_llm_success, EnvelopeMeta, OutputFormat};
 use crate::types::StrategyCreateRequest;
 
 #[derive(Subcommand)]
@@ -45,7 +46,7 @@ fn format_num(v: f64) -> String {
     }
 }
 
-pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Result<()> {
+pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
     match cmd {
         StrategyCmd::Create { name, r#type } => {
             let req = StrategyCreateRequest {
@@ -53,16 +54,13 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 strategy_type: r#type.clone(),
             };
             let resp = client.create_strategy(&req).await?;
-            if format == "json" {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "name": resp.name,
-                        "file_path": resp.file_path,
-                        "message": resp.message,
-                    }))?
-                );
-                return Ok(());
+            if format.is_machine() {
+                let data = serde_json::json!({
+                    "name": resp.name,
+                    "file_path": resp.file_path,
+                    "message": resp.message,
+                });
+                return print_strategy_machine(format, client, "strategy.create", data);
             }
 
             header("Strategy Created");
@@ -78,9 +76,8 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
         }
         StrategyCmd::List => {
             let strategies = client.list_strategies().await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&strategies)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_strategy_machine(format, client, "strategy.list", strategies);
             }
 
             if strategies.is_empty() {
@@ -110,10 +107,18 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                         let parts: Vec<&str> = clean.split('-').collect();
                         if parts.len() == 3 {
                             let month = match parts[1] {
-                                "01" => "Jan", "02" => "Feb", "03" => "Mar",
-                                "04" => "Apr", "05" => "May", "06" => "Jun",
-                                "07" => "Jul", "08" => "Aug", "09" => "Sep",
-                                "10" => "Oct", "11" => "Nov", "12" => "Dec",
+                                "01" => "Jan",
+                                "02" => "Feb",
+                                "03" => "Mar",
+                                "04" => "Apr",
+                                "05" => "May",
+                                "06" => "Jun",
+                                "07" => "Jul",
+                                "08" => "Aug",
+                                "09" => "Sep",
+                                "10" => "Oct",
+                                "11" => "Nov",
+                                "12" => "Dec",
                                 _ => parts[1],
                             };
                             format!("{} {}", month, parts[2])
@@ -150,15 +155,20 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
         }
         StrategyCmd::Info { name } => {
             let s = client.get_strategy(&name).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&s)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_strategy_machine(format, client, "strategy.info", s);
             }
 
             let stype = s.strategy_type.as_deref().unwrap_or("single");
             header(&format!("Strategy: {}", accent(&s.name)));
             divider(50);
-            kv("ID", &s.id.map(|i| i.to_string()).unwrap_or_else(|| "-".to_string()), 16);
+            kv(
+                "ID",
+                &s.id
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                16,
+            );
             kv("Name", &bold(&s.name), 16);
             kv(
                 "Type",
@@ -169,15 +179,31 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 },
                 16,
             );
-            kv("Strategy Class", s.strategy_class.as_deref().unwrap_or("-"), 16);
-            kv("Config Class", &muted(s.config_class.as_deref().unwrap_or("-")), 16);
+            kv(
+                "Strategy Class",
+                s.strategy_class.as_deref().unwrap_or("-"),
+                16,
+            );
+            kv(
+                "Config Class",
+                &muted(s.config_class.as_deref().unwrap_or("-")),
+                16,
+            );
             kv("File", &dim(s.file_path.as_deref().unwrap_or("-")), 16);
 
             if let Some(ref created) = s.created_at {
-                kv("Created", &muted(&created[..19.min(created.len())].replace('T', " ")), 16);
+                kv(
+                    "Created",
+                    &muted(&created[..19.min(created.len())].replace('T', " ")),
+                    16,
+                );
             }
             if let Some(ref updated) = s.updated_at {
-                kv("Updated", &muted(&updated[..19.min(updated.len())].replace('T', " ")), 16);
+                kv(
+                    "Updated",
+                    &muted(&updated[..19.min(updated.len())].replace('T', " ")),
+                    16,
+                );
             }
 
             // Portfolio details
@@ -186,7 +212,7 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                     println!();
                     println!("    {}", bold("Portfolio Details"));
                     divider(40);
-                    kv("Interval", &s.interval.as_deref().unwrap_or("-").to_string(), 16);
+                    kv("Interval", s.interval.as_deref().unwrap_or("-"), 16);
                     kv("Symbols", &symbols.len().to_string(), 16);
                     for sym in symbols {
                         println!("      {}", accent(sym));
@@ -228,12 +254,8 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
         }
         StrategyCmd::Validate { name } => {
             let result = client.validate_strategy(&name).await?;
-            if format == "json" {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!(result))?
-                );
-                return Ok(());
+            if format.is_machine() {
+                return print_strategy_machine(format, client, "strategy.validate", result);
             }
 
             header(&format!("Validation: {}", name));
@@ -243,13 +265,13 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                 println!(
                     "    {} {}",
                     status_badge("completed"),
-                    format!("{}", "VALID".with(POS).bold()),
+                    "VALID".with(POS).bold(),
                 );
             } else {
                 println!(
                     "    {} {}",
                     status_badge("failed"),
-                    format!("{}", "INVALID".with(NEG).bold()),
+                    "INVALID".with(NEG).bold(),
                 );
             }
 
@@ -271,12 +293,8 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
         }
         StrategyCmd::Rescan => {
             let result = client.rescan_strategies().await?;
-            if format == "json" {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!(result))?
-                );
-                return Ok(());
+            if format.is_machine() {
+                return print_strategy_machine(format, client, "strategy.rescan", result);
             }
 
             header("Strategy Rescan");
@@ -294,9 +312,8 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
         }
         StrategyCmd::Params { name } => {
             let resp = client.get_strategy_params(&name).await?;
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-                return Ok(());
+            if format.is_machine() {
+                return print_strategy_machine(format, client, "strategy.params", resp);
             }
 
             header(&format!("Parameters: {}", accent(&name)));
@@ -329,15 +346,12 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                         let pdefault = if p["required"].as_bool().unwrap_or(false) {
                             format!("{}", "required".with(NEG))
                         } else {
-                            p["default"]
-                                .as_str()
-                                .unwrap_or("-")
-                                .to_string()
+                            p["default"].as_str().unwrap_or("-").to_string()
                         };
 
                         let opt_range = if let Some(range) = opt_ranges.get(pname) {
-                            let lo = range["min"].as_f64().map(|v| format_num(v)).unwrap_or_default();
-                            let hi = range["max"].as_f64().map(|v| format_num(v)).unwrap_or_default();
+                            let lo = range["min"].as_f64().map(format_num).unwrap_or_default();
+                            let hi = range["max"].as_f64().map(format_num).unwrap_or_default();
                             let step_str = range["step"]
                                 .as_f64()
                                 .map(|s| format!(" (step {})", format_num(s)))
@@ -347,12 +361,7 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
                             format!("{}", "-".dark_grey())
                         };
 
-                        t.row(&[
-                            &accent(pname),
-                            &ptype_short,
-                            &pdefault,
-                            &opt_range,
-                        ]);
+                        t.row(&[&accent(pname), &ptype_short, &pdefault, &opt_range]);
                     }
                     t.footer();
                 }
@@ -362,4 +371,20 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: &str) -> Res
         }
     }
     Ok(())
+}
+
+fn print_strategy_machine<T: serde::Serialize>(
+    format: OutputFormat,
+    client: &ApiClient,
+    command: &'static str,
+    data: T,
+) -> Result<()> {
+    match format {
+        OutputFormat::Llm => print_llm_success(
+            data,
+            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
+        ),
+        OutputFormat::Json => print_json(&data),
+        OutputFormat::Text => Ok(()),
+    }
 }

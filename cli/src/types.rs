@@ -17,14 +17,14 @@ pub struct BacktestRunItem {
     pub result_summary: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BacktestRunList {
     pub runs: Vec<BacktestRunItem>,
     #[allow(dead_code)]
     pub total: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BacktestRunStatus {
     pub run_id: String,
     pub status: String,
@@ -33,7 +33,7 @@ pub struct BacktestRunStatus {
     pub result: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BacktestRunResponse {
     pub run_id: String,
     pub status: String,
@@ -54,7 +54,7 @@ pub struct BacktestRunRequest {
     pub fill_model: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BacktestCancelResponse {
     pub run_id: String,
     pub status: String,
@@ -105,8 +105,8 @@ pub struct RescanResult {
 #[derive(Debug, Serialize)]
 pub struct OptimizeRequest {
     pub strategy: String,
-    pub symbols: Vec<String>,
-    pub intervals: Vec<String>,
+    pub symbol: String,
+    pub interval: String,
     pub start_date: String,
     pub end_date: String,
     pub n_trials: u32,
@@ -123,9 +123,10 @@ pub struct OptimizeRequest {
     pub param_ranges: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OptimizeResponse {
     pub optimization_id: u64,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,7 +147,7 @@ pub struct StrategyCreateRequest {
     pub strategy_type: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StrategyCreateResponse {
     pub name: String,
     pub file_path: Option<String>,
@@ -179,6 +180,7 @@ pub struct DataCompactRequest {
 
 // ---- Trading (positions & fills) ----
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TradingPosition {
     #[serde(default)]
@@ -188,7 +190,7 @@ pub struct TradingPosition {
     #[serde(alias = "strategy_id")]
     pub strategy_id_tag: String,
     pub instrument_id: String,
-    pub side: String,           // "LONG", "SHORT", "FLAT"
+    pub side: String, // "LONG", "SHORT", "FLAT"
     pub quantity: String,
     #[serde(default)]
     pub signed_qty: f64,
@@ -210,6 +212,7 @@ pub struct TradingPosition {
     pub updated_at: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TradingFill {
     #[serde(default)]
@@ -223,7 +226,7 @@ pub struct TradingFill {
     #[serde(alias = "strategy_id")]
     pub strategy_id_tag: Option<String>,
     pub instrument_id: String,
-    pub order_side: String,     // "BUY", "SELL"
+    pub order_side: String, // "BUY", "SELL"
     pub last_qty: String,
     pub last_px: String,
     pub commission: Option<String>,
@@ -233,6 +236,7 @@ pub struct TradingFill {
     pub created_at: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TradingSummary {
     pub open_positions: u32,
@@ -244,6 +248,7 @@ pub struct TradingSummary {
 
 // ---- Trading (orders) ----
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TradingOrder {
     #[serde(default)]
@@ -251,19 +256,19 @@ pub struct TradingOrder {
     pub node_type: String,
     pub order_id: String,
     pub instrument_id: String,
-    pub side: String,              // "BUY", "SELL"
-    pub order_type: String,        // "LIMIT", "STOP_MARKET", etc.
+    pub side: String,       // "BUY", "SELL"
+    pub order_type: String, // "LIMIT", "STOP_MARKET", etc.
     pub quantity: String,
     pub price: Option<String>,
-    pub status: String,            // "ACCEPTED", "SUBMITTED", "PARTIALLY_FILLED"
+    pub status: String, // "ACCEPTED", "SUBMITTED", "PARTIALLY_FILLED"
     #[serde(alias = "strategy_id")]
     pub strategy_id_tag: Option<String>,
     pub created_at: Option<String>,
 }
 
-// ---- Node Portfolios ----
+// ---- Node Strategies ----
 
-/// Portfolio state on a trading node
+/// Strategy state on a trading node.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodePortfolio {
     pub state: String, // "available", "starting", "running", "paused", "flattening"
@@ -272,7 +277,13 @@ pub struct NodePortfolio {
     pub order_id_tag_prefix: Option<String>,
     #[serde(default)]
     pub was_running: bool,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub interval: String,
 }
+
+pub type NodeStrategyStatus = NodePortfolio;
 
 /// Request body for portfolio lifecycle commands
 #[derive(Debug, Serialize)]
@@ -281,11 +292,47 @@ pub struct PortfolioActionRequest {
     pub mode: String,
 }
 
-/// Response from GET /api/node/portfolios
-#[derive(Debug, Clone, Deserialize)]
+/// Response from GET /api/node/strategies.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NodeStrategiesResponse {
+    #[serde(default)]
+    pub strategies: std::collections::HashMap<String, NodeStrategyStatus>,
+}
+
+/// Deprecated compatibility shape for older /api/node/portfolios responses.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PortfoliosResponse {
     #[serde(default)]
     pub portfolios: std::collections::HashMap<String, NodePortfolio>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_strategies_response_reads_strategies_field() {
+        let parsed: NodeStrategiesResponse = serde_json::from_value(serde_json::json!({
+            "strategies": {
+                "mean_reversion": {
+                    "state": "running",
+                    "strategy_ids": ["mean_reversion-BTCUSDT-PERP"],
+                    "source_path": "/tmp/strategies/mean_reversion",
+                    "order_id_tag_prefix": "01",
+                    "was_running": true,
+                    "symbols": ["BTCUSDT-PERP"],
+                    "interval": "1m"
+                }
+            }
+        }))
+        .unwrap();
+
+        let item = parsed.strategies.get("mean_reversion").unwrap();
+        assert_eq!(item.state, "running");
+        assert_eq!(item.strategy_ids, vec!["mean_reversion-BTCUSDT-PERP"]);
+        assert!(item.was_running);
+    }
 }
 
 // ---- WebSocket events ----
@@ -320,10 +367,7 @@ pub enum WsEvent {
         error: Option<String>,
     },
     #[serde(rename = "backtest.cancelled")]
-    BacktestCancelled {
-        run_id: String,
-        status: String,
-    },
+    BacktestCancelled { run_id: String, status: String },
     #[serde(rename = "node.heartbeat")]
     NodeHeartbeat {
         node_type: String,

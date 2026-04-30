@@ -4,13 +4,182 @@ on:
   push:
     paths:
       - 'cli/**'
+      - 'Makefile'
       - '.github/workflows/build-cli.yml'
   pull_request:
     paths:
       - 'cli/**'
+      - 'Makefile'
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    name: Check CLI contract
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Rust CLI
+        working-directory: cli
+        run: |
+          cargo fmt --check
+          cargo check --locked
+          cargo test --locked
+          cargo clippy --all-targets -- -D warnings
+          cargo build --locked
+          ./target/debug/tino --help >/tmp/tino-help.txt
+          ./target/debug/tino version -f json | python3 -m json.tool >/tmp/tino-version.json
+
+          bad_home=$(mktemp -d)
+          mkdir -p "$bad_home/.tino/config" "$bad_home/bad-key-dir"
+          cat > "$bad_home/.tino/config/user.yaml" <<YAML
+          api:
+            url: http://127.0.0.1:8765/
+            key_file: $bad_home/bad-key-dir
+          YAML
+          HOME="$bad_home" ./target/debug/tino version -f json | python3 -m json.tool >/tmp/tino-version-bad-creds.json
+          HOME="$bad_home" ./target/debug/tino auth logout -f json | python3 -m json.tool >/tmp/tino-logout-bad-creds.json
+          set +e
+          HOME="$bad_home" ./target/debug/tino auth status -f json >/tmp/tino-status-bad-creds.out 2>/tmp/tino-status-bad-creds.err
+          status_bad_creds=$?
+          set -e
+          test "$status_bad_creds" -ne 0
+          test ! -s /tmp/tino-status-bad-creds.err
+          python3 - <<'PY'
+          import json
+          with open("/tmp/tino-status-bad-creds.out") as f:
+              payload = json.load(f)
+          assert payload["ok"] is False
+          assert payload["error"]["kind"] == "command"
+          assert payload["meta"]["command"] == "auth"
+          PY
+
+          cat >/tmp/tino-error-server.py <<'PY'
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          import json
+
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, *args):
+                  pass
+
+              def do_GET(self):
+                  if self.path.startswith("/api/backtest/failed/status"):
+                      self.send_response(200)
+                      self.send_header("Content-Type", "application/json")
+                      self.end_headers()
+                      self.wfile.write(json.dumps({
+                          "run_id": "failed",
+                          "status": "failed",
+                          "progress_pct": 100,
+                          "error": "typed failure",
+                          "result": None,
+                      }).encode())
+                      return
+                  self.send_response(418)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(json.dumps({"detail": "typed boom"}).encode())
+
+          HTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
+          PY
+          python3 /tmp/tino-error-server.py &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            python3 - <<'PY' && break || sleep 0.1
+          import socket
+          import sys
+          sock = socket.socket()
+          sock.settimeout(0.2)
+          sys.exit(0 if sock.connect_ex(("127.0.0.1", 8765)) == 0 else 1)
+          PY
+          done
+          set +e
+          TINO_API_URL=http://127.0.0.1:8765 ./target/debug/tino -f json backtest status missing >/tmp/tino-typed-error-json.out 2>/tmp/tino-typed-error-json.err
+          typed_error_status=$?
+          set -e
+          test "$typed_error_status" -ne 0
+          test ! -s /tmp/tino-typed-error-json.err
+          python3 - <<'PY'
+          import json
+          with open("/tmp/tino-typed-error-json.out") as f:
+              payload = json.load(f)
+          assert payload["ok"] is False
+          assert payload["error"]["kind"] == "http"
+          assert payload["error"]["status_code"] == 418
+          assert payload["error"]["body"]["detail"] == "typed boom"
+          assert payload["meta"]["command"] == "backtest"
+          PY
+
+          set +e
+          TINO_API_URL=http://127.0.0.1:8765 ./target/debug/tino -f llm backtest wait failed --timeout 1 >/tmp/tino-wait-failed-llm.out 2>/tmp/tino-wait-failed-llm.err
+          wait_failed_status=$?
+          ./target/debug/tino -f json node kill sandbox --level 1 >/tmp/tino-kill-missing-strategy.out 2>/tmp/tino-kill-missing-strategy.err
+          kill_missing_strategy_status=$?
+          ./target/debug/tino -f json node kill sandbox --level 4 >/tmp/tino-kill-bad-level.out 2>/tmp/tino-kill-bad-level.err
+          kill_bad_level_status=$?
+          set -e
+          test "$wait_failed_status" -ne 0
+          test "$kill_missing_strategy_status" -ne 0
+          test "$kill_bad_level_status" -ne 0
+          test ! -s /tmp/tino-wait-failed-llm.err
+          test ! -s /tmp/tino-kill-missing-strategy.err
+          test ! -s /tmp/tino-kill-bad-level.err
+          python3 - <<'PY'
+          import json
+          with open("/tmp/tino-wait-failed-llm.out") as f:
+              payload = json.load(f)
+          assert payload["ok"] is False
+          assert payload["error"]["kind"] == "backtest_failed"
+          assert payload["error"]["body"]["status"] == "failed"
+          assert payload["meta"]["command"] == "backtest.wait"
+          for path, expected in [
+              ("/tmp/tino-kill-missing-strategy.out", "node kill level 1 requires --strategy-id"),
+              ("/tmp/tino-kill-bad-level.out", "node kill level must be between 1 and 3"),
+          ]:
+              with open(path) as f:
+                  payload = json.load(f)
+              assert payload["ok"] is False
+              assert payload["error"]["kind"] == "command"
+              assert expected in payload["error"]["message"]
+              assert payload["meta"]["command"] == "node"
+          PY
+
+          set +e
+          ./target/debug/tino -f json node lifecycle flatten --mode sandbox >/tmp/tino-confirmation-json.out 2>/tmp/tino-confirmation-json.err
+          confirmation_json_status=$?
+          ./target/debug/tino -f llm node lifecycle halt --mode sandbox >/tmp/tino-confirmation-llm.out 2>/tmp/tino-confirmation-llm.err
+          confirmation_llm_status=$?
+          set -e
+          test "$confirmation_json_status" -ne 0
+          test "$confirmation_llm_status" -ne 0
+          test ! -s /tmp/tino-confirmation-json.err
+          test ! -s /tmp/tino-confirmation-llm.err
+          python3 - <<'PY'
+          import json
+          for path, command in [
+              ("/tmp/tino-confirmation-json.out", "node.lifecycle.flatten"),
+              ("/tmp/tino-confirmation-llm.out", "node.lifecycle.halt"),
+          ]:
+              with open(path) as f:
+                  payload = json.load(f)
+              assert payload["ok"] is False
+              assert payload["error"]["kind"] == "confirmation_required"
+              assert payload["error"]["body"]["required_flag"] == "--yes"
+              assert payload["meta"]["command"] == command
+          PY
+
+      - name: Verify Makefile install
+        run: |
+          make install BINDIR=/tmp/tino-bin
+          PATH="/tmp/tino-bin:$PATH" sh -c 'cd /tmp && tino --help >/tmp/tino-make-help.txt'
+          PATH="/tmp/tino-bin:$PATH" sh -c 'cd /tmp && tino version -f json | python3 -m json.tool >/tmp/tino-make-version.json'
+
   build:
+    needs: check
     strategy:
       matrix:
         include:
@@ -55,7 +224,7 @@ jobs:
 
       - name: Build release binary
         working-directory: cli
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
