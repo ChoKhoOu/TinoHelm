@@ -219,12 +219,23 @@ def _run_queue_mode(run_id: str) -> int:
         # The one place in this codebase that creates a BacktestEngine
         results = asyncio.run(runner.run())
 
-        # Progress: engine done, saving artifacts
-        publish_progress(
-            r, run_id, 95,
+        # Progress: engine done, saving artifacts. Redis progress is advisory;
+        # failures here must not turn a successful engine run into DB failed.
+        _best_effort(
+            "publish engine-complete progress",
+            publish_progress,
+            r,
+            run_id,
+            95,
             elapsed_secs=round(time.monotonic() - job_start_time, 1),
         )
-        r.setex(f"tino:backtest:progress:{run_id}", 86400, "95")
+        _best_effort(
+            "store engine-complete progress",
+            r.setex,
+            f"tino:backtest:progress:{run_id}",
+            86400,
+            "95",
+        )
 
         # Sanitize NaN/Infinity before any serialization
         results = sanitize_for_json(results)
@@ -243,40 +254,56 @@ def _run_queue_mode(run_id: str) -> int:
             json.dump(results, f, separators=(",", ":"), allow_nan=False, default=str)
         tmp_artifact_path.replace(artifact_path)
 
-        # Publish stats from results
+        # Persist the terminal DB state immediately after durable artifact write.
+        # From here on Redis events/cache pointers are advisory side effects and
+        # must not overwrite a successful backtest as failed.
         stats = results.get("statistics", {})
-        publish_stats(
-            r, run_id,
+        update_db_status(
+            cfg.database.url,
+            run_id,
+            "completed",
+            result_summary=stats,
+        )
+
+        _best_effort(
+            "publish stats",
+            publish_stats,
+            r,
+            run_id,
             trades=int(stats.get("total_trades", 0)),
             pnl=float(stats.get("pnl_total", 0)),
             win_rate=float(stats.get("win_rate", 0)),
         )
 
-        # Publish completion
-        publish_progress(
-            r, run_id, 100,
+        _best_effort(
+            "publish completion progress",
+            publish_progress,
+            r,
+            run_id,
+            100,
             elapsed_secs=round(time.monotonic() - job_start_time, 1),
         )
 
         # Store only a small summary pointer in Redis.  The full payload lives
         # in the artifact file and can be multi-MB for trade/equity reports.
-        r.setex(
+        pointer_json = json.dumps({
+            "status": "completed",
+            "summary": stats,
+            "artifact_path": str(artifact_path),
+        }, default=str)
+        _best_effort(
+            "store result pointer",
+            r.setex,
             f"tino:backtest:result:{run_id}",
             86400,
-            json.dumps({
-                "status": "completed",
-                "summary": stats,
-                "artifact_path": str(artifact_path),
-            }, default=str),
+            pointer_json,
         )
-        r.setex(f"tino:backtest:progress:{run_id}", 86400, "100")
-
-        # Update database record
-        update_db_status(
-            cfg.database.url,
-            run_id,
-            "completed",
-            result_summary=results.get("statistics", {}),
+        _best_effort(
+            "store completion progress",
+            r.setex,
+            f"tino:backtest:progress:{run_id}",
+            86400,
+            "100",
         )
         _best_effort("publish completion", publish_completed, r, run_id, "completed", summary=stats)
         _best_effort("delete cancel key", r.delete, cancel_key)

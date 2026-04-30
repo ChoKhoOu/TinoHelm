@@ -352,6 +352,57 @@ def test_post_completion_publish_error_does_not_overwrite_completed(tmp_path, mo
     assert "failed" not in statuses
 
 
+@pytest.mark.parametrize("failure_point", ["stats", "progress100", "result_pointer"])
+def test_post_artifact_redis_side_effect_failure_still_completes(
+    failure_point: str,
+    tmp_path,
+    monkeypatch,
+):
+    """After results.json is persisted, Redis cache/event failures must not fail the run."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+    r.get.side_effect = [None, None]
+    update_db_status = MagicMock()
+
+    def _publish_stats(*_args, **_kwargs):
+        if failure_point == "stats":
+            raise RuntimeError("redis stats down")
+
+    def _publish_progress(_r, _run_id, pct, **_kwargs):
+        if failure_point == "progress100" and pct == 100:
+            raise RuntimeError("redis progress down")
+
+    def _setex(key, *_args):
+        if failure_point == "result_pointer" and key == "tino:backtest:result:r-1":
+            raise RuntimeError("redis result pointer down")
+
+    r.setex.side_effect = _setex
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", update_db_status)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", _publish_progress)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", _publish_stats)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 0
+    assert (settings.paths.artifacts / "r-1" / "results.json").exists()
+    statuses = [c.args[2] for c in update_db_status.call_args_list if len(c.args) >= 3]
+    assert "completed" in statuses
+    assert "failed" not in statuses
+
+
 # ---------------------------------------------------------------------------
 # T2: test_run_id_failure
 # ---------------------------------------------------------------------------
