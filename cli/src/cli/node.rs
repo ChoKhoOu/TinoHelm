@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use crossterm::style::Stylize;
 
@@ -17,9 +17,12 @@ pub enum NodeCmd {
         /// Node type: sandbox or live
         #[arg(default_value = "sandbox")]
         node_type: String,
-        /// Kill escalation level (1-5)
+        /// Kill escalation level (1-3). Level 1 targets one strategy and requires --strategy-id.
         #[arg(long, short, default_value = "3")]
         level: u8,
+        /// Strategy ID required for level 1 kill.
+        #[arg(long)]
+        strategy_id: Option<String>,
     },
     /// Lifecycle control commands
     Lifecycle {
@@ -176,8 +179,15 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) ->
                 render_nodes_table(&nodes, &risk, &workers);
             }
         }
-        NodeCmd::Kill { node_type, level } => {
-            let result = client.node_kill(&node_type, level).await?;
+        NodeCmd::Kill {
+            node_type,
+            level,
+            strategy_id,
+        } => {
+            validate_kill_args(level, strategy_id.as_deref())?;
+            let result = client
+                .node_kill(&node_type, level, strategy_id.as_deref())
+                .await?;
             if format.is_machine() {
                 return print_node_machine(format, client, "node.kill", result);
             }
@@ -191,6 +201,9 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) ->
                 format!("{}", level.to_string().with(NEG).bold())
             };
             kv("Level", &level_str, 14);
+            if let Some(strategy_id) = strategy_id.as_deref() {
+                kv("Strategy", strategy_id, 14);
+            }
             println!();
         }
         NodeCmd::Lifecycle { command } => {
@@ -201,6 +214,39 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) ->
         }
     }
     Ok(())
+}
+
+fn validate_kill_args(level: u8, strategy_id: Option<&str>) -> Result<()> {
+    if !(1..=3).contains(&level) {
+        return Err(anyhow!("node kill level must be between 1 and 3"));
+    }
+    if level == 1
+        && strategy_id
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
+    {
+        return Err(anyhow!("node kill level 1 requires --strategy-id"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_level_one_requires_strategy_id() {
+        assert!(validate_kill_args(1, Some("strategy-a")).is_ok());
+        assert!(validate_kill_args(1, None).is_err());
+        assert!(validate_kill_args(1, Some("   ")).is_err());
+    }
+
+    #[test]
+    fn kill_level_is_limited_to_backend_contract() {
+        assert!(validate_kill_args(2, None).is_ok());
+        assert!(validate_kill_args(3, None).is_ok());
+        assert!(validate_kill_args(4, None).is_err());
+    }
 }
 
 async fn dispatch_lifecycle(

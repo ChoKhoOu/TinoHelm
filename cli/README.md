@@ -73,7 +73,7 @@ Every FastAPI operation can be called through `tino api` even before a typed sho
 tino api routes --filter /api/factor
 tino -f llm api get /api/factor/list -q include_experimental=false
 tino -f llm api call POST /api/factor/run --body-file factor_run.json
-tino -f llm api download /api/backtest/<run_id>/artifact/results.json -o results.json
+tino -f llm api download /api/backtest/<run_id>/artifacts/results.json -o results.json
 tino -f llm api call DELETE /api/backtest/<run_id>
 ```
 

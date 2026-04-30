@@ -91,21 +91,24 @@ impl Config {
     ) -> Result<(Option<String>, ApiKeySource)> {
         if let Some(key) = flag_api_key.and_then(Self::clean_key) {
             Ok((Some(key), ApiKeySource::Flag))
-        } else if let Ok(key) = std::env::var("TINO_API_KEY") {
-            match Self::clean_key(&key) {
-                Some(key) => Ok((Some(key), ApiKeySource::Env)),
-                None => Ok((None, ApiKeySource::None)),
-            }
-        } else if let Some((path, key)) = Self::read_credentials_file(yaml)? {
-            Ok((Some(key), ApiKeySource::CredentialsFile(path)))
-        } else if let Some(key) = yaml
-            .and_then(|cfg| cfg.api.as_ref())
-            .and_then(|api| api.key.as_deref())
-            .and_then(Self::clean_key)
-        {
-            Ok((Some(key), ApiKeySource::UserYaml))
         } else {
-            Ok((None, ApiKeySource::None))
+            if let Ok(key) = std::env::var("TINO_API_KEY") {
+                if let Some(key) = Self::clean_key(&key) {
+                    return Ok((Some(key), ApiKeySource::Env));
+                }
+            }
+
+            if let Some((path, key)) = Self::read_credentials_file(yaml)? {
+                Ok((Some(key), ApiKeySource::CredentialsFile(path)))
+            } else if let Some(key) = yaml
+                .and_then(|cfg| cfg.api.as_ref())
+                .and_then(|api| api.key.as_deref())
+                .and_then(Self::clean_key)
+            {
+                Ok((Some(key), ApiKeySource::UserYaml))
+            } else {
+                Ok((None, ApiKeySource::None))
+            }
         }
     }
 
@@ -283,6 +286,43 @@ mod tests {
         }
         if let Some(api_key) = old_api_key {
             std::env::set_var("TINO_API_KEY", api_key);
+        }
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn blank_env_key_falls_through_to_saved_credentials() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_api_url = std::env::var_os("TINO_API_URL");
+        let old_api_key = std::env::var_os("TINO_API_KEY");
+        let home = unique_home();
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("TINO_API_URL");
+        std::env::set_var("TINO_API_KEY", "   ");
+        Config::write_credentials("saved-key").unwrap();
+
+        let cfg = Config::load(None, None).unwrap();
+        assert_eq!(cfg.api_key.as_deref(), Some("saved-key"));
+        assert!(matches!(
+            cfg.api_key_source,
+            ApiKeySource::CredentialsFile(_)
+        ));
+
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(api_url) = old_api_url {
+            std::env::set_var("TINO_API_URL", api_url);
+        } else {
+            std::env::remove_var("TINO_API_URL");
+        }
+        if let Some(api_key) = old_api_key {
+            std::env::set_var("TINO_API_KEY", api_key);
+        } else {
+            std::env::remove_var("TINO_API_KEY");
         }
         std::fs::remove_dir_all(home).ok();
     }

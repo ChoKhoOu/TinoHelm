@@ -5,7 +5,9 @@ use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
-use crate::output::{print_json, print_llm_success, EnvelopeMeta, OutputFormat};
+use crate::output::{
+    print_json, print_llm_error, print_llm_success, EnvelopeError, EnvelopeMeta, OutputFormat,
+};
 use crate::types::{BacktestRunRequest, OptimizeRequest};
 
 #[derive(Subcommand)]
@@ -806,25 +808,34 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                     let st = data.status.clone();
                     last_status = st.clone();
                     if matches!(st.as_str(), "completed" | "failed" | "error" | "cancelled") {
-                        let success = st == "completed";
-                        print_backtest_machine(
+                        if st == "completed" {
+                            print_backtest_machine(
+                                format,
+                                client,
+                                "backtest.wait",
+                                serde_json::json!(data),
+                            )?;
+                            return Ok(());
+                        }
+                        print_backtest_error_machine(
                             format,
                             client,
                             "backtest.wait",
+                            "backtest_failed",
+                            format!("Backtest finished with status '{st}'"),
                             serde_json::json!(data),
                         )?;
-                        if !success {
-                            std::process::exit(1);
-                        }
-                        return Ok(());
+                        std::process::exit(1);
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
                     elapsed += poll_interval;
                 }
-                print_backtest_machine(
+                print_backtest_error_machine(
                     format,
                     client,
                     "backtest.wait",
+                    "backtest_timeout",
+                    format!("Backtest did not finish within {timeout}s"),
                     serde_json::json!({
                         "run_id": run_id,
                         "status": "timeout",
@@ -1120,6 +1131,34 @@ fn print_backtest_machine<T: serde::Serialize>(
             EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
         ),
         OutputFormat::Json => print_json(&data),
+        OutputFormat::Text => unreachable!("text output is handled by the caller"),
+    }
+}
+
+fn print_backtest_error_machine(
+    format: OutputFormat,
+    client: &ApiClient,
+    command: &'static str,
+    kind: impl Into<String>,
+    message: impl Into<String>,
+    body: serde_json::Value,
+) -> Result<()> {
+    let error = EnvelopeError {
+        kind: kind.into(),
+        message: message.into(),
+        status_code: None,
+        body: Some(body),
+    };
+    match format {
+        OutputFormat::Llm => print_llm_error(
+            error,
+            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
+        ),
+        OutputFormat::Json => print_json(&serde_json::json!({
+            "ok": false,
+            "error": error,
+            "meta": EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
+        })),
         OutputFormat::Text => unreachable!("text output is handled by the caller"),
     }
 }

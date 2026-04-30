@@ -576,8 +576,16 @@ impl ApiClient {
             .await
     }
 
-    pub async fn node_kill(&self, node_type: &str, level: u8) -> Result<serde_json::Value> {
-        let body = serde_json::json!({"mode": node_type, "level": level});
+    pub async fn node_kill(
+        &self,
+        node_type: &str,
+        level: u8,
+        strategy_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({"mode": node_type, "level": level});
+        if let Some(strategy_id) = strategy_id {
+            body["strategy_id"] = serde_json::json!(strategy_id);
+        }
         self.typed_json(Method::POST, "/api/node/kill", &[], Some(body))
             .await
     }

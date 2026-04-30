@@ -65,6 +65,18 @@ jobs:
                   pass
 
               def do_GET(self):
+                  if self.path.startswith("/api/backtest/failed/status"):
+                      self.send_response(200)
+                      self.send_header("Content-Type", "application/json")
+                      self.end_headers()
+                      self.wfile.write(json.dumps({
+                          "run_id": "failed",
+                          "status": "failed",
+                          "progress_pct": 100,
+                          "error": "typed failure",
+                          "result": None,
+                      }).encode())
+                      return
                   self.send_response(418)
                   self.send_header("Content-Type", "application/json")
                   self.end_headers()
@@ -99,6 +111,40 @@ jobs:
           assert payload["error"]["status_code"] == 418
           assert payload["error"]["body"]["detail"] == "typed boom"
           assert payload["meta"]["command"] == "backtest"
+          PY
+
+          set +e
+          TINO_API_URL=http://127.0.0.1:8765 ./target/debug/tino -f llm backtest wait failed --timeout 1 >/tmp/tino-wait-failed-llm.out 2>/tmp/tino-wait-failed-llm.err
+          wait_failed_status=$?
+          ./target/debug/tino -f json node kill sandbox --level 1 >/tmp/tino-kill-missing-strategy.out 2>/tmp/tino-kill-missing-strategy.err
+          kill_missing_strategy_status=$?
+          ./target/debug/tino -f json node kill sandbox --level 4 >/tmp/tino-kill-bad-level.out 2>/tmp/tino-kill-bad-level.err
+          kill_bad_level_status=$?
+          set -e
+          test "$wait_failed_status" -ne 0
+          test "$kill_missing_strategy_status" -ne 0
+          test "$kill_bad_level_status" -ne 0
+          test ! -s /tmp/tino-wait-failed-llm.err
+          test ! -s /tmp/tino-kill-missing-strategy.err
+          test ! -s /tmp/tino-kill-bad-level.err
+          python3 - <<'PY'
+          import json
+          with open("/tmp/tino-wait-failed-llm.out") as f:
+              payload = json.load(f)
+          assert payload["ok"] is False
+          assert payload["error"]["kind"] == "backtest_failed"
+          assert payload["error"]["body"]["status"] == "failed"
+          assert payload["meta"]["command"] == "backtest.wait"
+          for path, expected in [
+              ("/tmp/tino-kill-missing-strategy.out", "node kill level 1 requires --strategy-id"),
+              ("/tmp/tino-kill-bad-level.out", "node kill level must be between 1 and 3"),
+          ]:
+              with open(path) as f:
+                  payload = json.load(f)
+              assert payload["ok"] is False
+              assert payload["error"]["kind"] == "command"
+              assert expected in payload["error"]["message"]
+              assert payload["meta"]["command"] == "node"
           PY
 
           set +e
