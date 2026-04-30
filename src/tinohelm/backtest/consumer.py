@@ -34,6 +34,14 @@ async def _is_terminalizing(run_id: str, rds: aioredis.Redis) -> bool:
         return False
 
 
+async def _clear_terminalizing_marker(run_id: str, rds: aioredis.Redis) -> None:
+    """Best-effort parent cleanup for long-lived terminalization markers."""
+    try:
+        await rds.delete(_terminalizing_key(run_id))
+    except Exception:
+        logger.exception("Failed to delete terminalizing marker for %s", run_id)
+
+
 async def _terminate_process_with_terminalizing_grace(
     run_id: str,
     proc: asyncio.subprocess.Process,
@@ -44,45 +52,48 @@ async def _terminate_process_with_terminalizing_grace(
     terminalizing_grace: float = 30.0,
 ) -> None:
     """SIGTERM a child, but honor bounded terminalization grace before SIGKILL."""
-    if proc.returncode is not None:
-        return
-
-    logger.info("Sending SIGTERM to subprocess %s (%s)", run_id, reason)
-    proc.send_signal(signal.SIGTERM)
     try:
-        await asyncio.wait_for(proc.wait(), timeout=sigterm_grace)
-        return
-    except asyncio.TimeoutError:
-        pass
+        if proc.returncode is not None:
+            return
 
-    if await _is_terminalizing(run_id, rds):
-        logger.warning(
-            "Subprocess %s is terminalizing after SIGTERM grace during %s; "
-            "waiting up to %.1fs before SIGKILL escalation",
-            run_id,
-            reason,
-            terminalizing_grace,
-        )
+        logger.info("Sending SIGTERM to subprocess %s (%s)", run_id, reason)
+        proc.send_signal(signal.SIGTERM)
         try:
-            await asyncio.wait_for(proc.wait(), timeout=terminalizing_grace)
+            await asyncio.wait_for(proc.wait(), timeout=sigterm_grace)
             return
         except asyncio.TimeoutError:
-            logger.error(
-                "Terminalizing subprocess %s stuck after %.1fs during %s — SIGKILL",
+            pass
+
+        if await _is_terminalizing(run_id, rds):
+            logger.warning(
+                "Subprocess %s is terminalizing after SIGTERM grace during %s; "
+                "waiting up to %.1fs before SIGKILL escalation",
                 run_id,
+                reason,
                 terminalizing_grace,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=terminalizing_grace)
+                return
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Terminalizing subprocess %s stuck after %.1fs during %s — SIGKILL",
+                    run_id,
+                    terminalizing_grace,
+                    reason,
+                )
+        else:
+            logger.warning(
+                "Subprocess %s did not exit in %.1fs during %s — SIGKILL",
+                run_id,
+                sigterm_grace,
                 reason,
             )
-    else:
-        logger.warning(
-            "Subprocess %s did not exit in %.1fs during %s — SIGKILL",
-            run_id,
-            sigterm_grace,
-            reason,
-        )
 
-    proc.kill()
-    await proc.wait()
+        proc.kill()
+        await proc.wait()
+    finally:
+        await _clear_terminalizing_marker(run_id, rds)
 
 
 async def start_consumers(

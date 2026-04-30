@@ -272,8 +272,83 @@ def test_run_id_success_marks_terminalizing_for_parent_cancel_watcher(tmp_path, 
         rc = runner_cli._run_queue_mode("r-1")
 
     assert rc == 0
-    r.setex.assert_any_call("tino:backtest:terminalizing:r-1", 60, "1")
+    r.set.assert_any_call("tino:backtest:terminalizing:r-1", "1")
+    terminalizing_setex_calls = [
+        c for c in r.setex.call_args_list
+        if c.args and c.args[0] == "tino:backtest:terminalizing:r-1"
+    ]
+    assert terminalizing_setex_calls == []
     r.delete.assert_any_call("tino:backtest:terminalizing:r-1")
+
+
+def test_terminalization_marker_write_failure_is_advisory(tmp_path, monkeypatch):
+    """Redis marker I/O failure must not fail a completed engine+artifact run."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+    r.get.side_effect = [None, None]
+
+    def _setex(key, *_args):
+        if key == "tino:backtest:terminalizing:r-1":
+            raise RuntimeError("redis marker down")
+        return None
+
+    r.set.side_effect = RuntimeError("redis marker down")
+    r.setex.side_effect = _setex
+    update_db_status = MagicMock()
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", update_db_status)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 0
+    statuses = [c.args[2] for c in update_db_status.call_args_list if len(c.args) >= 3]
+    assert "completed" in statuses
+    assert "failed" not in statuses
+
+
+def test_terminalization_cancel_key_read_failure_is_advisory(tmp_path, monkeypatch):
+    """A transient cancel-key read failure after engine completion must not fail success."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+    r.get.side_effect = [None, RuntimeError("redis get down")]
+    update_db_status = MagicMock()
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_MINIMAL_JOB)))
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", update_db_status)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    mock_runner_instance = MagicMock()
+    mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 0
+    statuses = [c.args[2] for c in update_db_status.call_args_list if len(c.args) >= 3]
+    assert "completed" in statuses
+    assert "failed" not in statuses
 
 
 def test_run_id_sets_terminalization_callback_before_runner_artifacts(tmp_path, monkeypatch):
@@ -314,7 +389,12 @@ def test_run_id_sets_terminalization_callback_before_runner_artifacts(tmp_path, 
 
     assert rc == 0
     assert callback_seen == [True]
-    r.setex.assert_any_call("tino:backtest:terminalizing:r-1", 60, "1")
+    r.set.assert_any_call("tino:backtest:terminalizing:r-1", "1")
+    terminalizing_setex_calls = [
+        c for c in r.setex.call_args_list
+        if c.args and c.args[0] == "tino:backtest:terminalizing:r-1"
+    ]
+    assert terminalizing_setex_calls == []
 
 
 def test_post_completion_publish_error_does_not_overwrite_completed(tmp_path, monkeypatch):

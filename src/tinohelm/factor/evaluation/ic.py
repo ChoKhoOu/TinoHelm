@@ -112,7 +112,7 @@ def _ensure_factor_keys_covered(
     keys: list[str],
 ) -> None:
     """Reject finite factor cells that would be silently dropped by inner join."""
-    if factor.height == 0 or fwd_ret.height == 0:
+    if factor.height == 0:
         return
 
     factor_keys = (
@@ -123,6 +123,12 @@ def _ensure_factor_keys_covered(
     )
     if factor_keys.height == 0:
         return
+
+    if fwd_ret.height == 0:
+        raise ValueError(
+            "fwd_ret missing identity keys required by factor; "
+            f"keys={keys!r}, missing_sample={factor_keys.head(5).to_dicts()!r}"
+        )
 
     fwd_keys = fwd_ret.select(keys).unique(maintain_order=True)
     missing = factor_keys.join(fwd_keys, on=keys, how="anti")

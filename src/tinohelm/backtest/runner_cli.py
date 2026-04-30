@@ -63,7 +63,6 @@ _current_run_id: str | None = None
 _current_r: redis.Redis | None = None
 _current_db_url: str | None = None
 _terminalizing: bool = False
-_TERMINALIZING_TTL_SECONDS = 60
 
 
 class _BacktestCancelledAfterEngine(Exception):
@@ -192,8 +191,23 @@ def _run_queue_mode(run_id: str) -> int:
             global _terminalizing
             if _terminalizing:
                 return
-            if r.get(cancel_key):
-                r.delete(cancel_key)
+
+            # Local state must flip before any Redis I/O so SIGTERM is ignored
+            # throughout finalization even if Redis marker/cancel checks fail.
+            _terminalizing = True
+
+            cancel_requested = False
+            try:
+                cancel_requested = bool(r.get(cancel_key))
+            except Exception:
+                logger.exception(
+                    "Cancel-key read failed during terminalization for %s; "
+                    "continuing durable completion",
+                    run_id,
+                )
+
+            if cancel_requested:
+                _best_effort("delete post-engine cancel key", r.delete, cancel_key)
                 update_db_status(cfg.database.url, run_id, "cancelled")
                 _best_effort(
                     "publish post-engine cancellation",
@@ -204,8 +218,11 @@ def _run_queue_mode(run_id: str) -> int:
                 )
                 logger.info("Backtest %s cancelled after engine execution", run_id)
                 raise _BacktestCancelledAfterEngine()
-            r.setex(terminalizing_key, _TERMINALIZING_TTL_SECONDS, "1")
-            _terminalizing = True
+
+            # Keep a long-lived marker for the whole finalization window; the
+            # child clears it in finally.  Redis marker failure only weakens the
+            # parent-side grace heuristic and must not fail a completed run.
+            _best_effort("set terminalizing marker", r.set, terminalizing_key, "1")
 
         runner._before_artifact_export = _begin_terminalization
 

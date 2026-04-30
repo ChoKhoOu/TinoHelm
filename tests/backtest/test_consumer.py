@@ -94,7 +94,8 @@ async def test_cancel_watcher_sends_sigterm():
     )
 
     proc.send_signal.assert_called_once_with(signal.SIGTERM)
-    rds.delete.assert_called_once_with("tino:backtest:cancel:r-1")
+    rds.delete.assert_any_await("tino:backtest:terminalizing:r-1")
+    rds.delete.assert_any_await("tino:backtest:cancel:r-1")
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +182,8 @@ async def test_cancel_watcher_does_not_sigkill_terminalizing_subprocess():
     )
 
     proc.kill.assert_not_called()
+    rds.delete.assert_any_await("tino:backtest:terminalizing:r-terminalizing")
+    rds.delete.assert_any_await("tino:backtest:cancel:r-terminalizing")
 
 
 async def test_cancel_watcher_sigkills_stuck_terminalizing_subprocess():
@@ -219,6 +222,8 @@ async def test_cancel_watcher_sigkills_stuck_terminalizing_subprocess():
     )
 
     proc.kill.assert_called_once()
+    rds.delete.assert_any_await("tino:backtest:terminalizing:r-stuck-terminalizing")
+    rds.delete.assert_any_await("tino:backtest:cancel:r-stuck-terminalizing")
 
 
 async def test_shutdown_termination_honors_terminalizing_grace():
@@ -250,6 +255,7 @@ async def test_shutdown_termination_honors_terminalizing_grace():
 
     proc.send_signal.assert_called_once_with(signal.SIGTERM)
     proc.kill.assert_not_called()
+    rds.delete.assert_any_await("tino:backtest:terminalizing:r-shutdown-terminalizing")
 
 
 # ---------------------------------------------------------------------------
