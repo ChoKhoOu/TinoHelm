@@ -429,6 +429,11 @@ class DataRequest:
     source:
         Data source type: ``"bar"``, ``"funding_rate"``, ``"trade_tick"``,
         ``"quote_tick"``.  Defaults to ``"bar"`` for OHLCV fields.
+    source_type:
+        Optional physical catalog source under a logical source.  For
+        ``source="bar"`` this is the Binance kline-family source type such as
+        ``"klines"`` or ``"markPriceKlines"``.  ``None`` means the default
+        trade kline source (``"klines"``).
     """
 
     symbol: str
@@ -436,3 +441,4 @@ class DataRequest:
     frequency: str
     lookback: int
     source: str = "bar"
+    source_type: str | None = None

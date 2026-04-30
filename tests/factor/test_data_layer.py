@@ -32,6 +32,7 @@ import pytest
 from tinohelm.factor.data_layer import DataLayer, _parse_ts, load_aligned
 from tinohelm.factor.types import DataRequest
 from tinohelm.factor.universe import Universe
+from tinohelm.data.catalog_helpers import resolve_catalog_path
 from tinohelm.strategy.loader_helpers import make_bar_type_str
 
 
@@ -46,9 +47,18 @@ def test_parse_ts_converts_offset_to_utc_naive() -> None:
 # Test catalog writer (NT-free)
 # ---------------------------------------------------------------------------
 
-def _write_catalog_bars(catalog_path: Path, symbol_str: str, timestamps_ns: list[int], closes: list[float]):
+def _write_catalog_bars(
+    catalog_path: Path,
+    symbol_str: str,
+    timestamps_ns: list[int],
+    closes: list[float],
+    *,
+    interval: str = "1m",
+    source_type: str | None = None,
+):
     """Write a minimal bar Parquet fixture matching DataLayer's direct reader."""
-    bar_dir = catalog_path / "data" / "bar" / make_bar_type_str(symbol_str, "1m")
+    root = resolve_catalog_path(catalog_path, source_type) if source_type else catalog_path
+    bar_dir = root / "data" / "bar" / make_bar_type_str(symbol_str, interval)
     bar_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "ts_event": timestamps_ns,
@@ -515,6 +525,67 @@ class TestLoadGrouping:
                 DataRequest("BTCUSDT-PERP", "close", "5m", 0, "bar"),
             ])
 
+    def test_invalid_bar_frequency_rejected_instead_of_falling_back_to_1m(self, tmp_path: Path):
+        catalog_path = tmp_path / "catalog"
+        ts_ns = [_T0_NS + i * _1MIN_NS for i in range(3)]
+        _write_catalog_bars(catalog_path, "BTCUSDT-PERP", ts_ns, [100.0, 101.0, 102.0])
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        with pytest.raises(ValueError, match="Unsupported bar frequency"):
+            dl.load(DataRequest("BTCUSDT-PERP", "close", "typo", 0, "bar"))
+
+    def test_custom_6m_frequency_resamples_from_1m_source(self, tmp_path: Path):
+        catalog_path = tmp_path / "catalog"
+        ts_ns = [_T0_NS + i * _1MIN_NS for i in range(12)]
+        closes = [100.0 + i for i in range(12)]
+        _write_catalog_bars(catalog_path, "BTCUSDT-PERP", ts_ns, closes)
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        panels = dl.load([
+            DataRequest("BTCUSDT-PERP", "open", "6m", 0, "bar"),
+            DataRequest("BTCUSDT-PERP", "high", "6m", 0, "bar"),
+            DataRequest("BTCUSDT-PERP", "low", "6m", 0, "bar"),
+            DataRequest("BTCUSDT-PERP", "close", "6m", 0, "bar"),
+            DataRequest("BTCUSDT-PERP", "volume", "6m", 0, "bar"),
+        ])
+
+        assert _ts_list(panels["close"]) == [
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[0] // 1_000),
+            datetime(1970, 1, 1) + timedelta(microseconds=ts_ns[6] // 1_000),
+        ]
+        assert _sym_values(panels["open"], "BTCUSDT-PERP") == [90.0, 96.0]
+        assert _sym_values(panels["high"], "BTCUSDT-PERP") == [125.0, 131.0]
+        assert _sym_values(panels["low"], "BTCUSDT-PERP") == [80.0, 86.0]
+        assert _sym_values(panels["close"], "BTCUSDT-PERP") == [105.0, 111.0]
+        assert _sym_values(panels["volume"], "BTCUSDT-PERP") == [30.0, 30.0]
+
+    def test_bar_reader_uses_klines_source_root_before_legacy_flat_path(self, tmp_path: Path):
+        catalog_path = tmp_path / "catalog"
+        ts_ns = [_T0_NS + i * _1MIN_NS for i in range(2)]
+        _write_catalog_bars(
+            catalog_path,
+            "BTCUSDT-PERP",
+            ts_ns,
+            [100.0, 101.0],
+            source_type="klines",
+        )
+
+        uni_path = _make_universe_csv(tmp_path, [
+            {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
+        ])
+        dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
+
+        panel = dl.load(DataRequest("BTCUSDT-PERP", "close", "1m", 0, "bar"))["close"]
+        assert _sym_values(panel, "BTCUSDT-PERP") == [100.0, 101.0]
+
     def test_close_and_volume_separate_panels(self, tmp_path: Path, monkeypatch):
         catalog_path = tmp_path / "catalog"
         catalog_path.mkdir()
@@ -527,7 +598,7 @@ class TestLoadGrouping:
 
         ts_values = [datetime(2021, 5, 3, 0, i) for i in range(4)]
 
-        def fake_load_bar_fields(symbol, field_names, frequency, start, end):
+        def fake_load_bar_fields(symbol, field_names, frequency, start, end, source_type=None):
             values_by_field = {
                 "close": [100.0, 101.0, 102.0, 103.0],
                 "volume": [5.0, 5.0, 5.0, 5.0],
@@ -575,7 +646,7 @@ class TestLoadGrouping:
         }
         calls: list[tuple[str, tuple[str, ...]]] = []
 
-        def fake_load_bar_fields(symbol, field_names, frequency, start, end):
+        def fake_load_bar_fields(symbol, field_names, frequency, start, end, source_type=None):
             calls.append((symbol, tuple(field_names)))
             assert frequency == "1m"
             return {
@@ -615,7 +686,7 @@ class TestLoadGrouping:
 
         ts_values = [datetime(2021, 5, 3, 0, i) for i in range(6)]
 
-        def fake_load_bar_fields(symbol, field_names, frequency, start, end):
+        def fake_load_bar_fields(symbol, field_names, frequency, start, end, source_type=None):
             return {
                 field: pl.DataFrame(
                     {"ts": ts_values, "value": [float(i) for i in range(6)]},

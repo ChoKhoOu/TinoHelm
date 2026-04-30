@@ -48,8 +48,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -80,6 +82,48 @@ _BAR_FIELD_ATTR: dict[str, str] = {
 }
 
 _NAUTILUS_FIXED_PRECISION_SCALE: float = 10_000_000_000_000_000.0
+_DEFAULT_BAR_SOURCE_TYPE: str = "klines"
+
+_BAR_INTERVAL_RE = re.compile(r"^([1-9]\d*)([smhd])$")
+_BAR_UNIT_TO_AGGREGATION: dict[str, str] = {
+    "s": "SECOND",
+    "m": "MINUTE",
+    "h": "HOUR",
+    "d": "DAY",
+}
+_BAR_AGGREGATION_SECONDS: dict[str, int] = {
+    "SECOND": 1,
+    "MINUTE": 60,
+    "HOUR": 3_600,
+    "DAY": 86_400,
+}
+_BAR_AGGREGATION_POLARS_UNIT: dict[str, str] = {
+    "SECOND": "s",
+    "MINUTE": "m",
+    "HOUR": "h",
+    "DAY": "d",
+}
+
+
+@dataclass(frozen=True)
+class _BarInterval:
+    """Strictly parsed bar interval token."""
+
+    token: str
+    step: int
+    aggregation: str
+
+    @property
+    def ns(self) -> int:
+        return self.step * _BAR_AGGREGATION_SECONDS[self.aggregation] * 1_000_000_000
+
+    @property
+    def nt_part(self) -> str:
+        return f"{self.step}-{self.aggregation}"
+
+    @property
+    def polars_every(self) -> str:
+        return f"{self.step}{_BAR_AGGREGATION_POLARS_UNIT[self.aggregation]}"
 
 
 # ---------------------------------------------------------------------------
@@ -129,14 +173,94 @@ def _ordered_unique(values: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _group_requests_by_frequency(
+def _bar_source_type(req: DataRequest) -> str:
+    """Return the physical bar source type for a request."""
+    return req.source_type or _DEFAULT_BAR_SOURCE_TYPE
+
+
+def _group_bar_requests(
     requests: Sequence[DataRequest],
-) -> dict[str, list[DataRequest]]:
-    """Group bar requests by frequency while preserving first-seen order."""
-    groups: dict[str, list[DataRequest]] = defaultdict(list)
+) -> dict[tuple[str, str], list[DataRequest]]:
+    """Group bar requests by (frequency, source_type) preserving order."""
+    groups: dict[tuple[str, str], list[DataRequest]] = defaultdict(list)
     for req in requests:
-        groups[req.frequency].append(req)
+        groups[(req.frequency, _bar_source_type(req))].append(req)
     return groups
+
+
+def _parse_bar_frequency(frequency: str) -> _BarInterval:
+    """Parse a bar frequency strictly; never fall back to 1m on bad input."""
+    token = str(frequency).strip().lower()
+    try:
+        from tinohelm.data.catalog_helpers import interval_to_step_unit
+
+        step, aggregation = interval_to_step_unit(token)
+    except ValueError:
+        match = _BAR_INTERVAL_RE.match(token)
+        if match is None:
+            raise ValueError(
+                f"Unsupported bar frequency {frequency!r}. Expected '<positive integer><s|m|h|d>', "
+                "for example '1m', '6m', '1h', or '1d'."
+            ) from None
+        step = int(match.group(1))
+        aggregation = _BAR_UNIT_TO_AGGREGATION[match.group(2)]
+
+    if step <= 0 or aggregation not in _BAR_AGGREGATION_SECONDS:
+        raise ValueError(
+            f"Unsupported bar frequency {frequency!r}. Expected a positive s/m/h/d interval."
+        )
+    return _BarInterval(token=token, step=step, aggregation=aggregation)
+
+
+def _make_bar_type_strict(symbol: str, frequency: str) -> str:
+    """Build an NT bar-type string using strict frequency parsing."""
+    from tinohelm.strategy.loader_helpers import normalize_symbol
+
+    interval = _parse_bar_frequency(frequency)
+    return f"{normalize_symbol(symbol)}-{interval.nt_part}-LAST-EXTERNAL"
+
+
+def _bar_catalog_roots(base_root: Path, source_type: str) -> list[Path]:
+    """Return preferred catalog roots for bar reads: source-specific then legacy."""
+    from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+    base = Path(base_root)
+    resolved = resolve_catalog_path(base, source_type)
+    candidates = [resolved, base]
+
+    # If the caller already passed a resolved source root (e.g. .../bar/klines),
+    # prefer it over appending another /bar/klines suffix.
+    if base.name == source_type and base.parent.name == "bar":
+        candidates = [base, resolved]
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        key = path.resolve() if path.exists() else path.absolute()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
+
+
+def _candidate_source_frequencies(target: _BarInterval) -> list[str]:
+    """Return lower intervals that can compose ``target`` exactly."""
+    from tinohelm.data.catalog_helpers import INTERVAL_MAP
+
+    candidates: list[tuple[int, str]] = []
+    for token in INTERVAL_MAP:
+        try:
+            candidate = _parse_bar_frequency(token)
+        except ValueError:
+            continue
+        if candidate.ns < target.ns and target.ns % candidate.ns == 0:
+            candidates.append((candidate.ns, token))
+
+    # Coarsest usable source first minimizes scanned rows; 1m naturally remains
+    # the final fallback for custom intervals such as 6m when only base klines
+    # are stored.
+    return [token for _, token in sorted(candidates, reverse=True)]
 
 
 def _apply_lookback_start(
@@ -254,10 +378,11 @@ class DataLayer:
         non_bar_requests = [req for req in requests if req.source != "bar"]
 
         result: dict[str, Panel] = {}
-        for frequency, reqs in _group_requests_by_frequency(bar_requests).items():
+        for (frequency, source_type), reqs in _group_bar_requests(bar_requests).items():
             panels = self._load_bar_panels_grouped(
                 reqs=reqs,
                 frequency=frequency,
+                source_type=source_type,
                 start=start,
                 end=end,
             )
@@ -265,7 +390,7 @@ class DataLayer:
                 if field_name in result:
                     raise ValueError(
                         "DataLayer output key collision for bar field "
-                        f"{field_name!r}; request a single frequency per field"
+                        f"{field_name!r}; request a single frequency/source_type per field"
                     )
                 result[field_name] = panel
 
@@ -427,6 +552,7 @@ class DataLayer:
         self,
         reqs: list[DataRequest],
         frequency: str,
+        source_type: str,
         start: str | datetime | None,
         end: str | datetime | None,
     ) -> dict[str, Panel]:
@@ -439,6 +565,10 @@ class DataLayer:
         """
         if not reqs:
             return {}
+
+        # Validate before dispatching worker threads so invalid user input
+        # fails closed instead of being swallowed by the per-symbol fallback.
+        _parse_bar_frequency(frequency)
 
         ts_start = _parse_ts(start) if start is not None else None
         ts_end = _parse_ts(end) if end is not None else None
@@ -477,6 +607,7 @@ class DataLayer:
                     symbol=sym,
                     field_names=sym_fields,
                     frequency=frequency,
+                    source_type=source_type,
                     start=sym_load_start,
                     end=ts_end,
                 )
@@ -487,6 +618,8 @@ class DataLayer:
                 sym_fields = symbol_fields[sym]
                 try:
                     series_by_field = fut.result()
+                except ValueError:
+                    raise
                 except Exception:
                     logger.warning(
                         "Failed to load bar fields %s for symbol %s",
@@ -578,10 +711,17 @@ class DataLayer:
         frequency: str,
         start: datetime | None,
         end: datetime | None,
+        source_type: str | None = None,
     ) -> pl.DataFrame:
-        """Read one OHLCV field for a symbol from the Parquet catalog.
-        """
-        return self._load_bar_fields(symbol, [field_name], frequency, start, end)[field_name]
+        """Read one OHLCV field for a symbol from the Parquet catalog."""
+        return self._load_bar_fields(
+            symbol,
+            [field_name],
+            frequency,
+            start,
+            end,
+            source_type=source_type,
+        )[field_name]
 
     def _load_bar_fields(
         self,
@@ -590,9 +730,18 @@ class DataLayer:
         frequency: str,
         start: datetime | None,
         end: datetime | None,
+        source_type: str | None = None,
     ) -> dict[str, pl.DataFrame]:
-        """Read multiple OHLCV fields for a symbol via Parquet column projection."""
-        from tinohelm.strategy.loader_helpers import make_bar_type_str
+        """Read multiple OHLCV fields via Parquet projection and optional composition.
+
+        The reader first looks for the requested frequency directly under the
+        source-specific catalog root (``bar/klines`` by default) and then the
+        legacy flat catalog root.  If the target interval is not stored but can
+        be composed exactly from a lower interval on disk, it reads the lower
+        interval once and resamples to the requested cadence before returning.
+        """
+        target = _parse_bar_frequency(frequency)
+        source_type = source_type or _DEFAULT_BAR_SOURCE_TYPE
 
         fields = _ordered_unique(field_names)
         for field_name in fields:
@@ -602,64 +751,191 @@ class DataLayer:
                 )
 
         empty = {field_name: _empty_series_frame() for field_name in fields}
-        bar_type_str = make_bar_type_str(symbol, frequency)
-        bar_dir = self._catalog_root / "data" / "bar" / bar_type_str
-        parquet_files = sorted(bar_dir.glob("*.parquet"))
-        if not parquet_files:
-            logger.debug("No bar Parquet files for %s at %s", symbol, bar_dir)
-            return empty
 
-        try:
-            lf = pl.scan_parquet([str(path) for path in parquet_files])
-            schema = lf.collect_schema()
-        except Exception:
-            logger.warning(
-                "Failed to scan bar Parquet schema for %s at %s",
-                bar_type_str, bar_dir, exc_info=True,
-            )
-            return empty
-
-        if "ts_event" not in schema:
-            logger.warning("Bar Parquet for %s has no ts_event column", bar_type_str)
-            return empty
-
-        available_fields = [field for field in fields if field in schema]
-        missing_fields = [field for field in fields if field not in schema]
-        if missing_fields:
-            logger.warning(
-                "Bar Parquet for %s missing columns %s",
-                bar_type_str, missing_fields,
-            )
-        if not available_fields:
-            return empty
-
-        try:
-            scan = lf.select(["ts_event", *available_fields])
-            if start is not None:
-                scan = scan.filter(pl.col("ts_event") >= _datetime_to_ns(start))
-            if end is not None:
-                scan = scan.filter(pl.col("ts_event") <= _datetime_to_ns(end))
-            frame = scan.collect()
-        except Exception:
-            logger.warning(
-                "Failed to read bar Parquet for %s — returning empty series",
-                bar_type_str, exc_info=True,
-            )
-            return empty
-
-        if frame.is_empty():
-            return empty
-
-        frame = frame.with_columns(
-            pl.from_epoch(pl.col("ts_event"), time_unit="ns").alias(_TS_COL),
-            *[
-                _bar_value_expr(field, schema[field]).alias(field)
-                for field in available_fields
-            ],
+        frame, available_fields = self._read_bar_frame(
+            symbol=symbol,
+            field_names=fields,
+            frequency=frequency,
+            source_type=source_type,
+            start=start,
+            end=end,
         )
+        if frame is not None:
+            return self._bar_frame_to_series(frame, fields, available_fields, empty)
+
+        for source_frequency in _candidate_source_frequencies(target):
+            frame, available_fields = self._read_bar_frame(
+                symbol=symbol,
+                field_names=fields,
+                frequency=source_frequency,
+                source_type=source_type,
+                start=start,
+                end=end,
+            )
+            if frame is None:
+                continue
+            if frame.is_empty():
+                return empty
+            resampled = self._resample_bar_frame(
+                frame,
+                available_fields,
+                target=target,
+                start=start,
+                end=end,
+            )
+            return self._bar_frame_to_series(resampled, fields, available_fields, empty)
+
+        logger.debug(
+            "No bar Parquet files for %s %s under source_type=%s",
+            symbol, frequency, source_type,
+        )
+        return empty
+
+    def _read_bar_frame(
+        self,
+        *,
+        symbol: str,
+        field_names: Sequence[str],
+        frequency: str,
+        source_type: str,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> tuple[pl.DataFrame | None, list[str]]:
+        """Read decoded bar columns for one exact on-disk frequency.
+
+        Returns ``(None, [])`` when no matching parquet files exist in any
+        candidate catalog root.  An existing path with no rows/columns returns
+        an empty frame so callers do not fall through to another cadence by
+        accident.
+        """
+        bar_type_str = _make_bar_type_strict(symbol, frequency)
+        fields = _ordered_unique(field_names)
+
+        for catalog_root in _bar_catalog_roots(self._catalog_root, source_type):
+            bar_dir = catalog_root / "data" / "bar" / bar_type_str
+            parquet_files = sorted(bar_dir.glob("*.parquet"))
+            if not parquet_files:
+                continue
+
+            try:
+                lf = pl.scan_parquet([str(path) for path in parquet_files])
+                schema = lf.collect_schema()
+            except Exception:
+                logger.warning(
+                    "Failed to scan bar Parquet schema for %s at %s",
+                    bar_type_str, bar_dir, exc_info=True,
+                )
+                return pl.DataFrame(), []
+
+            if "ts_event" not in schema:
+                logger.warning("Bar Parquet for %s has no ts_event column", bar_type_str)
+                return pl.DataFrame(), []
+
+            available_fields = [field for field in fields if field in schema]
+            missing_fields = [field for field in fields if field not in schema]
+            if missing_fields:
+                logger.warning(
+                    "Bar Parquet for %s missing columns %s",
+                    bar_type_str, missing_fields,
+                )
+            if not available_fields:
+                return pl.DataFrame(), []
+
+            try:
+                scan = lf.select(["ts_event", *available_fields])
+                if start is not None:
+                    scan = scan.filter(pl.col("ts_event") >= _datetime_to_ns(start))
+                if end is not None:
+                    scan = scan.filter(pl.col("ts_event") <= _datetime_to_ns(end))
+                frame = scan.collect()
+            except Exception:
+                logger.warning(
+                    "Failed to read bar Parquet for %s at %s — returning empty series",
+                    bar_type_str, bar_dir, exc_info=True,
+                )
+                return pl.DataFrame(), []
+
+            if frame.is_empty():
+                return frame, available_fields
+
+            frame = frame.with_columns(
+                pl.from_epoch(pl.col("ts_event"), time_unit="ns").alias(_TS_COL),
+                *[
+                    _bar_value_expr(field, schema[field]).alias(field)
+                    for field in available_fields
+                ],
+            )
+            return (
+                frame.select([_TS_COL, *available_fields])
+                .sort(_TS_COL)
+                .unique(subset=[_TS_COL], keep="last", maintain_order=True),
+                available_fields,
+            )
+
+        return None, []
+
+    def _resample_bar_frame(
+        self,
+        frame: pl.DataFrame,
+        available_fields: Sequence[str],
+        *,
+        target: _BarInterval,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> pl.DataFrame:
+        """Aggregate lower-cadence OHLCV bars to ``target`` cadence."""
+        if frame.is_empty():
+            return frame
+
+        aggregations: list[pl.Expr] = []
+        for field in available_fields:
+            if field == "open":
+                aggregations.append(pl.col(field).first().alias(field))
+            elif field == "high":
+                aggregations.append(pl.col(field).max().alias(field))
+            elif field == "low":
+                aggregations.append(pl.col(field).min().alias(field))
+            elif field == "close":
+                aggregations.append(pl.col(field).last().alias(field))
+            elif field == "volume":
+                aggregations.append(pl.col(field).sum().alias(field))
+
+        if not aggregations:
+            return pl.DataFrame()
+
+        out = (
+            frame.sort(_TS_COL)
+            .group_by_dynamic(
+                _TS_COL,
+                every=target.polars_every,
+                period=target.polars_every,
+                closed="left",
+                label="left",
+            )
+            .agg(aggregations)
+            .sort(_TS_COL)
+        )
+        if start is not None:
+            out = out.filter(pl.col(_TS_COL) >= pl.lit(start))
+        if end is not None:
+            out = out.filter(pl.col(_TS_COL) <= pl.lit(end))
+        return out
+
+    def _bar_frame_to_series(
+        self,
+        frame: pl.DataFrame,
+        fields: Sequence[str],
+        available_fields: Sequence[str],
+        empty: dict[str, pl.DataFrame],
+    ) -> dict[str, pl.DataFrame]:
+        """Split a decoded/resampled bar frame into ``[ts, value]`` series."""
+        if frame.is_empty():
+            return dict(empty)
 
         out = dict(empty)
         for field in available_fields:
+            if field not in fields or field not in frame.columns:
+                continue
             out[field] = (
                 frame.select([_TS_COL, pl.col(field).alias(_VAL_COL)])
                 .sort(_TS_COL)
@@ -1153,11 +1429,10 @@ def _lookback_offset_ns(frequency: str, lookback: int) -> int | None:
     if lookback <= 0:
         return None
     try:
-        from tinohelm.data.catalog_helpers import interval_to_nanoseconds
-        return interval_to_nanoseconds(frequency) * lookback
+        return _parse_bar_frequency(frequency).ns * lookback
     except ValueError:
         logger.debug(
-            "_lookback_offset_ns: frequency %r is not a known bar interval; "
+            "_lookback_offset_ns: frequency %r is not a valid bar interval; "
             "skipping warmup offset",
             frequency,
         )
