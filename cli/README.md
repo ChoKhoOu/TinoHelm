@@ -10,15 +10,15 @@ From the repository root:
 make
 ```
 
-This builds the release binary and installs `tino` to `/usr/local/bin/tino` when writable, otherwise to `~/.local/bin/tino`. If the install directory is on `PATH`, `tino` can then be called from any directory.
+Plain `make` builds the release binary, installs `tino` to `/usr/local/bin/tino` when writable, otherwise to `~/.local/bin/tino`, and verifies that a fresh shell resolves `tino` to the newly installed binary. If `PATH` would find an older `tino` or cannot find `tino`, the default install fails. Explicit `BINDIR=...` overrides are treated as packaging/test installs when that directory is not already first on `PATH`; use `make verify-install` with the same `BINDIR` after adjusting `PATH` to enforce global resolution.
 
 Useful variants:
 
 ```bash
 make build                       # build only: cli/target/release/tino
 make package                     # package dist/tino-<target>.tar.gz
-make BINDIR=~/.local/bin         # install somewhere else
-make BINDIR=/usr/local/bin       # system-wide install if writable
+make verify-install              # verify installed binary and PATH resolution
+make BINDIR=/path/on/PATH        # explicit alternate install directory
 make uninstall                   # remove the installed binary
 ```
 
