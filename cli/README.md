@@ -2,14 +2,26 @@
 
 Rust CLI for TinoHelm. The old interactive TUI has been removed; `tino` is now a one-shot, LLM-first control plane with explicit human and machine output modes.
 
-## Build
+## Install
+
+From the repository root:
 
 ```bash
-cd cli
-cargo build --release
+make
 ```
 
-Binary: `cli/target/release/tino`.
+This builds the release binary and installs `tino` to `~/.cargo/bin/tino` by default. If `~/.cargo/bin` is on `PATH`, `tino` can then be called from any directory.
+
+Useful variants:
+
+```bash
+make build                       # build only: cli/target/release/tino
+make BINDIR=~/.local/bin         # install somewhere else
+make BINDIR=/usr/local/bin       # system-wide install if writable
+make uninstall                   # remove the installed binary
+```
+
+Binary after a build-only run: `cli/target/release/tino`.
 
 ## Output modes
 

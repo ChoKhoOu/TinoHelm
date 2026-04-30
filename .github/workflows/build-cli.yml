@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - 'cli/**'
+      - 'Makefile'
       - '.github/workflows/build-cli.yml'
   pull_request:
     paths:
       - 'cli/**'
+      - 'Makefile'
 
 jobs:
   check:
@@ -29,6 +31,12 @@ jobs:
           cargo build --locked
           ./target/debug/tino --help >/tmp/tino-help.txt
           ./target/debug/tino version -f json | python3 -m json.tool >/tmp/tino-version.json
+
+      - name: Verify Makefile install
+        run: |
+          make install BINDIR=/tmp/tino-bin
+          PATH="/tmp/tino-bin:$PATH" sh -c 'cd /tmp && tino --help >/tmp/tino-make-help.txt'
+          PATH="/tmp/tino-bin:$PATH" sh -c 'cd /tmp && tino version -f json | python3 -m json.tool >/tmp/tino-make-version.json'
 
   build:
     needs: check

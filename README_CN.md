@@ -18,15 +18,24 @@ docker compose up -d
 docker compose up -d --build api
 ```
 
-### 2. 构建 CLI
+### 2. 安装 CLI
 
 Rust CLI 是主要交互界面：单次命令、原始 JSON，以及给 LLM/自动化调用使用的稳定 `llm` envelope。
 
 ```bash
-cd cli && cargo build --release
+make
 ```
 
-产物在 `cli/target/release/tino`。
+默认会构建 release 产物，并安装到 `~/.cargo/bin/tino`；只要 `~/.cargo/bin` 在 `PATH` 里，之后在任意目录都能直接调用 `tino`。
+
+常用变体：
+
+```bash
+make build                       # 只构建：cli/target/release/tino
+make BINDIR=~/.local/bin         # 安装到其他目录
+make BINDIR=/usr/local/bin       # 安装为系统级命令，前提是目录可写
+make uninstall                   # 删除已安装的 tino
+```
 
 ### 3. 使用方式
 

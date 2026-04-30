@@ -20,15 +20,24 @@ Rebuild after source code changes:
 docker compose up -d --build api
 ```
 
-### 2. Build the CLI
+### 2. Install the CLI
 
 The Rust CLI is the primary interface: one-shot commands, raw JSON, and stable `llm` envelopes for autonomous callers.
 
 ```bash
-cd cli && cargo build --release
+make
 ```
 
-The binary is at `cli/target/release/tino`.
+This builds the release binary and installs `tino` to `~/.cargo/bin/tino` by default, so it can be called from anywhere when `~/.cargo/bin` is on `PATH`.
+
+Useful variants:
+
+```bash
+make build                       # build only: cli/target/release/tino
+make BINDIR=~/.local/bin         # install somewhere else
+make BINDIR=/usr/local/bin       # system-wide install if writable
+make uninstall                   # remove the installed binary
+```
 
 ### 3. Usage
 
