@@ -171,6 +171,10 @@ class FactorSpec:
     experimental: bool = False
     deprecated: bool = False
     signal_compatible: bool = True
+    source_file: str | None = None
+    module_path: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict, compare=False, hash=False)
+    warnings: list[dict[str, Any]] = field(default_factory=list, compare=False, hash=False)
 
 
 # ---------------------------------------------------------------------------
@@ -336,10 +340,10 @@ class EvalResult:
     """
 
     # IC stats
-    ic_mean: float = 0.0
-    ic_std: float = 0.0
-    ir: float = 0.0
-    ic_tstat: float = 0.0
+    ic_mean: float | None = 0.0
+    ic_std: float | None = 0.0
+    ir: float | None = 0.0
+    ic_tstat: float | None = 0.0
     ic_positive_pct: float = 0.0
     ic_max_abs: float = 0.0
 
@@ -404,6 +408,28 @@ class EvalResult:
     #: persisted on the result row itself (the dedicated
     #: ``factor_runs.baseline_id`` column carries this).
     baseline_id: str | None = None
+
+    #: Effective factor params used for this run after merging spec defaults
+    #: with request/config overrides. Included for cache/debug introspection.
+    effective_params: dict[str, Any] = field(default_factory=dict)
+
+    #: Runtime/source/cache metadata for debugging "what code did I run?".
+    cache_key: str | None = None
+    cache_hit: bool | None = None
+    factor_code_hash: str | None = None
+    factor_source_file: str | None = None
+    factor_module_path: str | None = None
+
+    #: Structured non-fatal diagnostics. Consumers should inspect this before
+    #: treating default numeric values as economically meaningful.
+    warnings: list[dict[str, Any]] = field(default_factory=list)
+
+    #: Optional base full-window evaluation when a specialised diagnostic such
+    #: as walk-forward owns the top-level OOS metrics.
+    base_eval: dict[str, Any] | None = None
+
+    #: Structured walk-forward payload for LLM/API consumers.
+    walk_forward: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------

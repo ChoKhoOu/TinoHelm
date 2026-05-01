@@ -20,7 +20,7 @@ Design notes
   single-factor ``run()`` and batch ``batch_run()`` share identical kernel
   invocation semantics.
 * **Cache key** is ``FactorCache.build_key(name, code_hash, config,
-  data_range)``.  ``data_range`` is ``(config.start, config.end)``.
+  data_range, interval)``.  ``data_range`` is ``(config.start, config.end)``.
 * **Observer spans**: every run emits ``orchestrator.run`` (outer) with
   nested ``data_load``, ``kernel_exec``, ``evaluate`` spans.  When the cache
   is fully hit, only the outer span is emitted, tagged ``cache_hit=True``.
@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from datetime import datetime
 from typing import Any, Callable
 
+import polars as pl
 from joblib import Parallel, delayed
 
 from tinohelm.factor.backend.base import AbstractBackend
@@ -64,6 +66,7 @@ logger = logging.getLogger(__name__)
 #: supply one via the ``interval`` argument.  Uses the short-form convention
 #: from :data:`tinohelm.data.catalog_helpers.INTERVAL_MAP`.
 _DEFAULT_INTERVAL: str = "1m"
+_EVAL_CLOSE_FIELD: str = "__eval_close"
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +111,55 @@ def _build_data_requests(
 
 
 def _extract_close_panel(data: dict[str, Panel]) -> Panel | None:
-    """Return the ``close`` Panel from a loaded data dict, if present."""
+    """Return the evaluator close Panel from a loaded data dict, if present."""
+    if _EVAL_CLOSE_FIELD in data:
+        return data[_EVAL_CLOSE_FIELD]
     return data.get("close")
+
+
+def _trim_panel_to_config_window(panel: Panel, config: EvalConfig) -> Panel:
+    """Trim factor values to the requested evaluation window."""
+    out = panel
+    if config.start is not None:
+        out = out.filter(pl.col("ts") >= pl.lit(_coerce_config_ts(config.start)))
+    if config.end is not None:
+        out = out.filter(pl.col("ts") <= pl.lit(_coerce_config_ts(config.end)))
+    return out
+
+
+def _coerce_config_ts(value: Any) -> Any:
+    """Coerce config timestamps without imposing a timezone policy."""
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    elif isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.replace(tzinfo=None) if hasattr(value, "tzinfo") and value.tzinfo else value
+
+
+def _ensure_close_requests(
+    requests: list[DataRequest],
+    universe: tuple[str, ...],
+    interval: str,
+) -> list[DataRequest]:
+    """Ensure evaluation close prices are included in the shared data load."""
+    existing = {
+        (r.symbol, r.field_name, r.frequency, r.source)
+        for r in requests
+    }
+    out = list(requests)
+    for sym in universe:
+        key = (sym, _EVAL_CLOSE_FIELD, interval, "bar")
+        if key not in existing:
+            out.append(
+                DataRequest(
+                    symbol=sym,
+                    field_name=_EVAL_CLOSE_FIELD,
+                    frequency=interval,
+                    lookback=0,
+                    source="bar",
+                )
+            )
+    return out
 
 
 def _serialize_segment_results(segment_results: dict[str, dict]) -> dict[str, dict]:
@@ -123,6 +173,33 @@ def _serialize_segment_results(segment_results: dict[str, dict]) -> dict[str, di
             else:
                 out[provider][label] = value
     return out
+
+
+def _merge_effective_params(spec: FactorSpec, config: EvalConfig, params: dict | None = None) -> dict:
+    """Merge factor defaults with config/request params for execution."""
+    merged = dict(spec.params or {})
+    merged.update(dict(config.params or {}))
+    if params:
+        merged.update(dict(params))
+    return merged
+
+
+def _attach_run_metadata(
+    result: EvalResult,
+    *,
+    spec: FactorSpec,
+    cache_key: str,
+    cache_hit: bool,
+    effective_params: dict,
+) -> EvalResult:
+    """Attach source/cache metadata to an EvalResult for LLM diagnostics."""
+    result.effective_params = dict(effective_params)
+    result.cache_key = cache_key or None
+    result.cache_hit = cache_hit
+    result.factor_code_hash = spec.code_hash
+    result.factor_source_file = spec.source_file
+    result.factor_module_path = spec.module_path
+    return result
 
 
 def _select_btc_or_first_symbol(panel: Panel, universe: tuple[str, ...]) -> str | None:
@@ -204,10 +281,9 @@ class Orchestrator:
         config:
             :class:`EvalConfig` describing universe, date range, IC freq, etc.
         params:
-            Per-run parameter overrides.  These are stashed into the returned
-            :class:`EvalResult` implicitly via ``config.params`` — not applied
-            to the kernel call directly (factor kernels consume scalars from
-            their own closure).
+            Per-run parameter overrides. These are merged with
+            ``FactorSpec.params`` and ``config.params`` and passed to kernels
+            that accept a ``params`` keyword.
         run_id:
             Optional run identifier forwarded to the observer span tag.  When
             ``None``, the observer's auto-generated UUID is used.
@@ -236,9 +312,15 @@ class Orchestrator:
                 "Did you call Registry.scan()?"
             )
 
+        effective_params = _merge_effective_params(spec, config, params)
+        if effective_params != dict(config.params or {}):
+            config = dataclasses.replace(config, params=effective_params)
+
         data_range = (config.start, config.end)
         cache_key = (
-            FactorCache.build_key(factor_name, spec.code_hash, config, data_range)
+            FactorCache.build_key(
+                factor_name, spec.code_hash, config, data_range, interval, full=full
+            )
             if self._cache is not None
             else ""
         )
@@ -255,7 +337,13 @@ class Orchestrator:
                 if hit is not None and hit.factor_values_hit and hit.eval_hit:
                     outer_ctx.tags["cache_hit"] = True
                     assert hit.eval_result is not None  # mypy happiness
-                    return hit.eval_result
+                    return _attach_run_metadata(
+                        hit.eval_result,
+                        spec=spec,
+                        cache_key=cache_key,
+                        cache_hit=True,
+                        effective_params=effective_params,
+                    )
                 # Partial hit — we may short-circuit compute when only the
                 # factor values are cached (still need to evaluate).
                 cached_values: Panel | None = (
@@ -268,8 +356,12 @@ class Orchestrator:
 
             # 2. Data load -----------------------------------------------
             if cached_values is None:
-                requests = _build_data_requests(
-                    [spec], config.universe, interval=interval
+                requests = _ensure_close_requests(
+                    _build_data_requests(
+                        [spec], config.universe, interval=interval
+                    ),
+                    config.universe,
+                    interval,
                 )
                 with self._observer.start_span("data_load", factor=factor_name):
                     data = self._data_layer.load(
@@ -282,9 +374,13 @@ class Orchestrator:
             if cached_values is None:
                 kernel = self._registry.get_kernel(factor_name)
                 with self._observer.start_span("kernel_exec", factor=factor_name):
-                    factor_values = _call_kernel(spec, kernel, data, self._backend)
+                    factor_values = _call_kernel(
+                        spec, kernel, data, self._backend, params=effective_params
+                    )
             else:
                 factor_values = cached_values
+
+            factor_values = _trim_panel_to_config_window(factor_values, config)
 
             if config.neutralize:
                 with self._observer.start_span(
@@ -304,11 +400,11 @@ class Orchestrator:
             #   skipped during data_load and must be fetched separately.
             # - If the factor does not use close directly, we still need it for
             #   evaluation (forward return computation).  Load it on demand.
-            if "close" not in data:
+            if _extract_close_panel(data) is None:
                 close_requests = [
                     DataRequest(
                         symbol=sym,
-                        field_name="close",
+                        field_name=_EVAL_CLOSE_FIELD,
                         frequency=interval,
                         lookback=spec.lookback,
                         source="bar",
@@ -345,6 +441,14 @@ class Orchestrator:
                     "providers": list(config.neutralize),
                     "method": "ols",
                 }
+
+            _attach_run_metadata(
+                eval_result,
+                spec=spec,
+                cache_key=cache_key,
+                cache_hit=False,
+                effective_params=effective_params,
+            )
 
             if config.segments:
                 with self._observer.start_span(
@@ -483,7 +587,7 @@ class Orchestrator:
             to ``None`` — the key is still present so callers can distinguish
             "failed" from "unknown".
         """
-        del params_map  # reserved; kernels use own closures for scalars today
+        params_map = params_map or {}
 
         batch_tags: dict[str, Any] = {"factors": list(factor_names), "full": full}
         if run_id is not None:
@@ -517,15 +621,31 @@ class Orchestrator:
 
             for spec in specs:
                 if self._cache is None:
+                    effective = _merge_effective_params(spec, config, params_map.get(spec.name))
+                    if effective != dict(config.params or {}):
+                        spec_config = dataclasses.replace(config, params=effective)
+                    else:
+                        spec_config = config
+                    cache_keys[spec.name] = FactorCache.build_key(
+                        spec.name, spec.code_hash, spec_config, data_range, interval, full=full
+                    )
                     specs_to_compute.append(spec)
                     continue
+                effective = _merge_effective_params(spec, config, params_map.get(spec.name))
+                spec_config = dataclasses.replace(config, params=effective)
                 cache_keys[spec.name] = FactorCache.build_key(
-                    spec.name, spec.code_hash, config, data_range
+                    spec.name, spec.code_hash, spec_config, data_range, interval, full=full
                 )
                 hit = self._cache.lookup(cache_keys[spec.name])
                 if hit is not None and hit.factor_values_hit and hit.eval_hit:
                     assert hit.eval_result is not None
-                    results[spec.name] = hit.eval_result
+                    results[spec.name] = _attach_run_metadata(
+                        hit.eval_result,
+                        spec=spec,
+                        cache_key=cache_keys[spec.name],
+                        cache_hit=True,
+                        effective_params=effective,
+                    )
                     continue
                 if hit is not None and hit.factor_values_hit:
                     cached_values_map[spec.name] = hit.factor_values  # type: ignore[assignment]
@@ -535,8 +655,12 @@ class Orchestrator:
                 return results
 
             # 3. Single merged data load ----------------------------------
-            requests = _build_data_requests(
-                specs_to_compute, config.universe, interval=interval
+            requests = _ensure_close_requests(
+                _build_data_requests(
+                    specs_to_compute, config.universe, interval=interval
+                ),
+                config.universe,
+                interval,
             )
             with self._observer.start_span("data_load", n_factors=len(specs_to_compute)):
                 data = self._data_layer.load(
@@ -603,7 +727,11 @@ class Orchestrator:
                         backend="threading",
                     )(
                         delayed(_run_one_kernel)(
-                            spec, kernel_map[spec.name], data, self._backend
+                            spec,
+                            kernel_map[spec.name],
+                            data,
+                            self._backend,
+                            _merge_effective_params(spec, config, params_map.get(spec.name)),
                         )
                         for spec in specs_with_kernels
                     )
@@ -633,6 +761,8 @@ class Orchestrator:
                     results[spec.name] = None
                     continue
 
+                factor_values = _trim_panel_to_config_window(factor_values, config)
+
                 if config.neutralize:
                     with self._observer.start_span(
                         "neutralize",
@@ -644,14 +774,18 @@ class Orchestrator:
                 self._observer.record_output_stats(spec.name, factor_values)
 
                 try:
+                    effective_params = _merge_effective_params(
+                        spec, config, params_map.get(spec.name)
+                    )
+                    eval_config = dataclasses.replace(config, params=effective_params)
                     with self._observer.start_span("evaluate", factor=spec.name, full=full):
                         if full:
                             eval_result = self._evaluator.evaluate_full(
-                                factor_values, close_panel, config
+                                factor_values, close_panel, eval_config
                             )
                         else:
                             eval_result = self._evaluator.evaluate(
-                                factor_values, close_panel, config
+                                factor_values, close_panel, eval_config
                             )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
@@ -665,6 +799,13 @@ class Orchestrator:
                         "providers": list(config.neutralize),
                         "method": "ols",
                     }
+                _attach_run_metadata(
+                    eval_result,
+                    spec=spec,
+                    cache_key=cache_keys.get(spec.name, ""),
+                    cache_hit=False,
+                    effective_params=effective_params,
+                )
                 if config.segments:
                     eval_result.segment_results = self._evaluate_segments(
                         factor_values=factor_values,
@@ -700,6 +841,7 @@ def _call_kernel(
     kernel: Callable,
     data: dict[str, Panel],
     backend: AbstractBackend,
+    params: dict | None = None,
 ) -> Panel:
     """Invoke *kernel* with the right calling convention and return its Panel.
 
@@ -708,7 +850,7 @@ def _call_kernel(
     to the batch scheduler's.
     """
     factor_data = Scheduler._select_inputs(spec, data)
-    return Scheduler._call_kernel(spec, kernel, factor_data, backend)
+    return Scheduler._call_kernel(spec, kernel, factor_data, backend, params=params)
 
 
 def _run_one_kernel(
@@ -716,6 +858,7 @@ def _run_one_kernel(
     kernel: Callable,
     data: dict[str, Panel],
     backend: AbstractBackend,
+    params: dict | None = None,
 ) -> Panel | BaseException:
     """Worker-thread entry that pairs _select_inputs + _call_kernel.
 
@@ -734,7 +877,7 @@ def _run_one_kernel(
     failure-isolation guarantee.
     """
     try:
-        return _call_kernel(spec, kernel, data, backend)
+        return _call_kernel(spec, kernel, data, backend, params=params)
     except BaseException as exc:  # noqa: BLE001 — by design: isolate per-factor failures
         return exc
 

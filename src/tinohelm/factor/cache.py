@@ -284,6 +284,7 @@ class FactorCache:
         factor_name: str,
         code_hash: str,
         extra_size: int = 0,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         with self._manifest_lock:
             manifest = self._load_manifest()
@@ -296,6 +297,11 @@ class FactorCache:
                     "size_bytes": 0,
                 }
             entry["size_bytes"] = entry.get("size_bytes", 0) + extra_size
+            entry["updated_at"] = datetime.now().isoformat()
+            if metadata:
+                entry_metadata = dict(entry.get("metadata") or {})
+                entry_metadata.update(metadata)
+                entry["metadata"] = entry_metadata
             manifest[key] = entry
             self._save_manifest(manifest)
 
@@ -309,6 +315,9 @@ class FactorCache:
         code_hash: str,
         config: EvalConfig,
         data_range: tuple,
+        interval: str,
+        *,
+        full: bool = False,
     ) -> str:
         """Compute a SHA-256 cache key.
 
@@ -322,6 +331,12 @@ class FactorCache:
             Evaluation configuration (universe, dates, params …).
         data_range :
             ``(start, end)`` tuple of the actual data window loaded.
+        interval :
+            Bar interval used for factor/evaluation inputs. Different bar
+            cadences must never share combined factor/eval cache entries.
+        full :
+            Evaluation mode. Full diagnostics and fast runs must not share an
+            EvalResult cache entry because full runs include extra outputs.
 
         Returns
         -------
@@ -329,15 +344,15 @@ class FactorCache:
             64-char hex digest.
         """
         config_dict = dataclasses.asdict(config)
-        payload = (
-            factor_name
-            + "|"
-            + code_hash
-            + "|"
-            + _stable_json(config_dict)
-            + "|"
-            + _stable_json(data_range)
-        )
+        payload = _stable_json({
+            "identity_version": 2,
+            "factor_name": factor_name,
+            "code_hash": code_hash,
+            "config": config_dict,
+            "data_range": data_range,
+            "interval": interval,
+            "eval_mode": "full" if full else "fast",
+        })
         return hashlib.sha256(payload.encode()).hexdigest()
 
     @staticmethod
@@ -414,6 +429,7 @@ class FactorCache:
         factor_values_key: str,
         eval_config: EvalConfig | dict[str, Any],
         *,
+        full: bool = False,
         returns_key: str | None = None,
         eval_version: str = "v1",
     ) -> str:
@@ -423,6 +439,7 @@ class FactorCache:
             "factor_values_key": factor_values_key,
             "returns_key": returns_key,
             "eval_version": eval_version,
+            "eval_mode": "full" if full else "fast",
             "eval_config": config_payload,
         })
 
@@ -541,7 +558,24 @@ class FactorCache:
             added_bytes += epath.stat().st_size
 
         if factor_values is not None or eval_result is not None:
-            self._update_manifest(key, factor_name, code_hash, added_bytes)
+            metadata: dict[str, Any] = {}
+            if eval_result is not None:
+                metadata["effective_params"] = dict(eval_result.effective_params or {})
+                metadata["cache_key"] = eval_result.cache_key
+                metadata["cache_hit"] = eval_result.cache_hit
+                metadata["factor_code_hash"] = eval_result.factor_code_hash
+                metadata["factor_source_file"] = eval_result.factor_source_file
+                metadata["factor_module_path"] = eval_result.factor_module_path
+                metadata["warnings"] = list(eval_result.warnings or [])
+                if eval_result.walk_forward is not None:
+                    metadata["walk_forward_status"] = eval_result.walk_forward.get("status")
+            self._update_manifest(
+                key,
+                factor_name,
+                code_hash,
+                added_bytes,
+                metadata=metadata,
+            )
 
     def invalidate(self, name: str | None = None) -> int:
         """Delete cached entries.

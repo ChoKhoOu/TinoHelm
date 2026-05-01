@@ -9,14 +9,12 @@ All tests are deterministic (``np.random.seed(42)``), NT-free, and run in
 from __future__ import annotations
 
 import datetime as dt
-import math
 
 import numpy as np
 import polars as pl
-import pytest
 
 from tinohelm.factor.evaluation.evaluator import Evaluator
-from tinohelm.factor.evaluation.walk_forward import Fold, WalkForwardEvaluator, generate_folds
+from tinohelm.factor.evaluation.walk_forward import WalkForwardEvaluator, generate_folds
 from tinohelm.factor.types import EvalConfig, EvalResult, WalkForwardSpec
 
 
@@ -62,6 +60,7 @@ def _make_simple_eval_fn(ic_value: float) -> object:
         r.ic_mean = ic_value
         r.ic_std = 0.05
         r.ir = ic_value / 0.05
+        r.ic_series = [{"date": "synthetic", "ic": ic_value}]
         return r
     return _fn
 
@@ -319,3 +318,92 @@ def test_evaluate_full_skips_walk_forward_when_spec_none():
     assert result.oos_ic_series == [], (
         f"oos_ic_series should be empty when walk_forward=None, got {result.oos_ic_series}"
     )
+
+
+def test_evaluate_full_preserves_insufficient_walk_forward_none_metrics():
+    """Scrubbing must not turn insufficient walk-forward metrics back into zeros."""
+    ts = _make_timestamps(8)
+    panel = pl.DataFrame({"ts": ts, "A": [1.0] * 8, "B": [2.0] * 8})
+    close = pl.DataFrame({"ts": ts, "A": [100.0 + i for i in range(8)], "B": [200.0 + i for i in range(8)]})
+    config = EvalConfig(
+        universe=("A", "B"),
+        start="2024-01-01",
+        end="2024-01-02",
+        walk_forward=WalkForwardSpec(train_bars=10, test_bars=5),
+    )
+
+    result = Evaluator().evaluate_full(panel, close, config)
+
+    assert result.ic_mean is None
+    assert result.ir is None
+    assert result.walk_forward["status"] == "insufficient_data"
+    assert any(w.get("code") == "walk_forward_no_folds" for w in result.warnings)
+
+
+def test_walk_forward_empty_fold_emits_warning_not_zero_success():
+    """Empty OOS slices must be explicit, not silently converted to zero metrics."""
+    ts = _make_timestamps(8)
+    return_ts = [value + dt.timedelta(days=30) for value in ts.to_list()]
+    panel = pl.DataFrame({"ts": ts, "A": [1.0] * 8, "B": [2.0] * 8})
+    returns = pl.DataFrame({"ts": return_ts, "A": [0.01] * 8, "B": [0.02] * 8})
+    wf = WalkForwardEvaluator(WalkForwardSpec(train_bars=3, test_bars=2))
+
+    def eval_fn(test_panel, test_returns):
+        assert test_panel.height > 0
+        return EvalResult()
+
+    result = wf.evaluate(panel, returns, eval_fn=eval_fn)
+
+    assert result.oos_ic_series
+    assert result.ic_mean is None
+    assert result.ir is None
+    assert result.walk_forward["status"] == "insufficient_data"
+    assert any(item.get("status") == "insufficient_data" for item in result.oos_ic_series)
+    assert any(w.get("code") == "walk_forward_fold_empty" for w in result.warnings)
+
+
+def test_walk_forward_non_finite_fold_metrics_are_insufficient_data():
+    """Direct eval_fn NaN/Inf output must not become top-level diagnostics."""
+    ts = _make_timestamps(20)
+    panel = pl.DataFrame({"ts": ts, "A": [1.0] * 20, "B": [2.0] * 20})
+    returns = pl.DataFrame({"ts": ts, "A": [0.01] * 20, "B": [0.02] * 20})
+    wf = WalkForwardEvaluator(WalkForwardSpec(train_bars=5, test_bars=5))
+
+    def eval_fn(test_panel, test_returns):
+        result = EvalResult()
+        result.ic_mean = float("nan")
+        result.ic_std = float("inf")
+        result.ic_series = [{"date": "synthetic", "ic": float("nan")}]
+        return result
+
+    result = wf.evaluate(panel, returns, eval_fn=eval_fn)
+
+    assert result.ic_mean is None
+    assert result.ir is None
+    assert result.walk_forward["status"] == "insufficient_data"
+    assert all(row["status"] == "insufficient_data" for row in result.oos_ic_series)
+    assert any(w.get("code") == "walk_forward_fold_no_valid_ic" for w in result.warnings)
+
+
+def test_walk_forward_non_finite_ic_series_entry_invalidates_fold():
+    """A non-finite IC observation invalidates the fold even with finite metrics."""
+    ts = _make_timestamps(10)
+    panel = pl.DataFrame({"ts": ts, "A": [1.0] * 10, "B": [2.0] * 10})
+    returns = pl.DataFrame({"ts": ts, "A": [0.01] * 10, "B": [0.02] * 10})
+    wf = WalkForwardEvaluator(WalkForwardSpec(train_bars=5, test_bars=5))
+
+    def eval_fn(test_panel, test_returns):
+        return EvalResult(
+            ic_mean=0.1,
+            ic_std=0.2,
+            ic_series=[{"ic": 0.1}, {"ic": float("nan")}],
+        )
+
+    result = wf.evaluate(panel, returns, eval_fn=eval_fn)
+
+    assert result.ic_mean is None
+    assert result.ir is None
+    assert result.walk_forward["status"] == "insufficient_data"
+    assert result.oos_ic_series[0]["status"] == "insufficient_data"
+    assert result.oos_ic_series[0]["warning_code"] == "walk_forward_fold_no_valid_ic"
+    assert any(w.get("code") == "walk_forward_fold_no_valid_ic" for w in result.warnings)

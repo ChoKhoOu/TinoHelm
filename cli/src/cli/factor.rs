@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use reqwest::Method;
+use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::api::{call_and_print, read_json_body};
@@ -19,10 +20,12 @@ pub enum FactorCmd {
     Universes,
     /// List symbols with catalog bar data.
     Symbols,
+    /// Show factor runner capabilities for LLM/API clients.
+    Capabilities,
     /// Synchronous quick factor exploration. Pass a full ExploreRequest JSON body.
-    Explore(BodyArgs),
+    Explore(ApiBodyArgs),
     /// Submit async deep diagnostic factor run. Pass a full RunRequest JSON body.
-    Run(BodyArgs),
+    Run(ApiBodyArgs),
     /// List factor runs.
     Runs {
         #[arg(long, default_value_t = 20)]
@@ -31,7 +34,18 @@ pub enum FactorCmd {
         factor_name: Option<String>,
     },
     /// Get factor run report/result.
-    Report { run_id: String },
+    Report {
+        run_id: String,
+        /// Request concise LLM summary payload.
+        #[arg(long)]
+        summary: bool,
+        /// Request full/detail payload.
+        #[arg(long)]
+        detail: bool,
+        /// Comma-separated fields to keep in the API response.
+        #[arg(long)]
+        fields: Option<String>,
+    },
     /// Cancel a factor run.
     Cancel { run_id: String },
     /// Create a custom factor template.
@@ -44,18 +58,10 @@ pub enum FactorCmd {
     },
     /// Synchronous factor parameter grid search. Pass a full ParamsGridRequest JSON body.
     #[command(name = "params-grid")]
-    ParamsGrid(BodyArgs),
+    ParamsGrid(ApiBodyArgs),
     /// Compare two completed factor runs.
-    Compare {
-        #[arg(long)]
-        a: String,
-        #[arg(long)]
-        b: String,
-        #[arg(long, default_value_t = 1000)]
-        n_bootstrap: u32,
-        #[arg(long, default_value_t = 0.95)]
-        confidence: f64,
-    },
+    Compare(CompareArgs),
+
     /// Compare 2+ completed factor runs.
     #[command(name = "compare-multi")]
     CompareMulti {
@@ -63,6 +69,20 @@ pub enum FactorCmd {
         #[arg(long, default_value_t = 1000)]
         n_bootstrap: u32,
     },
+}
+
+#[derive(clap::Args)]
+pub struct CompareArgs {
+    #[arg(long)]
+    a: Option<String>,
+    #[arg(long)]
+    b: Option<String>,
+    #[arg(long, default_value_t = 1000)]
+    n_bootstrap: u32,
+    #[arg(long, default_value_t = 0.95)]
+    confidence: f64,
+    #[command(flatten)]
+    body_args: BodyArgs,
 }
 
 #[derive(clap::Args)]
@@ -76,6 +96,21 @@ pub struct BodyArgs {
     /// Read JSON request body from stdin.
     #[arg(long)]
     stdin: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ApiBodyArgs {
+    #[command(flatten)]
+    body_args: BodyArgs,
+    /// Request concise LLM summary payload where supported.
+    #[arg(long)]
+    summary: bool,
+    /// Request full/detail payload where supported.
+    #[arg(long)]
+    detail: bool,
+    /// Comma-separated fields to keep in the API response/request.
+    #[arg(long)]
+    fields: Option<String>,
 }
 
 pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
@@ -125,8 +160,21 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
             )
             .await
         }
+        FactorCmd::Capabilities => {
+            call_and_print(
+                client,
+                format,
+                Method::GET,
+                "/api/factor/capabilities",
+                vec![],
+                None,
+                vec![],
+                "factor.capabilities",
+            )
+            .await
+        }
         FactorCmd::Explore(args) => {
-            let body = body_required(args)?;
+            let body = api_body_required(args, format == OutputFormat::Llm)?;
             call_and_print(
                 client,
                 format,
@@ -140,7 +188,7 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
             .await
         }
         FactorCmd::Run(args) => {
-            let body = body_required(args)?;
+            let body = api_body_required(args, false)?;
             call_and_print(
                 client,
                 format,
@@ -170,14 +218,34 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
             )
             .await
         }
-        FactorCmd::Report { run_id } => {
+        FactorCmd::Report {
+            run_id,
+            summary,
+            detail,
+            fields,
+        } => {
             let path = format!("/api/factor/report/{run_id}");
+            let mut query = Vec::new();
+            let default_llm_summary =
+                format == OutputFormat::Llm && !summary && !detail && fields.is_none();
+            if summary || default_llm_summary {
+                query.push(("summary".to_string(), "true".to_string()));
+                if !detail {
+                    query.push(("detail".to_string(), "false".to_string()));
+                }
+            }
+            if detail {
+                query.push(("detail".to_string(), "true".to_string()));
+            }
+            if let Some(fields) = fields {
+                query.push(("fields".to_string(), fields));
+            }
             call_and_print(
                 client,
                 format,
                 Method::GET,
                 &path,
-                vec![],
+                query,
                 None,
                 vec![],
                 "factor.report",
@@ -220,7 +288,7 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
             .await
         }
         FactorCmd::ParamsGrid(args) => {
-            let body = body_required(args)?;
+            let body = api_body_required(args, false)?;
             call_and_print(
                 client,
                 format,
@@ -233,18 +301,8 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
             )
             .await
         }
-        FactorCmd::Compare {
-            a,
-            b,
-            n_bootstrap,
-            confidence,
-        } => {
-            let body = serde_json::json!({
-                "eval_a_run_id": a,
-                "eval_b_run_id": b,
-                "n_bootstrap": n_bootstrap,
-                "confidence": confidence,
-            });
+        FactorCmd::Compare(args) => {
+            let body = compare_body(args)?;
             call_and_print(
                 client,
                 format,
@@ -286,4 +344,139 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
 fn body_required(args: BodyArgs) -> Result<serde_json::Value> {
     read_json_body(args.body, args.body_file, args.stdin)?
         .ok_or_else(|| anyhow::anyhow!("Missing JSON body. Use --body, --body-file, or --stdin"))
+}
+
+fn api_body_required(args: ApiBodyArgs, default_summary: bool) -> Result<serde_json::Value> {
+    let mut body = body_required(args.body_args)?;
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("JSON body must be an object"))?;
+    let body_has_result_controls = object.contains_key("summary")
+        || object.contains_key("detail")
+        || object.contains_key("fields");
+    if default_summary
+        && !args.summary
+        && !args.detail
+        && args.fields.is_none()
+        && !body_has_result_controls
+    {
+        object.insert("summary".to_string(), Value::Bool(true));
+        object.insert("detail".to_string(), Value::Bool(false));
+    }
+    if args.summary {
+        object.insert("summary".to_string(), Value::Bool(true));
+        if !args.detail {
+            object.insert("detail".to_string(), Value::Bool(false));
+        }
+    }
+    if args.detail {
+        object.insert("detail".to_string(), Value::Bool(true));
+    }
+    if let Some(fields) = args.fields {
+        object.insert(
+            "fields".to_string(),
+            Value::Array(
+                fields
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    Ok(body)
+}
+
+fn compare_body(args: CompareArgs) -> Result<serde_json::Value> {
+    if let Some(body) = read_json_body(
+        args.body_args.body,
+        args.body_args.body_file,
+        args.body_args.stdin,
+    )? {
+        return Ok(body);
+    }
+    let a = args
+        .a
+        .ok_or_else(|| anyhow::anyhow!("compare requires --a/--b or --body/--body-file/--stdin"))?;
+    let b = args
+        .b
+        .ok_or_else(|| anyhow::anyhow!("compare requires --a/--b or --body/--body-file/--stdin"))?;
+    Ok(serde_json::json!({
+        "eval_a_run_id": a,
+        "eval_b_run_id": b,
+        "n_bootstrap": args.n_bootstrap,
+        "confidence": args.confidence,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body_args(body: serde_json::Value) -> ApiBodyArgs {
+        ApiBodyArgs {
+            body_args: BodyArgs {
+                body: Some(body.to_string()),
+                body_file: None,
+                stdin: false,
+            },
+            summary: false,
+            detail: false,
+            fields: None,
+        }
+    }
+
+    #[test]
+    fn llm_default_body_is_summary_unless_body_controls_output() {
+        let body = api_body_required(
+            body_args(serde_json::json!({"factor_name":"x","config":{}})),
+            true,
+        )
+        .expect("body parses");
+
+        assert_eq!(body["summary"], serde_json::Value::Bool(true));
+        assert_eq!(body["detail"], serde_json::Value::Bool(false));
+    }
+
+    #[test]
+    fn llm_default_body_preserves_explicit_detail() {
+        let body = api_body_required(
+            body_args(serde_json::json!({"factor_name":"x","config":{},"detail":true})),
+            true,
+        )
+        .expect("body parses");
+
+        assert_eq!(body["detail"], serde_json::Value::Bool(true));
+        assert!(body.get("summary").is_none());
+    }
+
+    #[test]
+    fn api_body_rejects_non_object_json() {
+        let err = api_body_required(body_args(serde_json::json!([])), true)
+            .expect_err("array body must be rejected before mutation");
+
+        assert!(err.to_string().contains("JSON body must be an object"));
+    }
+
+    #[test]
+    fn compare_body_supports_typed_flags() {
+        let body = compare_body(CompareArgs {
+            a: Some("run-a".to_string()),
+            b: Some("run-b".to_string()),
+            n_bootstrap: 123,
+            confidence: 0.9,
+            body_args: BodyArgs {
+                body: None,
+                body_file: None,
+                stdin: false,
+            },
+        })
+        .expect("compare body builds");
+
+        assert_eq!(body["eval_a_run_id"], "run-a");
+        assert_eq!(body["eval_b_run_id"], "run-b");
+        assert_eq!(body["n_bootstrap"], 123);
+        assert_eq!(body["confidence"], 0.9);
+    }
 }

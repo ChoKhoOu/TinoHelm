@@ -49,6 +49,19 @@ def _is_bad_metric_value(val: object) -> bool:
         return True
 
 
+def _clean_metric_value(val: object) -> float | None:
+    """Return a JSON-safe float value or ``None`` for non-finite metrics."""
+    if _is_bad_metric_value(val):
+        return None
+    return float(val)  # type: ignore[arg-type]
+
+
+def _sample_metric_value(sample: np.ndarray, metric_name: str) -> float:
+    if metric_name == "ic_mean":
+        return float(np.mean(sample))
+    return float(np.mean(sample)) / (float(np.std(sample, ddof=1)) + 1e-12)
+
+
 # ---------------------------------------------------------------------------
 # Internal helper — extract plain float array from EvalResult.ic_series
 # ---------------------------------------------------------------------------
@@ -127,13 +140,15 @@ def compare_results(
 
     For each metric (``ic_mean``, ``ir``):
 
-    * ``delta = b - a``
-    * A ``n_bootstrap``-iteration bootstrap resamples ``ic_series`` of A and
-      B independently (with replacement) and recomputes the metric
-      difference on each sample.
+    * ``delta = a - b`` (also exposed as explicit ``a_minus_b`` and
+      ``b_minus_a`` fields).
+    * A ``n_bootstrap``-iteration bootstrap resamples date-paired IC
+      observations with replacement and recomputes the metric difference on
+      each sample.
     * The ``(alpha/2, 1 - alpha/2)`` percentile of bootstrap deltas gives
       ``ci_low`` / ``ci_high``.
-    * ``significant = True`` when the CI does not contain zero.
+    * ``direction`` is ``improved`` / ``degraded`` / ``neutral`` from A's
+      perspective when the CI excludes zero.
 
     Parameters
     ----------
@@ -151,7 +166,8 @@ def compare_results(
     -------
     dict
         ``{"metric_diffs": [{"name", "a", "b", "delta",
-        "ci_low", "ci_high", "significant"}, ...]}``.
+        "a_minus_b", "b_minus_a", "delta_basis", "direction",
+        "better_run", "ci_low", "ci_high", "significant"}, ...]}``.
         Values are ``None`` when the metric is undefined or its IC series
         is too short (< 2 points) for bootstrap.
     """
@@ -168,31 +184,57 @@ def compare_results(
         b_val = getattr(eval_b, metric_name, None)
 
         if _is_bad_metric_value(a_val) or _is_bad_metric_value(b_val):
+            cleaned_a = _clean_metric_value(a_val)
+            cleaned_b = _clean_metric_value(b_val)
             diffs.append({
                 "name": metric_name,
-                "a": a_val,
-                "b": b_val,
+                "a": cleaned_a,
+                "b": cleaned_b,
+                "full_a": cleaned_a,
+                "full_b": cleaned_b,
                 "delta": None,
+                "a_minus_b": None,
+                "b_minus_a": None,
+                "delta_basis": "a_minus_b",
                 "ci_low": None,
                 "ci_high": None,
                 "significant": "neutral",
+                "direction": "neutral",
+                "better_run": None,
             })
             continue
 
         a_val_f = float(a_val)  # type: ignore[arg-type]
         b_val_f = float(b_val)  # type: ignore[arg-type]
-        delta = b_val_f - a_val_f
+        has_paired_sample = len(a_ic) >= 2 and len(b_ic) >= 2
+        if has_paired_sample:
+            a_basis = _sample_metric_value(a_ic, metric_name)
+            b_basis = _sample_metric_value(b_ic, metric_name)
+        else:
+            a_basis = a_val_f
+            b_basis = b_val_f
+        a_minus_b = a_basis - b_basis
+        b_minus_a = b_basis - a_basis
+
+        better_run = "a" if a_minus_b > 0 else "b" if a_minus_b < 0 else None
 
         # Bootstrap CI — requires at least 2 data points in each series.
-        if len(a_ic) < 2 or len(b_ic) < 2:
+        if not has_paired_sample:
             diffs.append({
                 "name": metric_name,
                 "a": a_val_f,
                 "b": b_val_f,
-                "delta": delta,
+                "full_a": a_val_f,
+                "full_b": b_val_f,
+                "delta": a_minus_b,
+                "a_minus_b": a_minus_b,
+                "b_minus_a": b_minus_a,
+                "delta_basis": "a_minus_b",
                 "ci_low": None,
                 "ci_high": None,
                 "significant": "neutral",
+                "direction": "neutral",
+                "better_run": better_run,
             })
             continue
 
@@ -205,12 +247,9 @@ def compare_results(
             b_sample = b_ic[idx]
 
             if metric_name == "ic_mean":
-                bdiff = float(np.mean(b_sample)) - float(np.mean(a_sample))
+                bdiff = _sample_metric_value(a_sample, metric_name) - _sample_metric_value(b_sample, metric_name)
             else:
-                # ir = mean / std — guard against zero std
-                a_ir = float(np.mean(a_sample)) / (float(np.std(a_sample, ddof=1)) + 1e-12)
-                b_ir = float(np.mean(b_sample)) / (float(np.std(b_sample, ddof=1)) + 1e-12)
-                bdiff = b_ir - a_ir
+                bdiff = _sample_metric_value(a_sample, metric_name) - _sample_metric_value(b_sample, metric_name)
 
             boot_deltas[k] = bdiff
 
@@ -220,20 +259,27 @@ def compare_results(
 
         # Three-state significance: improved / degraded / neutral (AC-1.5.1)
         if ci_low > 0.0:
-            significant = "improved"   # b > a significantly
+            significant = "improved"   # a > b significantly under a_minus_b
         elif ci_high < 0.0:
-            significant = "degraded"   # b < a significantly
+            significant = "degraded"   # a < b significantly under a_minus_b
         else:
             significant = "neutral"    # CI contains zero
 
         diffs.append({
             "name": metric_name,
-            "a": a_val_f,
-            "b": b_val_f,
-            "delta": delta,
+            "a": a_basis,
+            "b": b_basis,
+            "full_a": a_val_f,
+            "full_b": b_val_f,
+            "delta": a_minus_b,
+            "a_minus_b": a_minus_b,
+            "b_minus_a": b_minus_a,
+            "delta_basis": "a_minus_b:paired_ic",
             "ci_low": ci_low,
             "ci_high": ci_high,
             "significant": significant,
+            "direction": significant,
+            "better_run": better_run,
         })
 
     return {"metric_diffs": diffs}
@@ -380,15 +426,7 @@ def compare_multi(
     for fname in factor_names:
         row: list[float | None] = []
         for m in _METRICS:
-            v = getattr(results[fname], m, None)
-            if v is None:
-                row.append(None)
-            else:
-                try:
-                    fv = float(v)
-                    row.append(None if (fv != fv) else fv)  # drop NaN
-                except (TypeError, ValueError):
-                    row.append(None)
+            row.append(_clean_metric_value(getattr(results[fname], m, None)))
         values.append(row)
 
     # 1-based rankings per metric (high → rank 1, None → last rank)
@@ -430,9 +468,9 @@ def compare_multi(
             )
         else:
             rolling = ic_arr.copy()
-        # Sanitize NaN → None for JSON serialization
+        # Sanitize non-finite values → None for strict JSON serialization.
         series_per_factor[fname] = [
-            None if (v != v) else float(v) for v in rolling.tolist()
+            _clean_metric_value(v) for v in rolling.tolist()
         ]
 
     rolling_ic_small_multiples = {

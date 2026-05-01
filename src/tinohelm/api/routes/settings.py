@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import platform
+import subprocess
 import sys
 import time
+from pathlib import Path
 from importlib.metadata import version as pkg_version
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,6 +74,45 @@ def _mask_key(value: str) -> str:
 
 
 # ---- routes ----
+
+@router.get("/version")
+async def get_version() -> dict:
+    """Return LLM-friendly runtime/source version metadata."""
+    try:
+        platform_ver = pkg_version("tinohelm")
+    except Exception:
+        from tinohelm import __version__
+
+        platform_ver = __version__
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[4],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        ).strip()
+    except Exception:
+        git_sha = os.environ.get("GIT_SHA") or os.environ.get("TINO_GIT_SHA")
+
+    from tinohelm.factor.registry import Registry
+
+    registry = Registry()
+    import tinohelm
+
+    return {
+        "api_version": "api/v1",
+        "platform_version": platform_ver,
+        "python_version": sys.version.split()[0],
+        "system": platform.platform(),
+        "api_package_path": str(Path(tinohelm.__file__).resolve().parent),
+        "git_sha": git_sha,
+        "build_time": os.environ.get("BUILD_TIME") or os.environ.get("TINO_BUILD_TIME"),
+        "factor_registry_paths": {
+            "user_dir": str(registry._user_dir),
+            "builtins_package": registry._builtins_package,
+        },
+    }
 
 @router.get("/settings")
 async def get_current_settings(
