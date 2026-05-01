@@ -20,7 +20,7 @@ Design notes
   single-factor ``run()`` and batch ``batch_run()`` share identical kernel
   invocation semantics.
 * **Cache key** is ``FactorCache.build_key(name, code_hash, config,
-  data_range)``.  ``data_range`` is ``(config.start, config.end)``.
+  data_range, interval)``.  ``data_range`` is ``(config.start, config.end)``.
 * **Observer spans**: every run emits ``orchestrator.run`` (outer) with
   nested ``data_load``, ``kernel_exec``, ``evaluate`` spans.  When the cache
   is fully hit, only the outer span is emitted, tagged ``cache_hit=True``.
@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from datetime import datetime
 from typing import Any, Callable
 
+import polars as pl
 from joblib import Parallel, delayed
 
 from tinohelm.factor.backend.base import AbstractBackend
@@ -113,6 +115,25 @@ def _extract_close_panel(data: dict[str, Panel]) -> Panel | None:
     if _EVAL_CLOSE_FIELD in data:
         return data[_EVAL_CLOSE_FIELD]
     return data.get("close")
+
+
+def _trim_panel_to_config_window(panel: Panel, config: EvalConfig) -> Panel:
+    """Trim factor values to the requested evaluation window."""
+    out = panel
+    if config.start is not None:
+        out = out.filter(pl.col("ts") >= pl.lit(_coerce_config_ts(config.start)))
+    if config.end is not None:
+        out = out.filter(pl.col("ts") <= pl.lit(_coerce_config_ts(config.end)))
+    return out
+
+
+def _coerce_config_ts(value: Any) -> Any:
+    """Coerce config timestamps without imposing a timezone policy."""
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    elif isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.replace(tzinfo=None) if hasattr(value, "tzinfo") and value.tzinfo else value
 
 
 def _ensure_close_requests(
@@ -297,7 +318,9 @@ class Orchestrator:
 
         data_range = (config.start, config.end)
         cache_key = (
-            FactorCache.build_key(factor_name, spec.code_hash, config, data_range, full=full)
+            FactorCache.build_key(
+                factor_name, spec.code_hash, config, data_range, interval, full=full
+            )
             if self._cache is not None
             else ""
         )
@@ -356,6 +379,8 @@ class Orchestrator:
                     )
             else:
                 factor_values = cached_values
+
+            factor_values = _trim_panel_to_config_window(factor_values, config)
 
             if config.neutralize:
                 with self._observer.start_span(
@@ -602,14 +627,14 @@ class Orchestrator:
                     else:
                         spec_config = config
                     cache_keys[spec.name] = FactorCache.build_key(
-                        spec.name, spec.code_hash, spec_config, data_range, full=full
+                        spec.name, spec.code_hash, spec_config, data_range, interval, full=full
                     )
                     specs_to_compute.append(spec)
                     continue
                 effective = _merge_effective_params(spec, config, params_map.get(spec.name))
                 spec_config = dataclasses.replace(config, params=effective)
                 cache_keys[spec.name] = FactorCache.build_key(
-                    spec.name, spec.code_hash, spec_config, data_range, full=full
+                    spec.name, spec.code_hash, spec_config, data_range, interval, full=full
                 )
                 hit = self._cache.lookup(cache_keys[spec.name])
                 if hit is not None and hit.factor_values_hit and hit.eval_hit:
@@ -735,6 +760,8 @@ class Orchestrator:
                     # Shouldn't happen with our bookkeeping, but guard anyway.
                     results[spec.name] = None
                     continue
+
+                factor_values = _trim_panel_to_config_window(factor_values, config)
 
                 if config.neutralize:
                     with self._observer.start_span(

@@ -6,7 +6,7 @@ use clap::Subcommand;
 use crossterm::style::Stylize;
 use reqwest::Method;
 
-use crate::api::{ApiClient, ApiHttpError};
+use crate::api::{extract_api_error_details, ApiClient, ApiHttpError};
 use crate::cli::style::{accent, dim, divider, header, kv, muted, Table};
 use crate::output::{
     print_json, print_llm_error, print_llm_success, Envelope, EnvelopeError, EnvelopeMeta,
@@ -398,12 +398,13 @@ fn is_failed_factor_report(path: &str, body: &serde_json::Value) -> bool {
 
 fn print_api_error(err: anyhow::Error, mut meta: EnvelopeMeta<'_>) -> Result<()> {
     if let Some(http) = err.downcast_ref::<ApiHttpError>() {
+        let details = extract_api_error_details(&http.body);
         meta.status_code = Some(http.status_code);
         return print_llm_error(
             EnvelopeError {
-                code: None,
+                code: details.code,
                 kind: "http".to_string(),
-                message: http.body.to_string(),
+                message: details.message,
                 status_code: Some(http.status_code),
                 body: Some(http.body.clone()),
             },

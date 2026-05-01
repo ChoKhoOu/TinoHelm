@@ -125,6 +125,31 @@ def _fixed_precision_bytes(value: float) -> bytes:
     return scaled.to_bytes(16, byteorder="little", signed=True)
 
 
+def test_grouped_bar_loader_validates_unknown_fields_before_dispatch(tmp_path: Path) -> None:
+    dl = DataLayer(catalog_root=tmp_path, universe=Universe.from_symbols(["BTCUSDT-PERP"]))
+
+    with pytest.raises(ValueError) as exc:
+        dl._load_bar_panels_grouped(
+            [
+                DataRequest(
+                    symbol="BTCUSDT-PERP",
+                    field_name="closing_price",
+                    frequency="1m",
+                    lookback=0,
+                    source="bar",
+                )
+            ],
+            frequency="1m",
+            source_type="klines",
+            start=None,
+            end=None,
+        )
+
+    assert "Unknown bar field 'closing_price'" in str(exc.value)
+    assert "close" in str(exc.value)
+    assert "volume" in str(exc.value)
+
+
 # ---------------------------------------------------------------------------
 # Base timestamps (fixed reference: 2021-05-03 00:00:00 UTC in nanoseconds)
 # ---------------------------------------------------------------------------

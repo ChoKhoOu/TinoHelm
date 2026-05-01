@@ -608,6 +608,11 @@ class DataLayer:
 
         symbols = _ordered_unique(req.symbol for req in reqs)
         fields = _ordered_unique(req.field_name for req in reqs)
+        unknown_fields = [field for field in fields if field not in _BAR_FIELD_ATTR]
+        if unknown_fields:
+            raise ValueError(
+                f"Unknown bar field {unknown_fields[0]!r}. Supported: {list(_BAR_FIELD_ATTR)}"
+            )
 
         field_symbols: dict[str, list[str]] = {
             field: _ordered_unique(req.symbol for req in reqs if req.field_name == field)

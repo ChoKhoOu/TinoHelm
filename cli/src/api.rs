@@ -28,6 +28,62 @@ pub struct ApiHttpError {
     pub body: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiErrorDetails {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+pub fn extract_api_error_details(body: &serde_json::Value) -> ApiErrorDetails {
+    fn str_field<'a>(value: &'a serde_json::Value, name: &str) -> Option<&'a str> {
+        value
+            .get(name)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    }
+    fn str_value(value: &serde_json::Value) -> Option<&str> {
+        value.as_str().filter(|s| !s.is_empty())
+    }
+
+    let mut code = str_field(body, "error_code").map(str::to_string);
+    let mut message = str_field(body, "message")
+        .map(str::to_string)
+        .or_else(|| str_field(body, "error_message").map(str::to_string));
+
+    if let Some(detail) = body.get("detail") {
+        if code.is_none() {
+            code = str_field(detail, "code")
+                .map(str::to_string)
+                .or_else(|| str_field(detail, "error_code").map(str::to_string));
+        }
+        if message.is_none() {
+            message = str_value(detail)
+                .map(str::to_string)
+                .or_else(|| str_field(detail, "message").map(str::to_string))
+                .or_else(|| str_field(detail, "error_message").map(str::to_string));
+        }
+    }
+
+    if let Some(error) = body.get("error") {
+        if code.is_none() {
+            code = str_field(error, "code")
+                .map(str::to_string)
+                .or_else(|| str_field(error, "error_code").map(str::to_string));
+        }
+        if message.is_none() {
+            message = str_value(error)
+                .map(str::to_string)
+                .or_else(|| str_field(error, "message").map(str::to_string))
+                .or_else(|| str_field(error, "error_message").map(str::to_string));
+        }
+    }
+
+    ApiErrorDetails {
+        code,
+        message: message.unwrap_or_else(|| body.to_string()),
+    }
+}
+
 impl std::fmt::Display for ApiHttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "HTTP {}: {}", self.status_code, self.body)
@@ -633,7 +689,8 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::ApiClient;
+    use super::{extract_api_error_details, ApiClient};
+    use serde_json::json;
 
     #[test]
     fn same_origin_check_does_not_prefix_match_ports() {
@@ -642,5 +699,41 @@ mod tests {
         assert!(!client.is_same_origin("http://localhost:80001/api/node/status"));
         assert!(!client.is_same_origin("https://localhost:8000/api/node/status"));
         assert!(!client.is_same_origin("http://example.com/api/node/status"));
+    }
+
+    #[test]
+    fn extracts_fastapi_detail_code_and_message() {
+        let details = extract_api_error_details(&json!({
+            "detail": {"code": "invalid_request", "message": "Bad input"}
+        }));
+        assert_eq!(details.code.as_deref(), Some("invalid_request"));
+        assert_eq!(details.message, "Bad input");
+    }
+
+    #[test]
+    fn extracts_envelope_error_code_and_message() {
+        let details = extract_api_error_details(&json!({
+            "error": {"code": "factor_failed", "message": "Factor failed"}
+        }));
+        assert_eq!(details.code.as_deref(), Some("factor_failed"));
+        assert_eq!(details.message, "Factor failed");
+    }
+
+    #[test]
+    fn extracts_top_level_error_code() {
+        let details = extract_api_error_details(&json!({
+            "error_code": "not_found",
+            "message": "Missing resource"
+        }));
+        assert_eq!(details.code.as_deref(), Some("not_found"));
+        assert_eq!(details.message, "Missing resource");
+    }
+
+    #[test]
+    fn falls_back_to_full_body_as_message() {
+        let body = json!({"detail": [{"loc": ["body", "x"], "msg": "required"}]});
+        let details = extract_api_error_details(&body);
+        assert_eq!(details.code, None);
+        assert_eq!(details.message, body.to_string());
     }
 }

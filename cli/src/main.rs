@@ -253,10 +253,11 @@ async fn main() -> anyhow::Result<()> {
 
 fn envelope_error_from_anyhow(err: &anyhow::Error) -> output::EnvelopeError {
     if let Some(http) = err.downcast_ref::<api::ApiHttpError>() {
+        let details = api::extract_api_error_details(&http.body);
         return output::EnvelopeError {
-            code: None,
+            code: details.code,
             kind: "http".to_string(),
-            message: http.body.to_string(),
+            message: details.message,
             status_code: Some(http.status_code),
             body: Some(http.body.clone()),
         };

@@ -315,6 +315,7 @@ class FactorCache:
         code_hash: str,
         config: EvalConfig,
         data_range: tuple,
+        interval: str,
         *,
         full: bool = False,
     ) -> str:
@@ -330,6 +331,9 @@ class FactorCache:
             Evaluation configuration (universe, dates, params …).
         data_range :
             ``(start, end)`` tuple of the actual data window loaded.
+        interval :
+            Bar interval used for factor/evaluation inputs. Different bar
+            cadences must never share combined factor/eval cache entries.
         full :
             Evaluation mode. Full diagnostics and fast runs must not share an
             EvalResult cache entry because full runs include extra outputs.
@@ -340,17 +344,15 @@ class FactorCache:
             64-char hex digest.
         """
         config_dict = dataclasses.asdict(config)
-        payload = (
-            factor_name
-            + "|"
-            + code_hash
-            + "|"
-            + _stable_json(config_dict)
-            + "|"
-            + _stable_json(data_range)
-            + "|"
-            + _stable_json({"eval_mode": "full" if full else "fast"})
-        )
+        payload = _stable_json({
+            "identity_version": 2,
+            "factor_name": factor_name,
+            "code_hash": code_hash,
+            "config": config_dict,
+            "data_range": data_range,
+            "interval": interval,
+            "eval_mode": "full" if full else "fast",
+        })
         return hashlib.sha256(payload.encode()).hexdigest()
 
     @staticmethod

@@ -184,10 +184,14 @@ def compare_results(
         b_val = getattr(eval_b, metric_name, None)
 
         if _is_bad_metric_value(a_val) or _is_bad_metric_value(b_val):
+            cleaned_a = _clean_metric_value(a_val)
+            cleaned_b = _clean_metric_value(b_val)
             diffs.append({
                 "name": metric_name,
-                "a": _clean_metric_value(a_val),
-                "b": _clean_metric_value(b_val),
+                "a": cleaned_a,
+                "b": cleaned_b,
+                "full_a": cleaned_a,
+                "full_b": cleaned_b,
                 "delta": None,
                 "a_minus_b": None,
                 "b_minus_a": None,
@@ -220,6 +224,8 @@ def compare_results(
                 "name": metric_name,
                 "a": a_val_f,
                 "b": b_val_f,
+                "full_a": a_val_f,
+                "full_b": b_val_f,
                 "delta": a_minus_b,
                 "a_minus_b": a_minus_b,
                 "b_minus_a": b_minus_a,
@@ -261,12 +267,14 @@ def compare_results(
 
         diffs.append({
             "name": metric_name,
-            "a": a_val_f,
-            "b": b_val_f,
+            "a": a_basis,
+            "b": b_basis,
+            "full_a": a_val_f,
+            "full_b": b_val_f,
             "delta": a_minus_b,
             "a_minus_b": a_minus_b,
             "b_minus_a": b_minus_a,
-            "delta_basis": "a_minus_b",
+            "delta_basis": "a_minus_b:paired_ic",
             "ci_low": ci_low,
             "ci_high": ci_high,
             "significant": significant,

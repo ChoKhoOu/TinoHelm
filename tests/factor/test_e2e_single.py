@@ -185,6 +185,12 @@ def volume_passthrough(volume: Panel) -> Panel:
     return volume
 
 
+@factor(category="测试", lookback=2)
+def finite_warmup_close(close: Panel) -> Panel:
+    cols = _value_cols(close)
+    return close.with_columns([(pl.col(c) - pl.col(c).shift(1)).alias(c) for c in cols])
+
+
 # ---------------------------------------------------------------------------
 # Fixtures — orchestrator + collaborators
 # ---------------------------------------------------------------------------
@@ -197,6 +203,7 @@ def registry() -> Registry:
     _register_factor(r, param_scale, param_scale.__factor_spec__)
     _register_factor(r, scalar_param_scale, scalar_param_scale.__factor_spec__)
     _register_factor(r, volume_passthrough, volume_passthrough.__factor_spec__)
+    _register_factor(r, finite_warmup_close, finite_warmup_close.__factor_spec__)
     return r
 
 
@@ -547,3 +554,75 @@ class TestAutoObserver:
         )
         result = orch.run("ret_5", config)
         assert isinstance(result, EvalResult)
+
+
+def test_run_and_batch_run_cache_keys_include_interval(
+    registry: Registry,
+    data_layer: _StubDataLayer,
+    backend: PolarsBackend,
+    evaluator: Evaluator,
+    cache: FactorCache,
+    observer: Observer,
+    config: EvalConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[str] = []
+    real_build_key = FactorCache.build_key
+
+    def spy_build_key(factor_name, code_hash, eval_config, data_range, interval, *, full=False):
+        calls.append(interval)
+        return real_build_key(factor_name, code_hash, eval_config, data_range, interval, full=full)
+
+    monkeypatch.setattr(FactorCache, "build_key", staticmethod(spy_build_key))
+    orch = Orchestrator(registry, data_layer, backend, evaluator, cache, observer)
+
+    orch.run("ret_5", config, interval="5m")
+    orch.batch_run(["vol_10"], config, interval="15m")
+
+    assert "5m" in calls
+    assert "15m" in calls
+
+
+def test_run_trims_finite_warmup_rows_before_evaluation(
+    registry: Registry,
+    backend: PolarsBackend,
+    tmp_path: Path,
+):
+    warmup_start = datetime(2023, 12, 31, 23)
+    start = datetime(2024, 1, 1, 0)
+    timestamps = [warmup_start + timedelta(hours=i) for i in range(8)]
+    payload: dict[str, list] = {"ts": timestamps}
+    for sym in SYMBOLS:
+        payload[sym] = [100.0 + i for i in range(len(timestamps))]
+    panel = pl.DataFrame(payload, schema={"ts": pl.Datetime("us"), **{sym: pl.Float64 for sym in SYMBOLS}})
+
+    data_layer = _StubDataLayer({"close": panel})
+    seen_factor_values: list[Panel] = []
+
+    class _CapturingEvaluator(Evaluator):
+        def evaluate(self, factor_values, returns, config):  # type: ignore[override]
+            seen_factor_values.append(factor_values)
+            return EvalResult(ic_mean=0.0, ir=0.0, rating=0)
+
+    orch = Orchestrator(
+        registry=registry,
+        data_layer=data_layer,
+        backend=backend,
+        evaluator=_CapturingEvaluator(),
+        cache=FactorCache(cache_root=tmp_path / "cache"),
+        observer=Observer(run_id="warmup-trim"),
+    )
+    config = EvalConfig(
+        universe=SYMBOLS,
+        start=start.isoformat(),
+        end=datetime(2024, 1, 1, 5).isoformat(),
+        forward_period=1,
+        quantiles=3,
+        ic_freq="H",
+    )
+
+    result = orch.run("finite_warmup_close", config)
+
+    assert isinstance(result, EvalResult)
+    assert seen_factor_values
+    assert min(seen_factor_values[0]["ts"].to_list()) >= start

@@ -358,7 +358,8 @@ def test_compare_results_delta_is_a_minus_b_with_explicit_reverse():
     assert ic_mean["a_minus_b"] == pytest.approx(0.15)
     assert ic_mean["b_minus_a"] == pytest.approx(-0.15)
     assert ic_mean["delta"] == pytest.approx(0.15)
-    assert ic_mean["delta_basis"] == "a_minus_b"
+    assert ic_mean["delta_basis"] == "a_minus_b:paired_ic"
+    assert ic_mean["delta"] == pytest.approx(ic_mean["a"] - ic_mean["b"])
     assert ic_mean["better_run"] == "a"
 
 
@@ -427,6 +428,12 @@ def test_compare_results_uses_paired_sample_for_delta_and_better_run():
     out = compare_results(eval_a, eval_b, n_bootstrap=100, random_seed=42)
     ic_mean = next(d for d in out["metric_diffs"] if d["name"] == "ic_mean")
 
+    assert ic_mean["a"] == pytest.approx(0.1)
+    assert ic_mean["b"] == pytest.approx(0.2)
     assert ic_mean["delta"] == pytest.approx(-0.1)
+    assert ic_mean["delta"] == pytest.approx(ic_mean["a"] - ic_mean["b"])
+    assert ic_mean["full_a"] == pytest.approx(1.0)
+    assert ic_mean["full_b"] == pytest.approx(0.0)
+    assert ic_mean["delta_basis"] == "a_minus_b:paired_ic"
     assert ic_mean["direction"] == "degraded"
     assert ic_mean["better_run"] == "b"

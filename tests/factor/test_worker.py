@@ -488,7 +488,7 @@ async def test_cancel_flag_mid_pipeline_breaks(mock_session_factory, mock_eval_r
 
 @pytest.mark.asyncio
 async def test_recover_interrupted_jobs_replays_snapshot_without_deleting_live_queue():
-    """Recovery must only re-enqueue rows flipped running → queued."""
+    """Recovery replays all durable queued rows without deleting live Redis entries."""
     old_run = _make_mock_db_run(
         run_id="old-run",
         config={
@@ -509,13 +509,25 @@ async def test_recover_interrupted_jobs_replays_snapshot_without_deleting_live_q
             "_tino_run_options": {"full": True},
         },
     )
+    durable_queued = _make_mock_db_run(
+        run_id="durable-queued",
+        config={
+            "universe": ["BTCUSDT-PERP"],
+            "start": "2024-01-01",
+            "end": "2024-01-02",
+            "params": {"n": 13},
+            "_tino_run_options": {"full": False},
+        },
+    )
 
-    select_result = MagicMock()
-    select_result.scalars.return_value.all.return_value = [old_run, new_run]
+    running_select = MagicMock()
+    running_select.scalars.return_value.all.return_value = [old_run, new_run]
+    queued_select = MagicMock()
+    queued_select.scalars.return_value.all.return_value = [durable_queued, old_run, new_run]
     update_result = MagicMock(rowcount=2)
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[select_result, update_result])
+    session.execute = AsyncMock(side_effect=[running_select, update_result, queued_select])
     session.commit = AsyncMock()
     factory = MagicMock()
     factory.return_value.__aenter__ = AsyncMock(return_value=session)
@@ -523,6 +535,7 @@ async def test_recover_interrupted_jobs_replays_snapshot_without_deleting_live_q
 
     rds = AsyncMock()
     rds.delete = AsyncMock()
+    rds.lrange = AsyncMock(return_value=[])
     rds.lpush = AsyncMock()
 
     worker_module = importlib.import_module("tinohelm.factor.worker")
@@ -535,29 +548,33 @@ async def test_recover_interrupted_jobs_replays_snapshot_without_deleting_live_q
     assert not getattr(rds, "rpush").await_args_list
 
     pushed_ids = [json.loads(c.args[1])["run_id"] for c in rds.lpush.await_args_list]
-    assert pushed_ids == ["old-run", "new-run"]
+    assert pushed_ids == ["durable-queued", "old-run", "new-run"]
 
     simulated_redis_list: list[str] = []
     for pushed_id in pushed_ids:
         simulated_redis_list.insert(0, pushed_id)
-    assert simulated_redis_list == ["new-run", "old-run"]
-    assert simulated_redis_list.pop() == "old-run"
+    assert simulated_redis_list == ["new-run", "old-run", "durable-queued"]
+    assert simulated_redis_list.pop() == "durable-queued"
 
 
 @pytest.mark.asyncio
-async def test_recover_interrupted_jobs_does_not_replay_existing_queued_rows():
-    """Startup recovery should not multiply rows that were already queued."""
-    select_result = MagicMock()
-    select_result.scalars.return_value.all.return_value = []
+async def test_recover_interrupted_jobs_replays_existing_queued_rows():
+    """Postgres queued rows are authoritative if Redis lost the list."""
+    queued_run = _make_mock_db_run(run_id="already-queued")
+    running_select = MagicMock()
+    running_select.scalars.return_value.all.return_value = []
+    queued_select = MagicMock()
+    queued_select.scalars.return_value.all.return_value = [queued_run]
 
     session = AsyncMock()
-    session.execute = AsyncMock(return_value=select_result)
+    session.execute = AsyncMock(side_effect=[running_select, queued_select])
     session.commit = AsyncMock()
     factory = MagicMock()
     factory.return_value.__aenter__ = AsyncMock(return_value=session)
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
     rds = AsyncMock()
+    rds.lrange = AsyncMock(return_value=[])
     rds.lpush = AsyncMock()
 
     worker_module = importlib.import_module("tinohelm.factor.worker")
@@ -566,4 +583,36 @@ async def test_recover_interrupted_jobs_does_not_replay_existing_queued_rows():
         recovered = await worker_module.recover_interrupted_jobs(rds)
 
     assert recovered == 0
-    rds.lpush.assert_not_awaited()
+    pushed_ids = [json.loads(c.args[1])["run_id"] for c in rds.lpush.await_args_list]
+    assert pushed_ids == ["already-queued"]
+
+
+@pytest.mark.asyncio
+async def test_recover_interrupted_jobs_does_not_duplicate_live_queued_payloads():
+    """Recovery replays missing durable queued rows but skips ids already in Redis."""
+    already_in_redis = _make_mock_db_run(run_id="already-in-redis")
+    missing_from_redis = _make_mock_db_run(run_id="missing-from-redis")
+    running_select = MagicMock()
+    running_select.scalars.return_value.all.return_value = []
+    queued_select = MagicMock()
+    queued_select.scalars.return_value.all.return_value = [already_in_redis, missing_from_redis]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[running_select, queued_select])
+    session.commit = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    rds = AsyncMock()
+    rds.lrange = AsyncMock(return_value=[json.dumps({"run_id": "already-in-redis"})])
+    rds.lpush = AsyncMock()
+
+    worker_module = importlib.import_module("tinohelm.factor.worker")
+
+    with patch.object(worker_module, "get_session_factory", return_value=factory):
+        recovered = await worker_module.recover_interrupted_jobs(rds)
+
+    assert recovered == 0
+    pushed_ids = [json.loads(c.args[1])["run_id"] for c in rds.lpush.await_args_list]
+    assert pushed_ids == ["missing-from-redis"]

@@ -71,6 +71,39 @@ def _queue_payload_from_run(run: FactorRun) -> str:
     })
 
 
+def _run_id_from_queue_payload(raw: str) -> str | None:
+    """Extract a run id from either full JSON queue payload or legacy UUID."""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw or None
+    if isinstance(payload, dict):
+        run_id = payload.get("run_id")
+        return str(run_id) if run_id else None
+    if isinstance(payload, str):
+        return payload or None
+    return None
+
+
+async def _queued_run_ids_in_redis(rds: aioredis.Redis) -> set[str]:
+    """Best-effort snapshot of run ids already present in the live Redis list."""
+    try:
+        existing_payloads = await rds.lrange(QUEUE_KEY, 0, -1)
+    except Exception:  # noqa: BLE001 - recovery must remain duplicate-safe
+        logger.warning("Could not inspect factor queue before recovery replay", exc_info=True)
+        return set()
+    out: set[str] = set()
+    for raw in existing_payloads or []:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        if not isinstance(raw, str):
+            continue
+        run_id = _run_id_from_queue_payload(raw)
+        if run_id:
+            out.add(run_id)
+    return out
+
+
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     """Reset FactorRun rows stuck in 'running' back to 'queued' and re-enqueue.
 
@@ -107,12 +140,26 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
         # the next startup will re-read the correct queued set.
         await db.commit()
 
+        queued_runs = (
+            await db.execute(
+                select(FactorRun)
+                .where(FactorRun.status == "queued")
+                .order_by(FactorRun.created_at.asc())
+            )
+        ).scalars().all()
+
+        existing_run_ids = await _queued_run_ids_in_redis(rds)
+
         # The live enqueue path uses LPUSH and consumers use BRPOP, so pushing
         # queued runs in created_at ASC order with LPUSH preserves FIFO within
         # the recovered snapshot: newest ends up at the head, oldest at the
-        # tail, and BRPOP consumes oldest first.
-        for run in interrupted_runs:
+        # tail, and BRPOP consumes oldest first.  Do not DELETE the live list:
+        # API instances can enqueue between our DB snapshot and Redis replay.
+        for run in queued_runs:
+            if run.id in existing_run_ids:
+                continue
             await rds.lpush(QUEUE_KEY, _queue_payload_from_run(run))
+            existing_run_ids.add(run.id)
 
     if recovered:
         logger.info("Recovered %d interrupted factor run(s)", recovered)

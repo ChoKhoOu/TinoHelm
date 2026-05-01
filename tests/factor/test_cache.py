@@ -106,7 +106,7 @@ def _key(
     code_hash: str = "abc123",
     data_range: tuple = ("2024-01-01", "2024-03-01"),
 ) -> str:
-    return FactorCache.build_key(name, code_hash, config, data_range)
+    return FactorCache.build_key(name, code_hash, config, data_range, "1m")
 
 
 # ---------------------------------------------------------------------------
@@ -115,22 +115,27 @@ def _key(
 
 class TestBuildKey:
     def test_same_inputs_same_key(self, config: EvalConfig) -> None:
-        k1 = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"))
-        k2 = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"))
+        k1 = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"), "1m")
+        k2 = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"), "1m")
         assert k1 == k2
 
     def test_different_code_hash_different_key(self, config: EvalConfig) -> None:
-        k1 = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"))
-        k2 = FactorCache.build_key("ret_5", "hash2", config, ("2024-01-01", "2024-03-01"))
+        k1 = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"), "1m")
+        k2 = FactorCache.build_key("ret_5", "hash2", config, ("2024-01-01", "2024-03-01"), "1m")
         assert k1 != k2
 
     def test_different_name_different_key(self, config: EvalConfig) -> None:
-        k1 = FactorCache.build_key("factor_a", "hash1", config, ("2024-01-01", "2024-03-01"))
-        k2 = FactorCache.build_key("factor_b", "hash1", config, ("2024-01-01", "2024-03-01"))
+        k1 = FactorCache.build_key("factor_a", "hash1", config, ("2024-01-01", "2024-03-01"), "1m")
+        k2 = FactorCache.build_key("factor_b", "hash1", config, ("2024-01-01", "2024-03-01"), "1m")
+        assert k1 != k2
+
+    def test_different_interval_different_key(self, config: EvalConfig) -> None:
+        k1 = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"), "1m")
+        k2 = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"), "5m")
         assert k1 != k2
 
     def test_key_is_hex_string(self, config: EvalConfig) -> None:
-        k = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"))
+        k = FactorCache.build_key("ret_5", "hash1", config, ("2024-01-01", "2024-03-01"), "1m")
         assert len(k) == 64
         int(k, 16)  # raises if not valid hex
 
@@ -140,6 +145,7 @@ class TestBuildKey:
             "hash1",
             config,
             ("2024-01-01", "2024-03-01"),
+            "1m",
             full=False,
         )
         full_key = FactorCache.build_key(
@@ -147,6 +153,7 @@ class TestBuildKey:
             "hash1",
             config,
             ("2024-01-01", "2024-03-01"),
+            "1m",
             full=True,
         )
         assert fast_key != full_key
@@ -240,7 +247,7 @@ class TestCodeHashChangeInvalidatesKey:
         sample_panel: pl.DataFrame,
         sample_eval_result: EvalResult,
     ) -> None:
-        key_v1 = FactorCache.build_key("ret_5", "hash_v1", config, ("2024-01-01", "2024-03-01"))
+        key_v1 = FactorCache.build_key("ret_5", "hash_v1", config, ("2024-01-01", "2024-03-01"), "1m")
         cache.store(
             key_v1,
             factor_name="ret_5",
@@ -249,7 +256,7 @@ class TestCodeHashChangeInvalidatesKey:
             eval_result=sample_eval_result,
         )
 
-        key_v2 = FactorCache.build_key("ret_5", "hash_v2", config, ("2024-01-01", "2024-03-01"))
+        key_v2 = FactorCache.build_key("ret_5", "hash_v2", config, ("2024-01-01", "2024-03-01"), "1m")
         # Different key — must miss
         assert cache.lookup(key_v2) is None
         # Original key still hits
@@ -312,7 +319,7 @@ class TestInvalidate:
         panel: pl.DataFrame,
         result: EvalResult,
     ) -> str:
-        key = FactorCache.build_key(factor_name, code_hash, config, ("2024-01-01", "2024-03-01"))
+        key = FactorCache.build_key(factor_name, code_hash, config, ("2024-01-01", "2024-03-01"), "1m")
         cache.store(key, factor_name=factor_name, code_hash=code_hash,
                     factor_values=panel, eval_result=result)
         return key
@@ -380,7 +387,7 @@ class TestNaNInfScrubbing:
             distribution_stats={"mean": float("nan"), "std": 1.0},
         )
 
-        key = FactorCache.build_key("dirty_factor", "hx", config, ("2024-01-01", "2024-03-01"))
+        key = FactorCache.build_key("dirty_factor", "hx", config, ("2024-01-01", "2024-03-01"), "1m")
         cache.store(key, factor_name="dirty_factor", code_hash="hx", eval_result=dirty)
 
         hit = cache.lookup(key)
@@ -409,7 +416,7 @@ class TestNaNInfScrubbing:
         config: EvalConfig,
         sample_eval_result: EvalResult,
     ) -> None:
-        key = FactorCache.build_key("clean_factor", "h0", config, ("2024-01-01", "2024-03-01"))
+        key = FactorCache.build_key("clean_factor", "h0", config, ("2024-01-01", "2024-03-01"), "1m")
         cache.store(key, factor_name="clean_factor", code_hash="h0", eval_result=sample_eval_result)
 
         hit = cache.lookup(key)
