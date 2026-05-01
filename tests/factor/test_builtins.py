@@ -9,8 +9,8 @@ Coverage
    kernel output is compared against the legacy pandas oracle parquet
    (``tests/factor/_legacy_pandas/regression_oracle.parquet``).  The
    absolute element-wise difference must satisfy ``|polars - pandas| <= 1e-6``.
-3. **Experimental gate** — the 3 experimental factors raise
-   ``NotImplementedError`` and have ``deprecated=True`` on their spec.
+3. **Downloadable-data factors** — experimental factors backed by newly
+   wired sources remain hidden by default but are no longer deprecated stubs.
 4. **Module import smoke** — ``tinohelm.factor.builtins`` imports cleanly.
 
 The oracle is generated once via
@@ -19,6 +19,7 @@ for the formulas mirrored from the legacy pandas implementation).
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -163,14 +164,10 @@ def test_factor_spec_category_and_lookback(fn):
     [trade_imbalance, oi_change, orderbook_imbalance_L1],
     ids=lambda f: f.__name__,
 )
-def test_experimental_flag_and_deprecated(fn):
-    """The 3 experimental kernels carry both ``experimental=True`` and
-    ``deprecated=True`` so they are hidden from the default factor list and
-    excluded from automated multi-factor reports until s21 unlocks them.
-    """
+def test_experimental_flag_not_deprecated(fn):
     spec = fn.__factor_spec__
     assert spec.experimental is True, f"{fn.__name__}: experimental must be True"
-    assert spec.deprecated is True, f"{fn.__name__}: deprecated must be True"
+    assert spec.deprecated is False, f"{fn.__name__}: deprecated must be False"
 
 
 @pytest.mark.parametrize(
@@ -300,35 +297,32 @@ def test_output_shape_preserves_ts_and_symbols(
 
 
 # ---------------------------------------------------------------------------
-# Experimental kernels raise — guards against silent empty output regression
+# Downloadable-data kernels — guards against pending-stub regressions
 # ---------------------------------------------------------------------------
 
 
 def _dummy_panel(field: str, oracle: pd.DataFrame) -> pl.DataFrame:
     """Build a plausible polars Panel for an experimental input field."""
-    # Reuse one of the input fields so shapes are realistic; values don't
-    # matter because the kernel raises before touching them.
     base = _input_panel(oracle, "close")
     return base.rename({sym: sym for sym in SYMBOLS})
 
 
-def test_trade_imbalance_raises(oracle: pd.DataFrame):
+def test_trade_imbalance_formula(oracle: pd.DataFrame):
     panel = _dummy_panel("volume", oracle)
-    side = _dummy_panel("volume", oracle)
-    with pytest.raises(NotImplementedError, match="trade_imbalance"):
-        trade_imbalance(panel, side, params={"lookback": 20})
+    out = trade_imbalance(panel, params={"lookback": 20})
+    assert out.columns == ["ts", *SYMBOLS]
 
 
-def test_oi_change_raises(oracle: pd.DataFrame):
+def test_oi_change_formula(oracle: pd.DataFrame):
     panel = _dummy_panel("close", oracle)
-    with pytest.raises(NotImplementedError, match="oi_change"):
-        oi_change(panel, params={"lookback": 1})
+    out = oi_change(panel, params={"lookback": 1})
+    assert out.columns == ["ts", *SYMBOLS]
 
 
-def test_orderbook_imbalance_L1_raises(oracle: pd.DataFrame):
+def test_orderbook_imbalance_L1_formula(oracle: pd.DataFrame):
     panel = _dummy_panel("close", oracle)
-    with pytest.raises(NotImplementedError, match="orderbook_imbalance_L1"):
-        orderbook_imbalance_L1(panel)
+    out = orderbook_imbalance_L1(panel)
+    assert out.equals(panel)
 
 
 # ---------------------------------------------------------------------------
@@ -346,3 +340,28 @@ def test_builtins_package_import():
         volatility,
         volume,
     )
+
+
+def test_oi_change_formula_uses_open_interest_panel():
+    from tinohelm.factor.builtins.crypto_data import oi_change
+    panel = pl.DataFrame({"ts": [datetime(2021, 1, 1), datetime(2021, 1, 2)], "BTC": [100.0, 110.0]})
+    out = oi_change(panel, params={"lookback": 1})
+    assert out["BTC"].to_list()[0] is None
+    assert out["BTC"].to_list()[1] == pytest.approx(0.1)
+    assert oi_change.__factor_spec__.deprecated is False
+
+
+def test_orderbook_imbalance_l1_passthrough():
+    from tinohelm.factor.builtins.crypto_data import orderbook_imbalance_L1
+    panel = pl.DataFrame({"ts": [datetime(2021, 1, 1)], "BTC": [0.25]})
+    out = orderbook_imbalance_L1(panel)
+    assert out.equals(panel)
+    assert orderbook_imbalance_L1.__factor_spec__.deprecated is False
+
+
+def test_trade_imbalance_smooths_loaded_panel():
+    from tinohelm.factor.builtins.microstructure import trade_imbalance
+    panel = pl.DataFrame({"ts": [datetime(2021, 1, i + 1) for i in range(3)], "BTC": [1.0, -1.0, 0.5]})
+    out = trade_imbalance(panel, params={"lookback": 2})
+    assert out["BTC"].to_list() == [None, 0.0, -0.25]
+    assert trade_imbalance.__factor_spec__.deprecated is False

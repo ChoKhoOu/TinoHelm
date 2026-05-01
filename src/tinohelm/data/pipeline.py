@@ -547,10 +547,29 @@ class BinanceVisionPipeline:
             )
             return paths
 
+        elif category == "quote_tick":
+            from tinohelm.data.catalog import write_quote_ticks
+            paths = write_quote_ticks(
+                ticks=objects, symbol=symbol,
+                catalog_path=self.catalog_path,
+                source_type=data_type,
+            )
+            return paths
+
         elif category == "funding_rate":
             # Write to both Parquet (primary) and JSON (backward-compat fallback)
             parquet_path = self._write_funding_rates(objects, symbol)
             return [parquet_path] if parquet_path else []
+
+        elif category == "metrics":
+            from tinohelm.data.catalog import write_metrics_parquet
+            path = write_metrics_parquet(objects, symbol, self.catalog_path)
+            return [str(path)]
+
+        elif category == "order_book_delta":
+            from tinohelm.data.catalog import write_book_depth_parquet
+            path = write_book_depth_parquet(objects, symbol, self.catalog_path)
+            return [str(path)]
 
         else:
             logger.warning(
@@ -683,7 +702,6 @@ class BinanceVisionPipeline:
         interval: str | None, start_dt, end_dt, instrument,
     ) -> tuple[int, list[str]]:
         """Shared REST fallback for all klines-family types."""
-        from tinohelm.data import providers
         from tinohelm.data.catalog import write_bars
 
         if not interval:
@@ -759,13 +777,14 @@ class BinanceVisionPipeline:
             bar_type = _make_bar_type(inst.id, interval)
             resolved = resolve_catalog_path(self.catalog_path, data_type)
             target_dir = Path(resolved) / "data" / "bar" / str(bar_type)
-        elif category == "trade_tick":
+        elif category in {"trade_tick", "quote_tick"}:
             from tinohelm.data.catalog import resolve_catalog_path
             inst = self._get_instrument(symbol)
             resolved = resolve_catalog_path(self.catalog_path, data_type)
-            target_dir = Path(resolved) / "data" / "trade_tick" / str(inst.id)
+            nt_category = "quote_tick" if category == "quote_tick" else "trade_tick"
+            target_dir = Path(resolved) / "data" / nt_category / str(inst.id)
         else:
-            return  # funding_rate etc. use JSON, no parquet cleanup needed
+            return  # merged raw datasets clean themselves via their writers
 
         if not target_dir.exists():
             return

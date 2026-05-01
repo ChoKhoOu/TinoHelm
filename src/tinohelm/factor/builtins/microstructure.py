@@ -7,9 +7,8 @@ Numerical alignment with the pre-polars pandas implementation is asserted
 in ``tests/factor/test_builtins.py`` via the regression oracle parquet
 (absolute difference <= 1e-6).
 
-``trade_imbalance`` remains marked ``experimental=True`` and ``deprecated=True``
-because ``DataLayer`` does not yet support ``trade_tick``.  Its kernel raises
-``NotImplementedError``; s21 will decide whether to enable it.
+``trade_imbalance`` smooths the DataLayer-computed per-bucket signed trade
+imbalance from downloadable trade-tick data.
 """
 from __future__ import annotations
 
@@ -30,28 +29,18 @@ def _value_cols(panel: Panel) -> list[str]:
     category="微观结构",
     lookback=20,
     params={"lookback": 20},
-    description="买卖不平衡 — net buy/sell volume from trade_tick data (pending DataLayer support)",
+    description="买卖不平衡 — smoothed net buy/sell volume from trade_tick data",
     experimental=True,
-    deprecated=True,
 )
 def trade_imbalance(
-    trade_qty: Panel, trade_side: Panel, params=None
+    trade_imbalance: Panel, params=None
 ) -> Panel:
-    """Net buy minus sell volume imbalance from trade tick data.
-
-    Pending ``trade_tick`` DataLayer support — see s21 for activation.
-
-    Formula (when trade_tick is available)::
-
-        buy_qty  = trade_qty where trade_side == "BUY"  else 0
-        sell_qty = trade_qty where trade_side == "SELL" else 0
-        return (buy_qty - sell_qty).rolling(lookback).sum()
-               / trade_qty.rolling(lookback).sum()
-    """
-    raise NotImplementedError(
-        "trade_imbalance is experimental and requires trade_tick DataLayer "
-        "support which is not yet implemented (tracked under s21)."
-    )
+    """Rolling mean of loaded signed trade imbalance buckets."""
+    n = (params or {}).get("lookback", 20)
+    cols = _value_cols(trade_imbalance)
+    return trade_imbalance.with_columns([
+        pl.col(c).rolling_mean(window_size=n).alias(c) for c in cols
+    ])
 
 
 @factor(

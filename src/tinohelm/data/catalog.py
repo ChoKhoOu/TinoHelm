@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tinohelm.data.catalog_helpers import (
     CATEGORY_DIR,
@@ -25,6 +25,10 @@ from tinohelm.data.catalog_helpers import (
 from tinohelm.data.pipeline_helpers import WRITE_CATEGORY as _PIPELINE_WRITE_CATEGORY
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    import pandas as pd
+    import polars as pl
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +421,130 @@ def write_trade_ticks(
     written = sorted(current - existing)
     logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
+
+
+def write_quote_ticks(
+    ticks: list,
+    symbol: str,
+    catalog_path: str | Path,
+    source_type: str | None = None,
+) -> list[str]:
+    """Write QuoteTick objects to a source-aware Parquet catalog root."""
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    catalog_path = Path(resolve_catalog_path(catalog_path, source_type))
+    catalog = ParquetDataCatalog(str(catalog_path))
+
+    from tinohelm.data.instruments import make_instrument
+    instrument = make_instrument(symbol)
+    tick_dir = catalog_path / "data" / "quote_tick" / str(instrument.id)
+
+    existing = set(str(f) for f in tick_dir.glob("*.parquet")) if tick_dir.exists() else set()
+    catalog.write_data(ticks, skip_disjoint_check=True)
+    current = set(str(f) for f in tick_dir.glob("*.parquet")) if tick_dir.exists() else set()
+    written = sorted(current - existing)
+    logger.info("Wrote %d QuoteTick to %d file(s) for %s", len(ticks), len(written), symbol)
+    return written
+
+
+def metrics_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
+    return Path(catalog_root) / "metrics" / "metrics" / "data" / "metrics" / f"{symbol.lower()}.parquet"
+
+
+def book_depth_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
+    return Path(catalog_root) / "book_depth" / "bookDepth" / "data" / "book_depth" / f"{symbol.lower()}.parquet"
+
+
+def _write_raw_records_parquet(
+    records: list,
+    out_path: Path,
+    rows: list[dict[str, Any]],
+    dedupe_subset: list[str],
+) -> Path:
+    import fcntl
+    import os
+    import tempfile
+
+    import polars as pl
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = out_path.with_suffix(out_path.suffix + ".lock")
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            frame = pl.DataFrame(rows)
+            if out_path.exists():
+                try:
+                    frame = pl.concat([pl.read_parquet(out_path), frame], how="diagonal_relaxed")
+                except Exception:
+                    logger.warning("Failed to merge existing raw parquet at %s", out_path, exc_info=True)
+            frame = frame.sort(dedupe_subset).unique(
+                subset=dedupe_subset,
+                keep="last",
+                maintain_order=True,
+            )
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{out_path.name}.", suffix=".tmp", dir=out_path.parent)
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            try:
+                frame.write_parquet(tmp_path)
+                os.replace(tmp_path, out_path)
+            finally:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    logger.info("Wrote %d raw rows to %s", len(records), out_path)
+    return out_path
+
+
+def write_metrics_parquet(records: list, symbol: str, catalog_root: str | Path) -> Path:
+    """Write BinanceMetrics dataclass records as source-aware raw Parquet."""
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        open_interest = float(getattr(record, "open_interest"))
+        rows.append({
+            "symbol": str(getattr(record, "symbol", symbol)),
+            "ts_event": int(getattr(record, "ts_event")),
+            "ts_init": int(getattr(record, "ts_init", getattr(record, "ts_event"))),
+            "open_interest": open_interest,
+            "sum_open_interest": open_interest,
+            "open_interest_value": float(getattr(record, "open_interest_value")),
+            "toptrader_long_short_ratio_count": float(getattr(record, "toptrader_long_short_ratio_count", 0.0)),
+            "toptrader_long_short_ratio_sum": float(getattr(record, "toptrader_long_short_ratio_sum", 0.0)),
+            "global_long_short_ratio": float(getattr(record, "global_long_short_ratio", 0.0)),
+            "taker_long_short_vol_ratio": float(getattr(record, "taker_long_short_vol_ratio", 0.0)),
+        })
+    return _write_raw_records_parquet(records, metrics_parquet_path(symbol, catalog_root), rows, ["ts_event"])
+
+
+def write_book_depth_parquet(records: list, symbol: str, catalog_root: str | Path) -> Path:
+    """Write BinanceBookDepth dataclass records as source-aware raw Parquet."""
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        rows.append({
+            "symbol": str(getattr(record, "symbol", symbol)),
+            "ts_event": int(getattr(record, "ts_event")),
+            "ts_init": int(getattr(record, "ts_init", getattr(record, "ts_event"))),
+            "percentage": float(getattr(record, "percentage")),
+            "depth": float(getattr(record, "depth")),
+            "notional": float(getattr(record, "notional")),
+        })
+    return _write_raw_records_parquet(records, book_depth_parquet_path(symbol, catalog_root), rows, ["ts_event", "percentage"])
+
+
+def read_metrics_parquet(symbol: str, catalog_root: str | Path) -> "pl.DataFrame | None":
+    import polars as pl
+
+    path = metrics_parquet_path(symbol, catalog_root)
+    return pl.read_parquet(path) if path.exists() else None
+
+
+def read_book_depth_parquet(symbol: str, catalog_root: str | Path) -> "pl.DataFrame | None":
+    import polars as pl
+
+    path = book_depth_parquet_path(symbol, catalog_root)
+    return pl.read_parquet(path) if path.exists() else None
 
 
 # ---------------------------------------------------------------------------

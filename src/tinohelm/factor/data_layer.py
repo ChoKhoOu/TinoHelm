@@ -36,7 +36,14 @@ Market cap (source="market_cap"):
     ``market_cap``  (close × current circulating_supply snapshot; non-PIT for
     historical research unless replaced with a dated supply series)
 Trade-tick derived (source="trade_tick"):
-    ``trade_imbalance``  (not yet implemented — raises NotImplementedError)
+    ``trade_price``, ``trade_qty``, ``trade_side``, ``signed_trade_qty``,
+    ``buy_qty``, ``sell_qty``, ``trade_imbalance``
+Quote-tick derived (source="quote_tick"):
+    ``bid_price``, ``bid_qty``, ``ask_price``, ``ask_qty``, ``mid_price``,
+    ``spread_bps``, ``depth_l1_usd``, ``orderbook_imbalance``
+Metrics/OI (source="metrics" or "open_interest"):
+    ``open_interest``, ``sum_open_interest``, ``open_interest_value`` and
+    Binance long/short ratio fields
 
 Frequency strings
 -----------------
@@ -80,6 +87,22 @@ _BAR_FIELD_ATTR: dict[str, str] = {
     "low": "low",
     "volume": "volume",
 }
+
+_QUOTE_TICK_FIELDS: frozenset[str] = frozenset({
+    "bid_price", "bid_qty", "ask_price", "ask_qty", "mid_price",
+    "spread_bps", "depth_l1_usd", "orderbook_imbalance",
+})
+_TRADE_TICK_FIELDS: frozenset[str] = frozenset({
+    "trade_price", "trade_qty", "trade_side", "signed_trade_qty",
+    "buy_qty", "sell_qty", "trade_imbalance",
+})
+_METRICS_FIELDS: frozenset[str] = frozenset({
+    "open_interest", "sum_open_interest", "open_interest_value",
+    "toptrader_long_short_ratio_count", "toptrader_long_short_ratio_sum",
+    "global_long_short_ratio", "taker_long_short_vol_ratio",
+})
+_BOOK_DEPTH_FIELDS: frozenset[str] = frozenset({"book_depth", "book_depth_notional", "depth", "notional"})
+_BAR_CLOSE_OFFSET = pl.duration(milliseconds=1)
 
 _NAUTILUS_FIXED_PRECISION_SCALE: float = 10_000_000_000_000_000.0
 _DEFAULT_BAR_SOURCE_TYPE: str = "klines"
@@ -338,6 +361,177 @@ def _decode_nautilus_fixed_precision(value: bytes | bytearray | memoryview | Non
     if not raw:
         return None
     return int.from_bytes(raw, byteorder="little", signed=True) / _NAUTILUS_FIXED_PRECISION_SCALE
+
+
+def _fixed_precision_expr(column: str, dtype: pl.DataType) -> pl.Expr:
+    col = pl.col(column)
+    if dtype.is_numeric():
+        return col.cast(pl.Float64)
+    if dtype == pl.Binary:
+        try:
+            return (
+                col.bin.reinterpret(dtype=pl.Int128, endianness="little")
+                .cast(pl.Float64)
+                / _NAUTILUS_FIXED_PRECISION_SCALE
+            )
+        except AttributeError:
+            return col.map_elements(_decode_nautilus_fixed_precision, return_dtype=pl.Float64)
+    return pl.lit(None, dtype=pl.Float64)
+
+
+def _quote_frame_to_series(
+    frame: pl.DataFrame,
+    field_name: str,
+    frequency: str,
+    start: datetime | None,
+    end: datetime | None,
+) -> pl.DataFrame:
+    if frame.is_empty() or "ts_event" not in frame.columns:
+        return _empty_series_frame()
+    required = ["bid_price", "bid_size", "ask_price", "ask_size"]
+    if any(column not in frame.columns for column in required):
+        return _empty_series_frame()
+    schema = frame.schema
+    decoded = frame.with_columns(
+        pl.from_epoch(pl.col("ts_event"), time_unit="ns").alias(_TS_COL),
+        _fixed_precision_expr("bid_price", schema["bid_price"]).alias("bid_price"),
+        _fixed_precision_expr("bid_size", schema["bid_size"]).alias("bid_qty"),
+        _fixed_precision_expr("ask_price", schema["ask_price"]).alias("ask_price"),
+        _fixed_precision_expr("ask_size", schema["ask_size"]).alias("ask_qty"),
+    ).with_columns(
+        ((pl.col("bid_price") + pl.col("ask_price")) / 2.0).alias("mid_price"),
+        ((pl.col("ask_price") - pl.col("bid_price")) / ((pl.col("bid_price") + pl.col("ask_price")) / 2.0) * 10_000.0).alias("spread_bps"),
+        (pl.col("bid_price") * pl.col("bid_qty") + pl.col("ask_price") * pl.col("ask_qty")).alias("depth_l1_usd"),
+        ((pl.col("bid_qty") - pl.col("ask_qty")) / (pl.col("bid_qty") + pl.col("ask_qty"))).alias("orderbook_imbalance"),
+    )
+    decoded = _filter_time_range(decoded, start, end)
+    if decoded.is_empty():
+        return _empty_series_frame()
+    interval = _parse_bar_frequency(frequency)
+    return (
+        decoded.sort(_TS_COL)
+        .group_by_dynamic(
+            _TS_COL,
+            every=interval.polars_every,
+            period=interval.polars_every,
+            closed="right",
+            label="right",
+        )
+        .agg(pl.col(field_name).last().alias(_VAL_COL))
+        .with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL))
+        .drop_nulls(_VAL_COL)
+        .select([_TS_COL, _VAL_COL])
+        .sort(_TS_COL)
+    )
+
+
+def _trade_side_expr() -> pl.Expr:
+    side = pl.col("aggressor_side")
+    if hasattr(side, "str"):
+        text_side = side.cast(pl.Utf8, strict=False).str.to_uppercase()
+        return (
+            pl.when(text_side.is_in(["1", "BUYER", "BUY", "BID"])).then(1.0)
+            .when(text_side.is_in(["2", "SELLER", "SELL", "ASK"])).then(-1.0)
+            .otherwise(None)
+        )
+    return pl.lit(None, dtype=pl.Float64)
+
+
+def _trade_frame_to_series(
+    frame: pl.DataFrame,
+    field_name: str,
+    frequency: str,
+    start: datetime | None,
+    end: datetime | None,
+) -> pl.DataFrame:
+    if frame.is_empty() or "ts_event" not in frame.columns:
+        return _empty_series_frame()
+    price_col = "price" if "price" in frame.columns else "trade_price"
+    size_col = "size" if "size" in frame.columns else "trade_qty"
+    if price_col not in frame.columns or size_col not in frame.columns:
+        return _empty_series_frame()
+    schema = frame.schema
+    decoded = frame.with_columns(
+        pl.from_epoch(pl.col("ts_event"), time_unit="ns").alias(_TS_COL),
+        _fixed_precision_expr(price_col, schema[price_col]).alias("trade_price"),
+        _fixed_precision_expr(size_col, schema[size_col]).alias("trade_qty"),
+        _trade_side_expr().alias("trade_side"),
+    ).with_columns(
+        (pl.col("trade_qty") * pl.col("trade_side")).alias("signed_trade_qty"),
+        pl.when(pl.col("trade_side") > 0).then(pl.col("trade_qty")).otherwise(0.0).alias("buy_qty"),
+        pl.when(pl.col("trade_side") < 0).then(pl.col("trade_qty")).otherwise(0.0).alias("sell_qty"),
+    )
+    decoded = _filter_time_range(decoded.select([_TS_COL, "trade_price", "trade_qty", "trade_side", "signed_trade_qty", "buy_qty", "sell_qty"]), start, end)
+    if decoded.is_empty():
+        return _empty_series_frame()
+    interval = _parse_bar_frequency(frequency)
+    grouped = decoded.sort(_TS_COL).group_by_dynamic(
+        _TS_COL,
+        every=interval.polars_every,
+        period=interval.polars_every,
+        closed="right",
+        label="right",
+    )
+    if field_name == "trade_imbalance":
+        return (
+            grouped.agg([
+                pl.col("buy_qty").sum().alias("_buy"),
+                pl.col("sell_qty").sum().alias("_sell"),
+                pl.col("trade_qty").sum().alias("_total"),
+            ])
+            .with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL))
+            .filter(pl.col("_total") > 0)
+            .with_columns(((pl.col("_buy") - pl.col("_sell")) / pl.col("_total")).alias(_VAL_COL))
+            .select([_TS_COL, _VAL_COL])
+            .sort(_TS_COL)
+        )
+    agg_expr = (
+        pl.col(field_name).last().alias(_VAL_COL)
+        if field_name in {"trade_price", "trade_side"}
+        else pl.col(field_name).sum().alias(_VAL_COL)
+    )
+    return (
+        grouped.agg(agg_expr)
+        .with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL))
+        .drop_nulls(_VAL_COL)
+        .select([_TS_COL, _VAL_COL])
+        .sort(_TS_COL)
+    )
+
+
+def _raw_frame_field_to_series(
+    frame: pl.DataFrame,
+    field_name: str,
+    frequency: str | None = None,
+) -> pl.DataFrame:
+    if frame.is_empty() or "ts_event" not in frame.columns or field_name not in frame.columns:
+        return _empty_series_frame()
+    series = (
+        frame.select([
+            pl.from_epoch(pl.col("ts_event"), time_unit="ns").alias(_TS_COL),
+            pl.col(field_name).cast(pl.Float64).alias(_VAL_COL),
+        ])
+        .sort(_TS_COL)
+        .unique(subset=[_TS_COL], keep="last", maintain_order=True)
+    )
+    if frequency is None:
+        return series
+    interval = _parse_bar_frequency(frequency)
+    return (
+        series.sort(_TS_COL)
+        .group_by_dynamic(
+            _TS_COL,
+            every=interval.polars_every,
+            period=interval.polars_every,
+            closed="right",
+            label="right",
+        )
+        .agg(pl.col(_VAL_COL).last().alias(_VAL_COL))
+        .with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL))
+        .drop_nulls(_VAL_COL)
+        .select([_TS_COL, _VAL_COL])
+        .sort(_TS_COL)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -696,12 +890,125 @@ class DataLayer:
             return self._load_funding_rate(symbol, start, end)
         elif source == "market_cap":
             return self._load_market_cap_field(symbol, frequency, start, end)
+        elif source == "quote_tick":
+            return self._load_quote_tick_field(symbol, field_name, frequency, start, end)
         elif source == "trade_tick":
-            raise NotImplementedError(
-                "trade_tick source (trade_imbalance) is not yet implemented in DataLayer"
-            )
+            return self._load_trade_tick_field(symbol, field_name, frequency, start, end)
+        elif source in {"open_interest", "metrics"}:
+            return self._load_metrics_field(symbol, field_name, frequency, start, end)
+        elif source in {"book_depth", "bookDepth"}:
+            return self._load_book_depth_field(symbol, field_name, frequency, start, end)
         else:
             raise ValueError(f"Unknown data source: {source!r}")
+
+    def _load_quote_tick_field(
+        self,
+        symbol: str,
+        field_name: str,
+        frequency: str,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> pl.DataFrame:
+        if field_name not in _QUOTE_TICK_FIELDS:
+            raise ValueError(f"Unknown quote_tick field {field_name!r}")
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader_helpers import normalize_symbol
+
+        roots = [resolve_catalog_path(self._catalog_root, "bookTicker")]
+        if self._catalog_root.name == "bookTicker" and self._catalog_root.parent.name == "quotes":
+            roots.insert(0, self._catalog_root)
+        for root in _ordered_unique(str(path) for path in roots):
+            quote_dir = Path(root) / "data" / "quote_tick" / normalize_symbol(symbol)
+            files = sorted(quote_dir.glob("*.parquet"))
+            if not files:
+                continue
+            try:
+                frame = pl.scan_parquet([str(path) for path in files]).collect()
+            except Exception:
+                logger.warning("Failed to read quote ticks for %s", symbol, exc_info=True)
+                return _empty_series_frame()
+            return _quote_frame_to_series(frame, field_name, frequency, start, end)
+        return _empty_series_frame()
+
+    def _load_trade_tick_field(
+        self,
+        symbol: str,
+        field_name: str,
+        frequency: str,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> pl.DataFrame:
+        if field_name not in _TRADE_TICK_FIELDS:
+            raise ValueError(f"Unknown trade_tick field {field_name!r}")
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader_helpers import normalize_symbol
+
+        roots = [resolve_catalog_path(self._catalog_root, source) for source in ("aggTrades", "trades")]
+        if self._catalog_root.name in {"aggTrades", "trades"} and self._catalog_root.parent.name == "ticks":
+            roots.insert(0, self._catalog_root)
+        for root in _ordered_unique(str(path) for path in roots):
+            trade_dir = Path(root) / "data" / "trade_tick" / normalize_symbol(symbol)
+            files = sorted(trade_dir.glob("*.parquet"))
+            if not files:
+                continue
+            try:
+                frame = pl.scan_parquet([str(path) for path in files]).collect()
+            except Exception:
+                logger.warning("Failed to read trade ticks for %s", symbol, exc_info=True)
+                return _empty_series_frame()
+            return _trade_frame_to_series(frame, field_name, frequency, start, end)
+        return _empty_series_frame()
+
+    def _load_metrics_field(
+        self,
+        symbol: str,
+        field_name: str,
+        frequency: str,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> pl.DataFrame:
+        if field_name not in _METRICS_FIELDS:
+            raise ValueError(f"Unknown metrics field {field_name!r}")
+        from tinohelm.data.catalog import read_metrics_parquet
+
+        try:
+            frame = read_metrics_parquet(symbol, self._catalog_root)
+        except Exception:
+            logger.warning("Failed to read metrics parquet for %s", symbol, exc_info=True)
+            return _empty_series_frame()
+        if frame is None or frame.is_empty() or field_name not in frame.columns:
+            return _empty_series_frame()
+        out = _raw_frame_field_to_series(frame, field_name, frequency)
+        return _filter_time_range(out, start, end)
+
+    def _load_book_depth_field(
+        self,
+        symbol: str,
+        field_name: str,
+        frequency: str,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> pl.DataFrame:
+        if field_name not in _BOOK_DEPTH_FIELDS:
+            raise ValueError(f"Unknown book_depth field {field_name!r}")
+        from tinohelm.data.catalog import read_book_depth_parquet
+
+        try:
+            frame = read_book_depth_parquet(symbol, self._catalog_root)
+        except Exception:
+            logger.warning("Failed to read bookDepth parquet for %s", symbol, exc_info=True)
+            return _empty_series_frame()
+        if frame is None or frame.is_empty():
+            return _empty_series_frame()
+        metric_col = "notional" if field_name in {"book_depth_notional", "notional"} else "depth"
+        if metric_col not in frame.columns:
+            return _empty_series_frame()
+        if "percentage" in frame.columns:
+            frame = frame.sort(["ts_event", "percentage"]).unique(
+                subset=["ts_event"], keep="first", maintain_order=True,
+            )
+        out = _raw_frame_field_to_series(frame, metric_col, frequency)
+        return _filter_time_range(out, start, end)
 
     def _load_bar_reference_index(
         self,

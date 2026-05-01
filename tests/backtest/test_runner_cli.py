@@ -646,6 +646,8 @@ def test_fold_config_success(tmp_path, monkeypatch, capsys):
         "start": "2025-01-01T00:00:00",
         "end": "2025-02-01T00:00:00",
         "fitness_objective": "sharpe_ratio",
+        "data_type": "markPriceKlines",
+        "extra_data_types": ["bookTicker", "aggTrades"],
     }
     cfg_path = tmp_path / "fold_config.json"
     cfg_path.write_text(json.dumps(fold_cfg))
@@ -655,15 +657,19 @@ def test_fold_config_success(tmp_path, monkeypatch, capsys):
     mock_runner_instance = MagicMock()
     mock_runner_instance.run = AsyncMock(return_value=_FAKE_RESULTS)
 
+    runner_cls = MagicMock(return_value=mock_runner_instance)
+
     # BacktestRunner is lazily imported from tinohelm.backtest.runner
     # extract_fitness is lazily imported from tinohelm.backtest.optimizer_helpers
     with (
-        patch("tinohelm.backtest.runner.BacktestRunner", return_value=mock_runner_instance),
+        patch("tinohelm.backtest.runner.BacktestRunner", runner_cls),
         patch("tinohelm.backtest.optimizer_helpers.extract_fitness", return_value=0.5),
     ):
         rc = runner_cli._run_fold_mode(str(cfg_path))
 
     assert rc == 0, f"Expected exit code 0, got {rc}"
+    assert runner_cls.call_args.kwargs["data_type"] == "markPriceKlines"
+    assert runner_cls.call_args.kwargs["extra_data_types"] == ["bookTicker", "aggTrades"]
 
     captured = capsys.readouterr()
     lines = [ln for ln in captured.out.splitlines() if ln.strip()]

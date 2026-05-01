@@ -1,10 +1,9 @@
 """Tests for experimental factor handling.
 
-Validates AC#2:
-- 3 experimental factors (trade_imbalance, oi_change, orderbook_imbalance_L1)
-  are marked deprecated=True and experimental=True in the registry.
+Validates experimental factor handling:
+- 3 downloadable-data factors are marked experimental=True and deprecated=False.
 - /api/factor/list default endpoint does NOT return these factors.
-- Calling their kernels raises NotImplementedError.
+- Calling their kernels no longer raises pending-stub NotImplementedError.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Test: experimental factors are registered with deprecated=True
+# Test: experimental factors are registered but not deprecated
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("factor_name", [
@@ -20,8 +19,8 @@ import pytest
     "oi_change",
     "orderbook_imbalance_L1",
 ])
-def test_experimental_factor_marked_deprecated(factor_name: str):
-    """Each experimental factor has both deprecated=True and experimental=True."""
+def test_experimental_factor_not_deprecated(factor_name: str):
+    """Each downloadable-data factor is experimental but not a deprecated stub."""
     from tinohelm.factor.registry import Registry
 
     registry = Registry()
@@ -31,8 +30,8 @@ def test_experimental_factor_marked_deprecated(factor_name: str):
     assert spec is not None, (
         f"Factor {factor_name!r} not found in registry after scan()"
     )
-    assert spec.deprecated is True, (
-        f"{factor_name}: expected deprecated=True, got {spec.deprecated!r}"
+    assert spec.deprecated is False, (
+        f"{factor_name}: expected deprecated=False, got {spec.deprecated!r}"
     )
     assert spec.experimental is True, (
         f"{factor_name}: expected experimental=True, got {spec.experimental!r}"
@@ -88,28 +87,37 @@ def test_experimental_factors_included_with_flag():
 
 
 # ---------------------------------------------------------------------------
-# Test: invoking experimental factor kernels raises NotImplementedError
+# Test: invoking experimental factor kernels is supported
 # ---------------------------------------------------------------------------
 
-def test_trade_imbalance_raises():
-    """Calling trade_imbalance kernel raises NotImplementedError."""
+def test_trade_imbalance_kernel_runs():
     from tinohelm.factor.builtins.microstructure import trade_imbalance
+    import polars as pl
 
-    with pytest.raises(NotImplementedError, match="trade_imbalance"):
-        trade_imbalance(None, None)
+    panel = pl.DataFrame({"ts": [1, 2], "BTC": [1.0, -1.0]})
+    assert trade_imbalance(panel, params={"lookback": 1}).columns == ["ts", "BTC"]
 
 
-def test_oi_change_raises():
-    """Calling oi_change kernel raises NotImplementedError."""
+def test_oi_change_kernel_runs():
     from tinohelm.factor.builtins.crypto_data import oi_change
+    import polars as pl
 
-    with pytest.raises(NotImplementedError, match="oi_change"):
-        oi_change(None)
+    panel = pl.DataFrame({"ts": [1, 2], "BTC": [1.0, 2.0]})
+    assert oi_change(panel).columns == ["ts", "BTC"]
 
 
-def test_orderbook_imbalance_l1_raises():
-    """Calling orderbook_imbalance_L1 kernel raises NotImplementedError."""
+def test_orderbook_imbalance_l1_kernel_runs():
     from tinohelm.factor.builtins.crypto_data import orderbook_imbalance_L1
+    import polars as pl
 
-    with pytest.raises(NotImplementedError, match="orderbook_imbalance_L1"):
-        orderbook_imbalance_L1(None)
+    panel = pl.DataFrame({"ts": [1], "BTC": [0.5]})
+    assert orderbook_imbalance_L1(panel).equals(panel)
+
+
+def test_planner_infers_book_depth_source():
+    from tinohelm.factor.engine.planner import _infer_source
+
+    assert _infer_source("book_depth") == "book_depth"
+    assert _infer_source("book_depth_notional") == "book_depth"
+    assert _infer_source("depth") == "book_depth"
+    assert _infer_source("notional") == "book_depth"

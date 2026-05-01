@@ -52,6 +52,10 @@ pub struct BacktestRunRequest {
     pub params: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill_model: Option<serde_json::Value>,
+    #[serde(default)]
+    pub data_type: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_data_types: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

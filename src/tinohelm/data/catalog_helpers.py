@@ -64,13 +64,14 @@ _AGGREGATION_SECONDS: Mapping[str, int] = MappingProxyType({
 CATEGORY_DIR: Mapping[str, str] = MappingProxyType({
     "bar": "bar",
     "trade_tick": "ticks",
+    "quote_tick": "quotes",
 })
 
-# Write categories that ``catalog.write_bars`` / ``write_trade_ticks``
-# know how to produce. Everything else (``quote_tick``, ``funding_rate``,
-# ``order_book_delta``, ``liquidation``, ``metrics``) is written by
-# non-catalog writers and therefore MUST fall through to the base path in
-# ``resolve_catalog_path``.
+# Write categories that ``catalog.write_bars`` / ``write_trade_ticks`` /
+# ``write_quote_ticks`` know how to produce via Nautilus ParquetDataCatalog.
+# Non-NT raw datasets such as ``funding_rate``, ``order_book_delta``,
+# ``liquidation`` and ``metrics`` are written by source-specific Parquet/JSON
+# helpers and therefore fall through to the base path in ``resolve_catalog_path``.
 WRITABLE_CATEGORIES: frozenset[str] = frozenset(CATEGORY_DIR.keys())
 
 
@@ -138,6 +139,8 @@ def resolve_catalog_path(base_path: str | Path, source_type: str | None) -> Path
     '/tmp/cat/bar/markPriceKlines'
     >>> resolve_catalog_path("/tmp/cat", "aggTrades").as_posix()
     '/tmp/cat/ticks/aggTrades'
+    >>> resolve_catalog_path("/tmp/cat", "bookTicker").as_posix()
+    '/tmp/cat/quotes/bookTicker'
     >>> resolve_catalog_path("/tmp/cat", "fundingRate").as_posix()
     '/tmp/cat'
     >>> resolve_catalog_path("/tmp/cat", None).as_posix()

@@ -91,6 +91,10 @@ FIELD_ALIAS: dict[str, str] = {
     "oi": "open_interest",
     "持仓量": "open_interest",
     "openinterest": "open_interest",
+    "global_long_short_ratio": "global_long_short_ratio",
+    "taker_long_short_vol_ratio": "taker_long_short_vol_ratio",
+    "toptrader_long_short_ratio_count": "toptrader_long_short_ratio_count",
+    "toptrader_long_short_ratio_sum": "toptrader_long_short_ratio_sum",
 
     # ── orderbook imbalance (L1 bid/ask) ──────────────────────────────────
     "orderbook_imbalance": "orderbook_imbalance",
@@ -106,18 +110,31 @@ FIELD_ALIAS: dict[str, str] = {
     "ask_qty": "ask_qty",
     "bid": "bid_price",
     "ask": "ask_price",
+    "mid_price": "mid_price",
+    "spread_bps": "spread_bps",
+    "depth_l1_usd": "depth_l1_usd",
 
     # ── trade tick fields (source="trade_tick" / aggTrades) ───────────────
     "trade_price": "trade_price",
     "trade_qty": "trade_qty",
     "trade_side": "trade_side",
     "taker_buy": "trade_side",
+    "signed_trade_qty": "signed_trade_qty",
+    "buy_qty": "buy_qty",
+    "sell_qty": "sell_qty",
+    "trade_imbalance": "trade_imbalance",
 
     # ── open interest variants (source="metrics" / OI endpoint) ──────────
     "sum_open_interest": "sum_open_interest",
     "open_interest_value": "open_interest_value",
     "oi_value": "open_interest_value",
     "sum_oi": "sum_open_interest",
+    "metrics": "metrics",
+    "open_interest_source": "open_interest",
+    "book_depth": "book_depth",
+    "book_depth_notional": "book_depth_notional",
+    "depth": "depth",
+    "notional": "notional",
 
     # ── mark price (source="funding_rate" settlement data) ────────────────
     "mark_price": "mark_price",

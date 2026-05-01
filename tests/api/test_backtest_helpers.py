@@ -180,3 +180,37 @@ class TestUtilsImports:
         from tinohelm.api.routes import backtest as mod
         assert mod.fetch_redis_progress is shared_single
         assert mod.fetch_redis_progress_batch is shared_batch
+
+
+def test_backtest_runner_defaults_do_not_request_extra_replay():
+    from tinohelm.backtest.runner import BacktestRunner
+    runner = BacktestRunner(symbol="BTCUSDT-PERP", interval="1m")
+    assert runner.extra_data_types == []
+
+
+def test_backtest_runner_optional_replay_loads_and_injects(monkeypatch):
+    from tinohelm.backtest.runner import BacktestRunner
+
+    calls = []
+    runner = BacktestRunner(
+        symbol="BTCUSDT-PERP",
+        interval="1m",
+        extra_data_types=["bookTicker", "aggTrades"],
+    )
+
+    def fake_load(symbol, source_type):
+        calls.append((symbol, source_type))
+        return [f"{source_type}-tick"]
+
+    class Engine:
+        def __init__(self):
+            self.added = []
+        def add_data(self, data, sort=False):
+            self.added.append((data, sort))
+
+    monkeypatch.setattr(runner, "_load_or_fetch_replay_data", fake_load)
+    engine = Engine()
+    runner._inject_optional_replay_data(engine)
+
+    assert calls == [("BTCUSDT-PERP", "bookTicker"), ("BTCUSDT-PERP", "aggTrades")]
+    assert engine.added == [(["bookTicker-tick"], False), (["aggTrades-tick"], False)]
