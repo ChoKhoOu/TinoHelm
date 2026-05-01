@@ -49,6 +49,19 @@ def _is_bad_metric_value(val: object) -> bool:
         return True
 
 
+def _clean_metric_value(val: object) -> float | None:
+    """Return a JSON-safe float value or ``None`` for non-finite metrics."""
+    if _is_bad_metric_value(val):
+        return None
+    return float(val)  # type: ignore[arg-type]
+
+
+def _sample_metric_value(sample: np.ndarray, metric_name: str) -> float:
+    if metric_name == "ic_mean":
+        return float(np.mean(sample))
+    return float(np.mean(sample)) / (float(np.std(sample, ddof=1)) + 1e-12)
+
+
 # ---------------------------------------------------------------------------
 # Internal helper — extract plain float array from EvalResult.ic_series
 # ---------------------------------------------------------------------------
@@ -173,8 +186,8 @@ def compare_results(
         if _is_bad_metric_value(a_val) or _is_bad_metric_value(b_val):
             diffs.append({
                 "name": metric_name,
-                "a": a_val,
-                "b": b_val,
+                "a": _clean_metric_value(a_val),
+                "b": _clean_metric_value(b_val),
                 "delta": None,
                 "a_minus_b": None,
                 "b_minus_a": None,
@@ -189,13 +202,20 @@ def compare_results(
 
         a_val_f = float(a_val)  # type: ignore[arg-type]
         b_val_f = float(b_val)  # type: ignore[arg-type]
-        a_minus_b = a_val_f - b_val_f
-        b_minus_a = b_val_f - a_val_f
+        has_paired_sample = len(a_ic) >= 2 and len(b_ic) >= 2
+        if has_paired_sample:
+            a_basis = _sample_metric_value(a_ic, metric_name)
+            b_basis = _sample_metric_value(b_ic, metric_name)
+        else:
+            a_basis = a_val_f
+            b_basis = b_val_f
+        a_minus_b = a_basis - b_basis
+        b_minus_a = b_basis - a_basis
 
         better_run = "a" if a_minus_b > 0 else "b" if a_minus_b < 0 else None
 
         # Bootstrap CI — requires at least 2 data points in each series.
-        if len(a_ic) < 2 or len(b_ic) < 2:
+        if not has_paired_sample:
             diffs.append({
                 "name": metric_name,
                 "a": a_val_f,
@@ -221,12 +241,9 @@ def compare_results(
             b_sample = b_ic[idx]
 
             if metric_name == "ic_mean":
-                bdiff = float(np.mean(a_sample)) - float(np.mean(b_sample))
+                bdiff = _sample_metric_value(a_sample, metric_name) - _sample_metric_value(b_sample, metric_name)
             else:
-                # ir = mean / std — guard against zero std
-                a_ir = float(np.mean(a_sample)) / (float(np.std(a_sample, ddof=1)) + 1e-12)
-                b_ir = float(np.mean(b_sample)) / (float(np.std(b_sample, ddof=1)) + 1e-12)
-                bdiff = a_ir - b_ir
+                bdiff = _sample_metric_value(a_sample, metric_name) - _sample_metric_value(b_sample, metric_name)
 
             boot_deltas[k] = bdiff
 
@@ -401,15 +418,7 @@ def compare_multi(
     for fname in factor_names:
         row: list[float | None] = []
         for m in _METRICS:
-            v = getattr(results[fname], m, None)
-            if v is None:
-                row.append(None)
-            else:
-                try:
-                    fv = float(v)
-                    row.append(None if (fv != fv) else fv)  # drop NaN
-                except (TypeError, ValueError):
-                    row.append(None)
+            row.append(_clean_metric_value(getattr(results[fname], m, None)))
         values.append(row)
 
     # 1-based rankings per metric (high → rank 1, None → last rank)
@@ -451,9 +460,9 @@ def compare_multi(
             )
         else:
             rolling = ic_arr.copy()
-        # Sanitize NaN → None for JSON serialization
+        # Sanitize non-finite values → None for strict JSON serialization.
         series_per_factor[fname] = [
-            None if (v != v) else float(v) for v in rolling.tolist()
+            _clean_metric_value(v) for v in rolling.tolist()
         ]
 
     rolling_ic_small_multiples = {

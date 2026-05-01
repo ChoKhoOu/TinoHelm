@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 #: supply one via the ``interval`` argument.  Uses the short-form convention
 #: from :data:`tinohelm.data.catalog_helpers.INTERVAL_MAP`.
 _DEFAULT_INTERVAL: str = "1m"
+_EVAL_CLOSE_FIELD: str = "__eval_close"
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +109,9 @@ def _build_data_requests(
 
 
 def _extract_close_panel(data: dict[str, Panel]) -> Panel | None:
-    """Return the ``close`` Panel from a loaded data dict, if present."""
+    """Return the evaluator close Panel from a loaded data dict, if present."""
+    if _EVAL_CLOSE_FIELD in data:
+        return data[_EVAL_CLOSE_FIELD]
     return data.get("close")
 
 
@@ -124,12 +127,12 @@ def _ensure_close_requests(
     }
     out = list(requests)
     for sym in universe:
-        key = (sym, "close", interval, "bar")
+        key = (sym, _EVAL_CLOSE_FIELD, interval, "bar")
         if key not in existing:
             out.append(
                 DataRequest(
                     symbol=sym,
-                    field_name="close",
+                    field_name=_EVAL_CLOSE_FIELD,
                     frequency=interval,
                     lookback=0,
                     source="bar",
@@ -372,11 +375,11 @@ class Orchestrator:
             #   skipped during data_load and must be fetched separately.
             # - If the factor does not use close directly, we still need it for
             #   evaluation (forward return computation).  Load it on demand.
-            if "close" not in data:
+            if _extract_close_panel(data) is None:
                 close_requests = [
                     DataRequest(
                         symbol=sym,
-                        field_name="close",
+                        field_name=_EVAL_CLOSE_FIELD,
                         frequency=interval,
                         lookback=spec.lookback,
                         source="bar",

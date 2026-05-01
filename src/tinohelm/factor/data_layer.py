@@ -75,6 +75,7 @@ _VAL_COL: str = "value"
 
 _BAR_FIELD_ATTR: dict[str, str] = {
     "close": "close",
+    "__eval_close": "close",
     "open": "open",
     "high": "high",
     "low": "low",
@@ -616,6 +617,10 @@ class DataLayer:
             sym: _ordered_unique(req.field_name for req in reqs if req.symbol == sym)
             for sym in symbols
         }
+        physical_fields_by_symbol: dict[str, list[str]] = {
+            sym: _ordered_unique(_BAR_FIELD_ATTR[field] for field in symbol_fields[sym])
+            for sym in symbols
+        }
         field_load_starts: dict[str, datetime | None] = {}
         for field in fields:
             lookback = max(req.lookback for req in reqs if req.field_name == field)
@@ -628,6 +633,7 @@ class DataLayer:
         with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
             for sym in symbols:
                 sym_fields = symbol_fields[sym]
+                physical_fields = physical_fields_by_symbol[sym]
                 load_start_candidates = [
                     field_load_starts[field]
                     for field in sym_fields
@@ -637,7 +643,7 @@ class DataLayer:
                 fut = pool.submit(
                     self._load_bar_fields,
                     symbol=sym,
-                    field_names=sym_fields,
+                    field_names=physical_fields,
                     frequency=frequency,
                     source_type=source_type,
                     start=sym_load_start,
@@ -657,10 +663,13 @@ class DataLayer:
                         "Failed to load bar fields %s for symbol %s",
                         sym_fields, sym, exc_info=True,
                     )
-                    series_by_field = {field: _empty_series_frame() for field in sym_fields}
+                    series_by_field = {
+                        _BAR_FIELD_ATTR[field]: _empty_series_frame()
+                        for field in sym_fields
+                    }
 
                 for field in sym_fields:
-                    series = series_by_field.get(field, _empty_series_frame())
+                    series = series_by_field.get(_BAR_FIELD_ATTR[field], _empty_series_frame())
                     series_by_field_symbol[field][sym] = _filter_time_range(
                         series,
                         field_load_starts[field],

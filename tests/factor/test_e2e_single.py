@@ -121,7 +121,12 @@ class _StubDataLayer(DataLayer):
         self._calls.append((request, start, end))
         # Slice to the requested window so downstream eval matches the range
         out: dict[str, Panel] = {}
-        for field_name, panel in self._panels.items():
+        requested_fields = {
+            r.field_name for r in ([request] if not isinstance(request, list) else request)
+        }
+        for field_name in requested_fields:
+            source_field = "close" if field_name == "__eval_close" else field_name
+            panel = self._panels[source_field]
             sl = panel
             if start is not None:
                 start_ts = _coerce_to_dt(start)
@@ -291,7 +296,20 @@ class TestSingleFactorRun:
         fields = {(r.symbol, r.field_name, r.frequency, r.source) for r in first_request}
         for sym in SYMBOLS:
             assert (sym, "volume", "1m", "bar") in fields
-            assert (sym, "close", "1m", "bar") in fields
+            assert (sym, "__eval_close", "1m", "bar") in fields
+
+    def test_eval_close_alias_does_not_collide_with_factor_close_request(
+        self,
+        orchestrator: Orchestrator,
+        data_layer: _StubDataLayer,
+        config: EvalConfig,
+    ):
+        orchestrator.run("ret_5", config, interval="5m")
+        first_request = data_layer._calls[0][0]
+        fields = {(r.symbol, r.field_name, r.frequency, r.source) for r in first_request}
+        for sym in SYMBOLS:
+            assert (sym, "close", "5m", "bar") in fields
+            assert (sym, "__eval_close", "5m", "bar") in fields
 
     def test_no_nan_or_inf_in_scalar_fields(
         self, orchestrator: Orchestrator, config: EvalConfig

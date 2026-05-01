@@ -388,7 +388,11 @@ fn unwrap_api_envelope(
 }
 
 fn is_failed_factor_report(path: &str, body: &serde_json::Value) -> bool {
-    path.starts_with("/api/factor/report/")
+    let normalized_path = reqwest::Url::parse(path)
+        .map(|url| url.path().to_string())
+        .unwrap_or_else(|_| path.split_once('?').map_or(path, |(p, _)| p).to_string());
+
+    normalized_path.starts_with("/api/factor/report/")
         && body.get("status").and_then(|v| v.as_str()) == Some("failed")
 }
 
@@ -610,6 +614,18 @@ mod tests {
     fn failed_factor_report_is_llm_error_contract() {
         let body = serde_json::json!({"run_id": "r1", "status": "failed"});
         assert!(is_failed_factor_report("/api/factor/report/r1", &body));
+        assert!(is_failed_factor_report(
+            "http://localhost:8000/api/factor/report/r1",
+            &body
+        ));
+        assert!(is_failed_factor_report(
+            "/api/factor/report/r1?summary=true",
+            &body
+        ));
+        assert!(is_failed_factor_report(
+            "http://localhost:8000/api/factor/report/r1?summary=true",
+            &body
+        ));
         assert!(!is_failed_factor_report("/api/factor/runs/r1", &body));
         assert!(!is_failed_factor_report(
             "/api/factor/report/r1",

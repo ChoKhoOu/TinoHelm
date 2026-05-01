@@ -73,6 +73,23 @@ class Fold:
     fold_id: int
 
 
+def _is_finite_number(value: object) -> bool:
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _valid_ic_values(result: EvalResult) -> list[float] | None:
+    values: list[float] = []
+    for entry in result.ic_series or []:
+        value = entry.get("ic") if isinstance(entry, dict) else entry
+        if not _is_finite_number(value):
+            return None
+        values.append(float(value))
+    return values
+
+
 # ---------------------------------------------------------------------------
 # generate_folds
 # ---------------------------------------------------------------------------
@@ -247,7 +264,12 @@ class WalkForwardEvaluator:
 
             # Run eval on the OOS slice.
             oos_result = eval_fn(test_panel, test_returns)
-            if not getattr(oos_result, "ic_series", None) or oos_result.ic_mean is None:
+            valid_ic_values = _valid_ic_values(oos_result)
+            if (
+                not valid_ic_values
+                or not _is_finite_number(oos_result.ic_mean)
+                or not _is_finite_number(oos_result.ic_std)
+            ):
                 warning = {
                     "code": "walk_forward_fold_no_valid_ic",
                     "message": "Walk-forward fold had rows but no valid aligned IC observations.",
@@ -273,10 +295,10 @@ class WalkForwardEvaluator:
                 continue
 
             # Sharpe of IC = IR across the per-period IC series within this fold.
-            ic_std = oos_result.ic_std if oos_result.ic_std else 0.0
+            ic_std = float(oos_result.ic_std) if oos_result.ic_std else 0.0
             sharpe = (
-                oos_result.ic_mean / ic_std
-                if ic_std and not (ic_std != ic_std)  # NaN guard
+                float(oos_result.ic_mean) / ic_std
+                if ic_std and np.isfinite(ic_std)
                 else 0.0
             )
 
@@ -288,7 +310,7 @@ class WalkForwardEvaluator:
                     "test_start": fold.test_start,
                     "test_end": fold.test_end,
                     "status": "ok",
-                    "ic_mean": float(oos_result.ic_mean) if oos_result.ic_mean is not None else None,
+                    "ic_mean": float(oos_result.ic_mean),
                     "ic_std": float(ic_std),
                     "sharpe": float(sharpe),
                 }
@@ -309,7 +331,10 @@ class WalkForwardEvaluator:
             result.walk_forward = {"status": "insufficient_data", "folds": []}
             return result
 
-        valid_fold_rows = [d for d in oos_ic_series if d.get("status") == "ok" and d.get("ic_mean") is not None]
+        valid_fold_rows = [
+            d for d in oos_ic_series
+            if d.get("status") == "ok" and _is_finite_number(d.get("ic_mean"))
+        ]
         if not valid_fold_rows:
             result = EvalResult()
             result.ic_mean = None

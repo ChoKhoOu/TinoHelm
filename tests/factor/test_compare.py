@@ -15,6 +15,8 @@ No network, no DB, no NT deps.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -358,3 +360,73 @@ def test_compare_results_delta_is_a_minus_b_with_explicit_reverse():
     assert ic_mean["delta"] == pytest.approx(0.15)
     assert ic_mean["delta_basis"] == "a_minus_b"
     assert ic_mean["better_run"] == "a"
+
+
+def test_compare_results_scrubs_non_finite_metric_values_for_strict_json():
+    """NaN/Inf metrics must not leak into strict JSON output."""
+    eval_a = _make_result([0.1, 0.2, 0.3], ic_mean=float("nan"), ir=float("inf"))
+    eval_b = _make_result([0.1, 0.2, 0.3], ic_mean=0.2, ir=1.0)
+
+    out = compare_results(eval_a, eval_b, n_bootstrap=20, random_seed=42)
+
+    json.dumps(out, allow_nan=False)
+    for entry in out["metric_diffs"]:
+        assert entry["a"] is None
+        assert entry["delta"] is None
+
+
+def test_compare_multi_scrubs_non_finite_values_for_strict_json():
+    """Ranking heatmap and rolling IC data must be strict-JSON safe."""
+    results = {
+        "bad_metric": EvalResult(
+            ic_mean=float("inf"),
+            ir="not-a-number",
+            ic_series=[
+                {"date": "2024-01-01", "ic": 0.1},
+                {"date": "2024-01-02", "ic": float("inf")},
+            ],
+        ),
+        "ok": EvalResult(
+            ic_mean=0.2,
+            ir=1.0,
+            ic_series=[
+                {"date": "2024-01-01", "ic": 0.2},
+                {"date": "2024-01-02", "ic": 0.3},
+            ],
+        ),
+    }
+
+    out = compare_multi(results)
+
+    json.dumps(out, allow_nan=False)
+    assert out["ranking_heatmap"]["values"][0] == [None, None]
+    assert out["rolling_ic_small_multiples"]["series"]["bad_metric"] == [0.1, None]
+
+
+def test_compare_results_uses_paired_sample_for_delta_and_better_run():
+    """Scalar full-run values must not contradict paired-bootstrap direction."""
+    eval_a = EvalResult(
+        ic_mean=1.0,
+        ir=2.0,
+        ic_series=[
+            {"date": "2024-01-01", "ic": 0.1},
+            {"date": "2024-01-02", "ic": 0.1},
+            {"date": "2024-01-03", "ic": 9.0},
+        ],
+    )
+    eval_b = EvalResult(
+        ic_mean=0.0,
+        ir=1.0,
+        ic_series=[
+            {"date": "2024-01-01", "ic": 0.2},
+            {"date": "2024-01-02", "ic": 0.2},
+            {"date": "2024-01-04", "ic": -9.0},
+        ],
+    )
+
+    out = compare_results(eval_a, eval_b, n_bootstrap=100, random_seed=42)
+    ic_mean = next(d for d in out["metric_diffs"] if d["name"] == "ic_mean")
+
+    assert ic_mean["delta"] == pytest.approx(-0.1)
+    assert ic_mean["direction"] == "degraded"
+    assert ic_mean["better_run"] == "b"

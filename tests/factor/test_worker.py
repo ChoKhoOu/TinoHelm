@@ -220,6 +220,43 @@ async def test_process_job_duplicate_replay_loses_db_claim_before_orchestrator(m
     mock_rds.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+async def test_stale_cancel_key_does_not_overwrite_terminal_run(terminal_status):
+    """A stale payload plus stale cancel key must not rewrite terminal status."""
+    run_id = f"terminal-{terminal_status}"
+    run = _make_mock_db_run(run_id=run_id, status=terminal_status)
+
+    select_result = MagicMock(scalar_one_or_none=MagicMock(return_value=run))
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=select_result)
+    session.commit = AsyncMock()
+
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    rds = AsyncMock()
+    rds.exists.return_value = 1
+    rds.delete = AsyncMock()
+    rds.publish = AsyncMock()
+    rds.close = AsyncMock()
+
+    with (
+        patch("tinohelm.factor.worker.get_session_factory", return_value=factory),
+        patch("tinohelm.factor.worker.aioredis.from_url", return_value=rds),
+        patch("tinohelm.factor.worker._run_orchestrator") as run_orchestrator,
+    ):
+        from tinohelm.factor.worker import _process_job
+
+        await _process_job(_make_payload(run_id=run_id), "redis://localhost:6379")
+
+    run_orchestrator.assert_not_called()
+    assert session.execute.await_count == 1
+    session.commit.assert_not_awaited()
+    rds.delete.assert_awaited_once_with(f"tino:factor:cancel:{run_id}")
+
+
 # ---------------------------------------------------------------------------
 # Test: state machine transitions queued → running → completed/failed
 # ---------------------------------------------------------------------------
@@ -451,7 +488,7 @@ async def test_cancel_flag_mid_pipeline_breaks(mock_session_factory, mock_eval_r
 
 @pytest.mark.asyncio
 async def test_recover_interrupted_jobs_replays_snapshot_without_deleting_live_queue():
-    """Recovery must not delete concurrent live LPUSH entries."""
+    """Recovery must only re-enqueue rows flipped running → queued."""
     old_run = _make_mock_db_run(
         run_id="old-run",
         config={
@@ -473,12 +510,12 @@ async def test_recover_interrupted_jobs_replays_snapshot_without_deleting_live_q
         },
     )
 
-    update_result = MagicMock(rowcount=2)
     select_result = MagicMock()
     select_result.scalars.return_value.all.return_value = [old_run, new_run]
+    update_result = MagicMock(rowcount=2)
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[update_result, select_result])
+    session.execute = AsyncMock(side_effect=[select_result, update_result])
     session.commit = AsyncMock()
     factory = MagicMock()
     factory.return_value.__aenter__ = AsyncMock(return_value=session)
@@ -505,3 +542,28 @@ async def test_recover_interrupted_jobs_replays_snapshot_without_deleting_live_q
         simulated_redis_list.insert(0, pushed_id)
     assert simulated_redis_list == ["new-run", "old-run"]
     assert simulated_redis_list.pop() == "old-run"
+
+
+@pytest.mark.asyncio
+async def test_recover_interrupted_jobs_does_not_replay_existing_queued_rows():
+    """Startup recovery should not multiply rows that were already queued."""
+    select_result = MagicMock()
+    select_result.scalars.return_value.all.return_value = []
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=select_result)
+    session.commit = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    rds = AsyncMock()
+    rds.lpush = AsyncMock()
+
+    worker_module = importlib.import_module("tinohelm.factor.worker")
+
+    with patch.object(worker_module, "get_session_factory", return_value=factory):
+        recovered = await worker_module.recover_interrupted_jobs(rds)
+
+    assert recovered == 0
+    rds.lpush.assert_not_awaited()

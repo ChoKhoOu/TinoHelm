@@ -82,40 +82,36 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     factory = get_session_factory()
     recovered = 0
     async with factory() as db:
+        interrupted_runs = (
+            await db.execute(
+                select(FactorRun)
+                .where(FactorRun.status == STATUS_RUNNING)
+                .order_by(FactorRun.created_at.asc())
+            )
+        ).scalars().all()
+        interrupted_ids = [run.id for run in interrupted_runs]
+
         # Flip running → queued and persist to DB first.
         # DB commit happens before any Redis mutation so that a failed DB write
         # cannot enqueue rows whose durable status still says "running".
-        result = await db.execute(
-            update(FactorRun)
-            .where(FactorRun.status == STATUS_RUNNING)
-            .values(status="queued", progress=0)
-        )
-        recovered = result.rowcount or 0
+        if interrupted_ids:
+            result = await db.execute(
+                update(FactorRun)
+                .where(FactorRun.id.in_(interrupted_ids), FactorRun.status == STATUS_RUNNING)
+                .values(status="queued", progress=0)
+            )
+            recovered = result.rowcount or 0
 
         # Commit DB changes before touching Redis.  This is the critical ordering:
         # if Redis ops fail after this point, the DB already reflects "queued" and
         # the next startup will re-read the correct queued set.
         await db.commit()
 
-        # After a successful commit, replay the DB's authoritative queued
-        # snapshot without clearing the live Redis queue.  The API may LPUSH a
-        # fresh job between the SELECT and any Redis mutation; deleting the
-        # shared queue here would lose that live enqueue until a future
-        # recovery pass.  Duplicate replay is safe because _process_job claims
-        # queued rows conditionally before executing work.
-        queued_runs = (
-            await db.execute(
-                select(FactorRun)
-                .where(FactorRun.status == "queued")
-                .order_by(FactorRun.created_at.asc())
-            )
-        ).scalars().all()
-
         # The live enqueue path uses LPUSH and consumers use BRPOP, so pushing
         # queued runs in created_at ASC order with LPUSH preserves FIFO within
         # the recovered snapshot: newest ends up at the head, oldest at the
         # tail, and BRPOP consumes oldest first.
-        for run in queued_runs:
+        for run in interrupted_runs:
             await rds.lpush(QUEUE_KEY, _queue_payload_from_run(run))
 
     if recovered:
@@ -158,7 +154,9 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
         full: bool = bool(payload.get("full", False))
 
         # ----------------------------------------------------------------
-        # 2. Check cancel flag early (before DB round-trip)
+        # 2. Prepare cancel helpers. Cancellation is applied only after the
+        #    DB row is loaded so stale queue payloads cannot rewrite terminal
+        #    runs.
         # ----------------------------------------------------------------
         cancel_key = f"tino:factor:cancel:{run_id}"
 
@@ -166,7 +164,10 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             async with factory() as db_c:
                 await db_c.execute(
                     update(FactorRun)
-                    .where(FactorRun.id == run_id)
+                    .where(
+                        FactorRun.id == run_id,
+                        FactorRun.status.in_(["queued", STATUS_RUNNING]),
+                    )
                     .values(
                         status=STATUS_CANCELLED,
                         finished_at=datetime.now(UTC).replace(tzinfo=None),
@@ -174,11 +175,6 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
                     )
                 )
                 await db_c.commit()
-
-        if await rds.exists(cancel_key):
-            logger.info("Factor run %s cancelled (pre-load), skipping", run_id)
-            await _mark_cancelled()
-            return
 
         # ----------------------------------------------------------------
         # 3. Load FactorRun from DB; resolve config if not in payload
@@ -192,8 +188,15 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
                 logger.warning("FactorRun %s not found in DB, skipping", run_id)
                 return
 
-            if run.status == STATUS_CANCELLED:
-                logger.info("FactorRun %s already cancelled, skipping", run_id)
+            if run.status in {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}:
+                if await rds.exists(cancel_key):
+                    await rds.delete(cancel_key)
+                    logger.info("Cleared stale cancel key for terminal FactorRun %s", run_id)
+                logger.info("FactorRun %s status is terminal %r; skipping", run_id, run.status)
+                return
+            if await rds.exists(cancel_key):
+                logger.info("Factor run %s cancelled, skipping", run_id)
+                await _mark_cancelled()
                 return
             if run.status != "queued":
                 logger.info(

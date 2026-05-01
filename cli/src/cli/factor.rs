@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use reqwest::Method;
+use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::api::{call_and_print, read_json_body};
@@ -347,35 +348,41 @@ fn body_required(args: BodyArgs) -> Result<serde_json::Value> {
 
 fn api_body_required(args: ApiBodyArgs, default_summary: bool) -> Result<serde_json::Value> {
     let mut body = body_required(args.body_args)?;
-    let body_has_result_controls = body.get("summary").is_some()
-        || body.get("detail").is_some()
-        || body.get("fields").is_some();
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("JSON body must be an object"))?;
+    let body_has_result_controls = object.contains_key("summary")
+        || object.contains_key("detail")
+        || object.contains_key("fields");
     if default_summary
         && !args.summary
         && !args.detail
         && args.fields.is_none()
         && !body_has_result_controls
     {
-        body["summary"] = serde_json::Value::Bool(true);
-        body["detail"] = serde_json::Value::Bool(false);
+        object.insert("summary".to_string(), Value::Bool(true));
+        object.insert("detail".to_string(), Value::Bool(false));
     }
     if args.summary {
-        body["summary"] = serde_json::Value::Bool(true);
+        object.insert("summary".to_string(), Value::Bool(true));
         if !args.detail {
-            body["detail"] = serde_json::Value::Bool(false);
+            object.insert("detail".to_string(), Value::Bool(false));
         }
     }
     if args.detail {
-        body["detail"] = serde_json::Value::Bool(true);
+        object.insert("detail".to_string(), Value::Bool(true));
     }
     if let Some(fields) = args.fields {
-        body["fields"] = serde_json::Value::Array(
-            fields
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| serde_json::Value::String(s.to_string()))
-                .collect(),
+        object.insert(
+            "fields".to_string(),
+            Value::Array(
+                fields
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
         );
     }
     Ok(body)
@@ -442,6 +449,14 @@ mod tests {
 
         assert_eq!(body["detail"], serde_json::Value::Bool(true));
         assert!(body.get("summary").is_none());
+    }
+
+    #[test]
+    fn api_body_rejects_non_object_json() {
+        let err = api_body_required(body_args(serde_json::json!([])), true)
+            .expect_err("array body must be rejected before mutation");
+
+        assert!(err.to_string().contains("JSON body must be an object"));
     }
 
     #[test]
