@@ -88,7 +88,8 @@ def client():
 # ---------------------------------------------------------------------------
 
 def test_runtime_version_endpoint_exposes_source_metadata(client):
-    resp = client.get("/api/version")
+    with patch("tinohelm.factor.registry.Registry.scan", side_effect=AssertionError("no scan")):
+        resp = client.get("/api/version")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["api_package_path"]
@@ -98,7 +99,8 @@ def test_runtime_version_endpoint_exposes_source_metadata(client):
 
 
 def test_factor_version_and_capabilities_endpoints(client):
-    version_resp = client.get("/api/factor/version")
+    with patch("tinohelm.factor.registry.Registry.scan", side_effect=AssertionError("no scan")):
+        version_resp = client.get("/api/factor/version")
     assert version_resp.status_code == 200, version_resp.text
     version_body = version_resp.json()
     assert version_body["api_package_path"]
@@ -284,6 +286,59 @@ def test_explore_returns_summary(client):
     assert "quantile_pnl" in body
     assert body["ic_mean"] == pytest.approx(0.05)
     assert body["rating"] == 2
+
+
+def test_explore_detail_false_takes_precedence_over_fields(client):
+    """POST /explore applies fields to summary when detail=false."""
+    from tinohelm.factor.types import EvalResult
+
+    mock_result = EvalResult(
+        ic_mean=0.05,
+        ic_std=0.02,
+        ir=0.6,
+        rating=2,
+        quantile_pnl={"Q1": -0.01, "Q5": 0.01},
+        is_monotonic=True,
+    )
+
+    payload = {
+        "factor_name": "ret_N",
+        "config": {
+            "universe": ["BTCUSDT-PERP"],
+            "start": "2024-01-01",
+            "end": "2024-02-01",
+        },
+        "params": {"n": 10},
+        "summary": False,
+        "detail": False,
+        "fields": ["ic_mean", "rating", "ic_series"],
+    }
+
+    with (
+        patch("tinohelm.factor.registry.Registry") as MockRegistry,
+        patch("tinohelm.factor.data_layer.DataLayer"),
+        patch("tinohelm.factor.evaluation.evaluator.Evaluator"),
+        patch("tinohelm.factor.cache.FactorCache"),
+        patch("tinohelm.factor.observer.Observer"),
+        patch("tinohelm.factor.engine.orchestrator.Orchestrator") as MockOrchestrator,
+    ):
+        reg_instance = MagicMock()
+        reg_instance.scan.return_value = {"ret_N": MagicMock(name="ret_N")}
+        reg_instance.get_spec.return_value = MagicMock(name="spec")
+        MockRegistry.return_value = reg_instance
+
+        orch_instance = MagicMock()
+        orch_instance.run.return_value = mock_result
+        MockOrchestrator.return_value = orch_instance
+
+        resp = client.post("/api/factor/explore", json=payload)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {
+        "factor_name": "ret_N",
+        "summary": {"ic_mean": 0.05, "rating": 2},
+    }
 
 
 def test_explore_404_unknown_factor(client):

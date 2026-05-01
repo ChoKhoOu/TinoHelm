@@ -134,6 +134,35 @@ class TestBuildKey:
         assert len(k) == 64
         int(k, 16)  # raises if not valid hex
 
+    def test_eval_cache_key_partitions_fast_and_full_modes(self, config: EvalConfig) -> None:
+        fast_key = FactorCache.build_key(
+            "ret_5",
+            "hash1",
+            config,
+            ("2024-01-01", "2024-03-01"),
+            full=False,
+        )
+        full_key = FactorCache.build_key(
+            "ret_5",
+            "hash1",
+            config,
+            ("2024-01-01", "2024-03-01"),
+            full=True,
+        )
+        assert fast_key != full_key
+
+    def test_split_eval_key_partitions_fast_and_full_modes(self, config: EvalConfig) -> None:
+        factor_values_key = "factor-values-key"
+        assert FactorCache.build_eval_key(
+            factor_values_key,
+            config,
+            full=False,
+        ) != FactorCache.build_eval_key(
+            factor_values_key,
+            config,
+            full=True,
+        )
+
 
 class TestFullMissThenHit:
     def test_lookup_miss_before_store(self, cache: FactorCache, config: EvalConfig) -> None:

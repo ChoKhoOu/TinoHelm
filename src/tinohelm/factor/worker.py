@@ -83,10 +83,8 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     recovered = 0
     async with factory() as db:
         # Flip running → queued and persist to DB first.
-        # DB commit happens before any Redis mutation so that a partial failure
-        # (commit error after Redis delete) cannot produce double-enqueue on the
-        # next startup — the DB would still show the rows as "running" and the
-        # recover would simply retry cleanly.
+        # DB commit happens before any Redis mutation so that a failed DB write
+        # cannot enqueue rows whose durable status still says "running".
         result = await db.execute(
             update(FactorRun)
             .where(FactorRun.status == STATUS_RUNNING)
@@ -99,9 +97,12 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
         # the next startup will re-read the correct queued set.
         await db.commit()
 
-        # After a successful commit, rebuild the Redis queue from the DB's
-        # authoritative "queued" state (includes both newly-recovered rows and
-        # any pre-existing queued rows).
+        # After a successful commit, replay the DB's authoritative queued
+        # snapshot without clearing the live Redis queue.  The API may LPUSH a
+        # fresh job between the SELECT and any Redis mutation; deleting the
+        # shared queue here would lose that live enqueue until a future
+        # recovery pass.  Duplicate replay is safe because _process_job claims
+        # queued rows conditionally before executing work.
         queued_runs = (
             await db.execute(
                 select(FactorRun)
@@ -110,14 +111,12 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
             )
         ).scalars().all()
 
-        # Clear the old queue and re-populate atomically to avoid duplicates.
         # The live enqueue path uses LPUSH and consumers use BRPOP, so pushing
-        # queued runs in created_at ASC order with LPUSH preserves FIFO: newest
-        # ends up at the head, oldest at the tail, and BRPOP consumes oldest first.
-        if queued_runs:
-            await rds.delete(QUEUE_KEY)
-            for run in queued_runs:
-                await rds.lpush(QUEUE_KEY, _queue_payload_from_run(run))
+        # queued runs in created_at ASC order with LPUSH preserves FIFO within
+        # the recovered snapshot: newest ends up at the head, oldest at the
+        # tail, and BRPOP consumes oldest first.
+        for run in queued_runs:
+            await rds.lpush(QUEUE_KEY, _queue_payload_from_run(run))
 
     if recovered:
         logger.info("Recovered %d interrupted factor run(s)", recovered)
@@ -196,6 +195,12 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             if run.status == STATUS_CANCELLED:
                 logger.info("FactorRun %s already cancelled, skipping", run_id)
                 return
+            if run.status != "queued":
+                logger.info(
+                    "FactorRun %s status is %r, not queued; skipping",
+                    run_id, run.status,
+                )
+                return
 
             # If caller didn't embed config in the payload, load from DB row.
             if config_dict is None:
@@ -208,16 +213,22 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
             if not factor_name:
                 factor_name = run.factor_name
 
-            # queued → running
-            await db.execute(
+            # queued → running.  The status predicate makes recovery replay
+            # duplicate-safe when the same queued snapshot is LPUSHed more
+            # than once or a live queue entry races with startup recovery.
+            claim_result = await db.execute(
                 update(FactorRun)
-                .where(FactorRun.id == run_id)
+                .where(FactorRun.id == run_id, FactorRun.status == "queued")
                 .values(
                     status=STATUS_RUNNING,
                     started_at=datetime.now(UTC).replace(tzinfo=None),
                     progress=0,
                 )
             )
+            if getattr(claim_result, "rowcount", None) == 0:
+                logger.info("FactorRun %s was already claimed; skipping", run_id)
+                await db.rollback()
+                return
             await db.commit()
 
         progress_channel = f"tino:factor:progress:{run_id}"

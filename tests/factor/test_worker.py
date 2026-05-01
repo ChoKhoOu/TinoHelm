@@ -5,11 +5,9 @@ All tests use mocked Redis and DB sessions — no real I/O is performed.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
+import importlib
 import json
-import traceback
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -182,6 +180,44 @@ async def test_process_job_failure(mock_rds, mock_session_factory):
     )
     failed_evt = next(ev for ev in publish_calls if ev["type"] == "factor.failed")
     assert "exploded" in failed_evt["error"]
+
+
+# ---------------------------------------------------------------------------
+# Test: duplicate queue recovery replay is DB-claim guarded
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_process_job_duplicate_replay_loses_db_claim_before_orchestrator(mock_rds):
+    """Duplicate queue entries must be consumed without executing the job twice."""
+    run_id = "duplicate-replay-run"
+    run = _make_mock_db_run(run_id=run_id, status="queued")
+
+    select_result = MagicMock(scalar_one_or_none=MagicMock(return_value=run))
+    stale_claim_result = MagicMock(rowcount=0)
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[select_result, stale_claim_result])
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("tinohelm.factor.worker.get_session_factory", return_value=factory),
+        patch("tinohelm.factor.worker.aioredis.from_url", return_value=mock_rds),
+        patch("tinohelm.factor.worker._run_orchestrator") as run_orchestrator,
+    ):
+        from tinohelm.factor.worker import _process_job
+
+        await _process_job(_make_payload(run_id=run_id), "redis://localhost:6379")
+
+    run_orchestrator.assert_not_called()
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+    mock_rds.publish.assert_not_awaited()
+    mock_rds.close.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +396,7 @@ async def test_start_stop_worker_lifecycle():
     # return value is passed directly to asyncio.create_task() as a coroutine.
     # We patch it so it returns a fresh coroutine each call.
     with patch("tinohelm.factor.worker.consumer_loop", new=_fake_consumer_loop):
-        task = start_factor_worker("redis://localhost:6379")
+        start_factor_worker("redis://localhost:6379")
 
     assert _handle.is_running()
 
@@ -414,8 +450,8 @@ async def test_cancel_flag_mid_pipeline_breaks(mock_session_factory, mock_eval_r
 
 
 @pytest.mark.asyncio
-async def test_recover_interrupted_jobs_rebuilds_fifo_queue_for_brpop_consumers():
-    """Recovery must preserve the live LPUSH/BRPOP FIFO queue contract."""
+async def test_recover_interrupted_jobs_replays_snapshot_without_deleting_live_queue():
+    """Recovery must not delete concurrent live LPUSH entries."""
     old_run = _make_mock_db_run(
         run_id="old-run",
         config={
@@ -452,13 +488,13 @@ async def test_recover_interrupted_jobs_rebuilds_fifo_queue_for_brpop_consumers(
     rds.delete = AsyncMock()
     rds.lpush = AsyncMock()
 
-    with patch("tinohelm.factor.worker.get_session_factory", return_value=factory):
-        from tinohelm.factor.worker import QUEUE_KEY, recover_interrupted_jobs
+    worker_module = importlib.import_module("tinohelm.factor.worker")
 
-        recovered = await recover_interrupted_jobs(rds)
+    with patch.object(worker_module, "get_session_factory", return_value=factory):
+        recovered = await worker_module.recover_interrupted_jobs(rds)
 
     assert recovered == 2
-    rds.delete.assert_awaited_once_with(QUEUE_KEY)
+    rds.delete.assert_not_awaited()
     assert not getattr(rds, "rpush").await_args_list
 
     pushed_ids = [json.loads(c.args[1])["run_id"] for c in rds.lpush.await_args_list]

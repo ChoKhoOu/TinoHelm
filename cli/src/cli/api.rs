@@ -214,16 +214,18 @@ pub async fn call_and_print(
                 meta.status_code = Some(resp.status_code);
                 meta.elapsed_ms = Some(resp.elapsed_ms);
                 if let Some((ok, data, error)) = unwrap_api_envelope(&resp.body, resp.status_code) {
-                    return print_json(&Envelope {
+                    print_json(&Envelope {
                         ok,
                         data,
                         error,
                         meta,
-                    });
+                    })?;
+                    if !ok {
+                        std::process::exit(1);
+                    }
+                    return Ok(());
                 }
-                if path.starts_with("/api/factor/report/")
-                    && resp.body.get("status").and_then(|v| v.as_str()) == Some("failed")
-                {
+                if is_failed_factor_report(path, &resp.body) {
                     let code = resp
                         .body
                         .get("error_code")
@@ -237,7 +239,7 @@ pub async fn call_and_print(
                         .and_then(|v| v.as_str())
                         .unwrap_or("Factor run failed")
                         .to_string();
-                    return print_json(&Envelope {
+                    print_json(&Envelope {
                         ok: false,
                         data: Some(resp.body.clone()),
                         error: Some(EnvelopeError {
@@ -248,7 +250,8 @@ pub async fn call_and_print(
                             body: Some(resp.body.clone()),
                         }),
                         meta,
-                    });
+                    })?;
+                    std::process::exit(1);
                 }
                 print_llm_success(resp.body, meta)
             }
@@ -382,6 +385,11 @@ fn unwrap_api_envelope(
     };
 
     Some((ok, data, error))
+}
+
+fn is_failed_factor_report(path: &str, body: &serde_json::Value) -> bool {
+    path.starts_with("/api/factor/report/")
+        && body.get("status").and_then(|v| v.as_str()) == Some("failed")
 }
 
 fn print_api_error(err: anyhow::Error, mut meta: EnvelopeMeta<'_>) -> Result<()> {
@@ -555,7 +563,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{truncate_chars, unwrap_api_envelope};
+    use super::{is_failed_factor_report, truncate_chars, unwrap_api_envelope};
 
     #[test]
     fn truncate_chars_leaves_short_strings_unchanged() {
@@ -596,5 +604,16 @@ mod tests {
         let error = error.expect("error");
         assert_eq!(error.message, "bad request");
         assert_eq!(error.status_code, Some(422));
+    }
+
+    #[test]
+    fn failed_factor_report_is_llm_error_contract() {
+        let body = serde_json::json!({"run_id": "r1", "status": "failed"});
+        assert!(is_failed_factor_report("/api/factor/report/r1", &body));
+        assert!(!is_failed_factor_report("/api/factor/runs/r1", &body));
+        assert!(!is_failed_factor_report(
+            "/api/factor/report/r1",
+            &serde_json::json!({"status": "completed"})
+        ));
     }
 }

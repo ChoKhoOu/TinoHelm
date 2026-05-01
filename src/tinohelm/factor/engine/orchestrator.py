@@ -294,7 +294,7 @@ class Orchestrator:
 
         data_range = (config.start, config.end)
         cache_key = (
-            FactorCache.build_key(factor_name, spec.code_hash, config, data_range)
+            FactorCache.build_key(factor_name, spec.code_hash, config, data_range, full=full)
             if self._cache is not None
             else ""
         )
@@ -599,14 +599,14 @@ class Orchestrator:
                     else:
                         spec_config = config
                     cache_keys[spec.name] = FactorCache.build_key(
-                        spec.name, spec.code_hash, spec_config, data_range
+                        spec.name, spec.code_hash, spec_config, data_range, full=full
                     )
                     specs_to_compute.append(spec)
                     continue
                 effective = _merge_effective_params(spec, config, params_map.get(spec.name))
                 spec_config = dataclasses.replace(config, params=effective)
                 cache_keys[spec.name] = FactorCache.build_key(
-                    spec.name, spec.code_hash, spec_config, data_range
+                    spec.name, spec.code_hash, spec_config, data_range, full=full
                 )
                 hit = self._cache.lookup(cache_keys[spec.name])
                 if hit is not None and hit.factor_values_hit and hit.eval_hit:

@@ -315,6 +315,8 @@ class FactorCache:
         code_hash: str,
         config: EvalConfig,
         data_range: tuple,
+        *,
+        full: bool = False,
     ) -> str:
         """Compute a SHA-256 cache key.
 
@@ -328,6 +330,9 @@ class FactorCache:
             Evaluation configuration (universe, dates, params …).
         data_range :
             ``(start, end)`` tuple of the actual data window loaded.
+        full :
+            Evaluation mode. Full diagnostics and fast runs must not share an
+            EvalResult cache entry because full runs include extra outputs.
 
         Returns
         -------
@@ -343,6 +348,8 @@ class FactorCache:
             + _stable_json(config_dict)
             + "|"
             + _stable_json(data_range)
+            + "|"
+            + _stable_json({"eval_mode": "full" if full else "fast"})
         )
         return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -420,6 +427,7 @@ class FactorCache:
         factor_values_key: str,
         eval_config: EvalConfig | dict[str, Any],
         *,
+        full: bool = False,
         returns_key: str | None = None,
         eval_version: str = "v1",
     ) -> str:
@@ -429,6 +437,7 @@ class FactorCache:
             "factor_values_key": factor_values_key,
             "returns_key": returns_key,
             "eval_version": eval_version,
+            "eval_mode": "full" if full else "fast",
             "eval_config": config_payload,
         })
 

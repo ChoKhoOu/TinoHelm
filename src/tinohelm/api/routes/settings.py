@@ -98,7 +98,6 @@ async def get_version() -> dict:
     from tinohelm.factor.registry import Registry
 
     registry = Registry()
-    registry.scan()
     import tinohelm
 
     return {

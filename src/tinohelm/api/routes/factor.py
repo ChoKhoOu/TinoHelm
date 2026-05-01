@@ -412,7 +412,6 @@ async def factor_version() -> dict:
     from tinohelm.factor.registry import Registry
 
     registry = Registry()
-    registry.scan()
     return {
         "api_version": "factor-api/v1",
         "platform_version": _platform_version(),
@@ -578,10 +577,10 @@ async def explore_factor(req: ExploreRequest) -> dict:
             "summary": _select_fields(_eval_summary(result), req.fields),
             "result": _select_fields(full_payload, req.fields) if req.fields else full_payload,
         }
-    if req.fields:
-        return _select_fields(full_payload, req.fields)
     if not detail:
         return {"factor_name": req.factor_name, "summary": _select_fields(_eval_summary(result), req.fields)}
+    if req.fields:
+        return _select_fields(full_payload, req.fields)
     return full_payload
 
 
