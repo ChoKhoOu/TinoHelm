@@ -1,11 +1,11 @@
 """Tests for tinohelm.core.config — configuration loading, merging, and env overrides."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from tinohelm.core.config import (
     Settings,
@@ -114,8 +114,29 @@ class TestSettingsDefaults:
 
     def test_data_defaults(self):
         s = DataSettings()
-        assert s.download_concurrency == 5
-        assert s.convert_workers == 4
+        assert s.download_concurrency == 2
+        assert s.convert_workers == 1
+        assert s.chunk_rows == 1_000_000
+        assert s.agg_trades_chunk_rows == 500_000
+        assert s.csv_queue_maxsize == 1
+        assert s.agg_trades_max_days_per_job == 1
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "download_concurrency",
+            "convert_workers",
+            "chunk_rows",
+            "agg_trades_chunk_rows",
+            "csv_queue_maxsize",
+            "agg_trades_max_days_per_job",
+        ],
+    )
+    def test_data_settings_reject_zero_or_negative_overrides(self, field):
+        with pytest.raises(ValidationError):
+            DataSettings(**{field: 0})
+        with pytest.raises(ValidationError):
+            DataSettings(**{field: -1})
 
     def test_backtest_defaults(self):
         s = BacktestSettings()
@@ -176,6 +197,17 @@ class TestLoadSettings:
         with patch("tinohelm.core.config._PROJECT_ROOT", tmp_path):
             s = load_settings()
         assert s.server.port == 9999
+
+    def test_repo_default_yaml_uses_hardened_data_defaults(self, clean_env):
+        """Repo default.yaml must not override hardened DataSettings defaults."""
+        s = load_settings()
+
+        assert s.data.download_concurrency == 2
+        assert s.data.convert_workers == 1
+        assert s.data.chunk_rows == 1_000_000
+        assert s.data.agg_trades_chunk_rows == 500_000
+        assert s.data.csv_queue_maxsize == 1
+        assert s.data.agg_trades_max_days_per_job == 1
 
     def test_user_yaml_overrides_default(self, tmp_path, monkeypatch, clean_env):
         """user.yaml overrides values from default.yaml."""

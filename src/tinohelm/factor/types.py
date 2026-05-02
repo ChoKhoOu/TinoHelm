@@ -33,6 +33,7 @@ the factor-framework rebuild (see ``3-tech-design.md`` §3.7).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal
 
 import polars as pl
@@ -468,3 +469,23 @@ class DataRequest:
     lookback: int
     source: str = "bar"
     source_type: str | None = None
+
+
+@dataclass(frozen=True)
+class EventRequest:
+    """Describes a raw tick/event data request.
+
+    Unlike :class:`DataRequest`, an event request never aggregates to a panel;
+    the data layer returns one output row per underlying event. Event rows are
+    raw catalog data with no point-in-time universe filtering, listing-window
+    filtering, aggregation, or panel alignment; callers needing PIT-aligned
+    factor panels should use ``DataLayer.load_panel()`` or ``DataLayer.load()``.
+    """
+
+    symbol: str
+    source: str
+    fields: tuple[str, ...]
+    start: datetime | str | None = None
+    end: datetime | str | None = None
+    source_type: str | None = None
+    on_error: Literal["raise", "empty"] = "raise"

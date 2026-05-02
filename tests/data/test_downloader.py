@@ -16,7 +16,6 @@ import pytest
 from tinohelm.data.downloader import (
     ChecksumError,
     DATA_TYPE_AVAILABILITY,
-    DownloadTask,
     VisionDownloader,
 )
 
@@ -300,6 +299,32 @@ class TestVerifyChecksum:
             await dl.verify_checksum(zip_path, "https://example.com/data.zip.CHECKSUM")
 
         assert zip_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_checksum_hashing_does_not_read_whole_file(self, tmp_path, monkeypatch):
+        """Checksum verification streams bytes instead of Path.read_bytes()."""
+        zip_path = tmp_path / "data.zip"
+        content = b"zip file contents"
+        zip_path.write_bytes(content)
+        correct_hash = hashlib.sha256(content).hexdigest()
+
+        mock_response = MagicMock()
+        mock_response.text = f"{correct_hash}  data.zip\n"
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        def fail_read_bytes(self):
+            raise AssertionError("read_bytes should not be used for checksum hashing")
+
+        monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+        dl = _make_dl(tmp_path)
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await dl.verify_checksum(zip_path, "https://example.com/data.zip.CHECKSUM")
 
     @pytest.mark.asyncio
     async def test_mismatched_checksum_raises_and_deletes_zip(self, tmp_path):

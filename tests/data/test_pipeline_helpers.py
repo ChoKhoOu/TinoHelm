@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from tinohelm.data.pipeline_helpers import (
+    CANONICAL_WRITE_CATEGORIES,
     DOWNLOAD_PROGRESS_BASE,
     DOWNLOAD_PROGRESS_SPAN,
     INTERVAL_CONVENTION,
@@ -102,6 +103,19 @@ class TestCanonicalMappings:
         assert WRITE_CATEGORY["liquidationSnapshot"] == "liquidation"
         assert WRITE_CATEGORY["metrics"] == "metrics"
         assert len(WRITE_CATEGORY) == 11
+
+    def test_write_categories_are_idempotent_but_not_source_type_keys(self):
+        assert CANONICAL_WRITE_CATEGORIES == frozenset({
+            "bar", "trade_tick", "quote_tick", "funding_rate",
+            "order_book_delta", "liquidation", "metrics",
+        })
+        for category in CANONICAL_WRITE_CATEGORIES:
+            assert resolve_write_category(category) == category
+            assert resolve_db_category(category) == category
+        # WRITE_CATEGORY remains a source_type map used by resolve_catalog_path;
+        # canonical categories must not create synthetic roots like ticks/trade_tick.
+        assert "trade_tick" not in WRITE_CATEGORY
+        assert "order_book_delta" not in WRITE_CATEGORY
 
     def test_interval_convention_canonical_keys(self):
         assert INTERVAL_CONVENTION["aggTrades"] == "tick"

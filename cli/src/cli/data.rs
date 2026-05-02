@@ -19,6 +19,12 @@ pub enum DataCmd {
         start: String,
         /// End date (YYYY-MM-DD)
         end: String,
+        /// Binance data type (e.g., klines, aggTrades, trades, bookTicker)
+        #[arg(long, default_value = "klines")]
+        data_type: String,
+        /// Binance asset class (um or cm)
+        #[arg(long, default_value = "um")]
+        asset_class: String,
     },
     /// Fetch data for multiple symbols x intervals in parallel
     #[command(name = "fetch-batch")]
@@ -34,6 +40,12 @@ pub enum DataCmd {
         /// End date (YYYY-MM-DD)
         #[arg(short, long)]
         end: String,
+        /// Binance data type (e.g., klines, aggTrades, trades, bookTicker)
+        #[arg(long, default_value = "klines")]
+        data_type: String,
+        /// Binance asset class (um or cm)
+        #[arg(long, default_value = "um")]
+        asset_class: String,
     },
     /// List available data catalog
     List,
@@ -48,6 +60,9 @@ pub enum DataCmd {
         symbol: String,
         /// Interval (e.g., 1m, 5m)
         interval: String,
+        /// Binance bar data type (e.g., klines, markPriceKlines, indexPriceKlines)
+        #[arg(long, default_value = "klines")]
+        data_type: String,
     },
     /// Validate data integrity for a symbol/interval
     Validate {
@@ -55,6 +70,9 @@ pub enum DataCmd {
         symbol: String,
         /// Interval (e.g., 1m, 5m)
         interval: String,
+        /// Binance bar data type (e.g., klines, markPriceKlines, indexPriceKlines)
+        #[arg(long, default_value = "klines")]
+        data_type: String,
     },
     /// Scan Parquet files on disk and sync missing entries into DB catalog
     Scan,
@@ -79,12 +97,16 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             interval,
             start,
             end,
+            data_type,
+            asset_class,
         } => {
             let req = DataFetchRequest {
                 symbol: symbol.clone(),
                 interval: interval.clone(),
                 start: start.clone(),
                 end: end.clone(),
+                data_type: data_type.clone(),
+                asset_class: asset_class.clone(),
             };
             let result = client.fetch_data(&req).await?;
             if format.is_machine() {
@@ -100,6 +122,7 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             header("Data Fetch Submitted");
             divider(50);
             kv("Symbol", &accent(&symbol), 12);
+            kv("Data Type", &data_type, 12);
             kv("Interval", &interval, 12);
             kv("Period", &format!("{} ~ {}", start, end), 12);
             kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
@@ -210,12 +233,16 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             interval,
             start,
             end,
+            data_type,
+            asset_class,
         } => {
             let req = DataFetchBatchRequest {
                 symbols: symbols.clone(),
                 intervals: interval.clone(),
                 start: start.clone(),
                 end: end.clone(),
+                data_type: data_type.clone(),
+                asset_class: asset_class.clone(),
             };
             let result = client.fetch_data_batch(&req).await?;
             if format.is_machine() {
@@ -235,7 +262,13 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             header("Batch Data Fetch Submitted");
             divider(50);
             kv("Symbols", &accent(&symbols.join(", ")), 12);
-            kv("Intervals", &interval.join(", "), 12);
+            kv("Data Type", &data_type, 12);
+            let display_intervals = if interval.is_empty() {
+                "tick".to_string()
+            } else {
+                interval.join(", ")
+            };
+            kv("Intervals", &display_intervals, 12);
             kv("Period", &format!("{} ~ {}", start, end), 12);
             kv("Queued", &bold(&count.to_string()), 12);
             kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
@@ -245,10 +278,15 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             }
             println!();
         }
-        DataCmd::Compact { symbol, interval } => {
+        DataCmd::Compact {
+            symbol,
+            interval,
+            data_type,
+        } => {
             let req = DataCompactRequest {
                 symbol: symbol.clone(),
                 interval: interval.clone(),
+                data_type: data_type.clone(),
             };
             let result = client.compact_data(&req).await?;
             if format.is_machine() {
@@ -266,9 +304,10 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             };
             let msg = result.get("message").and_then(|v| v.as_str());
 
-            header(&format!("Compact: {} {}", symbol, interval));
+            header(&format!("Compact: {} {} {}", symbol, data_type, interval));
             divider(50);
             kv("Symbol", &accent(&symbol), 12);
+            kv("Data Type", &data_type, 12);
             kv("Interval", &interval, 12);
             kv("Status", &format!("{}  {}", badge, bold(st)), 12);
             if let Some(m) = msg {
@@ -276,14 +315,19 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             }
             println!();
         }
-        DataCmd::Validate { symbol, interval } => {
-            let result = client.validate_data(&symbol, &interval).await?;
+        DataCmd::Validate {
+            symbol,
+            interval,
+            data_type,
+        } => {
+            let result = client.validate_data(&symbol, &interval, &data_type).await?;
             if format.is_machine() {
                 return print_data_machine(format, client, "data.validate", result);
             }
 
-            header(&format!("Validate: {} {}", symbol, interval));
+            header(&format!("Validate: {} {} {}", symbol, data_type, interval));
             divider(50);
+            kv("Data Type", &data_type, 12);
 
             if let Some(obj) = result.as_object() {
                 let st = obj

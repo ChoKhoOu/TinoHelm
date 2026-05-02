@@ -24,8 +24,12 @@ paths:
   factor_cache: "tino/factor_cache"
 
 data:
-  download_concurrency: 5
-  convert_workers: 4
+  download_concurrency: 2
+  convert_workers: 1
+  chunk_rows: 1000000
+  agg_trades_chunk_rows: 500000
+  csv_queue_maxsize: 1
+  agg_trades_max_days_per_job: 1
 
 backtest:
   max_concurrent: 4

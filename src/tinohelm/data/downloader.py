@@ -344,7 +344,14 @@ class VisionDownloader:
             return
         expected_hash = parts[0].lower()
 
-        actual_hash = hashlib.sha256(zip_path.read_bytes()).hexdigest().lower()
+        with zip_path.open("rb") as fh:
+            if hasattr(hashlib, "file_digest"):
+                actual_hash = hashlib.file_digest(fh, "sha256").hexdigest().lower()
+            else:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                actual_hash = digest.hexdigest().lower()
 
         if actual_hash != expected_hash:
             zip_path.unlink(missing_ok=True)
