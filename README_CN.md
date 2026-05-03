@@ -34,7 +34,7 @@ Rust CLI 是主要交互界面：单次命令、原始 JSON，以及给 LLM/自�
 ./scripts/install-tino.sh
 ```
 
-安装脚本支持 Linux 和 macOS，默认安装 moving `nightly` release；Windows 暂不提供预构建二进制。如需稳定版，请显式指定 tag：
+安装脚本支持 Linux 和 Apple Silicon macOS，默认安装 moving `nightly` release；Windows 和 Intel macOS 暂不提供预构建二进制。如需稳定版，请显式指定 tag：
 
 ```bash
 ./scripts/install-tino.sh --version <tag>

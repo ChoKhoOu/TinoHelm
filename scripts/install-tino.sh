@@ -16,7 +16,7 @@ Environment overrides:
 
 Defaults:
   Installs the moving nightly release unless --version <tag> is provided.
-  Supported platforms: Linux and macOS. Windows is not supported.
+  Supported platforms: Linux x86_64/arm64 and macOS Apple Silicon. Windows is not supported.
 EOF
 }
 
@@ -73,11 +73,11 @@ detect_target() {
       ;;
     Darwin)
       case "$arch" in
-        x86_64|amd64)
-          printf '%s\n' x86_64-apple-darwin
-          ;;
         aarch64|arm64)
           printf '%s\n' aarch64-apple-darwin
+          ;;
+        x86_64|amd64)
+          fail "macOS Intel prebuilt binaries are not provided; build from source instead"
           ;;
         *)
           fail "unsupported architecture for macOS: $arch"

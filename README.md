@@ -36,7 +36,7 @@ The Rust CLI is the primary interface: one-shot commands, raw JSON, and stable `
 ./scripts/install-tino.sh
 ```
 
-The installer supports Linux and macOS, installs the moving `nightly` release by default, and does not provide Windows binaries. Use an explicit tag when stable releases exist:
+The installer supports Linux and Apple Silicon macOS, installs the moving `nightly` release by default, and does not provide Windows or Intel macOS binaries. Use an explicit tag when stable releases exist:
 
 ```bash
 ./scripts/install-tino.sh --version <tag>
