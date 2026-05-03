@@ -4,19 +4,23 @@ Rust CLI for TinoHelm. The old interactive TUI has been removed; `tino` is now a
 
 ## Install
 
+For private GitHub Releases, authenticate before running the installer:
+
+```bash
+gh auth login
+```
+
 From the repository root, install or update a prebuilt CLI without building Rust:
 
 ```bash
 ./scripts/install-tino.sh
 ```
 
-Use the moving nightly release after each merge to `main`:
+The installer supports Linux and macOS, installs the moving `nightly` release by default, and does not provide Windows binaries. Use an explicit tag when stable releases exist:
 
 ```bash
-./scripts/install-tino.sh --nightly
+./scripts/install-tino.sh --version <tag>
 ```
-
-For private releases, authenticate first with `gh auth login` so the installer can use `gh release download`.
 
 Build from source only when you explicitly want a local Rust toolchain:
 

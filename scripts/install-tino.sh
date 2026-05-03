@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${TINO_REPO:-ChoKhoOu/TinoHelm}"
-VERSION="${TINO_VERSION:-latest}"
+VERSION="${TINO_VERSION:-nightly}"
 BINDIR="${BINDIR:-}"
 
 usage() {
@@ -13,6 +13,10 @@ Environment overrides:
   TINO_REPO=owner/repo
   TINO_VERSION=<tag|nightly>
   BINDIR=/install/dir
+
+Defaults:
+  Installs the moving nightly release unless --version <tag> is provided.
+  Supported platforms: Linux and macOS. Windows is not supported.
 EOF
 }
 
@@ -47,20 +51,38 @@ detect_target() {
 
   case "$os" in
     Linux) ;;
+    Darwin) ;;
     *)
-      fail "unsupported operating system: $os (supported: Linux)"
+      fail "unsupported operating system: $os (supported: Linux and macOS)"
       ;;
   esac
 
-  case "$arch" in
-    x86_64|amd64)
-      printf '%s\n' x86_64-unknown-linux-gnu
+  case "$os" in
+    Linux)
+      case "$arch" in
+        x86_64|amd64)
+          printf '%s\n' x86_64-unknown-linux-gnu
+          ;;
+        aarch64|arm64)
+          printf '%s\n' aarch64-unknown-linux-gnu
+          ;;
+        *)
+          fail "unsupported architecture for Linux: $arch"
+          ;;
+      esac
       ;;
-    aarch64|arm64)
-      printf '%s\n' aarch64-unknown-linux-gnu
-      ;;
-    *)
-      fail "unsupported architecture: $arch"
+    Darwin)
+      case "$arch" in
+        x86_64|amd64)
+          printf '%s\n' x86_64-apple-darwin
+          ;;
+        aarch64|arm64)
+          printf '%s\n' aarch64-apple-darwin
+          ;;
+        *)
+          fail "unsupported architecture for macOS: $arch"
+          ;;
+      esac
       ;;
   esac
 }
@@ -71,21 +93,13 @@ gh_is_authenticated() {
 
 download_with_gh() {
   local asset="$1" dest="$2"
-  if [ "$VERSION" = "latest" ]; then
-    gh release download --repo "$REPO" --pattern "$asset" --output "$dest"
-  else
-    gh release download "$VERSION" --repo "$REPO" --pattern "$asset" --output "$dest"
-  fi
+  gh release download "$VERSION" --repo "$REPO" --pattern "$asset" --output "$dest"
 }
 
 download_with_curl() {
   local asset="$1" dest="$2" url
   have_cmd curl || fail "neither authenticated gh nor curl is available for downloads"
-  if [ "$VERSION" = "latest" ]; then
-    url="https://github.com/$REPO/releases/latest/download/$asset"
-  else
-    url="https://github.com/$REPO/releases/download/$VERSION/$asset"
-  fi
+  url="https://github.com/$REPO/releases/download/$VERSION/$asset"
   curl -fsSL "$url" -o "$dest"
 }
 

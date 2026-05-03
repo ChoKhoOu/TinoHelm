@@ -6,6 +6,13 @@ Quantitative trading platform powered by [NautilusTrader](https://nautilustrader
 
 ## Quick Start
 
+For private GHCR images or private GitHub Releases, authenticate before pulling images or running the installer:
+
+```bash
+gh auth login
+gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
+```
+
 ### 1. Start Backend Services
 
 ```bash
@@ -29,11 +36,10 @@ The Rust CLI is the primary interface: one-shot commands, raw JSON, and stable `
 ./scripts/install-tino.sh
 ```
 
-The installer downloads a prebuilt `tino` release from GitHub and installs it to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Use nightly builds from the moving `nightly` release when you want the latest merged CLI without building locally:
+The installer supports Linux and macOS, installs the moving `nightly` release by default, and does not provide Windows binaries. Use an explicit tag when stable releases exist:
 
 ```bash
-./scripts/install-tino.sh --nightly
-TINO_VERSION=nightly ./scripts/install-tino.sh
+./scripts/install-tino.sh --version <tag>
 ```
 
 Build from source only when you explicitly want a local Rust build:
@@ -45,13 +51,6 @@ make package                     # package dist/tino-<target>.tar.gz
 make verify-install              # verify installed binary and PATH resolution
 make BINDIR=/path/on/PATH        # explicit alternate install directory
 make uninstall                   # remove the installed binary
-```
-
-For private GHCR images or private GitHub Releases, authenticate first:
-
-```bash
-gh auth login
-gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
 ```
 
 ### 3. Usage

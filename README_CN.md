@@ -4,6 +4,13 @@
 
 ## 快速开始
 
+如果使用私有 GHCR 镜像或私有 GitHub Releases，请先完成认证，再拉取镜像或运行安装脚本：
+
+```bash
+gh auth login
+gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
+```
+
 ### 1. 启动后端服务
 
 ```bash
@@ -27,11 +34,10 @@ Rust CLI 是主要交互界面：单次命令、原始 JSON，以及给 LLM/自�
 ./scripts/install-tino.sh
 ```
 
-安装脚本会从 GitHub Releases 下载预构建的 `tino`，优先安装到 `/usr/local/bin`，不可写时安装到 `~/.local/bin`。要跟随 main 最新合并版本，用 moving `nightly` release：
+安装脚本支持 Linux 和 macOS，默认安装 moving `nightly` release；Windows 暂不提供预构建二进制。如需稳定版，请显式指定 tag：
 
 ```bash
-./scripts/install-tino.sh --nightly
-TINO_VERSION=nightly ./scripts/install-tino.sh
+./scripts/install-tino.sh --version <tag>
 ```
 
 只有明确需要本地 Rust 构建时才用源码构建：
@@ -43,13 +49,6 @@ make package                     # 打包：dist/tino-<target>.tar.gz
 make verify-install              # 验证已安装二进制和 PATH 解析
 make BINDIR=/path/on/PATH        # 明确指定其他安装目录
 make uninstall                   # 删除已安装的 tino
-```
-
-私有 GHCR 镜像或私有 GitHub Releases 需要先认证：
-
-```bash
-gh auth login
-gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
 ```
 
 ### 3. 使用方式
