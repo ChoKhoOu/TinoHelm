@@ -31,10 +31,8 @@ services:
       retries: 5
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: tinohelm-api:latest
+    image: ${TINO_API_IMAGE:-ghcr.io/chokhoou/tinohelm-api:latest}
+    pull_policy: missing
     restart: unless-stopped
     ports:
       - "127.0.0.1:8000:8000"
@@ -83,9 +81,8 @@ services:
       TINO_BACKTEST__MAX_CONCURRENT: "${TINO_BACKTEST__MAX_CONCURRENT:-4}"
 
   web:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
+    image: ${TINO_WEB_IMAGE:-ghcr.io/chokhoou/tinohelm-web:latest}
+    pull_policy: missing
     restart: unless-stopped
     ports:
       - "127.0.0.1:3000:3000"
@@ -93,7 +90,8 @@ services:
       - api
 
   node-sandbox:
-    image: tinohelm-api:latest
+    image: ${TINO_API_IMAGE:-ghcr.io/chokhoou/tinohelm-api:latest}
+    pull_policy: missing
     restart: on-failure
     command: ["python", "-m", "tinohelm.node.sandbox_main"]
     profiles: ["sandbox"]
@@ -145,7 +143,8 @@ services:
       start_period: 60s
 
   node-live:
-    image: tinohelm-api:latest
+    image: ${TINO_API_IMAGE:-ghcr.io/chokhoou/tinohelm-api:latest}
+    pull_policy: missing
     restart: on-failure
     command: ["python", "-m", "tinohelm.node.live_main"]
     profiles: ["live"]

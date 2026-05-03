@@ -1,0 +1,22 @@
+services:
+  api:
+    image: ${TINO_API_IMAGE:-tinohelm-api:latest}
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+  web:
+    image: ${TINO_WEB_IMAGE:-tinohelm-web:latest}
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+
+  node-sandbox:
+    image: ${TINO_API_IMAGE:-tinohelm-api:latest}
+    pull_policy: never
+
+  node-live:
+    image: ${TINO_API_IMAGE:-tinohelm-api:latest}
+    pull_policy: never

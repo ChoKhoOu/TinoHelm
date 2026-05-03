@@ -9,15 +9,16 @@ Quantitative trading platform powered by [NautilusTrader](https://nautilustrader
 ### 1. Start Backend Services
 
 ```bash
+docker compose pull
 docker compose up -d
 ```
 
-This starts **PostgreSQL**, **Redis**, and the **API server** (FastAPI on port 8000).
+This pulls the published API/web images from GHCR and starts **PostgreSQL**, **Redis**, and the **API server** (FastAPI on port 8000).
 
-Rebuild after source code changes:
+Opt into local image builds only when you actually want them:
 
 ```bash
-docker compose up -d --build api
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 ### 2. Install the CLI
@@ -25,19 +26,32 @@ docker compose up -d --build api
 The Rust CLI is the primary interface: one-shot commands, raw JSON, and stable `llm` envelopes for autonomous callers.
 
 ```bash
-make
+./scripts/install-tino.sh
 ```
 
-Plain `make` builds the release binary, installs `tino` to `/usr/local/bin/tino` when that directory is writable, otherwise to `~/.local/bin/tino`, and verifies that a fresh shell can resolve the newly installed binary from `PATH`. If `PATH` would still find an older `tino` or no `tino` at all, the default install fails instead of silently producing a non-global command. Explicit `BINDIR=...` overrides are treated as packaging/test installs when that directory is not already first on `PATH`; use `make verify-install` with the same `BINDIR` after adjusting `PATH` to enforce global resolution.
-
-Useful variants:
+The installer downloads a prebuilt `tino` release from GitHub and installs it to `/usr/local/bin` when writable, otherwise `~/.local/bin`. Use nightly builds from the moving `nightly` release when you want the latest merged CLI without building locally:
 
 ```bash
+./scripts/install-tino.sh --nightly
+TINO_VERSION=nightly ./scripts/install-tino.sh
+```
+
+Build from source only when you explicitly want a local Rust build:
+
+```bash
+make
 make build                       # build only: cli/target/release/tino
 make package                     # package dist/tino-<target>.tar.gz
 make verify-install              # verify installed binary and PATH resolution
 make BINDIR=/path/on/PATH        # explicit alternate install directory
 make uninstall                   # remove the installed binary
+```
+
+For private GHCR images or private GitHub Releases, authenticate first:
+
+```bash
+gh auth login
+gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
 ```
 
 ### 3. Usage
