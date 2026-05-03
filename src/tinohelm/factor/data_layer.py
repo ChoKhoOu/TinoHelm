@@ -1586,6 +1586,7 @@ class DataLayer:
                 needs_price = not strict_fields or "trade_price" in strict_fields
                 needs_qty = not strict_fields or any(field in {"trade_qty", "signed_trade_qty", "buy_qty", "sell_qty", "trade_imbalance"} for field in strict_fields)
                 needs_side = not strict_fields or any(field in {"trade_side", "signed_trade_qty", "buy_qty", "sell_qty", "trade_imbalance"} for field in strict_fields)
+                needs_trade_id = "trade_id" in strict_fields
                 missing: list[str] = []
                 price_col = "price" if "price" in schema else "trade_price"
                 size_col = "size" if "size" in schema else "trade_qty"
@@ -1595,6 +1596,8 @@ class DataLayer:
                     missing.append("size/trade_qty")
                 if needs_side and "aggressor_side" not in schema:
                     missing.append("aggressor_side")
+                if needs_trade_id and "trade_id" not in schema:
+                    missing.append("trade_id")
                 if missing:
                     if strict_fields:
                         raise ValueError(f"Missing required trade_tick column(s) for raw fields {tuple(strict_fields)!r}: {', '.join(missing)}")

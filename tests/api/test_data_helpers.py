@@ -25,6 +25,7 @@ from tinohelm.api.routes.data import (
     _interval_to_nt,
     _nt_to_interval,
     _parquet_size_for,
+    _run_compact,
     scan_data_catalog,
     trigger_compact,
     trigger_data_fetch_batch,
@@ -346,6 +347,81 @@ class TestSourceAwareBarMaintenance:
 
         assert result == {"status": "ok"}
         assert calls == [("BTCUSDT-PERP", "1m", str(resolve_catalog_path(tmp_path, "markPriceKlines")))]
+
+    def test_validate_data_falls_back_to_legacy_flat_default_klines_root(self, tmp_path: Path, monkeypatch):
+        import asyncio
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader import normalize_symbol
+
+        nt_sym = normalize_symbol("BTCUSDT-PERP")
+        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "bars.parquet").write_bytes(b"legacy")
+        resolved_dir = resolve_catalog_path(tmp_path, "klines") / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        resolved_dir.mkdir(parents=True)
+
+        calls = []
+
+        def fake_validate_bars(*, symbol, interval, catalog_path):
+            calls.append((symbol, interval, catalog_path))
+            return {"status": "ok"}
+
+        monkeypatch.setattr("tinohelm.data.catalog.validate_bars", fake_validate_bars)
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        result = asyncio.run(validate_data(
+            "BTCUSDT-PERP",
+            "1m",
+            data_type="klines",
+            settings=settings,
+        ))
+
+        assert result == {"status": "ok"}
+        assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path))]
+
+    def test_run_compact_falls_back_to_legacy_flat_default_klines_root(self, tmp_path: Path, monkeypatch):
+        import asyncio
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader import normalize_symbol
+
+        nt_sym = normalize_symbol("BTCUSDT-PERP")
+        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "bars.parquet").write_bytes(b"legacy")
+        resolved_dir = resolve_catalog_path(tmp_path, "klines") / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        resolved_dir.mkdir(parents=True)
+
+        calls = []
+        statements = []
+
+        def fake_compact_bars(*, symbol, interval, catalog_path):
+            calls.append((symbol, interval, catalog_path))
+            return {"bars_count": 1, "size_before": 6, "size_after": 6}
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return None
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def execute(self, stmt):
+                statements.append(stmt)
+                return FakeResult()
+
+        monkeypatch.setattr("tinohelm.data.catalog.compact_bars", fake_compact_bars)
+        monkeypatch.setattr("tinohelm.db.session.get_session_factory", lambda: FakeSession)
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        asyncio.run(_run_compact("BTCUSDT-PERP", "1m", settings, "klines", "klines"))
+
+        assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path))]
+        assert statements
+        assert "data_catalog.source_type = :source_type_1" in str(statements[0])
 
     def test_trigger_compact_passes_source_aware_bar_contract(self, tmp_path: Path):
         import asyncio

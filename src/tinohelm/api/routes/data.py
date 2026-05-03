@@ -134,15 +134,38 @@ def _fetch_batch_job_intervals(data_type: str, intervals: list[str]) -> list[str
     return intervals if _is_bar_data_type(data_type) else [None]
 
 
-def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
-    """Calculate total Parquet size on disk for a specific symbol/interval."""
+def _bar_parquet_files(catalog_path: str | Path, symbol: str, interval: str) -> list[Path]:
     from tinohelm.strategy.loader import normalize_symbol
+
     nt_sym = normalize_symbol(symbol)
     nt_interval = _interval_to_nt(interval)
     bar_type_dir = Path(catalog_path) / "data" / "bar" / f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
     if not bar_type_dir.exists():
-        return 0
-    return sum(f.stat().st_size for f in bar_type_dir.glob("*.parquet"))
+        return []
+    return list(bar_type_dir.glob("*.parquet"))
+
+
+def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
+    """Calculate total Parquet size on disk for a specific symbol/interval."""
+    return sum(f.stat().st_size for f in _bar_parquet_files(catalog_path, symbol, interval))
+
+
+def _bar_catalog_path_for(
+    base_catalog_path: str | Path,
+    data_type: str,
+    symbol: str,
+    interval: str,
+    source_type: str | None = None,
+) -> str:
+    """Resolve a bar catalog root, falling back to legacy flat default-source files."""
+    from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+    effective_source = source_type or data_type
+    resolved = resolve_catalog_path(base_catalog_path, effective_source)
+    if effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
+        if not _bar_parquet_files(resolved, symbol, interval) and _bar_parquet_files(base_catalog_path, symbol, interval):
+            return str(base_catalog_path)
+    return str(resolved)
 
 
 def _delete_storage_files(
@@ -350,12 +373,17 @@ async def _run_compact(
     """Background task to compact Parquet files and update DB catalog size."""
     try:
         from tinohelm.data.catalog import compact_bars
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.db.session import get_session_factory
 
         base_catalog_path = settings.paths.catalog if settings else "data/catalog"
         effective_source = source_type or data_type
-        catalog_path = str(resolve_catalog_path(base_catalog_path, effective_source))
+        catalog_path = _bar_catalog_path_for(
+            base_catalog_path,
+            data_type,
+            symbol,
+            interval,
+            source_type=effective_source,
+        )
         result = await asyncio.to_thread(
             compact_bars, symbol=symbol, interval=interval, catalog_path=catalog_path
         )
@@ -486,7 +514,6 @@ async def validate_data(
 ) -> dict:
     """Validate data integrity for a symbol/interval. Returns synchronously."""
     from tinohelm.data.catalog import validate_bars
-    from tinohelm.data.catalog_helpers import resolve_catalog_path
 
     if data_type not in WRITE_CATEGORY or not _is_bar_data_type(data_type):
         supported = ", ".join(sorted(k for k, v in WRITE_CATEGORY.items() if v == "bar"))
@@ -496,7 +523,7 @@ async def validate_data(
         )
 
     base_catalog_path = settings.paths.catalog if settings else "data/catalog"
-    catalog_path = str(resolve_catalog_path(base_catalog_path, data_type))
+    catalog_path = _bar_catalog_path_for(base_catalog_path, data_type, symbol, interval, source_type=data_type)
     try:
         result = await asyncio.to_thread(
             validate_bars,

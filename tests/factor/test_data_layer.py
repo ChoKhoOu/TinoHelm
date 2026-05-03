@@ -1259,6 +1259,17 @@ def test_load_events_trade_tick_missing_ts_event_raises_by_default(tmp_path: Pat
         dl.load_events(symbol=symbol, source="trade_tick", fields=("trade_price", "trade_qty", "trade_id"))
 
 
+def test_load_events_trade_tick_missing_requested_trade_id_raises_by_default(tmp_path: Path) -> None:
+    symbol = "BTCUSDT-PERP"
+    _write_trade_ticks(tmp_path, symbol, [
+        {"ts_event": _T0_NS + 1_000_000_000, "price": 100.0, "size": 1.0},
+    ])
+    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
+
+    with pytest.raises(ValueError, match="trade_id"):
+        dl.load_events(symbol=symbol, source="trade_tick", fields=("trade_id",))
+
+
 def test_load_events_trade_tick_missing_ts_event_empty_fallback(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
     root = tmp_path / "data" / "trade_tick" / normalize_symbol(symbol)
