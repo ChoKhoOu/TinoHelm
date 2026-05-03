@@ -43,6 +43,19 @@ WRITE_CATEGORY: Mapping[str, str] = MappingProxyType({
     "metrics": "metrics",
 })
 
+# Idempotent write-category inputs used by DB/catalog rows. Keep these out of
+# WRITE_CATEGORY because that mapping also doubles as source_type → category for
+# source-aware catalog roots (e.g. resolve_catalog_path("aggTrades")).
+CANONICAL_WRITE_CATEGORIES: frozenset[str] = frozenset({
+    "bar",
+    "trade_tick",
+    "quote_tick",
+    "funding_rate",
+    "order_book_delta",
+    "liquidation",
+    "metrics",
+})
+
 # Mapping: data_type → DB ``interval`` column convention when the user did
 # not provide an interval (typically because the data type is intervalless).
 INTERVAL_CONVENTION: Mapping[str, str] = MappingProxyType({
@@ -88,6 +101,8 @@ def resolve_write_category(data_type: str) -> str:
     Unknown types fall back to ``"custom"`` — the caller is expected to log a
     warning and skip writing rather than crash.
     """
+    if data_type in CANONICAL_WRITE_CATEGORIES:
+        return data_type
     return WRITE_CATEGORY.get(data_type, "custom")
 
 
@@ -97,6 +112,8 @@ def resolve_db_category(data_type: str) -> str:
     Unknown types fall back to the input ``data_type`` itself. Keeps the DB
     record discoverable even when the type isn't yet a first-class category.
     """
+    if data_type in CANONICAL_WRITE_CATEGORIES:
+        return data_type
     return WRITE_CATEGORY.get(data_type, data_type)
 
 

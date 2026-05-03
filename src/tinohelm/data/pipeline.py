@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,6 +46,11 @@ from tinohelm.data.pipeline_helpers import (
 
 logger = logging.getLogger(__name__)
 
+
+def _ns_to_utc_date(ns: int) -> date:
+    """Convert Unix epoch nanoseconds to a UTC calendar date."""
+    return datetime.fromtimestamp(ns // 1_000_000_000, UTC).date()
+
 # Backwards-compat aliases (kept so external imports keep working):
 # ``api/routes/data.py`` historically reaches into ``_WRITE_CATEGORY``;
 # the canonical name is now :data:`WRITE_CATEGORY` exported from
@@ -54,8 +59,8 @@ _REST_FALLBACK_TYPES = REST_FALLBACK_TYPES
 _WRITE_CATEGORY = WRITE_CATEGORY
 _INTERVAL_CONVENTION = INTERVAL_CONVENTION
 
-# Default chunk size for large-file converters
-_CHUNK_SIZE = 10_000_000
+# Backwards-compatible fallback; runtime chunking is settings-driven.
+_CHUNK_SIZE = 1_000_000
 
 
 @dataclass
@@ -95,7 +100,10 @@ class BinanceVisionPipeline:
         self.downloader = VisionDownloader(
             raw_dir=raw_dir, concurrency=cfg.data.download_concurrency,
         )
-        self._convert_workers = cfg.data.convert_workers
+        self._convert_workers = max(1, cfg.data.convert_workers)
+        self._chunk_rows = max(1, cfg.data.chunk_rows)
+        self._agg_trades_chunk_rows = max(1, cfg.data.agg_trades_chunk_rows)
+        self._csv_queue_maxsize = max(1, cfg.data.csv_queue_maxsize)
 
     # ------------------------------------------------------------------
     # Public API
@@ -193,7 +201,7 @@ class BinanceVisionPipeline:
             f"Downloading {len(tasks)} file(s) (×{dl_concurrency}, convert ×{n_converters})...",
         )
 
-        csv_queue: asyncio.Queue[Path | None] = asyncio.Queue()
+        csv_queue: asyncio.Queue[Path | None] = asyncio.Queue(maxsize=self._csv_queue_maxsize)
         download_done = 0
         convert_done = 0
         total_objects = 0
@@ -238,7 +246,8 @@ class BinanceVisionPipeline:
                 # Thread-safe chunk callback: interpolates within current file's range
                 _cd = convert_done  # snapshot before executor starts
                 def _chunk_cb(objects_so_far):
-                    chunks = max(1, objects_so_far // _CHUNK_SIZE)
+                    chunk_rows = self._chunk_rows_for(data_type)
+                    chunks = max(1, objects_so_far // chunk_rows)
                     sub = compute_chunk_subprogress(_cd, total_tasks, chunks)
                     asyncio.run_coroutine_threadsafe(
                         _progress(sub, f"转换中 {objects_so_far:,} objects..."),
@@ -439,7 +448,8 @@ class BinanceVisionPipeline:
     ) -> tuple[int, list[str]]:
         """Read one CSV in chunks, convert, flush periodically."""
         try:
-            reader = pd.read_csv(csv_path, header=hdr, chunksize=_CHUNK_SIZE)
+            chunk_rows = self._chunk_rows_for(data_type)
+            reader = pd.read_csv(csv_path, header=hdr, chunksize=chunk_rows)
         except Exception:
             logger.warning("Failed to open CSV %s", csv_path, exc_info=True)
             return 0, []
@@ -458,7 +468,7 @@ class BinanceVisionPipeline:
             objs = converter.convert_chunk(chunk, instrument, **kwargs)
             chunk_objects.extend(objs)
 
-            if len(chunk_objects) >= _CHUNK_SIZE:
+            if len(chunk_objects) >= chunk_rows:
                 fp = self._write_objects(
                     chunk_objects, symbol, data_type, interval, merge=False,
                 )
@@ -478,6 +488,11 @@ class BinanceVisionPipeline:
                 chunk_cb(count)
 
         return count, fps
+
+    def _chunk_rows_for(self, data_type: str) -> int:
+        if data_type == "aggTrades":
+            return self._agg_trades_chunk_rows
+        return self._chunk_rows
 
     def _stream_full_file(
         self, csv_path, hdr, converter, instrument, kwargs,
@@ -825,11 +840,10 @@ class BinanceVisionPipeline:
             schema = pf.schema_arrow
             col_idx = None
             for name in ("ts_event", "ts_init"):
-                try:
-                    col_idx = schema.get_field_index(name)
+                idx = schema.get_field_index(name)
+                if idx >= 0:
+                    col_idx = idx
                     break
-                except KeyError:
-                    continue
             if col_idx is None:
                 return None
 
@@ -880,6 +894,125 @@ class BinanceVisionPipeline:
 
         return kwargs
 
+    def _catalog_storage_stats(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        source_type: str | None,
+    ) -> tuple[int | None, int]:
+        """Return full-scan row and byte counts for a catalog storage path."""
+        target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
+        if target_dir is None or not target_dir.exists():
+            return None, 0
+
+        if target_dir.is_file():
+            try:
+                total_size = target_dir.stat().st_size
+            except OSError:
+                total_size = 0
+            if target_dir.suffix.lower() != ".parquet":
+                return None, total_size
+            try:
+                import pyarrow.parquet as pq
+
+                return pq.ParquetFile(target_dir).metadata.num_rows, total_size
+            except Exception:
+                return None, total_size
+
+        total_rows = 0
+        total_size = 0
+        saw_unknown_rows = False
+        for path in target_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                total_size += path.stat().st_size
+            except OSError:
+                continue
+            if path.suffix.lower() != ".parquet":
+                saw_unknown_rows = True
+                continue
+            try:
+                import pyarrow.parquet as pq
+
+                total_rows += pq.ParquetFile(path).metadata.num_rows
+            except Exception:
+                saw_unknown_rows = True
+
+        if saw_unknown_rows:
+            return None, total_size
+        return total_rows, total_size
+
+    def _catalog_storage_coverage(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        source_type: str | None,
+    ) -> tuple[date, date] | None:
+        """Return stored min/max event dates for a catalog storage path."""
+        target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
+        if target_dir is None or not target_dir.exists():
+            return None
+
+        paths = [target_dir] if target_dir.is_file() else [path for path in target_dir.rglob("*.parquet") if path.is_file()]
+        min_ts: int | None = None
+        max_ts: int | None = None
+        saw_unknown_range = False
+        for path in paths:
+            if path.suffix.lower() != ".parquet":
+                continue
+            time_range = self._parquet_time_range(path)
+            if time_range is None:
+                saw_unknown_range = True
+                continue
+            file_min, file_max = time_range
+            min_ts = file_min if min_ts is None else min(min_ts, file_min)
+            max_ts = file_max if max_ts is None else max(max_ts, file_max)
+
+        if saw_unknown_range or min_ts is None or max_ts is None:
+            return None
+        return (_ns_to_utc_date(min_ts), _ns_to_utc_date(max_ts))
+
+    def _catalog_item_dir(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        source_type: str | None,
+    ) -> Path | None:
+        """Resolve the concrete on-disk directory represented by one DB row."""
+        from tinohelm.data.catalog import resolve_catalog_path
+        from tinohelm.strategy.loader_helpers import make_bar_type_str, normalize_symbol
+
+        category = resolve_write_category(data_type)
+        if category == "metrics":
+            from tinohelm.data.catalog import metrics_parquet_path
+
+            return metrics_parquet_path(symbol, self.catalog_path)
+        if category == "order_book_delta":
+            from tinohelm.data.catalog import book_depth_parquet_path
+
+            return book_depth_parquet_path(symbol, self.catalog_path)
+        if category == "funding_rate":
+            from tinohelm.data.catalog import funding_rate_parquet_path
+
+            return funding_rate_parquet_path(symbol, self.catalog_path)
+
+        effective_source = source_type or data_type
+        resolved = resolve_catalog_path(self.catalog_path, effective_source)
+        nt_symbol = normalize_symbol(symbol)
+        if category == "bar":
+            if not interval:
+                return None
+            return Path(resolved) / "data" / "bar" / make_bar_type_str(symbol, interval)
+        if category == "trade_tick":
+            return Path(resolved) / "data" / "trade_tick" / nt_symbol
+        if category == "quote_tick":
+            return Path(resolved) / "data" / "quote_tick" / nt_symbol
+        return None
+
     async def _update_db_catalog(
         self,
         symbol: str,
@@ -913,13 +1046,58 @@ class BinanceVisionPipeline:
             existing = (await session.execute(stmt)).scalar_one_or_none()
 
             if existing:
-                existing.start_date = min(existing.start_date, start)
-                existing.end_date = max(existing.end_date, end)
+                overlaps_existing = start <= existing.end_date and end >= existing.start_date
                 existing.file_path = effective_path
-                if record_count is not None:
-                    existing.record_count = record_count
-                if size_bytes is not None:
-                    existing.size_bytes = size_bytes
+                write_category = resolve_write_category(data_type)
+                if overlaps_existing:
+                    storage_record_count, storage_size_bytes = self._catalog_storage_stats(
+                        symbol,
+                        data_type,
+                        interval,
+                        source_type,
+                    )
+                    existing.record_count = storage_record_count
+                    existing.size_bytes = storage_size_bytes
+                    if write_category in {"bar", "trade_tick", "quote_tick"}:
+                        storage_coverage = self._catalog_storage_coverage(
+                            symbol,
+                            data_type,
+                            interval,
+                            source_type,
+                        )
+                        if storage_coverage is not None:
+                            existing.start_date, existing.end_date = storage_coverage
+                    else:
+                        existing.start_date = min(existing.start_date, start)
+                        existing.end_date = max(existing.end_date, end)
+                else:
+                    existing.start_date = min(existing.start_date, start)
+                    existing.end_date = max(existing.end_date, end)
+                    if write_category in {"metrics", "order_book_delta", "funding_rate"}:
+                        storage_record_count, storage_size_bytes = self._catalog_storage_stats(
+                            symbol,
+                            data_type,
+                            interval,
+                            source_type,
+                        )
+                        existing.record_count = storage_record_count
+                        existing.size_bytes = storage_size_bytes
+                    else:
+                        if record_count is None:
+                            existing.record_count = None
+                        elif existing.record_count is not None:
+                            existing.record_count += record_count
+                        if size_bytes is not None:
+                            if write_category == "bar":
+                                _, storage_size_bytes = self._catalog_storage_stats(
+                                    symbol,
+                                    data_type,
+                                    interval,
+                                    source_type,
+                                )
+                                existing.size_bytes = storage_size_bytes
+                            else:
+                                existing.size_bytes = (existing.size_bytes or 0) + size_bytes
                 if source_type is not None:
                     existing.source_type = source_type
             else:

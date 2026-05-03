@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import redis.asyncio as aioredis
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
 from tinohelm.core.config import Settings
+from tinohelm.data.pipeline_helpers import WRITE_CATEGORY, resolve_db_interval
 from tinohelm.data.worker import enqueue_job
 from tinohelm.db.models import DataCatalog, DataFetchJob
 
@@ -57,12 +58,18 @@ class CompactRequest(BaseModel):
 
     symbol: str
     interval: str
+    data_type: str = "klines"
 
 
 # ---- helpers ----
 
 _UNIT_MAP = {"m": "MINUTE", "h": "HOUR", "d": "DAY"}
 _UNIT_REVERSE = {v: k for k, v in _UNIT_MAP.items()}
+_LEGACY_DEFAULT_SOURCE = {
+    "bar": "klines",
+    "trade_tick": "aggTrades",
+    "quote_tick": "bookTicker",
+}
 
 
 def _interval_to_nt(interval: str) -> str:
@@ -92,55 +99,167 @@ def _nt_to_interval(nt_suffix: str) -> str | None:
     return f"{step}{unit}"
 
 
-def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
-    """Calculate total Parquet size on disk for a specific symbol/interval."""
+def _split_fetch_date_ranges(
+    *,
+    data_type: str,
+    start: date,
+    end: date,
+    max_days_per_job: int,
+) -> list[tuple[date, date]]:
+    """Split large aggTrades requests into bounded inclusive date windows."""
+    if data_type != "aggTrades" or max_days_per_job <= 0:
+        return [(start, end)]
+    ranges: list[tuple[date, date]] = []
+    current = start
+    step = timedelta(days=max_days_per_job - 1)
+    while current <= end:
+        chunk_end = min(current + step, end)
+        ranges.append((current, chunk_end))
+        current = chunk_end + timedelta(days=1)
+    return ranges
+
+
+def _is_bar_data_type(data_type: str) -> bool:
+    """Return True for kline-family data types that require bar intervals."""
+    return WRITE_CATEGORY.get(data_type) == "bar"
+
+
+def _fetch_batch_intervals(data_type: str, intervals: list[str]) -> list[str]:
+    """Return the legacy response intervals field; keep it string-only."""
+    return intervals if _is_bar_data_type(data_type) else []
+
+
+def _fetch_batch_job_intervals(data_type: str, intervals: list[str]) -> list[str | None]:
+    """Return effective DB/job intervals for fetch-batch job creation."""
+    return intervals if _is_bar_data_type(data_type) else [None]
+
+
+def _bar_parquet_files(catalog_path: str | Path, symbol: str, interval: str) -> list[Path]:
     from tinohelm.strategy.loader import normalize_symbol
+
     nt_sym = normalize_symbol(symbol)
     nt_interval = _interval_to_nt(interval)
     bar_type_dir = Path(catalog_path) / "data" / "bar" / f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
     if not bar_type_dir.exists():
-        return 0
-    return sum(f.stat().st_size for f in bar_type_dir.glob("*.parquet"))
+        return []
+    return list(bar_type_dir.glob("*.parquet"))
+
+
+def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
+    """Calculate total Parquet size on disk for a specific symbol/interval."""
+    return sum(f.stat().st_size for f in _bar_parquet_files(catalog_path, symbol, interval))
+
+
+def _bar_catalog_path_for(
+    base_catalog_path: str | Path,
+    data_type: str,
+    symbol: str,
+    interval: str,
+    source_type: str | None = None,
+) -> str:
+    """Resolve a bar catalog root, falling back to legacy flat default-source files."""
+    from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+    effective_source = source_type or data_type
+    resolved = resolve_catalog_path(base_catalog_path, effective_source)
+    if effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
+        if not _bar_parquet_files(resolved, symbol, interval) and _bar_parquet_files(base_catalog_path, symbol, interval):
+            return str(base_catalog_path)
+    return str(resolved)
 
 
 def _delete_storage_files(
-    symbol: str, data_type: str, interval: str, catalog_path: str,
+    symbol: str, data_type: str, interval: str, catalog_path: str, source_type: str | None = None,
 ) -> tuple[int, int]:
     """Delete storage files for a catalog entry. Returns (deleted_files, freed_bytes)."""
+    from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+    def _target_roots(category: str) -> list[Path]:
+        base = Path(catalog_path)
+        if not source_type:
+            return [base]
+
+        resolved = resolve_catalog_path(catalog_path, source_type)
+        if source_type == _LEGACY_DEFAULT_SOURCE.get(category):
+            return [resolved, base]
+        if resolved == base:
+            return []
+        return [resolved]
+
+    def _delete_parquet_dirs(target_dirs: list[Path]) -> tuple[int, int]:
+        deleted_files = 0
+        freed_bytes = 0
+        seen: set[Path] = set()
+        for target_dir in target_dirs:
+            if target_dir in seen:
+                continue
+            seen.add(target_dir)
+            if not target_dir.exists():
+                continue
+            files = list(target_dir.glob("*.parquet"))
+            total_size = sum(f.stat().st_size for f in files)
+            for f in files:
+                f.unlink()
+            if target_dir.exists() and not list(target_dir.iterdir()):
+                target_dir.rmdir()
+            deleted_files += len(files)
+            freed_bytes += total_size
+        return deleted_files, freed_bytes
+
+    def _delete_parquet_files(target_files: list[Path]) -> tuple[int, int]:
+        deleted_files = 0
+        freed_bytes = 0
+        seen: set[Path] = set()
+        for target_file in target_files:
+            if target_file in seen:
+                continue
+            seen.add(target_file)
+            if not target_file.exists():
+                continue
+            size = target_file.stat().st_size
+            target_file.unlink()
+            deleted_files += 1
+            freed_bytes += size
+        return deleted_files, freed_bytes
+
     if data_type == "bar":
         from tinohelm.strategy.loader import normalize_symbol
         nt_sym = normalize_symbol(symbol)
         nt_interval = _interval_to_nt(interval)
-        target_dir = Path(catalog_path) / "data" / "bar" / f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
+        dir_name = f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
+        return _delete_parquet_dirs([root / "data" / "bar" / dir_name for root in _target_roots("bar")])
     elif data_type == "trade_tick":
         from tinohelm.strategy.loader import normalize_symbol
         nt_sym = normalize_symbol(symbol)
-        target_dir = Path(catalog_path) / "data" / "trade_tick" / nt_sym
+        return _delete_parquet_dirs([root / "data" / "trade_tick" / nt_sym for root in _target_roots("trade_tick")])
+    elif data_type == "metrics":
+        from tinohelm.data.catalog import metrics_parquet_path
+
+        return _delete_parquet_files([metrics_parquet_path(symbol, catalog_path)])
+    elif data_type == "order_book_delta":
+        from tinohelm.data.catalog import book_depth_parquet_path
+
+        return _delete_parquet_files([book_depth_parquet_path(symbol, catalog_path)])
     elif data_type == "funding_rate":
         from tinohelm.core.paths import paths
+
+        from tinohelm.data.catalog import funding_rate_parquet_path
+
+        deleted_files, freed_bytes = _delete_parquet_files([funding_rate_parquet_path(symbol, catalog_path)])
         json_path = paths.get("funding_rates") / f"{symbol.lower()}.json"
         if json_path.exists():
             size = json_path.stat().st_size
             json_path.unlink()
-            return (1, size)
-        return (0, 0)
+            deleted_files += 1
+            freed_bytes += size
+        return (deleted_files, freed_bytes)
     elif data_type == "quote_tick":
         from tinohelm.strategy.loader import normalize_symbol
         nt_sym = normalize_symbol(symbol)
-        target_dir = Path(catalog_path) / "data" / "quote_tick" / nt_sym
+        return _delete_parquet_dirs([root / "data" / "quote_tick" / nt_sym for root in _target_roots("quote_tick")])
     else:
         logger.warning("No storage handler for data_type=%r, removing DB row only", data_type)
         return (0, 0)
-
-    if not target_dir.exists():
-        return (0, 0)
-    files = list(target_dir.glob("*.parquet"))
-    total_size = sum(f.stat().st_size for f in files)
-    for f in files:
-        f.unlink()
-    if target_dir.exists() and not list(target_dir.iterdir()):
-        target_dir.rmdir()
-    return (len(files), total_size)
 
 
 # ---- routes ----
@@ -244,18 +363,32 @@ async def cancel_data_fetch_job(
     return {"status": "cancelled", "job_id": job_id}
 
 
-async def _run_compact(symbol: str, interval: str, settings: Settings) -> None:
+async def _run_compact(
+    symbol: str,
+    interval: str,
+    settings: Settings,
+    data_type: str = "klines",
+    source_type: str | None = None,
+) -> None:
     """Background task to compact Parquet files and update DB catalog size."""
     try:
         from tinohelm.data.catalog import compact_bars
         from tinohelm.db.session import get_session_factory
 
-        catalog_path = str(settings.paths.catalog) if settings else "data/catalog"
+        base_catalog_path = settings.paths.catalog if settings else "data/catalog"
+        effective_source = source_type or data_type
+        catalog_path = _bar_catalog_path_for(
+            base_catalog_path,
+            data_type,
+            symbol,
+            interval,
+            source_type=effective_source,
+        )
         result = await asyncio.to_thread(
             compact_bars, symbol=symbol, interval=interval, catalog_path=catalog_path
         )
 
-        # Update DB catalog size_bytes
+        # Update DB catalog size_bytes for the same source-aware bar row.
         total_size = await asyncio.to_thread(_parquet_size_for, catalog_path, symbol, interval)
 
         factory = get_session_factory()
@@ -264,18 +397,29 @@ async def _run_compact(symbol: str, interval: str, settings: Settings) -> None:
                 DataCatalog.symbol == symbol,
                 DataCatalog.data_type == "bar",
                 DataCatalog.interval == interval,
+                DataCatalog.source_type == effective_source,
             )
             existing = (await db.execute(stmt)).scalar_one_or_none()
+            if existing is None and effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
+                legacy_stmt = select(DataCatalog).where(
+                    DataCatalog.symbol == symbol,
+                    DataCatalog.data_type == "bar",
+                    DataCatalog.interval == interval,
+                    DataCatalog.source_type.is_(None),
+                )
+                existing = (await db.execute(legacy_stmt)).scalar_one_or_none()
             if existing:
                 existing.size_bytes = total_size
+                if "bars_count" in result:
+                    existing.record_count = result["bars_count"]
                 await db.commit()
 
         logger.info(
-            "Compaction background task done: %s %s — %d bars, %d -> %d bytes",
-            symbol, interval, result["bars_count"], result["size_before"], result["size_after"],
+            "Compaction background task done: %s %s %s — %d bars, %d -> %d bytes",
+            symbol, data_type, interval, result["bars_count"], result["size_before"], result["size_after"],
         )
     except Exception as exc:
-        logger.exception("Compaction failed for %s %s: %s", symbol, interval, exc)
+        logger.exception("Compaction failed for %s %s %s: %s", symbol, data_type, interval, exc)
 
 
 @router.post("/fetch-batch")
@@ -283,26 +427,54 @@ async def trigger_data_fetch_batch(
     body: DataFetchBatchRequest,
     db: AsyncSession = Depends(get_db),
     rds: aioredis.Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Create persistent data-fetch jobs for multiple symbols."""
     if not body.symbols:
         raise HTTPException(status_code=400, detail="symbols must not be empty")
+    if body.start > body.end:
+        raise HTTPException(status_code=400, detail="start must be on or before end")
+    if body.data_type not in WRITE_CATEGORY:
+        supported = ", ".join(sorted(WRITE_CATEGORY))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported data_type {body.data_type!r}. Supported values: {supported}",
+        )
+    if _is_bar_data_type(body.data_type) and not body.intervals:
+        raise HTTPException(status_code=400, detail="intervals must not be empty")
 
     job_ids: list[str] = []
+    jobs: list[dict[str, str | None]] = []
+    ranges = _split_fetch_date_ranges(
+        data_type=body.data_type,
+        start=body.start,
+        end=body.end,
+        max_days_per_job=settings.data.agg_trades_max_days_per_job,
+    )
+    effective_intervals = _fetch_batch_job_intervals(body.data_type, body.intervals)
     for symbol in body.symbols:
-        for interval in body.intervals:
-            job = DataFetchJob(
-                symbol=symbol,
-                data_type=body.data_type,
-                interval=interval,
-                start_date=body.start,
-                end_date=body.end,
-                asset_class=body.asset_class,
-                status="queued",
-            )
-            db.add(job)
-            await db.flush()
-            job_ids.append(job.job_id)
+        for interval in effective_intervals:
+            for start_date, end_date in ranges:
+                job = DataFetchJob(
+                    symbol=symbol,
+                    data_type=body.data_type,
+                    interval=interval,
+                    start_date=start_date,
+                    end_date=end_date,
+                    asset_class=body.asset_class,
+                    status="queued",
+                )
+                db.add(job)
+                await db.flush()
+                job_ids.append(job.job_id)
+                jobs.append({
+                    "job_id": job.job_id,
+                    "data_type": body.data_type,
+                    "db_interval": resolve_db_interval(body.data_type, interval),
+                    "interval": interval,
+                    "start": start_date.isoformat(),
+                    "end": end_date.isoformat(),
+                })
 
     await db.commit()
 
@@ -311,10 +483,11 @@ async def trigger_data_fetch_batch(
 
     return {
         "status": "accepted",
-        "message": f"Data fetch for {len(job_ids)} job(s) queued ({len(body.symbols)} symbol(s) × {len(body.intervals)} interval(s))",
+        "message": f"Data fetch for {len(job_ids)} job(s) queued ({len(body.symbols)} symbol(s) × {len(effective_intervals)} effective interval(s))",
         "job_ids": job_ids,
+        "jobs": jobs,
         "symbols": body.symbols,
-        "intervals": body.intervals,
+        "intervals": _fetch_batch_intervals(body.data_type, body.intervals),
         "data_type": body.data_type,
         "start": body.start.isoformat(),
         "end": body.end.isoformat(),
@@ -329,10 +502,16 @@ async def trigger_compact(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Trigger background compaction for a symbol/interval."""
-    background_tasks.add_task(_run_compact, body.symbol, body.interval, settings)
+    if body.data_type not in WRITE_CATEGORY or not _is_bar_data_type(body.data_type):
+        supported = ", ".join(sorted(k for k, v in WRITE_CATEGORY.items() if v == "bar"))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported bar data_type {body.data_type!r}. Supported values: {supported}",
+        )
+    background_tasks.add_task(_run_compact, body.symbol, body.interval, settings, body.data_type, body.data_type)
     return {
         "status": "accepted",
-        "message": f"Compaction for {body.symbol} {body.interval} queued",
+        "message": f"Compaction for {body.symbol} {body.data_type} {body.interval} queued",
     }
 
 
@@ -340,17 +519,27 @@ async def trigger_compact(
 async def validate_data(
     symbol: str,
     interval: str,
+    data_type: str = "klines",
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Validate data integrity for a symbol/interval. Returns synchronously."""
     from tinohelm.data.catalog import validate_bars
 
+    if data_type not in WRITE_CATEGORY or not _is_bar_data_type(data_type):
+        supported = ", ".join(sorted(k for k, v in WRITE_CATEGORY.items() if v == "bar"))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported bar data_type {data_type!r}. Supported values: {supported}",
+        )
+
+    base_catalog_path = settings.paths.catalog if settings else "data/catalog"
+    catalog_path = _bar_catalog_path_for(base_catalog_path, data_type, symbol, interval, source_type=data_type)
     try:
         result = await asyncio.to_thread(
             validate_bars,
             symbol=symbol,
             interval=interval,
-            catalog_path=str(settings.paths.catalog),
+            catalog_path=catalog_path,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -371,8 +560,6 @@ async def scan_data_catalog(
     Discovers bar data directories, reads date ranges from the actual
     Parquet data, and upserts DataCatalog rows for any that are missing.
     """
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
     catalog_path = str(settings.paths.catalog)
     from tinohelm.data.catalog import resolve_catalog_path
 
@@ -397,7 +584,9 @@ async def scan_data_catalog(
     if _old_bar.exists() and not any(d == _old_bar for d, _, _ in _bar_scan_targets):
         _bar_scan_targets.append((_old_bar, catalog_path, "klines"))
 
+    bar_stats: dict[tuple[str, str, str, str], dict] = {}
     for bar_dir, cat_root, _bar_src in _bar_scan_targets:
+        is_source_aware = Path(cat_root) != Path(catalog_path)
         for entry in sorted(bar_dir.iterdir()):
             if not entry.is_dir():
                 continue
@@ -423,6 +612,8 @@ async def scan_data_catalog(
 
             bar_type_str = f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
             try:
+                from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
                 catalog = ParquetDataCatalog(cat_root)
                 bars = await asyncio.to_thread(catalog.bars, bar_types=[bar_type_str])
                 if not bars:
@@ -437,62 +628,91 @@ async def scan_data_catalog(
                 logger.warning("Scan: failed to read bars for %s", bar_type_str, exc_info=True)
                 continue
 
-            stmt = select(DataCatalog).where(
-                DataCatalog.symbol == symbol,
-                DataCatalog.data_type == "bar",
-                DataCatalog.interval == interval,
-                DataCatalog.source_type == _bar_src,
-            )
-            existing_row = (await db.execute(stmt)).scalar_one_or_none()
-            if not existing_row:
-                # Adopt old record with source_type=NULL if present
-                stmt_null = select(DataCatalog).where(
-                    DataCatalog.symbol == symbol,
-                    DataCatalog.data_type == "bar",
-                    DataCatalog.interval == interval,
-                    DataCatalog.source_type.is_(None),
-                )
-                existing_row = (await db.execute(stmt_null)).scalar_one_or_none()
-            if existing_row:
-                existing_row.start_date = min(existing_row.start_date, start_date)
-                existing_row.end_date = max(existing_row.end_date, end_date)
-                existing_row.size_bytes = size_bytes
-                existing_row.record_count = record_count
-                existing_row.file_path = cat_root
-                existing_row.source_type = _bar_src
-                updated += 1
+            key = (symbol, "bar", interval, _bar_src)
+            existing = bar_stats.get(key)
+            if existing is None:
+                bar_stats[key] = {
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "size_bytes": size_bytes,
+                    "record_count": record_count,
+                    "all_record_counts_known": record_count is not None,
+                    "file_path": cat_root,
+                    "has_source_aware": is_source_aware,
+                }
             else:
-                db.add(DataCatalog(
-                    symbol=symbol,
-                    data_type="bar",
-                    interval=interval,
-                    start_date=start_date,
-                    end_date=end_date,
-                    file_path=cat_root,
-                    size_bytes=size_bytes,
-                    record_count=record_count,
-                    source_type=_bar_src,
-                ))
-                created += 1
+                existing["start_date"] = min(existing["start_date"], start_date)
+                existing["end_date"] = max(existing["end_date"], end_date)
+                existing["size_bytes"] += size_bytes
+                if record_count is None:
+                    existing["all_record_counts_known"] = False
+                    existing["record_count"] = None
+                elif existing["all_record_counts_known"]:
+                    existing["record_count"] = (existing["record_count"] or 0) + record_count
+                if is_source_aware and not existing["has_source_aware"]:
+                    existing["file_path"] = cat_root
+                    existing["has_source_aware"] = True
 
             logger.info("Scan: %s %s %s [%s..%s] %d bytes", _bar_src, symbol, interval, start_date, end_date, size_bytes)
 
-    # Scan trade_tick directories per source_type
-    _tick_source_types = ("aggTrades", "trades")
-    _tick_scan_targets: list[tuple[Path, str, str]] = []
-    for _src_type in _tick_source_types:
-        resolved = str(resolve_catalog_path(catalog_path, _src_type))
-        d = Path(resolved) / "data" / "trade_tick"
-        if d.exists():
-            _tick_scan_targets.append((d, resolved, _src_type))
-    # Old flat path fallback (pre-migration data, default to aggTrades)
-    _old_tick = Path(catalog_path) / "data" / "trade_tick"
-    if _old_tick.exists() and not any(d == _old_tick for d, _, _ in _tick_scan_targets):
-        _tick_scan_targets.append((_old_tick, catalog_path, "aggTrades"))
+    for (symbol, _data_type, interval, _bar_src), stat in bar_stats.items():
+        stmt = select(DataCatalog).where(
+            DataCatalog.symbol == symbol,
+            DataCatalog.data_type == "bar",
+            DataCatalog.interval == interval,
+            DataCatalog.source_type == _bar_src,
+        )
+        existing_row = (await db.execute(stmt)).scalar_one_or_none()
+        if not existing_row and _bar_src == "klines":
+            stmt_null = select(DataCatalog).where(
+                DataCatalog.symbol == symbol,
+                DataCatalog.data_type == "bar",
+                DataCatalog.interval == interval,
+                DataCatalog.source_type.is_(None),
+            )
+            existing_row = (await db.execute(stmt_null)).scalar_one_or_none()
+        if existing_row:
+            existing_row.start_date = min(existing_row.start_date, stat["start_date"])
+            existing_row.end_date = max(existing_row.end_date, stat["end_date"])
+            existing_row.size_bytes = stat["size_bytes"]
+            existing_row.record_count = stat["record_count"]
+            existing_row.file_path = stat["file_path"]
+            existing_row.source_type = _bar_src
+            updated += 1
+        else:
+            db.add(DataCatalog(
+                symbol=symbol,
+                data_type="bar",
+                interval=interval,
+                start_date=stat["start_date"],
+                end_date=stat["end_date"],
+                file_path=stat["file_path"],
+                size_bytes=stat["size_bytes"],
+                record_count=stat["record_count"],
+                source_type=_bar_src,
+            ))
+            created += 1
 
+    # Scan source-aware tick directories plus old flat fallbacks.
+    _tick_scan_targets: list[tuple[Path, str, str, str]] = []
+    for _tick_data_type, _tick_dir_name, _tick_source_types in (
+        ("trade_tick", "trade_tick", ("aggTrades", "trades")),
+        ("quote_tick", "quote_tick", ("bookTicker",)),
+    ):
+        for _src_type in _tick_source_types:
+            resolved = str(resolve_catalog_path(catalog_path, _src_type))
+            d = Path(resolved) / "data" / _tick_dir_name
+            if d.exists():
+                _tick_scan_targets.append((d, resolved, _src_type, _tick_data_type))
+        _old_tick = Path(catalog_path) / "data" / _tick_dir_name
+        if _old_tick.exists() and not any(d == _old_tick for d, _, _, dt in _tick_scan_targets if dt == _tick_data_type):
+            _tick_scan_targets.append((_old_tick, catalog_path, _tick_source_types[0], _tick_data_type))
+
+    tick_stats: dict[tuple[str, str, str, str], dict] = {}
     sym_pattern = re.compile(r"^(.+)\.BINANCE$")
-    for trade_tick_dir, _tick_root, _src_type in _tick_scan_targets:
+    for trade_tick_dir, _tick_root, _src_type, _tick_data_type in _tick_scan_targets:
         resolved_path = _tick_root
+        is_source_aware = Path(resolved_path) != Path(catalog_path)
         for entry in sorted(trade_tick_dir.iterdir()):
             if not entry.is_dir():
                 continue
@@ -508,6 +728,7 @@ async def scan_data_catalog(
 
             try:
                 import pyarrow.parquet as pq
+
                 total_rows = 0
                 ts_min_val, ts_max_val = float("inf"), 0
                 for pf in parquet_files:
@@ -517,11 +738,13 @@ async def scan_data_catalog(
                         rg = meta.row_group(rg_idx)
                         for col_idx in range(rg.num_columns):
                             col = rg.column(col_idx)
-                            if col.path_in_schema == "ts_init" and col.statistics and col.statistics.has_min_max:
+                            if col.path_in_schema not in {"ts_event", "ts_init"}:
+                                continue
+                            if col.statistics and col.statistics.has_min_max:
                                 ts_min_val = min(ts_min_val, col.statistics.min)
                                 ts_max_val = max(ts_max_val, col.statistics.max)
-                start_dt = datetime.fromtimestamp(ts_min_val / 1e9, tz=timezone.utc).date() if ts_min_val != float("inf") else None
-                end_dt = datetime.fromtimestamp(ts_max_val / 1e9, tz=timezone.utc).date() if ts_max_val != 0 else None
+                start_dt = datetime.fromtimestamp(ts_min_val // 1_000_000_000, tz=timezone.utc).date() if ts_min_val != float("inf") else None
+                end_dt = datetime.fromtimestamp(ts_max_val // 1_000_000_000, tz=timezone.utc).date() if ts_max_val != 0 else None
             except Exception:
                 import os
                 file_times = [os.path.getmtime(pf) for pf in parquet_files]
@@ -532,44 +755,68 @@ async def scan_data_catalog(
             if start_dt is None or end_dt is None:
                 continue
 
-            stmt = select(DataCatalog).where(
-                DataCatalog.symbol == symbol,
-                DataCatalog.data_type == "trade_tick",
-                DataCatalog.interval == "tick",
-                DataCatalog.source_type == _src_type,
-            )
-            existing_row = (await db.execute(stmt)).scalar_one_or_none()
-            if not existing_row:
-                # Adopt old record with source_type=NULL if present
-                stmt_null = select(DataCatalog).where(
-                    DataCatalog.symbol == symbol,
-                    DataCatalog.data_type == "trade_tick",
-                    DataCatalog.interval == "tick",
-                    DataCatalog.source_type.is_(None),
-                )
-                existing_row = (await db.execute(stmt_null)).scalar_one_or_none()
-            if existing_row:
-                existing_row.start_date = min(existing_row.start_date, start_dt)
-                existing_row.end_date = max(existing_row.end_date, end_dt)
-                existing_row.size_bytes = sz
-                existing_row.file_path = resolved_path
-                existing_row.source_type = _src_type
-                if total_rows is not None:
-                    existing_row.record_count = total_rows
-                updated += 1
+            key = (symbol, _tick_data_type, "tick", _src_type)
+            existing = tick_stats.get(key)
+            if existing is None:
+                tick_stats[key] = {
+                    "start_date": start_dt,
+                    "end_date": end_dt,
+                    "size_bytes": sz,
+                    "record_count": total_rows,
+                    "all_record_counts_known": total_rows is not None,
+                    "file_path": resolved_path,
+                    "has_source_aware": is_source_aware,
+                }
             else:
-                db.add(DataCatalog(
-                    symbol=symbol,
-                    data_type="trade_tick",
-                    interval="tick",
-                    start_date=start_dt,
-                    end_date=end_dt,
-                    file_path=resolved_path,
-                    size_bytes=sz,
-                    record_count=total_rows,
-                    source_type=_src_type,
-                ))
-                created += 1
+                existing["start_date"] = min(existing["start_date"], start_dt)
+                existing["end_date"] = max(existing["end_date"], end_dt)
+                existing["size_bytes"] += sz
+                if total_rows is None:
+                    existing["all_record_counts_known"] = False
+                    existing["record_count"] = None
+                elif existing["all_record_counts_known"]:
+                    existing["record_count"] = (existing["record_count"] or 0) + total_rows
+                if is_source_aware and not existing["has_source_aware"]:
+                    existing["file_path"] = resolved_path
+                    existing["has_source_aware"] = True
+
+    for (symbol, _tick_data_type, interval, _src_type), stat in tick_stats.items():
+        stmt = select(DataCatalog).where(
+            DataCatalog.symbol == symbol,
+            DataCatalog.data_type == _tick_data_type,
+            DataCatalog.interval == interval,
+            DataCatalog.source_type == _src_type,
+        )
+        existing_row = (await db.execute(stmt)).scalar_one_or_none()
+        if not existing_row and _src_type == _LEGACY_DEFAULT_SOURCE.get(_tick_data_type):
+            stmt_null = select(DataCatalog).where(
+                DataCatalog.symbol == symbol,
+                DataCatalog.data_type == _tick_data_type,
+                DataCatalog.interval == interval,
+                DataCatalog.source_type.is_(None),
+            )
+            existing_row = (await db.execute(stmt_null)).scalar_one_or_none()
+        if existing_row:
+            existing_row.start_date = min(existing_row.start_date, stat["start_date"])
+            existing_row.end_date = max(existing_row.end_date, stat["end_date"])
+            existing_row.size_bytes = stat["size_bytes"]
+            existing_row.file_path = stat["file_path"]
+            existing_row.source_type = _src_type
+            existing_row.record_count = stat["record_count"]
+            updated += 1
+        else:
+            db.add(DataCatalog(
+                symbol=symbol,
+                data_type=_tick_data_type,
+                interval=interval,
+                start_date=stat["start_date"],
+                end_date=stat["end_date"],
+                file_path=stat["file_path"],
+                size_bytes=stat["size_bytes"],
+                record_count=stat["record_count"],
+                source_type=_src_type,
+            ))
+            created += 1
 
     await db.commit()
     return {"status": "ok", "scanned": scanned, "created": created, "updated": updated}
@@ -592,6 +839,7 @@ async def delete_catalog_entry(
         _delete_storage_files,
         row.symbol, row.data_type, row.interval,
         str(settings.paths.catalog),
+        row.source_type,
     )
 
     await db.delete(row)

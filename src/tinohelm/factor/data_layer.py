@@ -60,13 +60,14 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Literal, Sequence
 
 import polars as pl
 
 from tinohelm.core.paths import paths
-from tinohelm.factor.types import DataRequest, Panel
+from tinohelm.factor.types import DataRequest, EventRequest, Panel
 from tinohelm.factor.universe import Universe
 
 logger = logging.getLogger(__name__)
@@ -97,13 +98,16 @@ _TRADE_TICK_FIELDS: frozenset[str] = frozenset({
     "trade_price", "trade_qty", "trade_side", "signed_trade_qty",
     "buy_qty", "sell_qty", "trade_imbalance",
 })
+_TRADE_EVENT_FIELDS: frozenset[str] = (_TRADE_TICK_FIELDS - frozenset({"trade_imbalance"})) | frozenset({"trade_id"})
+_TRADE_TICK_SOURCE_TYPES: frozenset[str] = frozenset({"aggTrades", "trades"})
+_QUOTE_TICK_SOURCE_TYPES: frozenset[str] = frozenset({"bookTicker"})
 _METRICS_FIELDS: frozenset[str] = frozenset({
     "open_interest", "sum_open_interest", "open_interest_value",
     "toptrader_long_short_ratio_count", "toptrader_long_short_ratio_sum",
     "global_long_short_ratio", "taker_long_short_vol_ratio",
 })
 _BOOK_DEPTH_FIELDS: frozenset[str] = frozenset({"book_depth", "book_depth_notional", "depth", "notional"})
-_BAR_CLOSE_OFFSET = pl.duration(milliseconds=1)
+_BAR_CLOSE_OFFSET = pl.duration(nanoseconds=1_000_000)
 
 _NAUTILUS_FIXED_PRECISION_SCALE: float = 10_000_000_000_000_000.0
 _DEFAULT_BAR_SOURCE_TYPE: str = "klines"
@@ -150,6 +154,15 @@ class _BarInterval:
         return f"{self.step}{_BAR_AGGREGATION_POLARS_UNIT[self.aggregation]}"
 
 
+@dataclass(frozen=True)
+class _TickFileCandidate:
+    path: Path
+    source_priority: int
+    file_ordinal: int
+    source_type: str
+    source_aware: bool
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers — series construction
 # ---------------------------------------------------------------------------
@@ -160,6 +173,51 @@ def _empty_series_frame() -> pl.DataFrame:
         {_TS_COL: [], _VAL_COL: []},
         schema={_TS_COL: pl.Datetime("ns"), _VAL_COL: pl.Float64},
     )
+
+
+def _empty_trade_tick_events_frame(fields: Sequence[str]) -> pl.DataFrame:
+    """Return an empty raw trade-tick event frame preserving requested columns."""
+    numeric_fields = {
+        "trade_price",
+        "trade_qty",
+        "trade_side",
+        "signed_trade_qty",
+        "buy_qty",
+        "sell_qty",
+    }
+    schema: dict[str, pl.DataType] = {_TS_COL: pl.Datetime("ns")}
+    for field in fields:
+        schema[field] = pl.Utf8 if field == "trade_id" else pl.Float64 if field in numeric_fields else pl.Null
+    return pl.DataFrame(schema=schema)
+
+
+def _empty_quote_tick_events_frame(fields: Sequence[str]) -> pl.DataFrame:
+    """Return an empty raw quote-tick event frame preserving requested columns."""
+    schema: dict[str, pl.DataType] = {_TS_COL: pl.Datetime("ns")}
+    for field in fields:
+        schema[field] = pl.Float64
+    return pl.DataFrame(schema=schema)
+
+
+def _validate_trade_tick_source_type(source_type: str | None) -> None:
+    if source_type is not None and source_type not in _TRADE_TICK_SOURCE_TYPES:
+        allowed = ", ".join(sorted(_TRADE_TICK_SOURCE_TYPES))
+        raise ValueError(f"Unknown trade_tick source_type {source_type!r}; supported: {allowed}")
+
+
+def _validate_quote_tick_source_type(source_type: str | None) -> None:
+    if source_type is not None and source_type not in _QUOTE_TICK_SOURCE_TYPES:
+        allowed = ", ".join(sorted(_QUOTE_TICK_SOURCE_TYPES))
+        raise ValueError(f"Unknown quote_tick source_type {source_type!r}; supported: {allowed}")
+
+
+def _add_panel_result(result: dict[str, Panel], field_name: str, panel: Panel, source: str) -> None:
+    if field_name in result:
+        raise ValueError(
+            "DataLayer output key collision for "
+            f"{source} field {field_name!r}; request a single frequency/source_type per field"
+        )
+    result[field_name] = panel
 
 
 def _build_series_frame(
@@ -319,6 +377,24 @@ def _fallback_source_window(
     return source_start, source_end
 
 
+def _tick_panel_raw_end(end: datetime | None, interval: _BarInterval) -> datetime | None:
+    """Extend a requested panel end to the enclosing raw tick bar boundary."""
+    if end is None:
+        return None
+    end_ns = _datetime_to_ns(end)
+    boundary_ns = ((end_ns + interval.ns - 1) // interval.ns) * interval.ns
+    return _ns_to_datetime(boundary_ns)
+
+
+def _tick_panel_raw_start(start: datetime | None, interval: _BarInterval) -> datetime | None:
+    """Floor a requested panel start to the enclosing raw tick bar boundary."""
+    if start is None:
+        return None
+    start_ns = _datetime_to_ns(start)
+    boundary_ns = (start_ns // interval.ns) * interval.ns
+    return _ns_to_datetime(boundary_ns)
+
+
 def _apply_lookback_start(
     start: datetime | None,
     frequency: str,
@@ -378,6 +454,156 @@ def _fixed_precision_expr(column: str, dtype: pl.DataType) -> pl.Expr:
         except AttributeError:
             return col.map_elements(_decode_nautilus_fixed_precision, return_dtype=pl.Float64)
     return pl.lit(None, dtype=pl.Float64)
+
+
+@lru_cache(maxsize=4096)
+def _cached_parquet_ts_event_range(
+    path_str: str,
+    mtime_ns: int,
+    size: int,
+) -> tuple[int | None, int | None] | None:
+    result: tuple[int | None, int | None] | None = None
+    path = Path(path_str)
+    try:
+        import pyarrow.parquet as pq
+
+        metadata = pq.ParquetFile(path).metadata
+        mins: list[int] = []
+        maxs: list[int] = []
+        for row_group_idx in range(metadata.num_row_groups):
+            row_group = metadata.row_group(row_group_idx)
+            for column_idx in range(row_group.num_columns):
+                column = row_group.column(column_idx)
+                if column.path_in_schema != "ts_event" or column.statistics is None:
+                    continue
+                stats = column.statistics
+                if stats.has_min_max:
+                    mins.append(int(stats.min))
+                    maxs.append(int(stats.max))
+        if mins and maxs:
+            result = (min(mins), max(maxs))
+        else:
+            table = pq.read_table(path, columns=["ts_event"])
+            column = table.column("ts_event")
+            if len(column) > 0:
+                result = (int(column.combine_chunks().to_numpy().min()), int(column.combine_chunks().to_numpy().max()))
+    except Exception:
+        try:
+            stats = (
+                pl.scan_parquet(str(path))
+                .select([
+                    pl.col("ts_event").min().alias("min_ts_event"),
+                    pl.col("ts_event").max().alias("max_ts_event"),
+                ])
+                .collect()
+            )
+            if not stats.is_empty():
+                result = (int(stats["min_ts_event"][0]), int(stats["max_ts_event"][0]))
+        except Exception:
+            result = None
+
+    return result
+
+
+def _parquet_ts_event_range(path: Path) -> tuple[int | None, int | None] | None:
+    """Return min/max ts_event ns for a Parquet file, or ``None`` if unknown."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return _cached_parquet_ts_event_range(str(path), stat.st_mtime_ns, stat.st_size)
+
+_parquet_ts_event_range.cache_info = _cached_parquet_ts_event_range.cache_info  # type: ignore[attr-defined]
+
+
+def _prune_parquet_files_by_time(
+    files: Sequence[Path],
+    start: datetime | None,
+    end: datetime | None,
+) -> list[Path]:
+    """Select files whose ts_event metadata overlaps an inclusive window."""
+    if start is None and end is None:
+        return list(files)
+    start_ns = _datetime_to_ns(start) if start is not None else None
+    end_ns = _datetime_to_ns(end) if end is not None else None
+    selected: list[Path] = []
+    for path in files:
+        file_range = _parquet_ts_event_range(path)
+        if file_range is None or file_range[0] is None or file_range[1] is None:
+            selected.append(path)
+            continue
+        min_ns, max_ns = file_range
+        if start_ns is not None and max_ns < start_ns:
+            continue
+        if end_ns is not None and min_ns > end_ns:
+            continue
+        selected.append(path)
+    return selected
+
+
+def _trade_tick_required_columns(fields: Sequence[str]) -> list[str]:
+    """Return ordered physical trade-tick columns needed for derived fields."""
+    required: list[str] = ["ts_event"]
+    for field in fields:
+        if field == "trade_price":
+            required.extend(["price", "trade_price"])
+        elif field in {"trade_qty", "signed_trade_qty", "buy_qty", "sell_qty", "trade_imbalance"}:
+            required.extend(["size", "trade_qty"])
+        if field in {"trade_side", "signed_trade_qty", "buy_qty", "sell_qty", "trade_imbalance"}:
+            required.append("aggressor_side")
+        if field == "trade_id":
+            required.append("trade_id")
+    return _ordered_unique(required)
+
+
+def _quote_tick_required_columns(fields: Sequence[str]) -> list[str]:
+    """Return ordered physical quote-tick columns needed for derived fields."""
+    return ["ts_event", "bid_price", "bid_size", "ask_price", "ask_size", "update_id", "sequence"]
+
+
+def _available_projection(schema: dict[str, pl.DataType], wanted: Sequence[str]) -> list[str]:
+    return [column for column in wanted if column in schema]
+
+
+def _empty_trade_normalized_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "ts_event": pl.Int64,
+            _TS_COL: pl.Datetime("ns"),
+            "trade_price": pl.Float64,
+            "trade_qty": pl.Float64,
+            "trade_side": pl.Float64,
+            "trade_id": pl.Utf8,
+            "signed_trade_qty": pl.Float64,
+            "buy_qty": pl.Float64,
+            "sell_qty": pl.Float64,
+            "_source_priority": pl.Int64,
+            "_file_ordinal": pl.Int64,
+            "_row_ordinal": pl.UInt32,
+        }
+    )
+
+
+def _empty_quote_normalized_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "ts_event": pl.Int64,
+            _TS_COL: pl.Datetime("ns"),
+            "bid_price": pl.Float64,
+            "bid_qty": pl.Float64,
+            "ask_price": pl.Float64,
+            "ask_qty": pl.Float64,
+            "mid_price": pl.Float64,
+            "spread_bps": pl.Float64,
+            "depth_l1_usd": pl.Float64,
+            "orderbook_imbalance": pl.Float64,
+            "update_id": pl.Utf8,
+            "sequence": pl.Utf8,
+            "_source_priority": pl.Int64,
+            "_file_ordinal": pl.Int64,
+            "_row_ordinal": pl.UInt32,
+        }
+    )
 
 
 def _quote_frame_to_series(
@@ -597,9 +823,28 @@ class DataLayer:
             panels with ``[ts, sym1, sym2, ...]`` columns (UTC, tz-naive
             ``Datetime("ns")``).
         """
+        return self.load_panel(request, start=start, end=end)
+
+    def load_panel(
+        self,
+        request: DataRequest | list[DataRequest],
+        start: str | datetime | None = None,
+        end: str | datetime | None = None,
+    ) -> dict[str, Panel]:
+        """Load panel data for one or more DataRequests.
+
+        Raw tick requests (``frequency="tick"``) are intentionally rejected;
+        use :meth:`load_events` for one-row-per-event data.
+        """
         requests: list[DataRequest] = (
             [request] if isinstance(request, DataRequest) else list(request)
         )
+        for req in requests:
+            if req.source in {"trade_tick", "quote_tick"} and str(req.frequency).lower() == "tick":
+                raise ValueError(
+                    f"Raw {req.source} frequency='tick' requests must use DataLayer.load_events(); "
+                    "panel loads require a bar aggregation frequency such as '1m'."
+                )
 
         bar_requests = [req for req in requests if req.source == "bar"]
         non_bar_requests = [req for req in requests if req.source != "bar"]
@@ -614,16 +859,29 @@ class DataLayer:
                 end=end,
             )
             for field_name, panel in panels.items():
-                if field_name in result:
-                    raise ValueError(
-                        "DataLayer output key collision for bar field "
-                        f"{field_name!r}; request a single frequency/source_type per field"
-                    )
-                result[field_name] = panel
+                _add_panel_result(result, field_name, panel, "bar")
+
+        trade_tick_requests = [req for req in non_bar_requests if req.source == "trade_tick"]
+        quote_tick_requests = [req for req in non_bar_requests if req.source == "quote_tick"]
+        other_non_bar_requests = [
+            req for req in non_bar_requests if req.source not in {"trade_tick", "quote_tick"}
+        ]
+
+        for (frequency, source_type), reqs in self._group_tick_panel_requests(trade_tick_requests).items():
+            _validate_trade_tick_source_type(source_type)
+            panels = self._load_trade_tick_panels_grouped(reqs, frequency, start, end, source_type=source_type)
+            for field_name, panel in panels.items():
+                _add_panel_result(result, field_name, panel, "trade_tick")
+
+        for (frequency, source_type), reqs in self._group_tick_panel_requests(quote_tick_requests).items():
+            _validate_quote_tick_source_type(source_type)
+            panels = self._load_quote_tick_panels_grouped(reqs, frequency, start, end, source_type=source_type)
+            for field_name, panel in panels.items():
+                _add_panel_result(result, field_name, panel, "quote_tick")
 
         # Group by (field_name, frequency, source) — each group → one Panel
         groups: dict[tuple[str, str, str], list[DataRequest]] = defaultdict(list)
-        for req in non_bar_requests:
+        for req in other_non_bar_requests:
             groups[(req.field_name, req.frequency, req.source)].append(req)
 
         funding_groups: list[tuple[tuple[str, str, str], list[DataRequest]]] = []
@@ -649,7 +907,7 @@ class DataLayer:
                 end=end,
                 lookback=lookback,
             )
-            result[field_name] = panel
+            _add_panel_result(result, field_name, panel, source)
 
         for (field_name, frequency, source), reqs in funding_groups:
             symbols = [r.symbol for r in reqs]
@@ -666,9 +924,70 @@ class DataLayer:
                 lookback=lookback,
                 reference_ts=reference_ts,
             )
-            result[field_name] = panel
+            _add_panel_result(result, field_name, panel, source)
 
         return result
+
+    def load_events(
+        self,
+        request: EventRequest | None = None,
+        *,
+        symbol: str | None = None,
+        source: str | None = None,
+        fields: Sequence[str] | None = None,
+        start: str | datetime | None = None,
+        end: str | datetime | None = None,
+        source_type: str | None = None,
+        on_error: Literal["raise", "empty"] = "raise",
+    ) -> pl.DataFrame:
+        """Load raw tick/event rows without panel aggregation.
+
+        This is a raw catalog API: it does not apply point-in-time universe
+        filtering, listing-window filtering, aggregation, or panel alignment.
+        Use :meth:`load_panel` or :meth:`load` for PIT-aligned factor panels.
+        """
+        if request is not None:
+            symbol = request.symbol
+            source = request.source
+            fields = request.fields
+            start = request.start if request.start is not None else start
+            end = request.end if request.end is not None else end
+            source_type = request.source_type if request.source_type is not None else source_type
+            on_error = request.on_error
+        if symbol is None or source is None or fields is None:
+            raise ValueError("load_events requires symbol, source, and fields")
+        if on_error not in {"raise", "empty"}:
+            raise ValueError("load_events on_error must be 'raise' or 'empty'")
+        if source not in {"trade_tick", "quote_tick"}:
+            raise ValueError(f"Unknown event source {source!r}; supported: ['quote_tick', 'trade_tick']")
+        ts_start = _parse_ts(start) if start is not None else None
+        ts_end = _parse_ts(end) if end is not None else None
+        if source == "trade_tick":
+            if "trade_imbalance" in fields:
+                raise ValueError(
+                    "trade_imbalance is a window aggregate ratio and is not available in raw event rows; "
+                    "use panel aggregation or request signed_trade_qty, buy_qty, or sell_qty instead."
+                )
+            unknown = [field for field in fields if field not in _TRADE_EVENT_FIELDS]
+            if unknown:
+                raise ValueError(f"Unknown trade_tick event field {unknown[0]!r}")
+            _validate_trade_tick_source_type(source_type)
+            return self._load_trade_tick_events(symbol, tuple(fields), ts_start, ts_end, source_type, on_error)
+
+        unknown = [field for field in fields if field not in _QUOTE_TICK_FIELDS]
+        if unknown:
+            raise ValueError(f"Unknown quote_tick event field {unknown[0]!r}")
+        _validate_quote_tick_source_type(source_type)
+        return self._load_quote_tick_events(symbol, tuple(fields), ts_start, ts_end, source_type, on_error)
+
+    @staticmethod
+    def _group_tick_panel_requests(
+        requests: Sequence[DataRequest],
+    ) -> dict[tuple[str, str | None], list[DataRequest]]:
+        groups: dict[tuple[str, str | None], list[DataRequest]] = defaultdict(list)
+        for req in requests:
+            groups[(req.frequency, req.source_type)].append(req)
+        return groups
 
     # ------------------------------------------------------------------
     # Internal orchestration
@@ -925,24 +1244,597 @@ class DataLayer:
     ) -> pl.DataFrame:
         if field_name not in _QUOTE_TICK_FIELDS:
             raise ValueError(f"Unknown quote_tick field {field_name!r}")
+        return self._load_quote_tick_fields(symbol, [field_name], frequency, start, end).get(
+            field_name,
+            _empty_series_frame(),
+        )
+
+    def _quote_tick_roots(self, source_type: str | None = None) -> list[Path]:
         from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.strategy.loader_helpers import normalize_symbol
+
+        _validate_quote_tick_source_type(source_type)
+        is_source_root = self._catalog_root.name == "bookTicker" and self._catalog_root.parent.name == "quotes"
+        if source_type:
+            if is_source_root:
+                roots = [self._catalog_root] if self._catalog_root.name == source_type else []
+            else:
+                roots = [resolve_catalog_path(self._catalog_root, source_type)]
+                if source_type == "bookTicker":
+                    roots.append(self._catalog_root)
+            return [Path(path) for path in _ordered_unique(str(path) for path in roots)]
 
         roots = [resolve_catalog_path(self._catalog_root, "bookTicker")]
-        if self._catalog_root.name == "bookTicker" and self._catalog_root.parent.name == "quotes":
+        roots.append(self._catalog_root)
+        if is_source_root:
             roots.insert(0, self._catalog_root)
-        for root in _ordered_unique(str(path) for path in roots):
-            quote_dir = Path(root) / "data" / "quote_tick" / normalize_symbol(symbol)
-            files = sorted(quote_dir.glob("*.parquet"))
-            if not files:
+        return [Path(path) for path in _ordered_unique(str(path) for path in roots)]
+
+    def _quote_tick_candidates(
+        self,
+        symbol: str,
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+    ) -> list[_TickFileCandidate]:
+        from tinohelm.strategy.loader_helpers import normalize_symbol
+
+        candidates: list[_TickFileCandidate] = []
+        file_ordinal = 0
+        for source_priority, root in enumerate(self._quote_tick_roots(source_type)):
+            root_path = Path(root)
+            quote_dir = root_path / "data" / "quote_tick" / normalize_symbol(symbol)
+            files = _prune_parquet_files_by_time(sorted(quote_dir.glob("*.parquet")), start, end)
+            source_aware = root_path.name == "bookTicker" and root_path.parent.name == "quotes"
+            for path in files:
+                candidates.append(_TickFileCandidate(path, source_priority, file_ordinal, "bookTicker", source_aware))
+                file_ordinal += 1
+        if any(candidate.source_aware for candidate in candidates):
+            return [candidate for candidate in candidates if candidate.source_aware]
+        return candidates
+
+    def _quote_tick_files(
+        self,
+        symbol: str,
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+    ) -> list[Path]:
+        return [candidate.path for candidate in self._quote_tick_candidates(symbol, start, end, source_type)]
+
+    def _read_quote_tick_frame(
+        self,
+        symbol: str,
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+        *,
+        strict: bool,
+    ) -> pl.DataFrame:
+        candidates = self._quote_tick_candidates(symbol, start, end, source_type)
+        if not candidates:
+            return _empty_quote_normalized_frame()
+        frames: list[pl.DataFrame] = []
+        required_columns = ["ts_event", "bid_price", "bid_size", "ask_price", "ask_size"]
+        for candidate in candidates:
+            lf = pl.scan_parquet(str(candidate.path), row_index_name="_row_ordinal")
+            schema = lf.collect_schema()
+            missing = [column for column in required_columns if column not in schema]
+            if missing:
+                if strict:
+                    raise ValueError(
+                        f"Missing required quote_tick column(s) for raw events: {', '.join(missing)}"
+                    )
                 continue
-            try:
-                frame = pl.scan_parquet([str(path) for path in files]).collect()
-            except Exception:
-                logger.warning("Failed to read quote ticks for %s", symbol, exc_info=True)
-                return _empty_series_frame()
-            return _quote_frame_to_series(frame, field_name, frequency, start, end)
-        return _empty_series_frame()
+            exprs = [
+                pl.col("ts_event").cast(pl.Int64, strict=False),
+                pl.from_epoch(pl.col("ts_event"), time_unit="ns").alias(_TS_COL),
+                _fixed_precision_expr("bid_price", schema["bid_price"]).alias("bid_price"),
+                _fixed_precision_expr("bid_size", schema["bid_size"]).alias("bid_qty"),
+                _fixed_precision_expr("ask_price", schema["ask_price"]).alias("ask_price"),
+                _fixed_precision_expr("ask_size", schema["ask_size"]).alias("ask_qty"),
+                pl.col("update_id").cast(pl.Utf8, strict=False).alias("update_id") if "update_id" in schema else pl.lit(None, dtype=pl.Utf8).alias("update_id"),
+                pl.col("sequence").cast(pl.Utf8, strict=False).alias("sequence") if "sequence" in schema else pl.lit(None, dtype=pl.Utf8).alias("sequence"),
+                pl.lit(candidate.source_priority).alias("_source_priority"),
+                pl.lit(candidate.file_ordinal).alias("_file_ordinal"),
+            ]
+            normalized = lf.with_columns(exprs).with_columns(
+                ((pl.col("bid_price") + pl.col("ask_price")) / 2.0).alias("mid_price"),
+                ((pl.col("ask_price") - pl.col("bid_price")) / ((pl.col("bid_price") + pl.col("ask_price")) / 2.0) * 10_000.0).alias("spread_bps"),
+                (pl.col("bid_price") * pl.col("bid_qty") + pl.col("ask_price") * pl.col("ask_qty")).alias("depth_l1_usd"),
+                ((pl.col("bid_qty") - pl.col("ask_qty")) / (pl.col("bid_qty") + pl.col("ask_qty"))).alias("orderbook_imbalance"),
+            ).select(_empty_quote_normalized_frame().columns).collect()
+            frames.append(normalized)
+        if not frames:
+            return _empty_quote_normalized_frame()
+        frame = pl.concat(frames, how="diagonal_relaxed")
+        if start is not None:
+            frame = frame.filter(pl.col("ts_event") >= _datetime_to_ns(start))
+        if end is not None:
+            frame = frame.filter(pl.col("ts_event") <= _datetime_to_ns(end))
+        if frame.is_empty():
+            return _empty_quote_normalized_frame()
+        frame = frame.with_columns(
+            pl.when(pl.col("update_id").is_not_null()).then(pl.concat_str([pl.lit("u:"), pl.col("update_id")]))
+            .when(pl.col("sequence").is_not_null()).then(pl.concat_str([pl.lit("s:"), pl.col("sequence")]))
+            .otherwise(pl.concat_str([
+                pl.lit("row:"),
+                pl.col("ts_event").cast(pl.Utf8),
+                pl.lit(":"),
+                pl.col("bid_price").cast(pl.Utf8),
+                pl.lit(":"),
+                pl.col("bid_qty").cast(pl.Utf8),
+                pl.lit(":"),
+                pl.col("ask_price").cast(pl.Utf8),
+                pl.lit(":"),
+                pl.col("ask_qty").cast(pl.Utf8),
+            ]))
+            .alias("_dedupe_key"),
+            pl.col("update_id").cast(pl.Int64, strict=False).alias("_update_id_num"),
+            pl.col("sequence").cast(pl.Int64, strict=False).alias("_sequence_num"),
+        )
+        return (
+            frame.sort(["_dedupe_key", "_source_priority", "_file_ordinal", "_row_ordinal"])
+            .unique(subset=["_dedupe_key"], keep="first", maintain_order=True)
+            .sort(["ts_event", "_update_id_num", "update_id", "_sequence_num", "sequence", "_source_priority", "_file_ordinal", "_row_ordinal"], nulls_last=True)
+            .select(_empty_quote_normalized_frame().columns)
+        )
+
+    def _load_quote_tick_panels_grouped(
+        self,
+        reqs: list[DataRequest],
+        frequency: str,
+        start: str | datetime | None,
+        end: str | datetime | None,
+        source_type: str | None = None,
+    ) -> dict[str, Panel]:
+        """Load multiple quote-tick panel fields with one parquet scan per symbol."""
+        if not reqs:
+            return {}
+        interval = _parse_bar_frequency(frequency)
+        ts_start = _parse_ts(start) if start is not None else None
+        ts_end = _parse_ts(end) if end is not None else None
+        raw_end = _tick_panel_raw_end(ts_end, interval)
+        fields = _ordered_unique(req.field_name for req in reqs)
+        unknown = [field for field in fields if field not in _QUOTE_TICK_FIELDS]
+        if unknown:
+            raise ValueError(f"Unknown quote_tick field {unknown[0]!r}")
+
+        symbols = _ordered_unique(req.symbol for req in reqs)
+        field_symbols = {
+            field: _ordered_unique(req.symbol for req in reqs if req.field_name == field)
+            for field in fields
+        }
+        symbol_fields = {
+            sym: _ordered_unique(req.field_name for req in reqs if req.symbol == sym)
+            for sym in symbols
+        }
+        field_load_starts = {
+            field: _apply_lookback_start(
+                ts_start,
+                frequency,
+                max(req.lookback for req in reqs if req.field_name == field),
+            )
+            for field in fields
+        }
+
+        series_by_field_symbol: dict[str, dict[str, pl.DataFrame]] = {field: {} for field in fields}
+        futures: dict[Any, str] = {}
+        with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+            for sym in symbols:
+                sym_fields = symbol_fields[sym]
+                starts = [field_load_starts[field] for field in sym_fields if field_load_starts[field] is not None]
+                sym_start = min(starts) if starts else None
+                futures[pool.submit(self._load_quote_tick_fields, sym, sym_fields, frequency, sym_start, raw_end, source_type=source_type)] = sym
+
+            for fut in as_completed(futures):
+                sym = futures[fut]
+                try:
+                    series_by_field = fut.result()
+                except ValueError:
+                    raise
+                except Exception:
+                    logger.warning("Failed to load quote_tick fields for symbol %s", sym, exc_info=True)
+                    series_by_field = {field: _empty_series_frame() for field in symbol_fields[sym]}
+                for field in symbol_fields[sym]:
+                    series_by_field_symbol[field][sym] = _filter_time_range(
+                        series_by_field.get(field, _empty_series_frame()),
+                        field_load_starts[field],
+                        ts_end,
+                    )
+
+        panels: dict[str, Panel] = {}
+        for field in fields:
+            ordered = {
+                sym: series_by_field_symbol[field].get(sym, _empty_series_frame())
+                for sym in field_symbols[field]
+            }
+            panels[field] = self._apply_pit(self._align_time(ordered))
+        return panels
+
+    def _load_quote_tick_fields(
+        self,
+        symbol: str,
+        field_names: Sequence[str],
+        frequency: str,
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+    ) -> dict[str, pl.DataFrame]:
+        unknown = [field for field in field_names if field not in _QUOTE_TICK_FIELDS]
+        if unknown:
+            raise ValueError(f"Unknown quote_tick field {unknown[0]!r}")
+        interval = _parse_bar_frequency(frequency)
+        raw_start = _tick_panel_raw_start(start, interval)
+        raw_end = _tick_panel_raw_end(end, interval)
+        empty = {field: _empty_series_frame() for field in field_names}
+        try:
+            frame = self._read_quote_tick_frame(symbol, raw_start, raw_end or end, source_type, strict=False)
+            if frame.is_empty():
+                return empty
+            frame = (
+                frame.lazy()
+                .group_by_dynamic(
+                    _TS_COL,
+                    every=interval.polars_every,
+                    period=interval.polars_every,
+                    closed="left",
+                    label="right",
+                )
+                .agg([pl.col(field).last().alias(field) for field in field_names])
+                .with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL))
+                .collect()
+            )
+        except Exception:
+            logger.warning("Failed to read quote ticks for %s", symbol, exc_info=True)
+            return empty
+        if frame.is_empty():
+            return empty
+        out = dict(empty)
+        for field in field_names:
+            if field in frame.columns:
+                out[field] = frame.drop_nulls(field).select([_TS_COL, pl.col(field).alias(_VAL_COL)]).sort(_TS_COL)
+        return out
+
+    def _trade_tick_root_groups(self, source_type: str | None = None) -> list[list[Path]]:
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+        _validate_trade_tick_source_type(source_type)
+        is_source_root = self._catalog_root.name in _TRADE_TICK_SOURCE_TYPES and self._catalog_root.parent.name == "ticks"
+        if source_type:
+            if is_source_root:
+                roots = [self._catalog_root] if self._catalog_root.name == source_type else []
+            else:
+                roots = [resolve_catalog_path(self._catalog_root, source_type)]
+                if source_type == "aggTrades":
+                    roots.append(self._catalog_root)
+            return [[Path(path) for path in _ordered_unique(str(path) for path in roots)]] if roots else []
+
+        if is_source_root:
+            return [[self._catalog_root]]
+
+        default_roots = [resolve_catalog_path(self._catalog_root, "aggTrades"), self._catalog_root]
+        fallback_roots = [resolve_catalog_path(self._catalog_root, "trades")]
+        return [
+            [Path(path) for path in _ordered_unique(str(path) for path in default_roots)],
+            [Path(path) for path in _ordered_unique(str(path) for path in fallback_roots)],
+        ]
+
+
+    def _trade_tick_candidate_groups(
+        self,
+        symbol: str,
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+    ) -> list[list[_TickFileCandidate]]:
+        from tinohelm.strategy.loader_helpers import normalize_symbol
+
+        groups: list[list[_TickFileCandidate]] = []
+        for root_group in self._trade_tick_root_groups(source_type):
+            candidates: list[_TickFileCandidate] = []
+            file_ordinal = 0
+            for source_priority, root in enumerate(root_group):
+                root_path = Path(root)
+                trade_dir = root_path / "data" / "trade_tick" / normalize_symbol(symbol)
+                files = _prune_parquet_files_by_time(sorted(trade_dir.glob("*.parquet")), start, end)
+                candidate_source_type = source_type or ("trades" if root_path.name == "trades" else "aggTrades")
+                source_aware = root_path.name in _TRADE_TICK_SOURCE_TYPES and root_path.parent.name == "ticks"
+                for path in files:
+                    candidates.append(_TickFileCandidate(path, source_priority, file_ordinal, candidate_source_type, source_aware))
+                    file_ordinal += 1
+            if any(candidate.source_aware for candidate in candidates):
+                candidates = [candidate for candidate in candidates if candidate.source_aware]
+            if candidates:
+                groups.append(candidates)
+        return groups
+
+
+    def _trade_tick_files(
+        self,
+        symbol: str,
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+    ) -> list[Path]:
+        for candidate_group in self._trade_tick_candidate_groups(symbol, start, end, source_type):
+            if candidate_group:
+                return [candidate.path for candidate in candidate_group]
+        return []
+
+    def _read_trade_tick_frame(
+        self,
+        symbol: str,
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None,
+        *,
+        strict_fields: Sequence[str] | None = None,
+    ) -> pl.DataFrame:
+        candidate_groups = self._trade_tick_candidate_groups(symbol, start, end, source_type)
+        if not candidate_groups:
+            return _empty_trade_normalized_frame()
+        strict_fields = tuple(strict_fields or ())
+        for candidates in candidate_groups:
+            frames: list[pl.DataFrame] = []
+            for candidate in candidates:
+                lf = pl.scan_parquet(str(candidate.path), row_index_name="_row_ordinal")
+                schema = lf.collect_schema()
+                if "ts_event" not in schema:
+                    if strict_fields:
+                        raise ValueError(f"Missing required trade_tick column(s) for raw fields {tuple(strict_fields)!r}: ts_event")
+                    continue
+                needs_price = not strict_fields or "trade_price" in strict_fields
+                needs_qty = not strict_fields or any(field in {"trade_qty", "signed_trade_qty", "buy_qty", "sell_qty", "trade_imbalance"} for field in strict_fields)
+                needs_side = not strict_fields or any(field in {"trade_side", "signed_trade_qty", "buy_qty", "sell_qty", "trade_imbalance"} for field in strict_fields)
+                needs_trade_id = "trade_id" in strict_fields
+                missing: list[str] = []
+                price_col = "price" if "price" in schema else "trade_price"
+                size_col = "size" if "size" in schema else "trade_qty"
+                if needs_price and price_col not in schema:
+                    missing.append("price/trade_price")
+                if needs_qty and size_col not in schema:
+                    missing.append("size/trade_qty")
+                if needs_side and "aggressor_side" not in schema:
+                    missing.append("aggressor_side")
+                if needs_trade_id and "trade_id" not in schema:
+                    missing.append("trade_id")
+                if missing:
+                    if strict_fields:
+                        raise ValueError(f"Missing required trade_tick column(s) for raw fields {tuple(strict_fields)!r}: {', '.join(missing)}")
+                    continue
+
+                exprs: list[pl.Expr] = [
+                    pl.col("ts_event").cast(pl.Int64, strict=False),
+                    pl.from_epoch(pl.col("ts_event"), time_unit="ns").alias(_TS_COL),
+                    _fixed_precision_expr(price_col, schema[price_col]).alias("trade_price") if price_col in schema else pl.lit(None, dtype=pl.Float64).alias("trade_price"),
+                    _fixed_precision_expr(size_col, schema[size_col]).alias("trade_qty") if size_col in schema else pl.lit(None, dtype=pl.Float64).alias("trade_qty"),
+                    _trade_side_expr().alias("trade_side") if "aggressor_side" in schema else pl.lit(None, dtype=pl.Float64).alias("trade_side"),
+                    pl.col("trade_id").cast(pl.Utf8, strict=False).alias("trade_id") if "trade_id" in schema else pl.lit(None, dtype=pl.Utf8).alias("trade_id"),
+                    pl.lit(candidate.source_priority).alias("_source_priority"),
+                    pl.lit(candidate.file_ordinal).alias("_file_ordinal"),
+                ]
+                normalized = lf.with_columns(exprs).with_columns([
+                    (pl.col("trade_qty") * pl.col("trade_side")).alias("signed_trade_qty"),
+                    pl.when(pl.col("trade_side") > 0).then(pl.col("trade_qty")).otherwise(0.0).alias("buy_qty"),
+                    pl.when(pl.col("trade_side") < 0).then(pl.col("trade_qty")).otherwise(0.0).alias("sell_qty"),
+                ]).select(_empty_trade_normalized_frame().columns).collect()
+                frames.append(normalized)
+            if not frames:
+                continue
+            frame = pl.concat(frames, how="diagonal_relaxed")
+            if start is not None:
+                frame = frame.filter(pl.col("ts_event") >= _datetime_to_ns(start))
+            if end is not None:
+                frame = frame.filter(pl.col("ts_event") <= _datetime_to_ns(end))
+            if frame.is_empty():
+                continue
+            frame = frame.with_columns(
+                pl.col("_source_priority").min().over("ts_event").alias("_preferred_source_priority")
+            ).filter(pl.col("_source_priority") == pl.col("_preferred_source_priority"))
+            if frame["trade_id"].drop_nulls().len() > 0:
+                frame = frame.with_columns(pl.col("trade_id").cast(pl.Int64, strict=False).alias("_trade_id_num"))
+                non_null_id = frame.filter(pl.col("trade_id").is_not_null())
+                null_id = frame.filter(pl.col("trade_id").is_null())
+                parts: list[pl.DataFrame] = []
+                if not non_null_id.is_empty():
+                    parts.append(
+                        non_null_id.sort(["trade_id", "_source_priority", "_file_ordinal", "_row_ordinal"])
+                        .unique(subset=["trade_id"], keep="first", maintain_order=True)
+                    )
+                if not null_id.is_empty():
+                    parts.append(null_id.sort(["ts_event", "_source_priority", "_file_ordinal", "_row_ordinal"]))
+                frame = pl.concat(parts, how="diagonal_relaxed") if parts else frame.clear()
+                return frame.sort(["ts_event", "_trade_id_num", "trade_id", "_source_priority", "_file_ordinal", "_row_ordinal"], nulls_last=True).select(
+                    _empty_trade_normalized_frame().columns
+                )
+            return (
+                frame.sort(["ts_event", "_source_priority", "_file_ordinal", "_row_ordinal"])
+                .select(_empty_trade_normalized_frame().columns)
+            )
+        return _empty_trade_normalized_frame()
+
+    def _load_trade_tick_panels_grouped(
+        self,
+        reqs: list[DataRequest],
+        frequency: str,
+        start: str | datetime | None,
+        end: str | datetime | None,
+        source_type: str | None = None,
+    ) -> dict[str, Panel]:
+        """Load multiple trade-tick panel fields with one parquet scan per symbol."""
+        if not reqs:
+            return {}
+        interval = _parse_bar_frequency(frequency)
+        ts_start = _parse_ts(start) if start is not None else None
+        ts_end = _parse_ts(end) if end is not None else None
+        raw_end = _tick_panel_raw_end(ts_end, interval)
+        fields = _ordered_unique(req.field_name for req in reqs)
+        unknown = [field for field in fields if field not in _TRADE_TICK_FIELDS]
+        if unknown:
+            raise ValueError(f"Unknown trade_tick field {unknown[0]!r}")
+
+        symbols = _ordered_unique(req.symbol for req in reqs)
+        field_symbols = {
+            field: _ordered_unique(req.symbol for req in reqs if req.field_name == field)
+            for field in fields
+        }
+        symbol_fields = {
+            sym: _ordered_unique(req.field_name for req in reqs if req.symbol == sym)
+            for sym in symbols
+        }
+        field_load_starts = {
+            field: _apply_lookback_start(
+                ts_start,
+                frequency,
+                max(req.lookback for req in reqs if req.field_name == field),
+            )
+            for field in fields
+        }
+
+        series_by_field_symbol: dict[str, dict[str, pl.DataFrame]] = {field: {} for field in fields}
+        futures: dict[Any, str] = {}
+        with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+            for sym in symbols:
+                sym_fields = symbol_fields[sym]
+                starts = [field_load_starts[field] for field in sym_fields if field_load_starts[field] is not None]
+                sym_start = min(starts) if starts else None
+                futures[pool.submit(self._load_trade_tick_fields, sym, sym_fields, frequency, sym_start, raw_end, source_type=source_type)] = sym
+
+            for fut in as_completed(futures):
+                sym = futures[fut]
+                try:
+                    series_by_field = fut.result()
+                except ValueError:
+                    raise
+                except Exception:
+                    logger.warning("Failed to load trade_tick fields for symbol %s", sym, exc_info=True)
+                    series_by_field = {field: _empty_series_frame() for field in symbol_fields[sym]}
+                for field in symbol_fields[sym]:
+                    series_by_field_symbol[field][sym] = _filter_time_range(
+                        series_by_field.get(field, _empty_series_frame()),
+                        field_load_starts[field],
+                        ts_end,
+                    )
+
+        panels: dict[str, Panel] = {}
+        for field in fields:
+            ordered = {
+                sym: series_by_field_symbol[field].get(sym, _empty_series_frame())
+                for sym in field_symbols[field]
+            }
+            panels[field] = self._apply_pit(self._align_time(ordered))
+        return panels
+
+    def _load_trade_tick_fields(
+        self,
+        symbol: str,
+        field_names: Sequence[str],
+        frequency: str,
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+    ) -> dict[str, pl.DataFrame]:
+        interval = _parse_bar_frequency(frequency)
+        raw_start = _tick_panel_raw_start(start, interval)
+        raw_end = _tick_panel_raw_end(end, interval)
+        empty = {field: _empty_series_frame() for field in field_names}
+        try:
+            frame = self._read_trade_tick_frame(symbol, raw_start, raw_end or end, source_type, strict_fields=None)
+            if frame.is_empty():
+                return empty
+            grouped = frame.lazy().group_by_dynamic(
+                _TS_COL,
+                every=interval.polars_every,
+                period=interval.polars_every,
+                closed="left",
+                label="right",
+            )
+            aggs: list[pl.Expr] = []
+            for field in field_names:
+                if field == "trade_imbalance":
+                    aggs.extend([
+                        pl.col("buy_qty").sum().alias("_trade_imbalance_buy"),
+                        pl.col("sell_qty").sum().alias("_trade_imbalance_sell"),
+                        pl.col("trade_qty").sum().alias("_trade_imbalance_total"),
+                    ])
+                elif field in {"trade_price", "trade_side"}:
+                    aggs.append(pl.col(field).last().alias(field))
+                else:
+                    aggs.append(pl.col(field).sum().alias(field))
+            frame = grouped.agg(aggs).with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL)).collect()
+        except Exception:
+            logger.warning("Failed to read trade ticks for %s", symbol, exc_info=True)
+            return empty
+
+        if frame.is_empty():
+            return empty
+        out = dict(empty)
+        if "trade_imbalance" in field_names and "_trade_imbalance_total" in frame.columns:
+            out["trade_imbalance"] = (
+                frame.filter(pl.col("_trade_imbalance_total") > 0)
+                .with_columns(((pl.col("_trade_imbalance_buy") - pl.col("_trade_imbalance_sell")) / pl.col("_trade_imbalance_total")).alias(_VAL_COL))
+                .select([_TS_COL, _VAL_COL])
+                .sort(_TS_COL)
+            )
+        for field in field_names:
+            if field == "trade_imbalance" or field not in frame.columns:
+                continue
+            out[field] = frame.drop_nulls(field).select([_TS_COL, pl.col(field).alias(_VAL_COL)]).sort(_TS_COL)
+        return out
+
+    def _load_quote_tick_events(
+        self,
+        symbol: str,
+        fields: Sequence[str],
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+        on_error: Literal["raise", "empty"] = "raise",
+    ) -> pl.DataFrame:
+        empty = _empty_quote_tick_events_frame(fields)
+        try:
+            frame = self._read_quote_tick_frame(symbol, start, end, source_type, strict=True)
+            if frame.is_empty():
+                return empty
+            columns = [_TS_COL, *fields]
+            return frame.select(columns)
+        except ValueError:
+            if on_error == "raise":
+                raise
+            logger.warning("Failed to read quote tick events for %s", symbol, exc_info=True)
+            return empty
+        except Exception:
+            if on_error == "raise":
+                raise
+            logger.warning("Failed to read quote tick events for %s", symbol, exc_info=True)
+            return empty
+
+    def _load_trade_tick_events(
+        self,
+        symbol: str,
+        fields: Sequence[str],
+        start: datetime | None,
+        end: datetime | None,
+        source_type: str | None = None,
+        on_error: Literal["raise", "empty"] = "raise",
+    ) -> pl.DataFrame:
+        empty = _empty_trade_tick_events_frame(fields)
+        try:
+            frame = self._read_trade_tick_frame(symbol, start, end, source_type, strict_fields=fields)
+            if frame.is_empty():
+                return empty
+            columns = [_TS_COL, *[field for field in fields if field in frame.columns]]
+            return frame.select(columns).sort(_TS_COL)
+        except ValueError:
+            if on_error == "raise":
+                raise
+            logger.warning("Failed to read trade tick events for %s", symbol, exc_info=True)
+            return empty
+        except Exception:
+            if on_error == "raise":
+                raise
+            logger.warning("Failed to read trade tick events for %s", symbol, exc_info=True)
+            return empty
 
     def _load_trade_tick_field(
         self,
@@ -954,24 +1846,10 @@ class DataLayer:
     ) -> pl.DataFrame:
         if field_name not in _TRADE_TICK_FIELDS:
             raise ValueError(f"Unknown trade_tick field {field_name!r}")
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.strategy.loader_helpers import normalize_symbol
-
-        roots = [resolve_catalog_path(self._catalog_root, source) for source in ("aggTrades", "trades")]
-        if self._catalog_root.name in {"aggTrades", "trades"} and self._catalog_root.parent.name == "ticks":
-            roots.insert(0, self._catalog_root)
-        for root in _ordered_unique(str(path) for path in roots):
-            trade_dir = Path(root) / "data" / "trade_tick" / normalize_symbol(symbol)
-            files = sorted(trade_dir.glob("*.parquet"))
-            if not files:
-                continue
-            try:
-                frame = pl.scan_parquet([str(path) for path in files]).collect()
-            except Exception:
-                logger.warning("Failed to read trade ticks for %s", symbol, exc_info=True)
-                return _empty_series_frame()
-            return _trade_frame_to_series(frame, field_name, frequency, start, end)
-        return _empty_series_frame()
+        return self._load_trade_tick_fields(symbol, [field_name], frequency, start, end).get(
+            field_name,
+            _empty_series_frame(),
+        )
 
     def _load_metrics_field(
         self,

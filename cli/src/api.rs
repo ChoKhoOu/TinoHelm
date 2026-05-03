@@ -469,6 +469,8 @@ impl ApiClient {
             "intervals": [req.interval.clone()],
             "start": req.start,
             "end": req.end,
+            "data_type": req.data_type,
+            "asset_class": req.asset_class,
         });
         self.typed_json(Method::POST, "/api/data/fetch-batch", &[], Some(payload))
             .await
@@ -499,11 +501,17 @@ impl ApiClient {
         .await
     }
 
-    pub async fn validate_data(&self, symbol: &str, interval: &str) -> Result<serde_json::Value> {
+    pub async fn validate_data(
+        &self,
+        symbol: &str,
+        interval: &str,
+        data_type: &str,
+    ) -> Result<serde_json::Value> {
+        let query = vec![("data_type".to_string(), data_type.to_string())];
         self.typed_json(
             Method::GET,
             &format!("/api/data/validate/{}/{}", symbol, interval),
-            &[],
+            &query,
             None,
         )
         .await

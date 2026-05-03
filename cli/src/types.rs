@@ -166,6 +166,8 @@ pub struct DataFetchRequest {
     pub interval: String,
     pub start: String,
     pub end: String,
+    pub data_type: String,
+    pub asset_class: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,12 +176,15 @@ pub struct DataFetchBatchRequest {
     pub intervals: Vec<String>,
     pub start: String,
     pub end: String,
+    pub data_type: String,
+    pub asset_class: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DataCompactRequest {
     pub symbol: String,
     pub interval: String,
+    pub data_type: String,
 }
 
 // ---- Trading (positions & fills) ----
