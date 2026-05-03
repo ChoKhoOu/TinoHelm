@@ -1642,18 +1642,13 @@ class DataLayer:
                         .unique(subset=["trade_id"], keep="first", maintain_order=True)
                     )
                 if not null_id.is_empty():
-                    parts.append(
-                        null_id.sort(["ts_event", "trade_price", "trade_qty", "trade_side", "_source_priority", "_file_ordinal", "_row_ordinal"])
-                        .unique(subset=["ts_event", "trade_price", "trade_qty", "trade_side"], keep="first", maintain_order=True)
-                    )
+                    parts.append(null_id.sort(["ts_event", "_source_priority", "_file_ordinal", "_row_ordinal"]))
                 frame = pl.concat(parts, how="diagonal_relaxed") if parts else frame.clear()
                 return frame.sort(["ts_event", "_trade_id_num", "trade_id", "_source_priority", "_file_ordinal", "_row_ordinal"], nulls_last=True).select(
                     _empty_trade_normalized_frame().columns
                 )
             return (
-                frame.sort(["ts_event", "trade_price", "trade_qty", "trade_side", "_source_priority", "_file_ordinal", "_row_ordinal"])
-                .unique(subset=["ts_event", "trade_price", "trade_qty", "trade_side"], keep="first", maintain_order=True)
-                .sort(["ts_event", "_source_priority", "_file_ordinal", "_row_ordinal"])
+                frame.sort(["ts_event", "_source_priority", "_file_ordinal", "_row_ordinal"])
                 .select(_empty_trade_normalized_frame().columns)
             )
         return _empty_trade_normalized_frame()

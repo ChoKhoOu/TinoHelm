@@ -400,8 +400,18 @@ async def _run_compact(
                 DataCatalog.source_type == effective_source,
             )
             existing = (await db.execute(stmt)).scalar_one_or_none()
+            if existing is None and effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
+                legacy_stmt = select(DataCatalog).where(
+                    DataCatalog.symbol == symbol,
+                    DataCatalog.data_type == "bar",
+                    DataCatalog.interval == interval,
+                    DataCatalog.source_type.is_(None),
+                )
+                existing = (await db.execute(legacy_stmt)).scalar_one_or_none()
             if existing:
                 existing.size_bytes = total_size
+                if "bars_count" in result:
+                    existing.record_count = result["bars_count"]
                 await db.commit()
 
         logger.info(

@@ -90,6 +90,20 @@ fn fmt_size(size_bytes: u64) -> String {
     }
 }
 
+fn is_bar_data_type(data_type: &str) -> bool {
+    matches!(
+        data_type,
+        "klines" | "markPriceKlines" | "indexPriceKlines" | "premiumIndexKlines"
+    )
+}
+
+fn fetch_batch_intervals_for_request(data_type: &str, intervals: &[String]) -> Vec<String> {
+    if intervals.is_empty() && is_bar_data_type(data_type) {
+        return vec!["1m".to_string()];
+    }
+    intervals.to_vec()
+}
+
 pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
     match cmd {
         DataCmd::Fetch {
@@ -236,9 +250,10 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             data_type,
             asset_class,
         } => {
+            let effective_intervals = fetch_batch_intervals_for_request(&data_type, &interval);
             let req = DataFetchBatchRequest {
                 symbols: symbols.clone(),
-                intervals: interval.clone(),
+                intervals: effective_intervals.clone(),
                 start: start.clone(),
                 end: end.clone(),
                 data_type: data_type.clone(),
@@ -256,17 +271,17 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             let count = result
                 .get("count")
                 .and_then(|v| v.as_u64())
-                .unwrap_or((symbols.len() * interval.len()) as u64);
+                .unwrap_or((symbols.len() * effective_intervals.len()) as u64);
             let msg = result.get("message").and_then(|v| v.as_str());
 
             header("Batch Data Fetch Submitted");
             divider(50);
             kv("Symbols", &accent(&symbols.join(", ")), 12);
             kv("Data Type", &data_type, 12);
-            let display_intervals = if interval.is_empty() {
+            let display_intervals = if effective_intervals.is_empty() {
                 "tick".to_string()
             } else {
-                interval.join(", ")
+                effective_intervals.join(", ")
             };
             kv("Intervals", &display_intervals, 12);
             kv("Period", &format!("{} ~ {}", start, end), 12);
@@ -470,6 +485,30 @@ fn print_data_machine<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_batch_defaults_empty_bar_intervals_to_one_minute() {
+        let intervals = fetch_batch_intervals_for_request("klines", &[]);
+
+        assert_eq!(intervals, vec!["1m".to_string()]);
+    }
+
+    #[test]
+    fn fetch_batch_keeps_empty_raw_tick_intervals_empty() {
+        let intervals = fetch_batch_intervals_for_request("aggTrades", &[]);
+
+        assert!(intervals.is_empty());
+    }
+
+    #[test]
+    fn fetch_batch_keeps_explicit_bar_intervals() {
+        let requested = vec!["5m".to_string(), "1h".to_string()];
+
+        assert_eq!(
+            fetch_batch_intervals_for_request("klines", &requested),
+            requested
+        );
+    }
 
     #[test]
     fn data_info_payload_filters_items_before_machine_output() {

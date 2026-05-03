@@ -1764,6 +1764,60 @@ def test_trade_tick_overlap_dedupes_by_trade_id_preferring_source_aware(tmp_path
     ]
 
 
+def test_trade_tick_no_trade_id_load_events_preserves_same_business_rows(tmp_path: Path) -> None:
+    symbol = "BTCUSDT-PERP"
+    ts_event = _T0_NS + 10 * 1_000_000_000
+    _write_trade_ticks(tmp_path, symbol, [
+        {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER"},
+        {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER"},
+    ])
+    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
+
+    events = dl.load_events(symbol=symbol, source="trade_tick", fields=("trade_qty",))
+
+    assert events.columns == ["ts", "trade_qty"]
+    assert events.to_dicts() == [
+        {"ts": datetime(2021, 5, 3, 0, 0, 10), "trade_qty": 2.0},
+        {"ts": datetime(2021, 5, 3, 0, 0, 10), "trade_qty": 2.0},
+    ]
+
+
+def test_trade_tick_mixed_null_trade_id_load_events_preserves_same_business_rows(tmp_path: Path) -> None:
+    symbol = "BTCUSDT-PERP"
+    ts_event = _T0_NS + 10 * 1_000_000_000
+    _write_trade_ticks(tmp_path, symbol, [
+        {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER", "trade_id": None},
+        {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER", "trade_id": None},
+        {"ts_event": ts_event, "price": 101.0, "size": 1.0, "aggressor_side": "SELLER", "trade_id": 10},
+    ])
+    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
+
+    events = dl.load_events(symbol=symbol, source="trade_tick", fields=("trade_qty", "trade_id"))
+
+    assert events.columns == ["ts", "trade_qty", "trade_id"]
+    assert events["trade_qty"].to_list() == [1.0, 2.0, 2.0]
+    assert events["trade_id"].to_list() == ["10", None, None]
+
+
+def test_trade_tick_no_trade_id_panel_aggregation_sums_same_business_rows(tmp_path: Path) -> None:
+    symbol = "BTCUSDT-PERP"
+    ts_event = _T0_NS + 10 * 1_000_000_000
+    _write_trade_ticks(tmp_path, symbol, [
+        {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER"},
+        {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER"},
+    ])
+    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
+
+    panel = dl.load_panel(
+        DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick"),
+        start="2021-05-03T00:00:00",
+        end="2021-05-03T00:00:59.999000",
+    )["trade_qty"]
+
+    assert panel["ts"].to_list() == [datetime(2021, 5, 3, 0, 0, 59, 999000)]
+    np.testing.assert_allclose(panel[symbol].to_numpy(), [4.0])
+
+
 def test_trade_tick_same_timestamp_last_price_uses_trade_id_order(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
     ts_event = _T0_NS + 10 * 1_000_000_000
