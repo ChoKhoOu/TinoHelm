@@ -4,18 +4,26 @@
 
 ## 快速开始
 
+如果使用私有 GHCR 镜像或私有 GitHub Releases，请先完成认证，再拉取镜像或运行安装脚本：
+
+```bash
+gh auth login
+gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
+```
+
 ### 1. 启动后端服务
 
 ```bash
+docker compose pull
 docker compose up -d
 ```
 
-启动 **PostgreSQL**、**Redis** 和 **API 服务**（FastAPI，端口 8000）。
+默认会从 GHCR 拉取已发布的 API/Web 镜像，并启动 **PostgreSQL**、**Redis** 和 **API 服务**（FastAPI，端口 8000）。
 
-源码变更后重新构建：
+只有明确需要本地构建镜像时才使用 build override：
 
 ```bash
-docker compose up -d --build api
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 ### 2. 安装 CLI
@@ -23,14 +31,19 @@ docker compose up -d --build api
 Rust CLI 是主要交互界面：单次命令、原始 JSON，以及给 LLM/自动化调用使用的稳定 `llm` envelope。
 
 ```bash
-make
+./scripts/install-tino.sh
 ```
 
-裸 `make` 会构建 release 产物；如果 `/usr/local/bin` 可写，就安装到 `/usr/local/bin/tino`，否则安装到 `~/.local/bin/tino`；随后会验证新 shell 能从 `PATH` 解析到刚安装的二进制。如果 `PATH` 仍然解析到旧的 `tino`，或者完全解析不到，默认安装会直接失败，不再给一个“看似安装成功但不能全局调用”的状态。显式传入 `BINDIR=...` 时，如果该目录不是当前 `PATH` 的优先命中目录，会按打包/测试安装处理；需要强制全局解析时，在调整 `PATH` 后用同一个 `BINDIR` 跑 `make verify-install`。
-
-常用变体：
+安装脚本支持 Linux 和 Apple Silicon macOS，默认安装 moving `nightly` release；Windows 和 Intel macOS 暂不提供预构建二进制。如需稳定版，请显式指定 tag：
 
 ```bash
+./scripts/install-tino.sh --version <tag>
+```
+
+只有明确需要本地 Rust 构建时才用源码构建：
+
+```bash
+make
 make build                       # 只构建：cli/target/release/tino
 make package                     # 打包：dist/tino-<target>.tar.gz
 make verify-install              # 验证已安装二进制和 PATH 解析

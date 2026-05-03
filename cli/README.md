@@ -4,17 +4,28 @@ Rust CLI for TinoHelm. The old interactive TUI has been removed; `tino` is now a
 
 ## Install
 
-From the repository root:
+For private GitHub Releases, authenticate before running the installer:
+
+```bash
+gh auth login
+```
+
+From the repository root, install or update a prebuilt CLI without building Rust:
+
+```bash
+./scripts/install-tino.sh
+```
+
+The installer supports Linux and Apple Silicon macOS, installs the moving `nightly` release by default, and does not provide Windows or Intel macOS binaries. Use an explicit tag when stable releases exist:
+
+```bash
+./scripts/install-tino.sh --version <tag>
+```
+
+Build from source only when you explicitly want a local Rust toolchain:
 
 ```bash
 make
-```
-
-Plain `make` builds the release binary, installs `tino` to `/usr/local/bin/tino` when writable, otherwise to `~/.local/bin/tino`, and verifies that a fresh shell resolves `tino` to the newly installed binary. If `PATH` would find an older `tino` or cannot find `tino`, the default install fails. Explicit `BINDIR=...` overrides are treated as packaging/test installs when that directory is not already first on `PATH`; use `make verify-install` with the same `BINDIR` after adjusting `PATH` to enforce global resolution.
-
-Useful variants:
-
-```bash
 make build                       # build only: cli/target/release/tino
 make package                     # package dist/tino-<target>.tar.gz
 make verify-install              # verify installed binary and PATH resolution
@@ -113,5 +124,5 @@ tino universe get <universe_id>
 
 ## Requirements
 
-- TinoHelm API server for API-backed operations: `docker compose up -d`
+- TinoHelm API server for API-backed operations: `docker compose pull && docker compose up -d`
 - Rust toolchain for building from source
