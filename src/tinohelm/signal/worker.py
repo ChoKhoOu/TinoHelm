@@ -510,7 +510,7 @@ def _load_aligned_panels(
     # function before calling ``_process_job``).
     from pathlib import Path
 
-    from tinohelm.core.paths import paths as _paths
+    from tinohelm.data.storage import get_active_catalog_root
     from tinohelm.factor.data_layer import DataLayer
     from tinohelm.factor.registry import Registry as FactorRegistry
     from tinohelm.factor.types import DataRequest
@@ -589,7 +589,7 @@ def _load_aligned_panels(
     # ----------------------------------------------------------------
     # 4. Build DataLayer + issue per-input DataRequests
     # ----------------------------------------------------------------
-    catalog_root = Path(config.get("catalog_path") or str(_paths.get("catalog")))
+    catalog_root = Path(config.get("catalog_path") or str(get_active_catalog_root()))
     data_layer = DataLayer(universe=universe, catalog_root=catalog_root)
 
     start = config.get("start")

@@ -459,10 +459,11 @@ def _run_orchestrator(
     from tinohelm.factor.config import parse_eval_config
     from tinohelm.factor.universe import Universe
     from tinohelm.core.config import get_settings
+    from tinohelm.data.storage import get_active_catalog_root
     import pathlib
 
     settings = get_settings()
-    catalog_path = str(settings.paths.catalog)
+    catalog_path = str(get_active_catalog_root(settings))
 
     # --- Build sub-systems -----------------------------------------------
     registry = Registry()

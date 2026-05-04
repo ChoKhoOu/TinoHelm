@@ -35,3 +35,19 @@ backtest:
   max_concurrent: 4
   # DEPRECATED — retained for back-compat; not consumed.
   max_workers: 2
+  streaming_enabled: true
+  stream_batch_size: 100000
+
+storage:
+  # local = existing filesystem catalog; tos/s3 = S3-compatible NT catalog URI.
+  provider: "local"
+  tos:
+    region: "cn-beijing"
+    bucket: ""
+    prefix: ""
+    # Empty endpoint derives the TOS S3 endpoint:
+    # https://tos-s3-{region}.ivolces.com for internal network,
+    # https://tos-s3-{region}.volces.com for public network.
+    endpoint: ""
+    use_internal_endpoint: true
+    max_keys: 1000

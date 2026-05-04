@@ -11,7 +11,14 @@ import polars as pl
 
 from tinohelm.data.catalog_helpers import interval_to_nanoseconds, resolve_catalog_path
 from tinohelm.data.pipeline_helpers import WRITE_CATEGORY
-from tinohelm.factor.data_layer import _bar_value_expr
+from tinohelm.data.storage import CatalogStorageProvider, StorageObject
+from tinohelm.factor.data_layer import (
+    _bar_value_expr,
+    _collect_lazy_streaming,
+    _parquet_lazy_frame,
+    _schema_names,
+    _storage_parquet_files,
+)
 from tinohelm.factor.research.panel import CanonicalBars, canonicalize_long_bars
 from tinohelm.strategy.loader_helpers import make_bar_type_str, parse_interval
 
@@ -28,8 +35,12 @@ class ResearchDataRequest:
 
 @dataclass(frozen=True)
 class _CandidateFile:
-    path: Path
+    file: StorageObject
     symbol_from_path: str | None = None
+
+    @property
+    def path(self) -> Path:
+        return self.file.path
 
 
 class ResearchParquetReader:
@@ -37,6 +48,8 @@ class ResearchParquetReader:
 
     def __init__(self, catalog_root: Path):
         self.catalog_root = Path(catalog_root)
+        from tinohelm.data.storage import get_catalog_storage
+        self._storage = get_catalog_storage(catalog_root=self.catalog_root)
 
     def load_bars(self, request: ResearchDataRequest) -> CanonicalBars:
         interval_to_nanoseconds(request.interval)
@@ -56,9 +69,8 @@ class ResearchParquetReader:
         lazy_frames = []
         validate_cadence = False
         for candidate in files:
-            scan = pl.scan_parquet(str(candidate.path), glob=False)
-            schema = scan.collect_schema()
-            schema_names = schema.names()
+            scan, schema = _parquet_lazy_frame(self._storage, candidate.file)
+            schema_names = _schema_names(schema)
             if not _has_timestamp(schema_names):
                 if "timestamp" in schema_names:
                     raise ValueError(
@@ -90,7 +102,7 @@ class ResearchParquetReader:
                 request.interval,
                 symbols=request.symbols,
             )
-        frame = pl.concat(lazy_frames, how="vertical_relaxed").collect()
+        frame = _collect_lazy_streaming(pl.concat(lazy_frames, how="vertical_relaxed"))
         if validate_cadence:
             _validate_flat_cadence(frame, request.interval)
         return canonicalize_long_bars(
@@ -121,15 +133,12 @@ class ResearchParquetReader:
                 result.append(root)
         return result
 
-    @staticmethod
-    def _candidate_files(roots: Sequence[Path], request: ResearchDataRequest) -> list[_CandidateFile]:
+    def _candidate_files(self, roots: Sequence[Path], request: ResearchDataRequest) -> list[_CandidateFile]:
         for root in roots:
-            if not root.exists():
-                continue
-            exact = _exact_bar_files(root, request)
+            exact = _exact_bar_files(root, request, self._storage)
             if exact:
                 return exact
-            legacy = [_CandidateFile(path) for path in _legacy_files(root, request.source)]
+            legacy = [_CandidateFile(file) for file in _legacy_files(root, request.source, self._storage)]
             if legacy:
                 return legacy
         return []
@@ -179,47 +188,50 @@ class ResearchParquetReader:
         return out
 
 
-def _exact_bar_files(root: Path, request: ResearchDataRequest) -> list[_CandidateFile]:
+def _exact_bar_files(
+    root: Path,
+    request: ResearchDataRequest,
+    storage: CatalogStorageProvider,
+) -> list[_CandidateFile]:
     bar_root = root / "data" / "bar"
-    if not bar_root.exists():
-        return []
     files: list[_CandidateFile] = []
     seen: set[Path] = set()
     if request.symbols:
         for requested_symbol in request.symbols:
-            matches: list[tuple[str, Path, list[Path]]] = []
+            matches: list[tuple[str, Path, list[StorageObject]]] = []
             for alias in sorted(_symbol_aliases(requested_symbol)):
                 for price_type in _price_types_for_source(request.source):
                     bar_dir = _safe_bar_dir(bar_root, alias, request.interval, price_type)
-                    if not bar_dir.exists():
-                        continue
-                    paths = _safe_parquet_files(root, sorted(bar_dir.glob("*.parquet")))
-                    if paths:
-                        matches.append((alias, bar_dir, paths))
+                    objects = _safe_parquet_objects(root, _storage_parquet_files(storage, bar_dir))
+                    if objects:
+                        matches.append((alias, bar_dir, objects))
             if len(matches) > 1:
                 dirs = [str(bar_dir.relative_to(bar_root)) for _, bar_dir, _ in matches]
                 raise ValueError(
                     f"ambiguous bar directories for requested symbol {requested_symbol!r}: {dirs!r}"
                 )
-            for _, bar_dir, paths in matches:
+            for _, bar_dir, objects in matches:
                 symbol_from_path = _symbol_from_bar_type_name(bar_dir.name)
-                for path in paths:
-                    resolved = path.resolve()
+                for file in objects:
+                    resolved = file.path.resolve(strict=False)
                     if resolved not in seen:
                         seen.add(resolved)
-                        files.append(_CandidateFile(path=path, symbol_from_path=symbol_from_path))
+                        files.append(_CandidateFile(file=file, symbol_from_path=symbol_from_path))
     else:
         interval_token = parse_interval(request.interval)
         suffixes = tuple(
             f"-{interval_token}-{price_type}-EXTERNAL" for price_type in _price_types_for_source(request.source)
         )
-        for bar_dir in sorted(path for path in bar_root.iterdir() if path.is_dir() and path.name.endswith(suffixes)):
+        objects = _safe_parquet_objects(root, _storage_parquet_files(storage, bar_root, recursive=True))
+        for file in objects:
+            bar_dir = file.path.parent
+            if not bar_dir.name.endswith(suffixes):
+                continue
             symbol = _symbol_from_bar_type_name(bar_dir.name)
-            for path in _safe_parquet_files(root, sorted(bar_dir.glob("*.parquet"))):
-                resolved = path.resolve()
-                if resolved not in seen:
-                    seen.add(resolved)
-                    files.append(_CandidateFile(path=path, symbol_from_path=symbol))
+            resolved = file.path.resolve(strict=False)
+            if resolved not in seen:
+                seen.add(resolved)
+                files.append(_CandidateFile(file=file, symbol_from_path=symbol))
     return files
 
 
@@ -233,15 +245,15 @@ def _is_metadata_parquet(path: Path) -> bool:
     }
 
 
-def _legacy_files(root: Path, source: str) -> list[Path]:
-    files = [path for path in _safe_parquet_files(root, sorted(root.glob("*.parquet")))]
+def _legacy_files(root: Path, source: str, storage: CatalogStorageProvider) -> list[StorageObject]:
+    files = _safe_parquet_objects(root, _storage_parquet_files(storage, root, recursive=False))
     if root.name == source:
         return files
-    source_matched = [path for path in files if _legacy_source_file_matches(path, source)]
+    source_matched = [file for file in files if _legacy_source_file_matches(file.path, source)]
     if source_matched:
         return source_matched
     if source == "klines":
-        return [path for path in files if not _legacy_source_file_matches_any(path)]
+        return [file for file in files if not _legacy_source_file_matches_any(file.path)]
     return []
 
 
@@ -258,6 +270,19 @@ def _legacy_source_file_matches(path: Path, source: str) -> bool:
 
 def _legacy_source_file_matches_any(path: Path) -> bool:
     return any(_legacy_source_file_matches(path, source) for source in _LEGACY_BAR_SOURCE_NAMES)
+
+
+def _safe_parquet_objects(root: Path, objects: Sequence[StorageObject]) -> list[StorageObject]:
+    resolved_root = root.resolve()
+    safe: list[StorageObject] = []
+    for obj in objects:
+        if _is_metadata_parquet(obj.path):
+            continue
+        resolved = obj.path.resolve(strict=False)
+        if not resolved.is_relative_to(resolved_root):
+            raise ValueError(f"parquet file {obj.path} resolves outside catalog root {root}")
+        safe.append(obj)
+    return safe
 
 
 def _safe_parquet_files(root: Path, paths: Sequence[Path]) -> list[Path]:
@@ -356,12 +381,9 @@ def _validate_bar_type_values(
         f"-{parse_interval(request.interval)}-{price_type}-EXTERNAL"
         for price_type in _price_types_for_source(request.source)
     )
-    values = (
+    values = _collect_lazy_streaming(
         scan.select(pl.col(bar_type_col).cast(pl.Utf8).drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+    ).to_series().to_list()
     mismatches = [value for value in values if not str(value).endswith(expected_suffixes)]
     if mismatches:
         sample = sorted(str(value) for value in mismatches)[:3]
@@ -387,7 +409,7 @@ def _validate_row_symbol_identity(
     if bar_type_col is not None:
         checks.append((bar_type_col, _clean_bar_type_symbol(pl.col(bar_type_col).cast(pl.Utf8)).alias("symbol")))
     for label, expr in checks:
-        values = scan.select(expr.drop_nulls().unique()).collect().to_series().to_list()
+        values = _collect_lazy_streaming(scan.select(expr.drop_nulls().unique())).to_series().to_list()
         mismatches = [value for value in values if str(value) not in aliases]
         if mismatches:
             sample = sorted(str(value) for value in mismatches)[:3]

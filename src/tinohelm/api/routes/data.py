@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
 from tinohelm.core.config import Settings
 from tinohelm.data.pipeline_helpers import WRITE_CATEGORY, resolve_db_interval
+from tinohelm.data.storage import stage_prefix_for_local_consumer
 from tinohelm.data.worker import enqueue_job
 from tinohelm.db.models import DataCatalog, DataFetchJob
 
@@ -136,10 +137,12 @@ def _fetch_batch_job_intervals(data_type: str, intervals: list[str]) -> list[str
 
 def _bar_parquet_files(catalog_path: str | Path, symbol: str, interval: str) -> list[Path]:
     from tinohelm.strategy.loader import normalize_symbol
+    from tinohelm.data.storage import get_catalog_storage, stage_prefix_for_local_consumer
 
     nt_sym = normalize_symbol(symbol)
     nt_interval = _interval_to_nt(interval)
     bar_type_dir = Path(catalog_path) / "data" / "bar" / f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
+    stage_prefix_for_local_consumer(get_catalog_storage(catalog_root=catalog_path), bar_type_dir)
     if not bar_type_dir.exists():
         return []
     return list(bar_type_dir.glob("*.parquet"))
@@ -173,6 +176,9 @@ def _delete_storage_files(
 ) -> tuple[int, int]:
     """Delete storage files for a catalog entry. Returns (deleted_files, freed_bytes)."""
     from tinohelm.data.catalog_helpers import resolve_catalog_path
+    from tinohelm.data.storage import delete_prefix, get_catalog_storage
+
+    storage = get_catalog_storage(catalog_root=catalog_path)
 
     def _target_roots(category: str) -> list[Path]:
         base = Path(catalog_path)
@@ -194,12 +200,20 @@ def _delete_storage_files(
             if target_dir in seen:
                 continue
             seen.add(target_dir)
+            if getattr(storage, "provider", "local") != "local":
+                remote_deleted, remote_freed = delete_prefix(storage, target_dir)
+                if target_dir.exists() and not list(target_dir.iterdir()):
+                    target_dir.rmdir()
+                deleted_files += remote_deleted
+                freed_bytes += remote_freed
+                continue
+            stage_prefix_for_local_consumer(storage, target_dir)
             if not target_dir.exists():
                 continue
             files = list(target_dir.glob("*.parquet"))
             total_size = sum(f.stat().st_size for f in files)
             for f in files:
-                f.unlink()
+                f.unlink(missing_ok=True)
             if target_dir.exists() and not list(target_dir.iterdir()):
                 target_dir.rmdir()
             deleted_files += len(files)
@@ -214,6 +228,12 @@ def _delete_storage_files(
             if target_file in seen:
                 continue
             seen.add(target_file)
+            if getattr(storage, "provider", "local") != "local":
+                remote_deleted, remote_freed = delete_prefix(storage, target_file)
+                deleted_files += remote_deleted
+                freed_bytes += remote_freed
+                continue
+            storage.materialize_path(target_file)
             if not target_file.exists():
                 continue
             size = target_file.stat().st_size
@@ -375,7 +395,8 @@ async def _run_compact(
         from tinohelm.data.catalog import compact_bars
         from tinohelm.db.session import get_session_factory
 
-        base_catalog_path = settings.paths.catalog if settings else "data/catalog"
+        from tinohelm.data.storage import get_active_catalog_root
+        base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
         effective_source = source_type or data_type
         catalog_path = _bar_catalog_path_for(
             base_catalog_path,
@@ -532,7 +553,8 @@ async def validate_data(
             detail=f"Unsupported bar data_type {data_type!r}. Supported values: {supported}",
         )
 
-    base_catalog_path = settings.paths.catalog if settings else "data/catalog"
+    from tinohelm.data.storage import get_active_catalog_root
+    base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
     catalog_path = _bar_catalog_path_for(base_catalog_path, data_type, symbol, interval, source_type=data_type)
     try:
         result = await asyncio.to_thread(
@@ -560,8 +582,11 @@ async def scan_data_catalog(
     Discovers bar data directories, reads date ranges from the actual
     Parquet data, and upserts DataCatalog rows for any that are missing.
     """
-    catalog_path = str(settings.paths.catalog)
     from tinohelm.data.catalog import resolve_catalog_path
+    from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
+
+    catalog_path = str(get_active_catalog_root(settings))
+    storage = get_catalog_storage(settings=settings)
 
     # Parse bar_type directory names:
     #   BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL
@@ -577,10 +602,12 @@ async def scan_data_catalog(
     for _src_type in _bar_source_types:
         resolved = str(resolve_catalog_path(catalog_path, _src_type))
         d = Path(resolved) / "data" / "bar"
+        stage_prefix_for_local_consumer(storage, d)
         if d.exists():
             _bar_scan_targets.append((d, resolved, _src_type))
     # Old flat path fallback (pre-migration data)
     _old_bar = Path(catalog_path) / "data" / "bar"
+    stage_prefix_for_local_consumer(storage, _old_bar)
     if _old_bar.exists() and not any(d == _old_bar for d, _, _ in _bar_scan_targets):
         _bar_scan_targets.append((_old_bar, catalog_path, "klines"))
 
@@ -702,9 +729,11 @@ async def scan_data_catalog(
         for _src_type in _tick_source_types:
             resolved = str(resolve_catalog_path(catalog_path, _src_type))
             d = Path(resolved) / "data" / _tick_dir_name
+            stage_prefix_for_local_consumer(storage, d)
             if d.exists():
                 _tick_scan_targets.append((d, resolved, _src_type, _tick_data_type))
         _old_tick = Path(catalog_path) / "data" / _tick_dir_name
+        stage_prefix_for_local_consumer(storage, _old_tick)
         if _old_tick.exists() and not any(d == _old_tick for d, _, _, dt in _tick_scan_targets if dt == _tick_data_type):
             _tick_scan_targets.append((_old_tick, catalog_path, _tick_source_types[0], _tick_data_type))
 
@@ -835,10 +864,11 @@ async def delete_catalog_entry(
     if not row:
         raise HTTPException(status_code=404, detail="Catalog entry not found")
 
+    from tinohelm.data.storage import get_active_catalog_root
     deleted_files, freed_bytes = await asyncio.to_thread(
         _delete_storage_files,
         row.symbol, row.data_type, row.interval,
-        str(settings.paths.catalog),
+        str(get_active_catalog_root(settings)),
         row.source_type,
     )
 

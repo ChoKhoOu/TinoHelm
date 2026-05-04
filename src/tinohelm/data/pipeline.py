@@ -24,6 +24,7 @@ import pandas as pd
 
 from tinohelm.data.converters import get_converter
 from tinohelm.data.downloader import VisionDownloader, _KLINES_TYPES
+from tinohelm.data.storage import stage_prefix_for_local_consumer
 from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
     INTERVAL_CONVENTION,
@@ -95,8 +96,11 @@ class BinanceVisionPipeline:
         raw_dir: str | Path = "~/.tino/data/raw",
     ) -> None:
         from tinohelm.core.config import get_settings
+        from tinohelm.data.storage import get_catalog_storage
+
         cfg = get_settings()
-        self.catalog_path = str(catalog_path)
+        self._storage = get_catalog_storage(settings=cfg, catalog_root=catalog_path)
+        self.catalog_path = str(self._storage.catalog_root)
         self.downloader = VisionDownloader(
             raw_dir=raw_dir, concurrency=cfg.data.download_concurrency,
         )
@@ -551,6 +555,7 @@ class BinanceVisionPipeline:
                 interval=interval, catalog_path=self.catalog_path,
                 merge=merge, source_type=data_type,
             )
+            self._sync_written_paths(paths)
             return [str(p) for p in paths]
 
         elif category == "trade_tick":
@@ -560,6 +565,7 @@ class BinanceVisionPipeline:
                 catalog_path=self.catalog_path,
                 source_type=data_type,
             )
+            self._sync_written_paths(paths)
             return paths
 
         elif category == "quote_tick":
@@ -569,6 +575,7 @@ class BinanceVisionPipeline:
                 catalog_path=self.catalog_path,
                 source_type=data_type,
             )
+            self._sync_written_paths(paths)
             return paths
 
         elif category == "funding_rate":
@@ -577,13 +584,17 @@ class BinanceVisionPipeline:
             return [parquet_path] if parquet_path else []
 
         elif category == "metrics":
-            from tinohelm.data.catalog import write_metrics_parquet
+            from tinohelm.data.catalog import metrics_parquet_path, write_metrics_parquet
+            self._storage.materialize_path(metrics_parquet_path(symbol, self.catalog_path))
             path = write_metrics_parquet(objects, symbol, self.catalog_path)
+            self._sync_written_paths([path])
             return [str(path)]
 
         elif category == "order_book_delta":
-            from tinohelm.data.catalog import write_book_depth_parquet
+            from tinohelm.data.catalog import book_depth_parquet_path, write_book_depth_parquet
+            self._storage.materialize_path(book_depth_parquet_path(symbol, self.catalog_path))
             path = write_book_depth_parquet(objects, symbol, self.catalog_path)
+            self._sync_written_paths([path])
             return [str(path)]
 
         else:
@@ -592,6 +603,20 @@ class BinanceVisionPipeline:
                 data_type, category,
             )
             return []
+
+    def _sync_written_paths(self, paths: list[str] | list[Path]) -> None:
+        """Upload written catalog files when the active provider is remote."""
+        if getattr(self._storage, "provider", "local") == "local":
+            return
+        for item in paths:
+            path = Path(item)
+            if not path.is_file():
+                continue
+            try:
+                self._storage.upload_path(path)
+            except Exception:
+                logger.warning("Failed to upload catalog file to storage: %s", path, exc_info=True)
+                raise
 
     @staticmethod
     def _funding_cache_covers(symbol: str, start: date, end: date) -> bool:
@@ -626,7 +651,7 @@ class BinanceVisionPipeline:
         Returns the Parquet file path string if written, else None.
         """
         from tinohelm.data.funding_cache import _save_cache
-        from tinohelm.data.catalog import write_funding_rate_parquet
+        from tinohelm.data.catalog import funding_rate_parquet_path, write_funding_rate_parquet
 
         cache_records = [
             {
@@ -641,6 +666,7 @@ class BinanceVisionPipeline:
 
         # Parquet write (new primary path)
         try:
+            self._storage.materialize_path(funding_rate_parquet_path(symbol, self.catalog_path))
             parquet_path = write_funding_rate_parquet(
                 records=records,
                 symbol=symbol,
@@ -650,6 +676,7 @@ class BinanceVisionPipeline:
                 "Wrote %d funding rate records for %s (Parquet + JSON)",
                 len(records), symbol,
             )
+            self._sync_written_paths([parquet_path])
             return str(parquet_path)
         except Exception:
             logger.warning(
@@ -741,6 +768,7 @@ class BinanceVisionPipeline:
         bars = converter.convert(df, instrument, **kwargs)
         if bars:
             paths = write_bars(bars, symbol, interval, self.catalog_path, merge=False, source_type=data_type)
+            self._sync_written_paths(paths)
             return len(bars), [str(p) for p in paths]
         return 0, []
 
@@ -763,6 +791,7 @@ class BinanceVisionPipeline:
         ticks = agg_trades_to_trade_ticks(agg_trades, symbol)
         if ticks:
             paths = write_trade_ticks(ticks, symbol, self.catalog_path, source_type="aggTrades")
+            self._sync_written_paths(paths)
             return len(ticks), paths
         return 0, []
 
@@ -801,6 +830,9 @@ class BinanceVisionPipeline:
         else:
             return  # merged raw datasets clean themselves via their writers
 
+        from tinohelm.data.storage import delete_prefix
+
+        stage_prefix_for_local_consumer(self._storage, target_dir)
         if not target_dir.exists():
             return
 
@@ -812,12 +844,12 @@ class BinanceVisionPipeline:
             time_range = self._parquet_time_range(fpath)
             if time_range is None:
                 # Cannot determine range — delete to be safe (will be re-fetched)
-                fpath.unlink()
+                delete_prefix(self._storage, fpath)
                 deleted += 1
                 continue
             file_min, file_max = time_range
             if file_max >= start_ns and file_min < end_ns:
-                fpath.unlink()
+                delete_prefix(self._storage, fpath)
                 deleted += 1
 
         if deleted:
@@ -903,7 +935,13 @@ class BinanceVisionPipeline:
     ) -> tuple[int | None, int]:
         """Return full-scan row and byte counts for a catalog storage path."""
         target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
-        if target_dir is None or not target_dir.exists():
+        if target_dir is None:
+            return None, 0
+        if target_dir.is_file():
+            self._storage.materialize_path(target_dir)
+        else:
+            stage_prefix_for_local_consumer(self._storage, target_dir)
+        if not target_dir.exists():
             return None, 0
 
         if target_dir.is_file():
@@ -953,7 +991,13 @@ class BinanceVisionPipeline:
     ) -> tuple[date, date] | None:
         """Return stored min/max event dates for a catalog storage path."""
         target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
-        if target_dir is None or not target_dir.exists():
+        if target_dir is None:
+            return None
+        if target_dir.is_file():
+            self._storage.materialize_path(target_dir)
+        else:
+            stage_prefix_for_local_consumer(self._storage, target_dir)
+        if not target_dir.exists():
             return None
 
         paths = [target_dir] if target_dir.is_file() else [path for path in target_dir.rglob("*.parquet") if path.is_file()]

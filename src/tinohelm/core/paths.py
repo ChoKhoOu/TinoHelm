@@ -125,7 +125,8 @@ class PathRegistry:
         try:
             from tinohelm.core.config import get_settings
 
-            configured: Path = getattr(get_settings().paths, field)
+            settings = get_settings()
+            configured: Path = getattr(settings.paths, field)
         except Exception as exc:  # fail-fast — no silent fallback
             raise PathConfigError(
                 f"Failed to resolve settings.paths.{field}: {exc!r}"

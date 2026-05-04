@@ -67,10 +67,116 @@ from typing import Any, Iterable, Literal, Sequence
 import polars as pl
 
 from tinohelm.core.paths import paths
+from tinohelm.data.storage import CatalogStorageProvider, StorageObject, is_remote_storage
 from tinohelm.factor.types import DataRequest, EventRequest, Panel
 from tinohelm.factor.universe import Universe
 
 logger = logging.getLogger(__name__)
+
+
+def _collect_lazy_streaming(lazy_frame: pl.LazyFrame) -> pl.DataFrame:
+    """Collect a lazy query with Polars streaming engine when available."""
+    try:
+        return lazy_frame.collect(engine="streaming")
+    except TypeError:
+        return lazy_frame.collect(streaming=True)
+
+
+def _storage_parquet_files(
+    storage: CatalogStorageProvider,
+    prefix: Path,
+    *,
+    recursive: bool = False,
+) -> list[StorageObject]:
+    return sorted(
+        storage.iter_files(prefix, suffix=".parquet", recursive=recursive),
+        key=lambda obj: str(obj.path),
+    )
+
+
+def _schema_names(schema: pl.Schema | dict[str, pl.DataType]) -> list[str]:
+    names = getattr(schema, "names", None)
+    if callable(names):
+        return list(names())
+    return list(schema.keys())
+
+
+def _polars_schema_from_arrow(arrow_schema: object) -> pl.Schema:
+    import pyarrow as pa
+
+    arrays = []
+    names = []
+    for field in arrow_schema:
+        names.append(field.name)
+        arrays.append(pa.array([], type=field.type))
+    return pl.from_arrow(pa.Table.from_arrays(arrays, names=names)).schema
+
+
+def _parquet_schema(
+    storage: CatalogStorageProvider,
+    file: StorageObject,
+    *,
+    row_index_name: str | None = None,
+) -> pl.Schema:
+    if not is_remote_storage(storage):
+        return pl.scan_parquet(str(file.path), row_index_name=row_index_name).collect_schema()
+    import pyarrow.parquet as pq
+
+    with storage.open_input_file(file) as fh:
+        schema = _polars_schema_from_arrow(pq.ParquetFile(fh, pre_buffer=False).schema_arrow)
+    if row_index_name is not None and row_index_name not in schema:
+        schema = pl.Schema({row_index_name: pl.UInt32, **dict(schema)})
+    return schema
+
+
+def _read_parquet_frame(
+    storage: CatalogStorageProvider,
+    file: StorageObject,
+    *,
+    columns: Sequence[str] | None = None,
+    row_index_name: str | None = None,
+) -> pl.DataFrame:
+    if not is_remote_storage(storage):
+        lf = pl.scan_parquet(str(file.path), row_index_name=row_index_name)
+        if columns is not None:
+            schema = lf.collect_schema()
+            selected = [column for column in columns if column in schema]
+            if row_index_name is not None and row_index_name not in selected:
+                selected.append(row_index_name)
+            lf = lf.select(selected)
+        return _collect_lazy_streaming(lf)
+
+    import pyarrow.parquet as pq
+
+    with storage.open_input_file(file) as fh:
+        parquet = pq.ParquetFile(fh, pre_buffer=False)
+        available = set(parquet.schema_arrow.names)
+        read_columns = None if columns is None else [column for column in columns if column in available]
+        table = parquet.read(columns=read_columns, use_threads=True)
+    frame = pl.from_arrow(table)
+    if row_index_name is not None:
+        frame = frame.with_row_index(row_index_name)
+    return frame
+
+
+def _parquet_lazy_frame(
+    storage: CatalogStorageProvider,
+    file: StorageObject,
+    *,
+    row_index_name: str | None = None,
+    columns: Sequence[str] | None = None,
+) -> tuple[pl.LazyFrame, pl.Schema]:
+    schema = _parquet_schema(storage, file, row_index_name=row_index_name)
+    if not is_remote_storage(storage):
+        lf = pl.scan_parquet(str(file.path), row_index_name=row_index_name)
+        if columns is not None:
+            selected = [column for column in columns if column in schema]
+            if row_index_name is not None and row_index_name in schema and row_index_name not in selected:
+                selected.append(row_index_name)
+            lf = lf.select(selected)
+        return lf, schema
+    frame = _read_parquet_frame(storage, file, columns=columns, row_index_name=row_index_name)
+    return frame.lazy(), schema
 
 # Column name conventions for the internal 2-col series frames and the
 # wide-table panel returned by :meth:`DataLayer.load`.
@@ -156,11 +262,15 @@ class _BarInterval:
 
 @dataclass(frozen=True)
 class _TickFileCandidate:
-    path: Path
+    file: StorageObject
     source_priority: int
     file_ordinal: int
     source_type: str
     source_aware: bool
+
+    @property
+    def path(self) -> Path:
+        return self.file.path
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +567,7 @@ def _fixed_precision_expr(column: str, dtype: pl.DataType) -> pl.Expr:
 
 
 @lru_cache(maxsize=4096)
-def _cached_parquet_ts_event_range(
+def _cached_local_parquet_ts_event_range(
     path_str: str,
     mtime_ns: int,
     size: int,
@@ -468,34 +578,19 @@ def _cached_parquet_ts_event_range(
         import pyarrow.parquet as pq
 
         metadata = pq.ParquetFile(path).metadata
-        mins: list[int] = []
-        maxs: list[int] = []
-        for row_group_idx in range(metadata.num_row_groups):
-            row_group = metadata.row_group(row_group_idx)
-            for column_idx in range(row_group.num_columns):
-                column = row_group.column(column_idx)
-                if column.path_in_schema != "ts_event" or column.statistics is None:
-                    continue
-                stats = column.statistics
-                if stats.has_min_max:
-                    mins.append(int(stats.min))
-                    maxs.append(int(stats.max))
-        if mins and maxs:
-            result = (min(mins), max(maxs))
-        else:
+        result = _ts_event_range_from_metadata(metadata)
+        if result is None:
             table = pq.read_table(path, columns=["ts_event"])
             column = table.column("ts_event")
             if len(column) > 0:
                 result = (int(column.combine_chunks().to_numpy().min()), int(column.combine_chunks().to_numpy().max()))
     except Exception:
         try:
-            stats = (
-                pl.scan_parquet(str(path))
-                .select([
+            stats = _collect_lazy_streaming(
+                pl.scan_parquet(str(path)).select([
                     pl.col("ts_event").min().alias("min_ts_event"),
                     pl.col("ts_event").max().alias("max_ts_event"),
                 ])
-                .collect()
             )
             if not stats.is_empty():
                 result = (int(stats["min_ts_event"][0]), int(stats["max_ts_event"][0]))
@@ -505,40 +600,99 @@ def _cached_parquet_ts_event_range(
     return result
 
 
-def _parquet_ts_event_range(path: Path) -> tuple[int | None, int | None] | None:
-    """Return min/max ts_event ns for a Parquet file, or ``None`` if unknown."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return _cached_parquet_ts_event_range(str(path), stat.st_mtime_ns, stat.st_size)
+def _ts_event_range_from_metadata(metadata: object) -> tuple[int | None, int | None] | None:
+    mins: list[int] = []
+    maxs: list[int] = []
+    for row_group_idx in range(metadata.num_row_groups):
+        row_group = metadata.row_group(row_group_idx)
+        for column_idx in range(row_group.num_columns):
+            column = row_group.column(column_idx)
+            if column.path_in_schema != "ts_event" or column.statistics is None:
+                continue
+            stats = column.statistics
+            if stats.has_min_max:
+                mins.append(int(stats.min))
+                maxs.append(int(stats.max))
+    if mins and maxs:
+        return (min(mins), max(maxs))
+    return None
 
-_parquet_ts_event_range.cache_info = _cached_parquet_ts_event_range.cache_info  # type: ignore[attr-defined]
+
+def _parquet_ts_event_range(
+    storage: CatalogStorageProvider,
+    file: StorageObject,
+) -> tuple[int | None, int | None] | None:
+    """Return min/max ts_event ns for a Parquet file, or ``None`` if unknown."""
+    if not is_remote_storage(storage):
+        try:
+            stat = file.path.stat()
+        except OSError:
+            return None
+        return _cached_local_parquet_ts_event_range(str(file.path), stat.st_mtime_ns, stat.st_size)
+
+    try:
+        import pyarrow.parquet as pq
+
+        with storage.open_input_file(file) as fh:
+            parquet = pq.ParquetFile(fh, pre_buffer=False)
+            result = _ts_event_range_from_metadata(parquet.metadata)
+            if result is not None:
+                return result
+            table = parquet.read(columns=["ts_event"], use_threads=True)
+            column = table.column("ts_event")
+            if len(column) > 0:
+                return (int(column.combine_chunks().to_numpy().min()), int(column.combine_chunks().to_numpy().max()))
+    except Exception:
+        return None
+    return None
+
+_parquet_ts_event_range.cache_info = _cached_local_parquet_ts_event_range.cache_info  # type: ignore[attr-defined]
 
 
 def _prune_parquet_files_by_time(
-    files: Sequence[Path],
-    start: datetime | None,
-    end: datetime | None,
-) -> list[Path]:
-    """Select files whose ts_event metadata overlaps an inclusive window."""
+    storage_or_files: CatalogStorageProvider | Sequence[Path] | Sequence[StorageObject],
+    files_or_start: Sequence[StorageObject] | datetime | None,
+    start_or_end: datetime | None = None,
+    end: datetime | None = None,
+) -> list[StorageObject] | list[Path]:
+    """Select files whose ts_event metadata overlaps an inclusive window.
+
+    The public helper historically accepted ``(paths, start, end)`` and
+    returned ``Path`` objects.  Provider-aware callers pass
+    ``(storage, StorageObject[], start, end)`` and keep remote object metadata.
+    """
+    from tinohelm.data.storage import LocalCatalogStorage
+
+    provider_like = hasattr(storage_or_files, "iter_files") and hasattr(storage_or_files, "provider")
+    return_paths = not provider_like
+    if provider_like:
+        storage = storage_or_files  # type: ignore[assignment]
+        files = list(files_or_start or ())  # type: ignore[arg-type]
+        start = start_or_end
+    else:
+        storage = LocalCatalogStorage(Path("."))
+        raw_paths = [Path(path) for path in storage_or_files]  # type: ignore[union-attr]
+        files = [StorageObject(key=str(path), path=path) for path in raw_paths]
+        start = files_or_start if isinstance(files_or_start, datetime) or files_or_start is None else None
+        end = start_or_end
+
     if start is None and end is None:
-        return list(files)
+        return [file.path for file in files] if return_paths else files
     start_ns = _datetime_to_ns(start) if start is not None else None
     end_ns = _datetime_to_ns(end) if end is not None else None
-    selected: list[Path] = []
-    for path in files:
-        file_range = _parquet_ts_event_range(path)
+    selected: list[StorageObject] = []
+    for file in files:
+        file_range = _parquet_ts_event_range(storage, file)
         if file_range is None or file_range[0] is None or file_range[1] is None:
-            selected.append(path)
+            selected.append(file)
             continue
         min_ns, max_ns = file_range
         if start_ns is not None and max_ns < start_ns:
             continue
         if end_ns is not None and min_ns > end_ns:
             continue
-        selected.append(path)
-    return selected
+        selected.append(file)
+    return [file.path for file in selected] if return_paths else selected
 
 
 def _trade_tick_required_columns(fields: Sequence[str]) -> list[str]:
@@ -793,6 +947,8 @@ class DataLayer:
         self._catalog_root = Path(catalog_root) if catalog_root is not None else paths.get("catalog")
         self._funding_dir = Path(funding_dir) if funding_dir is not None else paths.get("funding_rates")
         self._max_workers = max_workers
+        from tinohelm.data.storage import get_catalog_storage
+        self._storage = get_catalog_storage(catalog_root=self._catalog_root)
 
     # ------------------------------------------------------------------
     # Public API
@@ -1283,10 +1439,15 @@ class DataLayer:
         for source_priority, root in enumerate(self._quote_tick_roots(source_type)):
             root_path = Path(root)
             quote_dir = root_path / "data" / "quote_tick" / normalize_symbol(symbol)
-            files = _prune_parquet_files_by_time(sorted(quote_dir.glob("*.parquet")), start, end)
+            files = _prune_parquet_files_by_time(
+                self._storage,
+                _storage_parquet_files(self._storage, quote_dir),
+                start,
+                end,
+            )
             source_aware = root_path.name == "bookTicker" and root_path.parent.name == "quotes"
-            for path in files:
-                candidates.append(_TickFileCandidate(path, source_priority, file_ordinal, "bookTicker", source_aware))
+            for file in files:
+                candidates.append(_TickFileCandidate(file, source_priority, file_ordinal, "bookTicker", source_aware))
                 file_ordinal += 1
         if any(candidate.source_aware for candidate in candidates):
             return [candidate for candidate in candidates if candidate.source_aware]
@@ -1316,8 +1477,12 @@ class DataLayer:
         frames: list[pl.DataFrame] = []
         required_columns = ["ts_event", "bid_price", "bid_size", "ask_price", "ask_size"]
         for candidate in candidates:
-            lf = pl.scan_parquet(str(candidate.path), row_index_name="_row_ordinal")
-            schema = lf.collect_schema()
+            lf, schema = _parquet_lazy_frame(
+                self._storage,
+                candidate.file,
+                row_index_name="_row_ordinal",
+                columns=_quote_tick_required_columns(required_columns),
+            )
             missing = [column for column in required_columns if column not in schema]
             if missing:
                 if strict:
@@ -1337,12 +1502,14 @@ class DataLayer:
                 pl.lit(candidate.source_priority).alias("_source_priority"),
                 pl.lit(candidate.file_ordinal).alias("_file_ordinal"),
             ]
-            normalized = lf.with_columns(exprs).with_columns(
-                ((pl.col("bid_price") + pl.col("ask_price")) / 2.0).alias("mid_price"),
-                ((pl.col("ask_price") - pl.col("bid_price")) / ((pl.col("bid_price") + pl.col("ask_price")) / 2.0) * 10_000.0).alias("spread_bps"),
-                (pl.col("bid_price") * pl.col("bid_qty") + pl.col("ask_price") * pl.col("ask_qty")).alias("depth_l1_usd"),
-                ((pl.col("bid_qty") - pl.col("ask_qty")) / (pl.col("bid_qty") + pl.col("ask_qty"))).alias("orderbook_imbalance"),
-            ).select(_empty_quote_normalized_frame().columns).collect()
+            normalized = _collect_lazy_streaming(
+                lf.with_columns(exprs).with_columns(
+                    ((pl.col("bid_price") + pl.col("ask_price")) / 2.0).alias("mid_price"),
+                    ((pl.col("ask_price") - pl.col("bid_price")) / ((pl.col("bid_price") + pl.col("ask_price")) / 2.0) * 10_000.0).alias("spread_bps"),
+                    (pl.col("bid_price") * pl.col("bid_qty") + pl.col("ask_price") * pl.col("ask_qty")).alias("depth_l1_usd"),
+                    ((pl.col("bid_qty") - pl.col("ask_qty")) / (pl.col("bid_qty") + pl.col("ask_qty"))).alias("orderbook_imbalance"),
+                ).select(_empty_quote_normalized_frame().columns)
+            )
             frames.append(normalized)
         if not frames:
             return _empty_quote_normalized_frame()
@@ -1471,7 +1638,7 @@ class DataLayer:
             frame = self._read_quote_tick_frame(symbol, raw_start, raw_end or end, source_type, strict=False)
             if frame.is_empty():
                 return empty
-            frame = (
+            frame = _collect_lazy_streaming(
                 frame.lazy()
                 .group_by_dynamic(
                     _TS_COL,
@@ -1482,7 +1649,6 @@ class DataLayer:
                 )
                 .agg([pl.col(field).last().alias(field) for field in field_names])
                 .with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL))
-                .collect()
             )
         except Exception:
             logger.warning("Failed to read quote ticks for %s", symbol, exc_info=True)
@@ -1536,11 +1702,16 @@ class DataLayer:
             for source_priority, root in enumerate(root_group):
                 root_path = Path(root)
                 trade_dir = root_path / "data" / "trade_tick" / normalize_symbol(symbol)
-                files = _prune_parquet_files_by_time(sorted(trade_dir.glob("*.parquet")), start, end)
+                files = _prune_parquet_files_by_time(
+                    self._storage,
+                    _storage_parquet_files(self._storage, trade_dir),
+                    start,
+                    end,
+                )
                 candidate_source_type = source_type or ("trades" if root_path.name == "trades" else "aggTrades")
                 source_aware = root_path.name in _TRADE_TICK_SOURCE_TYPES and root_path.parent.name == "ticks"
-                for path in files:
-                    candidates.append(_TickFileCandidate(path, source_priority, file_ordinal, candidate_source_type, source_aware))
+                for file in files:
+                    candidates.append(_TickFileCandidate(file, source_priority, file_ordinal, candidate_source_type, source_aware))
                     file_ordinal += 1
             if any(candidate.source_aware for candidate in candidates):
                 candidates = [candidate for candidate in candidates if candidate.source_aware]
@@ -1577,8 +1748,21 @@ class DataLayer:
         for candidates in candidate_groups:
             frames: list[pl.DataFrame] = []
             for candidate in candidates:
-                lf = pl.scan_parquet(str(candidate.path), row_index_name="_row_ordinal")
-                schema = lf.collect_schema()
+                projected_columns = _ordered_unique([
+                    "ts_event",
+                    "price",
+                    "trade_price",
+                    "size",
+                    "trade_qty",
+                    "aggressor_side",
+                    "trade_id",
+                ])
+                lf, schema = _parquet_lazy_frame(
+                    self._storage,
+                    candidate.file,
+                    row_index_name="_row_ordinal",
+                    columns=projected_columns,
+                )
                 if "ts_event" not in schema:
                     if strict_fields:
                         raise ValueError(f"Missing required trade_tick column(s) for raw fields {tuple(strict_fields)!r}: ts_event")
@@ -1613,11 +1797,11 @@ class DataLayer:
                     pl.lit(candidate.source_priority).alias("_source_priority"),
                     pl.lit(candidate.file_ordinal).alias("_file_ordinal"),
                 ]
-                normalized = lf.with_columns(exprs).with_columns([
+                normalized = _collect_lazy_streaming(lf.with_columns(exprs).with_columns([
                     (pl.col("trade_qty") * pl.col("trade_side")).alias("signed_trade_qty"),
                     pl.when(pl.col("trade_side") > 0).then(pl.col("trade_qty")).otherwise(0.0).alias("buy_qty"),
                     pl.when(pl.col("trade_side") < 0).then(pl.col("trade_qty")).otherwise(0.0).alias("sell_qty"),
-                ]).select(_empty_trade_normalized_frame().columns).collect()
+                ]).select(_empty_trade_normalized_frame().columns))
                 frames.append(normalized)
             if not frames:
                 continue
@@ -1761,7 +1945,9 @@ class DataLayer:
                     aggs.append(pl.col(field).last().alias(field))
                 else:
                     aggs.append(pl.col(field).sum().alias(field))
-            frame = grouped.agg(aggs).with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL)).collect()
+            frame = _collect_lazy_streaming(
+                grouped.agg(aggs).with_columns((pl.col(_TS_COL) - _BAR_CLOSE_OFFSET).alias(_TS_COL))
+            )
         except Exception:
             logger.warning("Failed to read trade ticks for %s", symbol, exc_info=True)
             return empty
@@ -1861,10 +2047,13 @@ class DataLayer:
     ) -> pl.DataFrame:
         if field_name not in _METRICS_FIELDS:
             raise ValueError(f"Unknown metrics field {field_name!r}")
-        from tinohelm.data.catalog import read_metrics_parquet
+        from tinohelm.data.catalog import metrics_parquet_path
 
         try:
-            frame = read_metrics_parquet(symbol, self._catalog_root)
+            files = list(self._storage.iter_files(metrics_parquet_path(symbol, self._catalog_root), suffix=".parquet"))
+            if not files:
+                return _empty_series_frame()
+            frame = _read_parquet_frame(self._storage, files[0])
         except Exception:
             logger.warning("Failed to read metrics parquet for %s", symbol, exc_info=True)
             return _empty_series_frame()
@@ -1883,10 +2072,13 @@ class DataLayer:
     ) -> pl.DataFrame:
         if field_name not in _BOOK_DEPTH_FIELDS:
             raise ValueError(f"Unknown book_depth field {field_name!r}")
-        from tinohelm.data.catalog import read_book_depth_parquet
+        from tinohelm.data.catalog import book_depth_parquet_path
 
         try:
-            frame = read_book_depth_parquet(symbol, self._catalog_root)
+            files = list(self._storage.iter_files(book_depth_parquet_path(symbol, self._catalog_root), suffix=".parquet"))
+            if not files:
+                return _empty_series_frame()
+            frame = _read_parquet_frame(self._storage, files[0])
         except Exception:
             logger.warning("Failed to read bookDepth parquet for %s", symbol, exc_info=True)
             return _empty_series_frame()
@@ -2049,13 +2241,12 @@ class DataLayer:
 
         for catalog_root in _bar_catalog_roots(self._catalog_root, source_type):
             bar_dir = catalog_root / "data" / "bar" / bar_type_str
-            parquet_files = sorted(bar_dir.glob("*.parquet"))
+            parquet_files = _storage_parquet_files(self._storage, bar_dir)
             if not parquet_files:
                 continue
 
             try:
-                lf = pl.scan_parquet([str(path) for path in parquet_files])
-                schema = lf.collect_schema()
+                schema = _parquet_schema(self._storage, parquet_files[0])
             except Exception:
                 logger.warning(
                     "Failed to scan bar Parquet schema for %s at %s",
@@ -2078,12 +2269,29 @@ class DataLayer:
                 return pl.DataFrame(), []
 
             try:
-                scan = lf.select(["ts_event", *available_fields])
-                if start is not None:
-                    scan = scan.filter(pl.col("ts_event") >= _datetime_to_ns(start))
-                if end is not None:
-                    scan = scan.filter(pl.col("ts_event") <= _datetime_to_ns(end))
-                frame = scan.collect()
+                if is_remote_storage(self._storage):
+                    pruned_files = _prune_parquet_files_by_time(self._storage, parquet_files, start, end)
+                    frames = [
+                        _read_parquet_frame(
+                            self._storage,
+                            file,
+                            columns=["ts_event", *available_fields],
+                        )
+                        for file in pruned_files
+                    ]
+                    frame = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+                    if start is not None and not frame.is_empty():
+                        frame = frame.filter(pl.col("ts_event") >= _datetime_to_ns(start))
+                    if end is not None and not frame.is_empty():
+                        frame = frame.filter(pl.col("ts_event") <= _datetime_to_ns(end))
+                else:
+                    lf = pl.scan_parquet([str(file.path) for file in parquet_files])
+                    scan = lf.select(["ts_event", *available_fields])
+                    if start is not None:
+                        scan = scan.filter(pl.col("ts_event") >= _datetime_to_ns(start))
+                    if end is not None:
+                        scan = scan.filter(pl.col("ts_event") <= _datetime_to_ns(end))
+                    frame = _collect_lazy_streaming(scan)
             except Exception:
                 logger.warning(
                     "Failed to read bar Parquet for %s at %s — returning empty series",
@@ -2279,26 +2487,24 @@ class DataLayer:
         end: datetime | None,
     ) -> "pl.DataFrame | None":
         """Try to load funding rate from Parquet; return None if not available."""
-        from tinohelm.data.catalog import read_funding_rate_parquet
+        from tinohelm.data.catalog import funding_rate_parquet_path
 
         try:
-            df = read_funding_rate_parquet(symbol, self._catalog_root)
+            files = list(self._storage.iter_files(funding_rate_parquet_path(symbol, self._catalog_root), suffix=".parquet"))
+            if not files:
+                return None
+            frame = _read_parquet_frame(self._storage, files[0], columns=["ts_event", "funding_rate"])
         except Exception:
             logger.warning(
                 "Failed to read funding-rate Parquet for %s", symbol, exc_info=True
             )
             return None
 
-        if df is None:
-            # File does not exist — fall through to JSON
-            return None
-
-        # ``read_funding_rate_parquet`` returns pandas (NT pyarrow→pandas) — convert at the boundary.
-        if df.empty:
+        if frame.is_empty():
             return _empty_series_frame()
 
-        timestamps = [_ns_to_datetime(int(ts_ns)) for ts_ns in df["ts_event"]]
-        values = [float(v) for v in df["funding_rate"]]
+        timestamps = [_ns_to_datetime(int(ts_ns)) for ts_ns in frame["ts_event"]]
+        values = [float(v) for v in frame["funding_rate"]]
         frame = _build_series_frame(timestamps, values)
 
         return _filter_time_range(frame, start, end)

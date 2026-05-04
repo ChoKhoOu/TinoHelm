@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import multiprocessing
 from datetime import date
-from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tinohelm.api.deps import get_db, get_settings_dep
 from tinohelm.core.audit import log_audit
 from tinohelm.core.config import Settings
+from tinohelm.data.storage import get_active_catalog_root
 from tinohelm.db.models import OptimizationRun, OptimizationStatus, Strategy
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,7 @@ async def start_optimization(
             "interval": body.interval,
             "start_date": body.start_date,
             "end_date": body.end_date,
-            "catalog_path": str(settings.paths.catalog),
+            "catalog_path": str(get_active_catalog_root(settings)),
             "n_trials": resolved_n_trials,
             "fitness_objective": body.fitness_objective,
             "train_pct": body.train_pct,
