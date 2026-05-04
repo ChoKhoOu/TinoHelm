@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -135,22 +136,172 @@ def _fetch_batch_job_intervals(data_type: str, intervals: list[str]) -> list[str
     return intervals if _is_bar_data_type(data_type) else [None]
 
 
-def _bar_parquet_files(catalog_path: str | Path, symbol: str, interval: str) -> list[Path]:
-    from tinohelm.strategy.loader import normalize_symbol
-    from tinohelm.data.storage import get_catalog_storage, stage_prefix_for_local_consumer
+def _parquet_stat_value_to_ns(value: Any) -> int:
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1_000_000_000)
+    return int(value)
 
+
+def _parquet_object_stats(path_or_object, storage=None) -> dict[str, Any] | None:
+    """Return row-count/date/size stats from one parquet object metadata."""
+    try:
+        import pyarrow.parquet as pq
+
+        if storage is not None and getattr(storage, "provider", "local") != "local":
+            with storage.open_input_file(path_or_object) as fh:
+                metadata = pq.ParquetFile(fh).metadata
+        else:
+            path = path_or_object.path if hasattr(path_or_object, "path") else path_or_object
+            metadata = pq.read_metadata(Path(path))
+    except Exception:
+        return None
+
+    total_rows = int(metadata.num_rows)
+    ts_min: int | None = None
+    ts_max: int | None = None
+    for rg_idx in range(metadata.num_row_groups):
+        rg = metadata.row_group(rg_idx)
+        for col_idx in range(rg.num_columns):
+            col = rg.column(col_idx)
+            if col.path_in_schema not in {"ts_event", "ts_init"}:
+                continue
+            if col.statistics and col.statistics.has_min_max:
+                stat_min = _parquet_stat_value_to_ns(col.statistics.min)
+                stat_max = _parquet_stat_value_to_ns(col.statistics.max)
+                ts_min = stat_min if ts_min is None else min(ts_min, stat_min)
+                ts_max = stat_max if ts_max is None else max(ts_max, stat_max)
+    size = getattr(path_or_object, "size", None)
+    if size is None:
+        path = getattr(path_or_object, "path", path_or_object)
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            size = 0
+    return {"rows": total_rows, "ts_min": ts_min, "ts_max": ts_max, "size": int(size or 0)}
+
+
+def _last_modified_date(obj) -> date | None:
+    value = getattr(obj, "last_modified", None)
+    if value is None:
+        path = getattr(obj, "path", None)
+        if path is not None:
+            try:
+                return datetime.fromtimestamp(Path(path).stat().st_mtime, tz=timezone.utc).date()
+            except OSError:
+                return None
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return dt.date()
+    if isinstance(value, (int, float)):
+        if value > 10_000_000_000_000_000:  # nanoseconds
+            scale = 1_000_000_000
+        elif value > 10_000_000_000_000:  # microseconds
+            scale = 1_000_000
+        elif value > 10_000_000_000:  # milliseconds
+            scale = 1_000
+        else:
+            scale = 1
+        return datetime.fromtimestamp(value / scale, tz=timezone.utc).date()
+    return None
+
+
+def _group_parquet_objects_by_child_dir(storage, root: Path) -> dict[Path, list]:
+    """Group parquet objects under ``root/<child>/*.parquet`` by child dir."""
+    groups: dict[Path, list] = {}
+    for obj in storage.iter_files(root, suffix=".parquet", recursive=True):
+        try:
+            rel = obj.path.relative_to(root)
+        except ValueError:
+            continue
+        if len(rel.parts) < 2:
+            continue
+        groups.setdefault(root / rel.parts[0], []).append(obj)
+    return groups
+
+
+def _aggregate_parquet_object_stats(objects: list, storage) -> dict[str, Any] | None:
+    """Aggregate size, row count, and date coverage from parquet metadata."""
+    total_size = 0
+    total_rows = 0
+    all_rows_known = True
+    min_ts: int | None = None
+    max_ts: int | None = None
+    fallback_dates: list[date] = []
+
+    for obj in objects:
+        stats = _parquet_object_stats(obj, storage=storage)
+        if stats is None:
+            all_rows_known = False
+            if getattr(obj, "size", None) is not None:
+                total_size += int(obj.size)
+            fallback = _last_modified_date(obj)
+            if fallback is not None:
+                fallback_dates.append(fallback)
+            continue
+
+        total_size += int(stats["size"])
+        rows = stats.get("rows")
+        if rows is None:
+            all_rows_known = False
+        elif all_rows_known:
+            total_rows += int(rows)
+        obj_min = stats.get("ts_min")
+        obj_max = stats.get("ts_max")
+        if obj_min is None or obj_max is None:
+            fallback = _last_modified_date(obj)
+            if fallback is not None:
+                fallback_dates.append(fallback)
+        else:
+            min_ts = int(obj_min) if min_ts is None else min(min_ts, int(obj_min))
+            max_ts = int(obj_max) if max_ts is None else max(max_ts, int(obj_max))
+
+    if min_ts is not None and max_ts is not None:
+        start_dt = datetime.fromtimestamp(min_ts // 1_000_000_000, tz=timezone.utc).date()
+        end_dt = datetime.fromtimestamp(max_ts // 1_000_000_000, tz=timezone.utc).date()
+    elif fallback_dates:
+        start_dt = min(fallback_dates)
+        end_dt = max(fallback_dates)
+    else:
+        return None
+
+    return {
+        "start_date": start_dt,
+        "end_date": end_dt,
+        "size_bytes": total_size,
+        "record_count": total_rows if all_rows_known else None,
+        "all_record_counts_known": all_rows_known,
+    }
+
+
+def _bar_parquet_objects(catalog_path: str | Path, symbol: str, interval: str, storage=None) -> list:
+    from tinohelm.strategy.loader import normalize_symbol
+    from tinohelm.data.storage import get_catalog_storage
+
+    storage = storage or get_catalog_storage(catalog_root=catalog_path)
     nt_sym = normalize_symbol(symbol)
     nt_interval = _interval_to_nt(interval)
     bar_type_dir = Path(catalog_path) / "data" / "bar" / f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
-    stage_prefix_for_local_consumer(get_catalog_storage(catalog_root=catalog_path), bar_type_dir)
-    if not bar_type_dir.exists():
-        return []
-    return list(bar_type_dir.glob("*.parquet"))
+    return list(storage.iter_files(bar_type_dir, suffix=".parquet", recursive=False))
 
 
-def _parquet_size_for(catalog_path: str, symbol: str, interval: str) -> int:
-    """Calculate total Parquet size on disk for a specific symbol/interval."""
-    return sum(f.stat().st_size for f in _bar_parquet_files(catalog_path, symbol, interval))
+def _bar_parquet_files(catalog_path: str | Path, symbol: str, interval: str) -> list[Path]:
+    return [obj.path for obj in _bar_parquet_objects(catalog_path, symbol, interval)]
+
+
+def _parquet_size_for(catalog_path: str, symbol: str, interval: str, storage=None) -> int:
+    """Calculate total Parquet size for a specific symbol/interval."""
+    total = 0
+    for obj in _bar_parquet_objects(catalog_path, symbol, interval, storage=storage):
+        if getattr(obj, "size", None) is not None:
+            total += int(obj.size)
+        else:
+            try:
+                total += obj.path.stat().st_size
+            except OSError:
+                pass
+    return total
 
 
 def _bar_catalog_path_for(
@@ -159,6 +310,7 @@ def _bar_catalog_path_for(
     symbol: str,
     interval: str,
     source_type: str | None = None,
+    storage=None,
 ) -> str:
     """Resolve a bar catalog root, falling back to legacy flat default-source files."""
     from tinohelm.data.catalog_helpers import resolve_catalog_path
@@ -166,7 +318,7 @@ def _bar_catalog_path_for(
     effective_source = source_type or data_type
     resolved = resolve_catalog_path(base_catalog_path, effective_source)
     if effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
-        if not _bar_parquet_files(resolved, symbol, interval) and _bar_parquet_files(base_catalog_path, symbol, interval):
+        if not _bar_parquet_objects(resolved, symbol, interval, storage=storage) and _bar_parquet_objects(base_catalog_path, symbol, interval, storage=storage):
             return str(base_catalog_path)
     return str(resolved)
 
@@ -202,8 +354,6 @@ def _delete_storage_files(
             seen.add(target_dir)
             if getattr(storage, "provider", "local") != "local":
                 remote_deleted, remote_freed = delete_prefix(storage, target_dir)
-                if target_dir.exists() and not list(target_dir.iterdir()):
-                    target_dir.rmdir()
                 deleted_files += remote_deleted
                 freed_bytes += remote_freed
                 continue
@@ -280,6 +430,80 @@ def _delete_storage_files(
     else:
         logger.warning("No storage handler for data_type=%r, removing DB row only", data_type)
         return (0, 0)
+
+
+def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path: str | Path) -> dict:
+    """Compact bars for local or remote catalog storage."""
+    if getattr(storage, "provider", "local") == "local":
+        from tinohelm.data.catalog import compact_bars
+
+        return compact_bars(symbol=symbol, interval=interval, catalog_path=catalog_path)
+
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    from tinohelm.data.catalog import _make_bar_type, _make_instrument
+    from tinohelm.data.catalog_helpers import dedupe_by_ts
+    from tinohelm.data.storage import delete_prefix, upload_paths
+
+    catalog_path = Path(catalog_path)
+    instrument = _make_instrument(symbol)
+    bar_type = _make_bar_type(instrument.id, interval)
+    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
+    existing_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
+    files_before = len(existing_objects)
+    size_before = sum(int(obj.size or 0) for obj in existing_objects)
+
+    if files_before <= 1:
+        logger.info("Compaction skipped for %s %s — only %d file(s)", symbol, interval, files_before)
+        return {
+            "files_before": files_before,
+            "files_after": files_before,
+            "bars_count": 0,
+            "size_before": size_before,
+            "size_after": size_before,
+        }
+
+    catalog_uri = storage.uri_for_catalog_root(catalog_path)
+    catalog = ParquetDataCatalog.from_uri(
+        catalog_uri,
+        fs_storage_options=getattr(storage, "fs_storage_options", None),
+        fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
+    )
+    bars = catalog.bars(bar_types=[str(bar_type)])
+    if not bars:
+        logger.warning("No bars found for %s %s during compaction", symbol, interval)
+        return {
+            "files_before": files_before,
+            "files_after": files_before,
+            "bars_count": 0,
+            "size_before": size_before,
+            "size_after": size_before,
+        }
+
+    bars = dedupe_by_ts(bars)
+    if bar_dir.exists():
+        for local_file in bar_dir.glob("*.parquet"):
+            local_file.unlink(missing_ok=True)
+    bar_dir.mkdir(parents=True, exist_ok=True)
+
+    local_catalog = ParquetDataCatalog(str(catalog_path))
+    local_catalog.write_data([instrument])
+    local_catalog.write_data(bars)
+    new_files = list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
+    if not new_files:
+        raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
+    size_after = sum(path.stat().st_size for path in new_files)
+
+    delete_prefix(storage, bar_dir)
+    upload_paths(storage, new_files)
+
+    return {
+        "files_before": files_before,
+        "files_after": len(new_files),
+        "bars_count": len(bars),
+        "size_before": size_before,
+        "size_after": size_after,
+    }
 
 
 # ---- routes ----
@@ -392,11 +616,11 @@ async def _run_compact(
 ) -> None:
     """Background task to compact Parquet files and update DB catalog size."""
     try:
-        from tinohelm.data.catalog import compact_bars
         from tinohelm.db.session import get_session_factory
 
-        from tinohelm.data.storage import get_active_catalog_root
+        from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
         base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
+        storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path)
         effective_source = source_type or data_type
         catalog_path = _bar_catalog_path_for(
             base_catalog_path,
@@ -404,13 +628,16 @@ async def _run_compact(
             symbol,
             interval,
             source_type=effective_source,
+            storage=storage,
         )
         result = await asyncio.to_thread(
-            compact_bars, symbol=symbol, interval=interval, catalog_path=catalog_path
+            _compact_bars_with_storage, storage, symbol, interval, catalog_path
         )
 
         # Update DB catalog size_bytes for the same source-aware bar row.
-        total_size = await asyncio.to_thread(_parquet_size_for, catalog_path, symbol, interval)
+        total_size = result.get("size_after")
+        if total_size is None:
+            total_size = await asyncio.to_thread(_parquet_size_for, catalog_path, symbol, interval, storage)
 
         factory = get_session_factory()
         async with factory() as db:
@@ -598,25 +825,23 @@ async def scan_data_catalog(
 
     # Scan bar directories per source_type
     _bar_source_types = ("klines", "markPriceKlines", "indexPriceKlines", "premiumIndexKlines")
-    _bar_scan_targets: list[tuple[Path, str, str]] = []
+    _bar_scan_targets: list[tuple[Path, str, str, dict[Path, list]]] = []
     for _src_type in _bar_source_types:
-        resolved = str(resolve_catalog_path(catalog_path, _src_type))
-        d = Path(resolved) / "data" / "bar"
-        stage_prefix_for_local_consumer(storage, d)
-        if d.exists():
-            _bar_scan_targets.append((d, resolved, _src_type))
+        resolved_path = resolve_catalog_path(catalog_path, _src_type)
+        d = resolved_path / "data" / "bar"
+        grouped = _group_parquet_objects_by_child_dir(storage, d)
+        if grouped:
+            _bar_scan_targets.append((d, str(resolved_path), _src_type, grouped))
     # Old flat path fallback (pre-migration data)
     _old_bar = Path(catalog_path) / "data" / "bar"
-    stage_prefix_for_local_consumer(storage, _old_bar)
-    if _old_bar.exists() and not any(d == _old_bar for d, _, _ in _bar_scan_targets):
-        _bar_scan_targets.append((_old_bar, catalog_path, "klines"))
+    old_grouped = _group_parquet_objects_by_child_dir(storage, _old_bar)
+    if old_grouped and not any(d == _old_bar for d, _, _, _ in _bar_scan_targets):
+        _bar_scan_targets.append((_old_bar, catalog_path, "klines", old_grouped))
 
     bar_stats: dict[tuple[str, str, str, str], dict] = {}
-    for bar_dir, cat_root, _bar_src in _bar_scan_targets:
+    for _bar_dir, cat_root, _bar_src, grouped in _bar_scan_targets:
         is_source_aware = Path(cat_root) != Path(catalog_path)
-        for entry in sorted(bar_dir.iterdir()):
-            if not entry.is_dir():
-                continue
+        for entry, parquet_objects in sorted(grouped.items(), key=lambda item: item[0].name):
             m = pattern.match(entry.name)
             if not m:
                 continue
@@ -629,31 +854,16 @@ async def scan_data_catalog(
                 continue
 
             symbol = nt_sym.removesuffix(".BINANCE")
-
-            parquet_files = list(entry.glob("*.parquet"))
-            if not parquet_files:
+            stat_values = _aggregate_parquet_object_stats(parquet_objects, storage)
+            if stat_values is None:
+                logger.warning("Scan: no timestamp range readable for %s, skipping", entry.name)
                 continue
 
             scanned += 1
-            size_bytes = sum(f.stat().st_size for f in parquet_files)
-
-            bar_type_str = f"{nt_sym}-{nt_interval}-LAST-EXTERNAL"
-            try:
-                from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
-                catalog = ParquetDataCatalog(cat_root)
-                bars = await asyncio.to_thread(catalog.bars, bar_types=[bar_type_str])
-                if not bars:
-                    logger.warning("Scan: no bars readable for %s, skipping", bar_type_str)
-                    continue
-                record_count = len(bars)
-                ts_min = min(b.ts_event for b in bars)
-                ts_max = max(b.ts_event for b in bars)
-                start_date = datetime.fromtimestamp(ts_min / 1_000_000_000, tz=timezone.utc).date()
-                end_date = datetime.fromtimestamp(ts_max / 1_000_000_000, tz=timezone.utc).date()
-            except Exception:
-                logger.warning("Scan: failed to read bars for %s", bar_type_str, exc_info=True)
-                continue
+            size_bytes = stat_values["size_bytes"]
+            record_count = stat_values["record_count"]
+            start_date = stat_values["start_date"]
+            end_date = stat_values["end_date"]
 
             key = (symbol, "bar", interval, _bar_src)
             existing = bar_stats.get(key)
@@ -721,68 +931,41 @@ async def scan_data_catalog(
             created += 1
 
     # Scan source-aware tick directories plus old flat fallbacks.
-    _tick_scan_targets: list[tuple[Path, str, str, str]] = []
+    _tick_scan_targets: list[tuple[Path, str, str, str, dict[Path, list]]] = []
     for _tick_data_type, _tick_dir_name, _tick_source_types in (
         ("trade_tick", "trade_tick", ("aggTrades", "trades")),
         ("quote_tick", "quote_tick", ("bookTicker",)),
     ):
         for _src_type in _tick_source_types:
-            resolved = str(resolve_catalog_path(catalog_path, _src_type))
-            d = Path(resolved) / "data" / _tick_dir_name
-            stage_prefix_for_local_consumer(storage, d)
-            if d.exists():
-                _tick_scan_targets.append((d, resolved, _src_type, _tick_data_type))
+            resolved_path = resolve_catalog_path(catalog_path, _src_type)
+            d = resolved_path / "data" / _tick_dir_name
+            grouped = _group_parquet_objects_by_child_dir(storage, d)
+            if grouped:
+                _tick_scan_targets.append((d, str(resolved_path), _src_type, _tick_data_type, grouped))
         _old_tick = Path(catalog_path) / "data" / _tick_dir_name
-        stage_prefix_for_local_consumer(storage, _old_tick)
-        if _old_tick.exists() and not any(d == _old_tick for d, _, _, dt in _tick_scan_targets if dt == _tick_data_type):
-            _tick_scan_targets.append((_old_tick, catalog_path, _tick_source_types[0], _tick_data_type))
+        old_grouped = _group_parquet_objects_by_child_dir(storage, _old_tick)
+        if old_grouped and not any(d == _old_tick for d, _, _, dt, _ in _tick_scan_targets if dt == _tick_data_type):
+            _tick_scan_targets.append((_old_tick, catalog_path, _tick_source_types[0], _tick_data_type, old_grouped))
 
     tick_stats: dict[tuple[str, str, str, str], dict] = {}
     sym_pattern = re.compile(r"^(.+)\.BINANCE$")
-    for trade_tick_dir, _tick_root, _src_type, _tick_data_type in _tick_scan_targets:
+    for _trade_tick_dir, _tick_root, _src_type, _tick_data_type, grouped in _tick_scan_targets:
         resolved_path = _tick_root
         is_source_aware = Path(resolved_path) != Path(catalog_path)
-        for entry in sorted(trade_tick_dir.iterdir()):
-            if not entry.is_dir():
-                continue
+        for entry, parquet_objects in sorted(grouped.items(), key=lambda item: item[0].name):
             m = sym_pattern.match(entry.name)
             if not m:
                 continue
             symbol = m.group(1)
-            parquet_files = list(entry.glob("*.parquet"))
-            if not parquet_files:
+            stat_values = _aggregate_parquet_object_stats(parquet_objects, storage)
+            if stat_values is None:
                 continue
+
             scanned += 1
-            sz = sum(f.stat().st_size for f in parquet_files)
-
-            try:
-                import pyarrow.parquet as pq
-
-                total_rows = 0
-                ts_min_val, ts_max_val = float("inf"), 0
-                for pf in parquet_files:
-                    meta = pq.read_metadata(pf)
-                    total_rows += meta.num_rows
-                    for rg_idx in range(meta.num_row_groups):
-                        rg = meta.row_group(rg_idx)
-                        for col_idx in range(rg.num_columns):
-                            col = rg.column(col_idx)
-                            if col.path_in_schema not in {"ts_event", "ts_init"}:
-                                continue
-                            if col.statistics and col.statistics.has_min_max:
-                                ts_min_val = min(ts_min_val, col.statistics.min)
-                                ts_max_val = max(ts_max_val, col.statistics.max)
-                start_dt = datetime.fromtimestamp(ts_min_val // 1_000_000_000, tz=timezone.utc).date() if ts_min_val != float("inf") else None
-                end_dt = datetime.fromtimestamp(ts_max_val // 1_000_000_000, tz=timezone.utc).date() if ts_max_val != 0 else None
-            except Exception:
-                import os
-                file_times = [os.path.getmtime(pf) for pf in parquet_files]
-                start_dt = datetime.fromtimestamp(min(file_times), tz=timezone.utc).date()
-                end_dt = datetime.fromtimestamp(max(file_times), tz=timezone.utc).date()
-                total_rows = None
-
-            if start_dt is None or end_dt is None:
-                continue
+            sz = stat_values["size_bytes"]
+            total_rows = stat_values["record_count"]
+            start_dt = stat_values["start_date"]
+            end_dt = stat_values["end_date"]
 
             key = (symbol, _tick_data_type, "tick", _src_type)
             existing = tick_stats.get(key)

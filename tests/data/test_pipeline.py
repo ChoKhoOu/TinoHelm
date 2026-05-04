@@ -80,6 +80,48 @@ class TestIngestResult:
 
 
 class TestCatalogStorageStats:
+    def test_remote_single_file_metrics_write_seeds_existing_object_before_merge(self, tmp_path: Path, monkeypatch):
+        from tinohelm.data.catalog import metrics_parquet_path
+
+        symbol = "BTCUSDT-PERP"
+        path = metrics_parquet_path(symbol, tmp_path)
+        uploaded: list[tuple[Path, bytes]] = []
+
+        class RemoteStorage:
+            provider = "s3"
+            catalog_root = tmp_path
+
+            def exists(self, logical_path):
+                assert Path(logical_path) == path
+                return True
+
+            def read_bytes(self, logical_path):
+                assert Path(logical_path) == path
+                return b"existing-remote"
+
+            def upload_path(self, local_path, *, logical_path=None):
+                uploaded.append((Path(local_path), Path(local_path).read_bytes()))
+                return "s3://bucket/catalog/metrics.parquet"
+
+        def fake_write_metrics(records, write_symbol, catalog_root):
+            assert records == [object_marker]
+            assert write_symbol == symbol
+            assert Path(catalog_root) == tmp_path
+            assert path.read_bytes() == b"existing-remote"
+            path.write_bytes(b"merged-local")
+            return path
+
+        object_marker = object()
+        monkeypatch.setattr("tinohelm.data.catalog.write_metrics_parquet", fake_write_metrics)
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._storage = RemoteStorage()
+        p.catalog_path = str(tmp_path)
+
+        result = p._write_objects([object_marker], symbol, "metrics", None)
+
+        assert result == [str(path)]
+        assert uploaded == [(path, b"merged-local")]
+
     def test_trade_tick_stats_sum_all_parquet_files_in_source_path(self, tmp_path: Path):
         from tinohelm.data.catalog import resolve_catalog_path
         from tinohelm.strategy.loader_helpers import normalize_symbol
