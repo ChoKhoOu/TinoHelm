@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -167,6 +170,49 @@ class TestTerminalizationCallbackBeforeArtifactExport:
         assert result == {"statistics": {}}
         assert events == ["terminalizing", "reports", "tearsheet", "enhance"]
         mock_engine.dispose.assert_called_once()
+
+
+class TestStreamingBenchmarkDailyCloses:
+    def test_bar_data_iterator_updates_daily_closes_for_benchmark(self, monkeypatch):
+        runner = _mk_minimal_runner()
+        runner.start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        runner.end = runner.start + timedelta(days=2)
+        runner.stream_batch_size = 1
+
+        t0 = int(runner.start.timestamp() * 1_000_000_000)
+        one_min = 60 * 1_000_000_000
+        bars_by_window = [
+            [
+                SimpleNamespace(ts_init=t0, close=100.0),
+                SimpleNamespace(ts_init=t0 + one_min, close=101.0),
+            ],
+            [
+                SimpleNamespace(ts_init=t0 + 24 * 60 * one_min, close=110.0),
+                SimpleNamespace(ts_init=t0 + 24 * 60 * one_min + one_min, close=111.0),
+            ],
+        ]
+
+        class Catalog:
+            def __init__(self):
+                self.calls = 0
+
+            def bars(self, **kwargs):
+                out = bars_by_window[self.calls]
+                self.calls += 1
+                return out
+
+        catalog = Catalog()
+        monkeypatch.setattr(runner, "_catalog_for_path", lambda catalog_path: catalog)
+        daily_closes: dict[str, float] = {}
+        batches = list(runner._bar_data_iterator(
+            Path("/catalog"),
+            "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL",
+            "1d",
+            benchmark_daily_closes=daily_closes,
+        ))
+
+        assert batches == bars_by_window
+        assert daily_closes == {"2026-01-01": 101.0, "2026-01-02": 111.0}
 
 
 # ---------------------------------------------------------------------------

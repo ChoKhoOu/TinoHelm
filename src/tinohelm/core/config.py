@@ -77,10 +77,39 @@ class DataSettings(BaseModel):
     agg_trades_max_days_per_job: int = Field(default=1, ge=1)
 
 
+class TosStorageSettings(BaseModel):
+    """Volcengine TOS settings used through its S3-compatible endpoint."""
+
+    region: str = "cn-beijing"
+    bucket: str = ""
+    prefix: str = ""
+    endpoint: str = ""
+    use_internal_endpoint: bool = True
+    access_key: SecretStr = SecretStr("")
+    secret_key: SecretStr = SecretStr("")
+    security_token: SecretStr = SecretStr("")
+    max_keys: int = Field(default=1000, ge=1, le=1000)
+
+
+class StorageSettings(BaseModel):
+    """Catalog storage backend selection.
+
+    ``provider="local"`` preserves the existing filesystem layout.
+    ``provider="tos"`` and ``provider="s3"`` both expose the catalog as an
+    S3-compatible ``s3://bucket/prefix/catalog`` URI, with TOS-specific S3
+    endpoint, V4 signing and virtual-host addressing options.
+    """
+
+    provider: str = "local"
+    tos: TosStorageSettings = Field(default_factory=TosStorageSettings)
+
+
 class BacktestSettings(BaseModel):
     max_concurrent: int = 4
     # DEPRECATED: use max_concurrent instead. Retained so existing yaml entries don't break pydantic validation.
     max_workers: int = 2
+    streaming_enabled: bool = True
+    stream_batch_size: int = Field(default=100_000, ge=1)
 
 
 class RiskConfig(BaseModel):
@@ -103,6 +132,7 @@ class Settings(BaseSettings):
     binance: BinanceSettings = Field(default_factory=BinanceSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     data: DataSettings = Field(default_factory=DataSettings)
+    storage: StorageSettings = Field(default_factory=StorageSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     risk: RiskConfig = Field(default_factory=RiskConfig)
 

@@ -44,6 +44,8 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup and shutdown lifecycle for the TinoHelm API."""
     cfg = get_settings()
+    from tinohelm.data.storage import get_active_catalog_root
+    catalog_root = get_active_catalog_root(cfg)
 
     # ---- startup ----
     logger.info("TinoHelm API starting up")
@@ -57,7 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # worker pool moved to the async consumer pool below).
     nc = NodeController(
         redis_url=cfg.redis.url,
-        catalog_path=str(cfg.paths.catalog),
+        catalog_path=str(catalog_root),
         artifacts_path=str(cfg.paths.artifacts),
         db_url=cfg.database.url,
     )
@@ -80,7 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Data-fetch worker (async, in-process)
     await recover_interrupted_jobs(redis_client)
-    start_data_worker(redis_url=cfg.redis.url, catalog_path=str(cfg.paths.catalog))
+    start_data_worker(redis_url=cfg.redis.url, catalog_path=str(catalog_root))
 
     # Factor worker (async, in-process)
     await recover_factor_jobs(redis_client)
@@ -95,7 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     consumer_tasks, consumer_rds = await bt_consumer.start_consumers(
         n=cfg.backtest.max_concurrent,
         redis_url=cfg.redis.url,
-        catalog_path=str(cfg.paths.catalog),
+        catalog_path=str(catalog_root),
         artifacts_path=str(cfg.paths.artifacts),
         db_url=cfg.database.url,
     )

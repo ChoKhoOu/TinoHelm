@@ -87,7 +87,13 @@ def ensure_catalog_dirs(catalog_path: str | Path) -> Path:
     return path
 
 
-def validate_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
+def validate_bars(
+    symbol: str,
+    interval: str,
+    catalog_path: str | Path,
+    *,
+    storage=None,
+) -> dict:
     """Validate data integrity for a symbol/interval.
 
     Returns a dict with:
@@ -110,14 +116,31 @@ def validate_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     instrument = _make_instrument(symbol)
     bar_type = _make_bar_type(instrument.id, interval)
 
-    # Count files and size on disk
+    # Count files and size in the active backing store.
+    storage_provider = storage
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-    parquet_files = list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
+    if storage_provider is not None:
+        parquet_files = list(storage_provider.iter_files(bar_dir, suffix=".parquet", recursive=False))
+        catalog_uri_for_root = getattr(storage_provider, "uri_for_catalog_root", None)
+        catalog_uri = catalog_uri_for_root(catalog_path) if callable(catalog_uri_for_root) else str(catalog_path)
+    else:
+        parquet_files = list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
+        catalog_uri = str(catalog_path)
     file_count = len(parquet_files)
-    size_bytes = sum(f.stat().st_size for f in parquet_files)
+    size_bytes = sum(
+        int(obj.size) if getattr(obj, "size", None) is not None else Path(obj.path if hasattr(obj, "path") else obj).stat().st_size
+        for obj in parquet_files
+    )
 
     # Read bars from catalog
-    catalog = ParquetDataCatalog(str(catalog_path))
+    if storage_provider is not None and getattr(storage_provider, "provider", "local") != "local":
+        catalog = ParquetDataCatalog.from_uri(
+            catalog_uri,
+            fs_storage_options=getattr(storage_provider, "fs_storage_options", None),
+            fs_rust_storage_options=getattr(storage_provider, "fs_rust_storage_options", None),
+        )
+    else:
+        catalog = ParquetDataCatalog(str(catalog_path))
     try:
         bars = catalog.bars(bar_types=[str(bar_type)])
     except Exception:

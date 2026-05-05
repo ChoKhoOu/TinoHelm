@@ -160,11 +160,14 @@ def _run_queue_mode(run_id: str) -> int:
             ivl = job.get("interval")
             intervals = [ivl] if ivl else ["1m"]
 
+        from tinohelm.data.storage import get_active_catalog_root
+        catalog_root = get_active_catalog_root(cfg)
+
         runner = BacktestRunner(
             strategy_path=job["strategy_path"],
             config_path=job["config_path"],
             strategy_params=job.get("params", {}),
-            catalog_path=str(cfg.paths.catalog),
+            catalog_path=str(catalog_root),
             symbols=symbols,
             intervals=intervals,
             start=datetime.fromisoformat(job["start"]),

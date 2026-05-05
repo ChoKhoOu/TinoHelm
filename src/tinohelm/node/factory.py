@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from tinohelm.core.config import Settings
+from tinohelm.data.storage import get_active_catalog_root
 
 # Redis DB isolation per node type.
 _REDIS_DB_MAP: dict[str, int] = {
@@ -93,7 +94,7 @@ def build_trading_node_config(
         "strategies": strategies,
         "strategy_bundle": strategy_bundle,
         "binance": binance_config,
-        "catalog_path": str(settings.paths.catalog),
+        "catalog_path": str(get_active_catalog_root(settings)),
         "log_path": str(settings.paths.logs),
         "risk_engine": {
             "max_notional_per_order": 50000,  # USDT

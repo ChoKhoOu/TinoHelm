@@ -230,6 +230,72 @@ def test_list_symbols_with_bar_dirs(client, tmp_path):
     assert "ETHUSDT-PERP" in body
 
 
+def test_list_symbols_scans_source_aware_local_bar_roots(client, tmp_path):
+    """GET /symbols sees source-aware bar roots, not just legacy data/bar."""
+    from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+    klines_dir = resolve_catalog_path(tmp_path, "klines") / "data" / "bar"
+    mark_dir = resolve_catalog_path(tmp_path, "markPriceKlines") / "data" / "bar"
+    klines_dir.mkdir(parents=True)
+    mark_dir.mkdir(parents=True)
+    (klines_dir / "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL").mkdir()
+    (mark_dir / "ETHUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL").mkdir()
+
+    def _override_settings_with_catalog():
+        s = MagicMock()
+        s.paths.catalog = tmp_path
+        return s
+
+    from tinohelm.api.deps import get_settings_dep
+    test_app.dependency_overrides[get_settings_dep] = _override_settings_with_catalog
+    try:
+        resp = client.get("/api/factor/symbols")
+    finally:
+        test_app.dependency_overrides[get_settings_dep] = _override_get_settings
+
+    assert resp.status_code == 200
+    assert resp.json() == ["BTCUSDT-PERP", "ETHUSDT-PERP"]
+
+
+def test_list_symbols_scans_source_aware_remote_bar_roots(client, tmp_path, monkeypatch):
+    """Remote source-aware objects are enumerated through the storage provider."""
+    from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+    class Obj:
+        def __init__(self, path: Path):
+            self.path = path
+
+    class Storage:
+        provider = "s3"
+        catalog_root = tmp_path
+
+        def iter_files(self, prefix, suffix="", recursive=True):
+            base = Path(prefix)
+            if base == resolve_catalog_path(tmp_path, "klines") / "data" / "bar":
+                yield Obj(base / "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL" / "a.parquet")
+            if base == resolve_catalog_path(tmp_path, "markPriceKlines") / "data" / "bar":
+                yield Obj(base / "ETHUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL" / "b.parquet")
+
+    storage = Storage()
+    monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings=None: tmp_path)
+    monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: storage)
+
+    def _override_settings_with_catalog():
+        s = MagicMock()
+        s.paths.catalog = tmp_path
+        return s
+
+    from tinohelm.api.deps import get_settings_dep
+    test_app.dependency_overrides[get_settings_dep] = _override_settings_with_catalog
+    try:
+        resp = client.get("/api/factor/symbols")
+    finally:
+        test_app.dependency_overrides[get_settings_dep] = _override_get_settings
+
+    assert resp.status_code == 200
+    assert resp.json() == ["BTCUSDT-PERP", "ETHUSDT-PERP"]
+
+
 # ---------------------------------------------------------------------------
 # 4. POST /api/factor/explore — mock Orchestrator
 # ---------------------------------------------------------------------------

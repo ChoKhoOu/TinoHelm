@@ -6,6 +6,7 @@ storage-file deletion helper used by DELETE /api/data/catalog/{id}.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -26,6 +27,7 @@ from tinohelm.api.routes.data import (
     _nt_to_interval,
     _parquet_size_for,
     _run_compact,
+    _compact_bars_with_storage,
     scan_data_catalog,
     trigger_compact,
     trigger_data_fetch_batch,
@@ -47,6 +49,133 @@ class _FetchBatchDb:
 
     async def commit(self):
         pass
+
+
+class _FakeS3File(BytesIO):
+    def __init__(self, payload: bytes) -> None:
+        super().__init__(payload)
+        self.closed_flag = False
+
+    def close(self) -> None:
+        self.closed_flag = True
+        super().close()
+
+
+class _FakeS3FileSystem:
+    def __init__(self, objects: dict[str, bytes]) -> None:
+        self.objects = dict(objects)
+        self.open_calls: list[tuple[str, str]] = []
+        self.put_calls: list[tuple[str, str]] = []
+        self.rm_calls: list[str] = []
+
+    def info(self, path: str) -> dict:
+        if path not in self.objects:
+            raise FileNotFoundError(path)
+        return {"name": path, "size": len(self.objects[path]), "type": "file"}
+
+    def find(self, prefix: str, withdirs: bool = False, detail: bool = True):
+        matches = {
+            path: self.info(path)
+            for path in sorted(self.objects)
+            if path.startswith(prefix.rstrip("/") + "/") or path == prefix.rstrip("/")
+        }
+        return matches if detail else list(matches)
+
+    def ls(self, prefix: str, detail: bool = True):
+        prefix = prefix.rstrip("/")
+        out = []
+        for path in sorted(self.objects):
+            if not path.startswith(prefix + "/"):
+                continue
+            rel = path[len(prefix) + 1 :]
+            if "/" in rel:
+                continue
+            out.append(self.info(path) if detail else path)
+        return out
+
+    def open(self, path: str, mode: str = "rb"):
+        assert mode == "rb"
+        self.open_calls.append((path, mode))
+        return _FakeS3File(self.objects[path])
+
+    def put_file(self, local_path: str, remote_path: str) -> None:
+        self.put_calls.append((local_path, remote_path))
+        self.objects[remote_path] = Path(local_path).read_bytes()
+
+    def rm(self, path: str) -> None:
+        self.rm_calls.append(path)
+        if path not in self.objects:
+            raise FileNotFoundError(path)
+        del self.objects[path]
+
+
+class _CompactStorage:
+    provider = "s3"
+
+    def __init__(self, root: Path, fs: _FakeS3FileSystem) -> None:
+        self.catalog_root = root
+        self._fs = fs
+        self.fs_storage_options = {"endpoint_url": "https://example.com"}
+        self.fs_rust_storage_options = {"endpoint_url": "https://example.com"}
+
+    def uri_for_catalog_root(self, catalog_root: Path | str | None = None) -> str:
+        if catalog_root is None:
+            return "s3://bucket/catalog"
+        rel = Path(catalog_root).relative_to(self.catalog_root).as_posix() if Path(catalog_root) != self.catalog_root else ""
+        return "s3://bucket/catalog" if not rel else f"s3://bucket/catalog/{rel}"
+
+    def iter_files(self, prefix: Path | str, suffix: str = "", recursive: bool = True):
+        prefix = Path(prefix)
+        prefix_rel = prefix.relative_to(self.catalog_root).as_posix().rstrip("/")
+        for key, payload in self._fs.objects.items():
+            if not key.startswith("bucket/catalog/"):
+                continue
+            rel = key.removeprefix("bucket/catalog/")
+            if not rel.startswith(prefix_rel + "/"):
+                continue
+            remainder = rel[len(prefix_rel) + 1 :]
+            if not recursive and "/" in remainder:
+                continue
+            if suffix and not rel.endswith(suffix):
+                continue
+            obj = type("Obj", (), {})()
+            obj.key = key
+            obj.path = self.catalog_root / rel
+            obj.size = len(payload)
+            obj.last_modified = None
+            yield obj
+
+    def exists(self, path: Path | str) -> bool:
+        return True
+
+    def open_input_file(self, path_or_object):
+        key = getattr(path_or_object, "key", None)
+        if key is None:
+            key = f"bucket/catalog/{Path(path_or_object).name}"
+        return self._fs.open(key)
+
+    def read_bytes(self, path_or_object):
+        with self.open_input_file(path_or_object) as fh:
+            return fh.read()
+
+    def delete_path(self, local_path: Path | str) -> None:
+        key = getattr(local_path, "key", None)
+        if key is None:
+            rel = Path(local_path).relative_to(self.catalog_root).as_posix()
+            key = f"bucket/catalog/{rel}"
+        self._fs.rm(key)
+
+    def upload_path(self, local_path: Path | str, *, logical_path: Path | str | None = None) -> str:
+        path = Path(local_path)
+        rel_path = Path(logical_path) if logical_path is not None else path
+        try:
+            rel = rel_path.relative_to(self.catalog_root).as_posix()
+        except ValueError:
+            rel = rel_path.name
+        remote_path = f"bucket/catalog/{rel}"
+        self._fs.put_file(str(path), remote_path)
+        return f"s3://{remote_path}"
+
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +460,7 @@ class TestSourceAwareBarMaintenance:
 
         calls = []
 
-        def fake_validate_bars(*, symbol, interval, catalog_path):
+        def fake_validate_bars(*, symbol, interval, catalog_path, storage=None):
             calls.append((symbol, interval, catalog_path))
             return {"status": "ok"}
 
@@ -362,7 +491,7 @@ class TestSourceAwareBarMaintenance:
 
         calls = []
 
-        def fake_validate_bars(*, symbol, interval, catalog_path):
+        def fake_validate_bars(*, symbol, interval, catalog_path, storage=None):
             calls.append((symbol, interval, catalog_path))
             return {"status": "ok"}
 
@@ -378,6 +507,95 @@ class TestSourceAwareBarMaintenance:
 
         assert result == {"status": "ok"}
         assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path))]
+
+    def test_validate_data_passes_remote_storage_to_validate_bars(self, tmp_path: Path, monkeypatch):
+        import asyncio
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+        calls = []
+        storage = SimpleNamespace(provider="s3", catalog_root=tmp_path)
+
+        def fake_validate_bars(*, symbol, interval, catalog_path, storage=None):
+            calls.append((symbol, interval, catalog_path, storage))
+            return {"status": "ok"}
+
+        monkeypatch.setattr("tinohelm.data.catalog.validate_bars", fake_validate_bars)
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings=None: tmp_path)
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: storage)
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        result = asyncio.run(validate_data(
+            "BTCUSDT-PERP",
+            "1m",
+            data_type="markPriceKlines",
+            settings=settings,
+        ))
+
+        assert result == {"status": "ok"}
+        assert calls == [(
+            "BTCUSDT-PERP",
+            "1m",
+            str(resolve_catalog_path(tmp_path, "markPriceKlines")),
+            storage,
+        )]
+
+    def test_validate_bars_uses_remote_catalog_uri_and_storage_file_stats(self, tmp_path: Path, monkeypatch):
+        from datetime import timedelta
+        import sys
+        import types
+
+        from tinohelm.data.catalog import validate_bars
+
+        bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
+        key = f"bucket/catalog/data/bar/{bar_type_str}/bars.parquet"
+        fs = _FakeS3FileSystem({key: b"payload"})
+        storage = _CompactStorage(tmp_path, fs)
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def _ts_ns(dt: datetime) -> int:
+            return int(dt.timestamp() * 1_000_000_000)
+
+        bars = [
+            SimpleNamespace(ts_event=_ts_ns(t0), open=100.0, high=101.0, low=99.0, close=100.5, volume=1.0),
+            SimpleNamespace(ts_event=_ts_ns(t0 + timedelta(minutes=1)), open=100.5, high=102.0, low=100.0, close=101.0, volume=2.0),
+        ]
+        instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+
+        class FakeBarType:
+            def __str__(self):
+                return bar_type_str
+
+        class FakeCatalog:
+            from_uri_calls = []
+
+            @classmethod
+            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
+                cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
+                return cls()
+
+            def bars(self, bar_types):
+                assert bar_types == [bar_type_str]
+                return bars
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
+        monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: FakeBarType())
+        nt_mod = types.ModuleType("nautilus_trader")
+        persistence_mod = types.ModuleType("nautilus_trader.persistence")
+        catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+        catalog_mod.ParquetDataCatalog = FakeCatalog
+        monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+        result = validate_bars("BTCUSDT-PERP", "1m", tmp_path, storage=storage)
+
+        assert FakeCatalog.from_uri_calls == [
+            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options)
+        ]
+        assert result["total_bars"] == 2
+        assert result["file_count"] == 1
+        assert result["size_bytes"] == len(b"payload")
+        assert result["status"] == "ok"
 
     def test_run_compact_falls_back_to_legacy_flat_default_klines_root(self, tmp_path: Path, monkeypatch):
         import asyncio
@@ -507,6 +725,73 @@ class TestSourceAwareBarMaintenance:
         assert fn.__name__ == "_run_compact"
         assert args == ("BTCUSDT-PERP", "1m", settings, "markPriceKlines", "markPriceKlines")
         assert kwargs == {}
+
+    def test_remote_compact_uses_remote_nt_catalog_and_uploads_result(self, tmp_path: Path, monkeypatch):
+        bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
+        bar_dir = tmp_path / "data" / "bar" / bar_type_str
+        old_keys = [
+            f"bucket/catalog/data/bar/{bar_type_str}/old-a.parquet",
+            f"bucket/catalog/data/bar/{bar_type_str}/old-b.parquet",
+        ]
+        fs = _FakeS3FileSystem({old_keys[0]: b"old-a", old_keys[1]: b"old-b"})
+        storage = _CompactStorage(tmp_path, fs)
+
+        instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+
+        class FakeBarType:
+            def __str__(self):
+                return bar_type_str
+
+        bar_type = FakeBarType()
+        bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
+
+        class FakeCatalog:
+            from_uri_calls = []
+
+            def __init__(self, catalog_path=None):
+                self.catalog_path = catalog_path
+
+            @classmethod
+            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
+                cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
+                return cls(uri)
+
+            def bars(self, bar_types):
+                assert bar_types == [bar_type_str]
+                return bars
+
+            def write_data(self, data, skip_disjoint_check=False):
+                if data and hasattr(data[0], "ts_event"):
+                    bar_dir.mkdir(parents=True, exist_ok=True)
+                    (bar_dir / "compacted.parquet").write_bytes(b"new")
+
+        import sys
+        import types
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
+        monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: bar_type)
+        nt_mod = types.ModuleType("nautilus_trader")
+        persistence_mod = types.ModuleType("nautilus_trader.persistence")
+        catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+        catalog_mod.ParquetDataCatalog = FakeCatalog
+        monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+        result = _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
+
+        assert result == {
+            "files_before": 2,
+            "files_after": 1,
+            "bars_count": 2,
+            "size_before": len(b"old-a") + len(b"old-b"),
+            "size_after": len(b"new"),
+        }
+        assert FakeCatalog.from_uri_calls == [
+            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options)
+        ]
+        assert fs.rm_calls == old_keys
+        assert fs.put_calls == [(str(bar_dir / "compacted.parquet"), f"bucket/catalog/data/bar/{bar_type_str}/compacted.parquet")]
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +1172,67 @@ class TestScanDataCatalog:
         assert row.record_count == 1
         assert row.start_date == date(2025, 1, 1)
         assert row.end_date == date(2025, 1, 1)
+
+    async def test_scan_reads_remote_source_aware_quote_tick_without_local_dirs(self, tmp_path: Path, monkeypatch):
+        from tinohelm.db.models import DataCatalog
+
+        class _RemoteScanStorage:
+            provider = "s3"
+
+            def __init__(self, catalog_root: Path, objects: dict[str, bytes]) -> None:
+                self.catalog_root = catalog_root
+                self.objects = objects
+
+            def iter_files(self, prefix: Path | str, suffix: str = "", recursive: bool = True):
+                root = Path(prefix)
+                prefix_rel = root.relative_to(self.catalog_root).as_posix().rstrip("/")
+                for key, payload in sorted(self.objects.items()):
+                    if not key.startswith(prefix_rel + "/"):
+                        continue
+                    rel = key[len(prefix_rel) + 1 :]
+                    if suffix and not rel.endswith(suffix):
+                        continue
+                    obj = SimpleNamespace(
+                        key=key,
+                        path=self.catalog_root / key,
+                        size=len(payload),
+                        last_modified=None,
+                    )
+                    yield obj
+
+            def open_input_file(self, path_or_object):
+                key = getattr(path_or_object, "key", None)
+                if key is None:
+                    key = str(Path(path_or_object).relative_to(self.catalog_root))
+                return BytesIO(self.objects[key])
+
+        source_root = tmp_path / "quotes" / "bookTicker"
+        rel_dir = "quotes/bookTicker/data/quote_tick/BTCUSDT-PERP.BINANCE"
+        tmp_file = tmp_path / "quotes.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(tmp_file)
+        objects = {f"{rel_dir}/quotes.parquet": tmp_file.read_bytes()}
+        storage = _RemoteScanStorage(tmp_path, objects)
+
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: storage)
+        added_rows = []
+        db = self._empty_db(added_rows)
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        result = await scan_data_catalog(db=db, settings=settings)
+
+        assert result["created"] == 1
+        assert len(added_rows) == 1
+        row = added_rows[0]
+        assert isinstance(row, DataCatalog)
+        assert row.symbol == "BTCUSDT-PERP"
+        assert row.data_type == "quote_tick"
+        assert row.interval == "tick"
+        assert row.source_type == "bookTicker"
+        assert row.record_count == 1
+        assert row.start_date == date(2025, 1, 1)
+        assert row.end_date == date(2025, 1, 1)
+        assert row.file_path == str(source_root)
+        assert not (tmp_path / "quotes" / "bookTicker" / "data").exists()
 
     async def test_scan_combines_source_aware_and_legacy_book_ticker_stats(self, tmp_path: Path):
         from tinohelm.data.catalog_helpers import resolve_catalog_path

@@ -4,18 +4,27 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
-from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
-from nautilus_trader.backtest.models import FillModel, LatencyModel
-from nautilus_trader.common.actor import Actor, ActorConfig
-from nautilus_trader.config import LoggingConfig
-from nautilus_trader.model import TraderId
-from nautilus_trader.model.enums import AccountType, OmsType
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
+try:
+    from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
+    from nautilus_trader.backtest.models import FillModel, LatencyModel
+    from nautilus_trader.common.actor import Actor, ActorConfig
+    from nautilus_trader.config import LoggingConfig
+    from nautilus_trader.model import TraderId
+    from nautilus_trader.model.enums import AccountType, OmsType
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+    _NT_AVAILABLE = True
+    _NT_IMPORT_ERROR: Exception | None = None
+except ModuleNotFoundError as exc:
+    BacktestEngine = BacktestEngineConfig = FillModel = LatencyModel = None  # type: ignore[assignment]
+    Actor = ActorConfig = LoggingConfig = TraderId = AccountType = OmsType = ParquetDataCatalog = None  # type: ignore[assignment]
+    _NT_AVAILABLE = False
+    _NT_IMPORT_ERROR = exc
 
 from tinohelm.backtest.runner_helpers import (
     TIMEFRAME_PRIORITY as _TIMEFRAME_PRIORITY_TUPLE,
@@ -40,6 +49,11 @@ from tinohelm.strategy.loader import (
 logger = logging.getLogger(__name__)
 
 
+def _require_nt() -> None:
+    if not _NT_AVAILABLE:
+        raise RuntimeError("nautilus_trader is required for backtest execution") from _NT_IMPORT_ERROR
+
+
 def _ordered_unique_extra(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
@@ -48,63 +62,84 @@ def _ordered_unique_extra(values: list[str]) -> list[str]:
 # Progress reporter — lightweight actor for bar-level progress tracking
 # ---------------------------------------------------------------------------
 
-class _ProgressReporterConfig(ActorConfig, frozen=True):
-    component_id: str = "ProgressReporter-001"
+if _NT_AVAILABLE:
+
+    class _ProgressReporterConfig(ActorConfig, frozen=True):
+        component_id: str = "ProgressReporter-001"
 
 
-class _ProgressReporter(Actor):
-    """Counts processed bars and periodically writes progress to Redis.
+    class _ProgressReporter(Actor):
+        """Counts processed bars and periodically writes progress to Redis.
 
-    Instance attributes are set directly on the actor object by
-    BacktestRunner between add_actor() and engine.run().
-    """
+        Instance attributes are set directly on the actor object by
+        BacktestRunner between add_actor() and engine.run().
+        """
 
-    def on_start(self) -> None:
-        from nautilus_trader.model.data import BarType
+        def on_start(self) -> None:
+            from nautilus_trader.model.data import BarType
 
-        self._bar_count = 0
-        self._start_time = time.monotonic()
-        # Subscribe to explicitly provided bar types (cache may be empty at this point)
-        for bt_str in getattr(self, "_bar_type_strs", []):
-            try:
-                self.subscribe_bars(BarType.from_str(bt_str))
-            except Exception:
-                pass
+            self._bar_count = 0
+            self._start_time = time.monotonic()
+            # Subscribe to explicitly provided bar types (cache may be empty at this point)
+            for bt_str in getattr(self, "_bar_type_strs", []):
+                try:
+                    self.subscribe_bars(BarType.from_str(bt_str))
+                except Exception:
+                    pass
 
-    def on_bar(self, bar) -> None:
-        self._bar_count += 1
-        report_every = getattr(self, "_report_every", 2000)
-        redis_client = getattr(self, "_redis", None)
-        total_bars = getattr(self, "_total_bars", 0)
-        run_id = getattr(self, "_run_id", "")
+        def on_bar(self, bar) -> None:
+            self._bar_count += 1
+            report_every = getattr(self, "_report_every", 2000)
+            redis_client = getattr(self, "_redis", None)
+            total_bars = getattr(self, "_total_bars", 0)
+            run_id = getattr(self, "_run_id", "")
 
-        if (
-            self._bar_count % report_every == 0
-            and redis_client is not None
-            and total_bars > 0
-        ):
-            elapsed = time.monotonic() - self._start_time
-            fields = compute_bar_progress_fields(
-                self._bar_count, total_bars, elapsed,
-            )
-            payload = build_progress_payload(
-                run_id,
-                pct=fields["pct"],
-                elapsed_secs=fields["elapsed_secs"],
-                eta_secs=fields["eta_secs"],
-                total_bars=total_bars,
-                processed_bars=self._bar_count,
-                bars_per_sec=fields["bars_per_sec"],
-            )
-            try:
-                redis_client.setex(
-                    f"tino:backtest:progress:{run_id}", 86400, str(fields["pct"]),
+            if (
+                self._bar_count % report_every == 0
+                and redis_client is not None
+                and total_bars > 0
+            ):
+                elapsed = time.monotonic() - self._start_time
+                fields = compute_bar_progress_fields(
+                    self._bar_count, total_bars, elapsed,
                 )
-                redis_client.publish(
-                    f"tino:backtest:progress:{run_id}", json.dumps(payload),
+                payload = build_progress_payload(
+                    run_id,
+                    pct=fields["pct"],
+                    elapsed_secs=fields["elapsed_secs"],
+                    eta_secs=fields["eta_secs"],
+                    total_bars=total_bars,
+                    processed_bars=self._bar_count,
+                    bars_per_sec=fields["bars_per_sec"],
                 )
-            except Exception:
-                pass  # Never let Redis errors crash the backtest
+                try:
+                    redis_client.setex(
+                        f"tino:backtest:progress:{run_id}", 86400, str(fields["pct"]),
+                    )
+                    redis_client.publish(
+                        f"tino:backtest:progress:{run_id}", json.dumps(payload),
+                    )
+                except Exception:
+                    pass  # Never let Redis errors crash the backtest
+
+else:
+
+    @dataclass(frozen=True)
+    class _ProgressReporterConfig:
+        component_id: str = "ProgressReporter-001"
+
+
+    class _ProgressReporter:
+        """Fallback stub used when NautilusTrader is not installed."""
+
+        def __init__(self, config: _ProgressReporterConfig | None = None) -> None:
+            self.config = config or _ProgressReporterConfig()
+
+        def on_start(self) -> None:
+            return None
+
+        def on_bar(self, bar) -> None:
+            return None
 
 
 class BacktestRunner:
@@ -140,7 +175,15 @@ class BacktestRunner:
         self.strategy_path = strategy_path
         self.config_path = config_path
         self.strategy_params = strategy_params or {}
-        self.catalog_path = Path(catalog_path) if catalog_path else Path()
+        from tinohelm.data.storage import get_catalog_storage
+        from tinohelm.core.config import get_settings
+
+        requested_catalog_path = Path(catalog_path) if catalog_path else None
+        self._storage = get_catalog_storage(catalog_root=requested_catalog_path)
+        self.catalog_path = self._storage.catalog_root
+        cfg = get_settings()
+        self.streaming_enabled = bool(cfg.backtest.streaming_enabled)
+        self.stream_batch_size = int(cfg.backtest.stream_batch_size)
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
 
@@ -190,21 +233,181 @@ class BacktestRunner:
     # Sourced from ``runner_helpers.TIMEFRAME_PRIORITY`` (single source of truth).
     _TIMEFRAME_PRIORITY: list[str] = list(_TIMEFRAME_PRIORITY_TUPLE)
 
+    def _catalog_uri_for_root(self, logical_root: Path | str) -> str:
+        uri_for_root = getattr(self._storage, "uri_for_catalog_root", None)
+        if callable(uri_for_root):
+            return str(uri_for_root(logical_root))
+        return str(logical_root)
+
+    def _catalog_fs_storage_options(self) -> dict[str, Any] | None:
+        return getattr(self._storage, "fs_storage_options", None)
+
+    def _catalog_fs_rust_storage_options(self) -> dict[str, str] | None:
+        return getattr(self._storage, "fs_rust_storage_options", None)
+
     def _catalog_for_path(self, path: str | Path) -> ParquetDataCatalog:
         """Return a cached ParquetDataCatalog for the runner lifetime."""
-        key = str(path)
+        _require_nt()
+        uri = self._catalog_uri_for_root(path)
+        key = json.dumps(
+            {
+                "uri": uri,
+                "fs_storage_options": self._catalog_fs_storage_options() or {},
+                "fs_rust_storage_options": self._catalog_fs_rust_storage_options() or {},
+            },
+            sort_keys=True,
+            default=str,
+        )
         catalog = self._catalog_cache.get(key)
         if catalog is None:
-            catalog = ParquetDataCatalog(key)
+            if uri.startswith(("s3://", "gcs://", "abfs://", "az://")):
+                catalog = ParquetDataCatalog.from_uri(
+                    uri,
+                    fs_storage_options=self._catalog_fs_storage_options(),
+                    fs_rust_storage_options=self._catalog_fs_rust_storage_options(),
+                )
+            else:
+                catalog = ParquetDataCatalog(uri)
             self._catalog_cache[key] = catalog
         return catalog
 
-    def _invalidate_catalog_cache_for_source(self, source_type: str) -> None:
-        """Drop cached catalog handles that may be stale after a data fetch."""
+    def _logical_root_for_source(self, source_type: str) -> Path:
         from tinohelm.data.catalog import resolve_catalog_path
 
-        self._catalog_cache.pop(str(resolve_catalog_path(self.catalog_path, source_type)), None)
-        self._catalog_cache.pop(str(self.catalog_path), None)
+        return Path(resolve_catalog_path(self.catalog_path, source_type))
+
+    def _catalog_for_logical_root(self, logical_root: Path) -> ParquetDataCatalog:
+        return self._catalog_for_path(logical_root)
+
+    def _find_bar_catalog_location(self, bar_type_str: str, source_type: str) -> tuple[Path, Path] | None:
+        """Return the first catalog root containing parquet files for a bar type."""
+        logical_root = self._logical_root_for_source(source_type)
+
+        roots = [logical_root, self.catalog_path]
+        seen: set[Path] = set()
+        for root in roots:
+            if root in seen:
+                continue
+            seen.add(root)
+            bar_dir = root / "data" / "bar" / bar_type_str
+            objects = list(self._storage.iter_files(bar_dir, suffix=".parquet"))
+            if objects:
+                return root, bar_dir
+        return None
+
+    def _count_parquet_rows(self, parquet_dir: Path) -> int:
+        """Count rows from parquet metadata without loading row data."""
+        try:
+            import pyarrow.parquet as pq
+        except Exception:
+            return 0
+        total = 0
+        for obj in self._storage.iter_files(parquet_dir, suffix=".parquet"):
+            try:
+                with self._storage.open_input_file(obj) as fh:
+                    total += int(pq.ParquetFile(fh, pre_buffer=False).metadata.num_rows)
+            except Exception:
+                continue
+        return total
+
+    def _bar_stream_windows(self, interval: str):
+        """Yield half-open query windows sized by configured bar batch size."""
+        if self.start is None or self.end is None:
+            yield self.start, self.end
+            return
+        interval_minutes = max(1, _interval_to_minutes(interval) or 1)
+        batch_size = max(1, int(self.stream_batch_size))
+        step = timedelta(minutes=interval_minutes * batch_size)
+        cur = self.start
+        while cur < self.end:
+            nxt = min(self.end, cur + step)
+            yield cur, nxt
+            if nxt <= cur:
+                break
+            cur = nxt
+
+    def _bar_data_iterator(
+        self,
+        catalog_path: Path,
+        bar_type_str: str,
+        interval: str,
+        *,
+        benchmark_daily_closes: dict[str, float] | None = None,
+    ):
+        """Yield NT Bar batches from ParquetDataCatalog without holding the full range."""
+        catalog = self._catalog_for_path(catalog_path)
+        last_ts_init: int | None = None
+        for start, end in self._bar_stream_windows(interval):
+            try:
+                batch = catalog.bars(bar_types=[bar_type_str], start=start, end=end) or []
+            except Exception:
+                logger.warning(
+                    "Failed to stream bar batch %s [%s, %s)",
+                    bar_type_str, start, end, exc_info=True,
+                )
+                continue
+            if last_ts_init is not None:
+                batch = [bar for bar in batch if int(getattr(bar, "ts_init", 0)) > last_ts_init]
+            if not batch:
+                continue
+            last_ts_init = int(getattr(batch[-1], "ts_init", 0))
+            if benchmark_daily_closes is not None:
+                benchmark_daily_closes.update(
+                    extract_benchmark_daily_closes(
+                        (int(bar.ts_init), float(bar.close)) for bar in batch
+                    )
+                )
+            yield batch
+
+    def _resolve_bar_stream(
+        self,
+        sym: str,
+        nt_sym: str,
+        ivl: str,
+        *,
+        benchmark_daily_closes: dict[str, float] | None = None,
+    ) -> tuple[Any | None, str, str | None, int]:
+        """Resolve an engine data iterator for one symbol/interval without full materialization."""
+        bar_type_str = _make_bar_type_str(sym, ivl)
+        location = self._find_bar_catalog_location(bar_type_str, self.data_type)
+        if location is not None:
+            root, bar_dir = location
+            return (
+                self._bar_data_iterator(
+                    root,
+                    bar_type_str,
+                    ivl,
+                    benchmark_daily_closes=benchmark_daily_closes,
+                ),
+                bar_type_str,
+                None,
+                self._count_parquet_rows(bar_dir),
+            )
+
+        for candidate in candidate_source_intervals(ivl):
+            candidate_bt = _make_bar_type_str(sym, candidate)
+            location = self._find_bar_catalog_location(candidate_bt, self.data_type)
+            if location is None:
+                continue
+            root, bar_dir = location
+            composite_bt_str = build_composite_bar_type_str(nt_sym, candidate, ivl, _INTERVAL_MAP)
+            return (
+                self._bar_data_iterator(
+                    root,
+                    candidate_bt,
+                    candidate,
+                    benchmark_daily_closes=benchmark_daily_closes,
+                ),
+                composite_bt_str,
+                candidate_bt,
+                self._count_parquet_rows(bar_dir),
+            )
+
+        return None, bar_type_str, None, 0
+
+    def _invalidate_catalog_cache_for_source(self, source_type: str) -> None:
+        """Drop cached catalog handles that may be stale after a data fetch."""
+        self._catalog_cache.clear()
 
     @staticmethod
     def _normalize_extra_data_type(data_type: str) -> str | None:
@@ -226,11 +429,10 @@ class BacktestRunner:
 
     def _load_replay_data_from_catalog(self, symbol: str, source_type: str) -> list:
         """Cache-first load optional QuoteTick/TradeTick replay data."""
-        from tinohelm.data.catalog import resolve_catalog_path
         from tinohelm.strategy.loader_helpers import normalize_symbol
 
-        root = resolve_catalog_path(self.catalog_path, source_type)
-        catalog = self._catalog_for_path(root)
+        logical_root = self._logical_root_for_source(source_type)
+        catalog = self._catalog_for_logical_root(logical_root)
         instrument_id = normalize_symbol(symbol)
         start = self.start
         end = self.end
@@ -322,12 +524,11 @@ class BacktestRunner:
         Different kline types (klines, markPriceKlines, indexPriceKlines,
         premiumIndexKlines) are distinct datasets and must NOT be mixed.
         """
-        from tinohelm.data.catalog import resolve_catalog_path
 
         # 1. Resolved source_type path (new layout)
-        resolved = str(resolve_catalog_path(self.catalog_path, source_type))
+        logical_root = self._logical_root_for_source(source_type)
         try:
-            cat = self._catalog_for_path(resolved)
+            cat = self._catalog_for_path(logical_root)
             bars = cat.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
             if bars:
                 return bars
@@ -938,6 +1139,7 @@ class BacktestRunner:
         Returns:
             (engine, strategy_bundle, starting_balance)
         """
+        _require_nt()
         strategy_bundle = self._build_strategy_bundle()
 
         # Sync symbols/intervals from strategy bundle when runner-level lists are empty
@@ -1001,6 +1203,8 @@ class BacktestRunner:
         engine.add_venue(**venue_kwargs)
 
         # Load data from catalog
+        from tinohelm.data.catalog import resolve_catalog_path
+
         catalog = self._catalog_for_path(self.catalog_path)
 
         # Load instruments for each symbol
@@ -1022,9 +1226,50 @@ class BacktestRunner:
         total_bar_count: int = 0
         benchmark_daily_closes: dict[str, dict[str, float]] = {}
         pending_bars_by_loaded_type: dict[str, list] = {}
+        use_streaming_bars = self.streaming_enabled and hasattr(engine, "add_data_iterator")
+        added_stream_types: set[str] = set()
+        benchmark_stream_symbols: set[str] = set()
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
+                if use_streaming_bars:
+                    daily_close_target = benchmark_daily_closes.get(nt_sym, {})
+                    capture_benchmark = nt_sym not in benchmark_stream_symbols
+                    stream, bt_str, source_bt_str, row_count = self._resolve_bar_stream(
+                        sym,
+                        nt_sym,
+                        ivl,
+                        benchmark_daily_closes=daily_close_target if capture_benchmark else None,
+                    )
+                    if stream is None:
+                        logger.info("No local data for %s %s, submitting fetch job...", sym, ivl)
+                        success = await self._submit_and_wait_fetch(sym, ivl)
+                        if success:
+                            self._invalidate_catalog_cache_for_source(self.data_type)
+                            stream, bt_str, source_bt_str, row_count = self._resolve_bar_stream(
+                                sym,
+                                nt_sym,
+                                ivl,
+                                benchmark_daily_closes=daily_close_target if capture_benchmark else None,
+                            )
+                    if stream is not None:
+                        loaded_bt_str = source_bt_str or bt_str
+                        if loaded_bt_str not in added_stream_types:
+                            engine.add_data_iterator(
+                                data_name=f"bar:{loaded_bt_str}",
+                                generator=stream,
+                            )
+                            added_stream_types.add(loaded_bt_str)
+                            if capture_benchmark:
+                                benchmark_stream_symbols.add(nt_sym)
+                                benchmark_daily_closes[nt_sym] = daily_close_target
+                            total_bar_count += row_count
+                            loaded_bar_type_strs.append(loaded_bt_str)
+                        all_bar_type_strs.append(bt_str)
+                        continue
+                    logger.warning("No bar data available for %s at %s", sym, ivl)
+                    continue
+
                 bars, bt_str, source_bt_str = await self._resolve_bars(
                     catalog, sym, nt_sym, ivl,
                 )
@@ -1047,7 +1292,7 @@ class BacktestRunner:
         if missing_instrument_syms:
             from tinohelm.data.catalog import resolve_catalog_path
             for raw_sym, nt_sym in missing_instrument_syms:
-                resolved = str(resolve_catalog_path(self.catalog_path, self.data_type))
+                resolved = Path(resolve_catalog_path(self.catalog_path, self.data_type))
                 try:
                     resolved_cat = self._catalog_for_path(resolved)
                     instruments = resolved_cat.instruments(instrument_ids=[nt_sym])
@@ -1241,7 +1486,12 @@ class BacktestRunner:
         Returns:
             (engine, strategy_bundle, starting_balance)
         """
-        engine, strategy_bundle, starting_balance = await self._setup_engine()
+        was_streaming = self.streaming_enabled
+        self.streaming_enabled = False
+        try:
+            engine, strategy_bundle, starting_balance = await self._setup_engine()
+        finally:
+            self.streaming_enabled = was_streaming
 
         logger.info(
             "Engine prepared: %d symbols, %d bar types",

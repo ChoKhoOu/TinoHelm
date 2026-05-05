@@ -51,6 +51,14 @@ def _ns_to_utc_date(ns: int) -> date:
     """Convert Unix epoch nanoseconds to a UTC calendar date."""
     return datetime.fromtimestamp(ns // 1_000_000_000, UTC).date()
 
+
+def _timestamp_stat_to_ns(value: Any) -> int:
+    """Normalize Parquet timestamp statistic values to epoch nanoseconds."""
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return int(dt.timestamp() * 1_000_000_000)
+    return int(value)
+
 # Backwards-compat aliases (kept so external imports keep working):
 # ``api/routes/data.py`` historically reaches into ``_WRITE_CATEGORY``;
 # the canonical name is now :data:`WRITE_CATEGORY` exported from
@@ -95,8 +103,11 @@ class BinanceVisionPipeline:
         raw_dir: str | Path = "~/.tino/data/raw",
     ) -> None:
         from tinohelm.core.config import get_settings
+        from tinohelm.data.storage import get_catalog_storage
+
         cfg = get_settings()
-        self.catalog_path = str(catalog_path)
+        self._storage = get_catalog_storage(settings=cfg, catalog_root=catalog_path)
+        self.catalog_path = str(self._storage.catalog_root)
         self.downloader = VisionDownloader(
             raw_dir=raw_dir, concurrency=cfg.data.download_concurrency,
         )
@@ -551,6 +562,7 @@ class BinanceVisionPipeline:
                 interval=interval, catalog_path=self.catalog_path,
                 merge=merge, source_type=data_type,
             )
+            self._sync_written_paths(paths)
             return [str(p) for p in paths]
 
         elif category == "trade_tick":
@@ -560,6 +572,7 @@ class BinanceVisionPipeline:
                 catalog_path=self.catalog_path,
                 source_type=data_type,
             )
+            self._sync_written_paths(paths)
             return paths
 
         elif category == "quote_tick":
@@ -569,6 +582,7 @@ class BinanceVisionPipeline:
                 catalog_path=self.catalog_path,
                 source_type=data_type,
             )
+            self._sync_written_paths(paths)
             return paths
 
         elif category == "funding_rate":
@@ -577,13 +591,19 @@ class BinanceVisionPipeline:
             return [parquet_path] if parquet_path else []
 
         elif category == "metrics":
-            from tinohelm.data.catalog import write_metrics_parquet
+            from tinohelm.data.catalog import metrics_parquet_path, write_metrics_parquet
+            path = metrics_parquet_path(symbol, self.catalog_path)
+            self._stage_remote_file_for_merge(path)
             path = write_metrics_parquet(objects, symbol, self.catalog_path)
+            self._sync_written_paths([path])
             return [str(path)]
 
         elif category == "order_book_delta":
-            from tinohelm.data.catalog import write_book_depth_parquet
+            from tinohelm.data.catalog import book_depth_parquet_path, write_book_depth_parquet
+            path = book_depth_parquet_path(symbol, self.catalog_path)
+            self._stage_remote_file_for_merge(path)
             path = write_book_depth_parquet(objects, symbol, self.catalog_path)
+            self._sync_written_paths([path])
             return [str(path)]
 
         else:
@@ -592,6 +612,45 @@ class BinanceVisionPipeline:
                 data_type, category,
             )
             return []
+
+    def _stage_remote_file_for_merge(self, logical_path: Path | str) -> Path:
+        """Seed local write staging with an existing remote single-file dataset.
+
+        The raw single-file writers merge by reading ``out_path`` before an
+        atomic local replace.  On S3/TOS the existing file lives only in object
+        storage, so seed the logical local staging path explicitly before
+        invoking those writers; otherwise the subsequent upload would replace
+        the remote object with only the new batch.
+        """
+        path = Path(logical_path)
+        if getattr(self._storage, "provider", "local") == "local":
+            return path
+        try:
+            if not self._storage.exists(path):
+                if path.exists():
+                    path.unlink()
+                return path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(self._storage.read_bytes(path))
+        except FileNotFoundError:
+            if path.exists():
+                path.unlink()
+            return path
+        return path
+
+    def _sync_written_paths(self, paths: list[str] | list[Path]) -> None:
+        """Upload written catalog files when the active provider is remote."""
+        if getattr(self._storage, "provider", "local") == "local":
+            return
+        for item in paths:
+            path = Path(item)
+            if not path.is_file():
+                continue
+            try:
+                self._storage.upload_path(path)
+            except Exception:
+                logger.warning("Failed to upload catalog file to storage: %s", path, exc_info=True)
+                raise
 
     @staticmethod
     def _funding_cache_covers(symbol: str, start: date, end: date) -> bool:
@@ -626,7 +685,7 @@ class BinanceVisionPipeline:
         Returns the Parquet file path string if written, else None.
         """
         from tinohelm.data.funding_cache import _save_cache
-        from tinohelm.data.catalog import write_funding_rate_parquet
+        from tinohelm.data.catalog import funding_rate_parquet_path, write_funding_rate_parquet
 
         cache_records = [
             {
@@ -641,6 +700,7 @@ class BinanceVisionPipeline:
 
         # Parquet write (new primary path)
         try:
+            self._stage_remote_file_for_merge(funding_rate_parquet_path(symbol, self.catalog_path))
             parquet_path = write_funding_rate_parquet(
                 records=records,
                 symbol=symbol,
@@ -650,6 +710,7 @@ class BinanceVisionPipeline:
                 "Wrote %d funding rate records for %s (Parquet + JSON)",
                 len(records), symbol,
             )
+            self._sync_written_paths([parquet_path])
             return str(parquet_path)
         except Exception:
             logger.warning(
@@ -741,6 +802,7 @@ class BinanceVisionPipeline:
         bars = converter.convert(df, instrument, **kwargs)
         if bars:
             paths = write_bars(bars, symbol, interval, self.catalog_path, merge=False, source_type=data_type)
+            self._sync_written_paths(paths)
             return len(bars), [str(p) for p in paths]
         return 0, []
 
@@ -763,6 +825,7 @@ class BinanceVisionPipeline:
         ticks = agg_trades_to_trade_ticks(agg_trades, symbol)
         if ticks:
             paths = write_trade_ticks(ticks, symbol, self.catalog_path, source_type="aggTrades")
+            self._sync_written_paths(paths)
             return len(ticks), paths
         return 0, []
 
@@ -801,23 +864,31 @@ class BinanceVisionPipeline:
         else:
             return  # merged raw datasets clean themselves via their writers
 
-        if not target_dir.exists():
+        from tinohelm.data.storage import delete_prefix
+
+        parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=False))
+        if not parquet_objects:
             return
 
         start_ns = date_start_ns(start)
         end_ns = date_end_ns(end)
 
         deleted = 0
-        for fpath in list(target_dir.glob("*.parquet")):
-            time_range = self._parquet_time_range(fpath)
+        for obj in parquet_objects:
+            try:
+                time_range = self._parquet_time_range(obj, storage=self._storage)
+            except TypeError:
+                # Backward-compat for tests/callers monkeypatching the old
+                # one-argument helper signature.
+                time_range = self._parquet_time_range(obj.path)
             if time_range is None:
                 # Cannot determine range — delete to be safe (will be re-fetched)
-                fpath.unlink()
+                delete_prefix(self._storage, obj.path)
                 deleted += 1
                 continue
             file_min, file_max = time_range
             if file_max >= start_ns and file_min < end_ns:
-                fpath.unlink()
+                delete_prefix(self._storage, obj.path)
                 deleted += 1
 
         if deleted:
@@ -827,40 +898,68 @@ class BinanceVisionPipeline:
             )
 
     @staticmethod
-    def _parquet_time_range(path: Path) -> tuple[int, int] | None:
+    def _parquet_time_range(path_or_object, storage=None) -> tuple[int, int] | None:
         """Read min/max timestamp from parquet row-group statistics.
 
         Returns ``(min_ts_ns, max_ts_ns)`` or ``None`` if unavailable.
-        Only reads file metadata — zero row data loaded.
+        Only reads file metadata — zero row data loaded.  Remote storage objects
+        are opened through the provider instead of relying on local ``Path``
+        materialization.
         """
         try:
             import pyarrow.parquet as pq
 
-            pf = pq.ParquetFile(str(path))
-            schema = pf.schema_arrow
-            col_idx = None
-            for name in ("ts_event", "ts_init"):
-                idx = schema.get_field_index(name)
-                if idx >= 0:
-                    col_idx = idx
-                    break
-            if col_idx is None:
-                return None
+            if storage is not None and getattr(storage, "provider", "local") != "local":
+                with storage.open_input_file(path_or_object) as fh:
+                    pf = pq.ParquetFile(fh)
+                    return BinanceVisionPipeline._parquet_file_time_range(pf)
 
-            min_ts: int | None = None
-            max_ts: int | None = None
-            for i in range(pf.metadata.num_row_groups):
-                stats = pf.metadata.row_group(i).column(col_idx).statistics
-                if stats is None or not stats.has_min_max:
-                    return None  # incomplete statistics
-                if min_ts is None or stats.min < min_ts:
-                    min_ts = stats.min
-                if max_ts is None or stats.max > max_ts:
-                    max_ts = stats.max
-
-            return (int(min_ts), int(max_ts)) if min_ts is not None else None
+            path = path_or_object.path if hasattr(path_or_object, "path") else path_or_object
+            pf = pq.ParquetFile(str(Path(path)))
+            return BinanceVisionPipeline._parquet_file_time_range(pf)
         except Exception:
             return None
+
+    @staticmethod
+    def _parquet_row_count(path_or_object, storage=None) -> int | None:
+        """Read parquet row count from metadata without materializing rows."""
+        try:
+            import pyarrow.parquet as pq
+
+            if storage is not None and getattr(storage, "provider", "local") != "local":
+                with storage.open_input_file(path_or_object) as fh:
+                    return int(pq.ParquetFile(fh).metadata.num_rows)
+            path = path_or_object.path if hasattr(path_or_object, "path") else path_or_object
+            return int(pq.ParquetFile(str(Path(path))).metadata.num_rows)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parquet_file_time_range(pf) -> tuple[int, int] | None:
+        schema = pf.schema_arrow
+        col_idx = None
+        for name in ("ts_event", "ts_init"):
+            idx = schema.get_field_index(name)
+            if idx >= 0:
+                col_idx = idx
+                break
+        if col_idx is None:
+            return None
+
+        min_ts: int | None = None
+        max_ts: int | None = None
+        for i in range(pf.metadata.num_row_groups):
+            stats = pf.metadata.row_group(i).column(col_idx).statistics
+            if stats is None or not stats.has_min_max:
+                return None  # incomplete statistics
+            stat_min = _timestamp_stat_to_ns(stats.min)
+            stat_max = _timestamp_stat_to_ns(stats.max)
+            if min_ts is None or stat_min < min_ts:
+                min_ts = stat_min
+            if max_ts is None or stat_max > max_ts:
+                max_ts = stat_max
+
+        return (int(min_ts), int(max_ts)) if min_ts is not None else None
 
     @staticmethod
     def _cleanup_raw_file(csv_path: Path) -> None:
@@ -903,42 +1002,28 @@ class BinanceVisionPipeline:
     ) -> tuple[int | None, int]:
         """Return full-scan row and byte counts for a catalog storage path."""
         target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
-        if target_dir is None or not target_dir.exists():
+        if target_dir is None:
             return None, 0
-
-        if target_dir.is_file():
-            try:
-                total_size = target_dir.stat().st_size
-            except OSError:
-                total_size = 0
-            if target_dir.suffix.lower() != ".parquet":
-                return None, total_size
-            try:
-                import pyarrow.parquet as pq
-
-                return pq.ParquetFile(target_dir).metadata.num_rows, total_size
-            except Exception:
-                return None, total_size
+        parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=True))
+        if not parquet_objects:
+            return None, 0
 
         total_rows = 0
         total_size = 0
         saw_unknown_rows = False
-        for path in target_dir.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                total_size += path.stat().st_size
-            except OSError:
-                continue
-            if path.suffix.lower() != ".parquet":
+        for obj in parquet_objects:
+            if obj.size is not None:
+                total_size += int(obj.size)
+            else:
+                try:
+                    total_size += obj.path.stat().st_size
+                except OSError:
+                    pass
+            row_count = self._parquet_row_count(obj, storage=self._storage)
+            if row_count is None:
                 saw_unknown_rows = True
-                continue
-            try:
-                import pyarrow.parquet as pq
-
-                total_rows += pq.ParquetFile(path).metadata.num_rows
-            except Exception:
-                saw_unknown_rows = True
+            elif not saw_unknown_rows:
+                total_rows += row_count
 
         if saw_unknown_rows:
             return None, total_size
@@ -953,17 +1038,17 @@ class BinanceVisionPipeline:
     ) -> tuple[date, date] | None:
         """Return stored min/max event dates for a catalog storage path."""
         target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
-        if target_dir is None or not target_dir.exists():
+        if target_dir is None:
+            return None
+        paths = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=True))
+        if not paths:
             return None
 
-        paths = [target_dir] if target_dir.is_file() else [path for path in target_dir.rglob("*.parquet") if path.is_file()]
         min_ts: int | None = None
         max_ts: int | None = None
         saw_unknown_range = False
-        for path in paths:
-            if path.suffix.lower() != ".parquet":
-                continue
-            time_range = self._parquet_time_range(path)
+        for obj in paths:
+            time_range = self._parquet_time_range(obj, storage=self._storage)
             if time_range is None:
                 saw_unknown_range = True
                 continue

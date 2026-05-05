@@ -448,18 +448,40 @@ async def list_symbols(
     settings: Settings = Depends(get_settings_dep),
 ) -> list[str]:
     """Return symbols that have bar data in the NT catalog."""
-    catalog_bar_dir = settings.paths.catalog / "data" / "bar"
-    if not catalog_bar_dir.exists():
-        return []
+    from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
 
+    catalog_root = get_active_catalog_root(settings)
+    storage = get_catalog_storage(settings=settings)
     symbols: set[str] = set()
-    for sub in catalog_bar_dir.iterdir():
-        if sub.is_dir():
-            # NT bar dir name format: SYMBOL.VENUE-N-UNIT-LAST-EXTERNAL
-            name = sub.name
-            dot_idx = name.find(".")
-            if dot_idx > 0:
-                symbols.add(name[:dot_idx])
+    bar_source_types = ("klines", "markPriceKlines", "indexPriceKlines", "premiumIndexKlines")
+
+    def add_symbol_from_bar_type_dir(name: str) -> None:
+        dot_idx = name.find(".")
+        if dot_idx > 0:
+            symbols.add(name[:dot_idx])
+
+    from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+    catalog_roots = [resolve_catalog_path(catalog_root, source_type) for source_type in bar_source_types]
+    catalog_roots.append(catalog_root)  # legacy flat fallback
+
+    seen_roots: set[Path] = set()
+    for root in catalog_roots:
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        catalog_bar_dir = root / "data" / "bar"
+        if storage.provider == "local":
+            if not catalog_bar_dir.exists():
+                continue
+            for sub in catalog_bar_dir.iterdir():
+                if sub.is_dir():
+                    # NT bar dir name format: SYMBOL.VENUE-N-UNIT-LAST-EXTERNAL
+                    add_symbol_from_bar_type_dir(sub.name)
+            continue
+
+        for obj in storage.iter_files(catalog_bar_dir, suffix=".parquet", recursive=True):
+            add_symbol_from_bar_type_dir(obj.path.parent.name)
 
     return sorted(symbols)
 
@@ -486,8 +508,10 @@ async def explore_factor(req: ExploreRequest) -> dict:
     from tinohelm.core.config import get_settings
     import asyncio
 
+    from tinohelm.data.storage import get_active_catalog_root
+
     settings = get_settings()
-    catalog_path = str(settings.paths.catalog)
+    catalog_path = str(get_active_catalog_root(settings))
 
     registry = Registry()
     registry.scan()
@@ -831,8 +855,10 @@ async def params_grid_endpoint(req: ParamsGridRequest) -> dict:
     from tinohelm.factor.universe import Universe
     from tinohelm.core.config import get_settings
 
+    from tinohelm.data.storage import get_active_catalog_root
+
     settings = get_settings()
-    catalog_path = str(settings.paths.catalog)
+    catalog_path = str(get_active_catalog_root(settings))
 
     registry = Registry()
     registry.scan()
