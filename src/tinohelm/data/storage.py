@@ -64,6 +64,12 @@ class CatalogStorageProvider(Protocol):
     def upload_path(self, local_path: Path | str, *, logical_path: Path | str | None = None) -> str:
         """Upload one local file and return its logical URI."""
 
+    def upload_bytes(self, logical_path: Path | str, payload: bytes) -> str:
+        """Upload bytes directly to one logical catalog path."""
+
+    def copy_path(self, source_path: Path | str, dest_path: Path | str) -> str:
+        """Copy one logical catalog object without materializing local files."""
+
     def delete_path(self, local_path: Path | str) -> None:
         """Delete one catalog object from the backing store if present."""
 
@@ -129,6 +135,19 @@ class LocalCatalogStorage:
 
     def upload_path(self, local_path: Path | str, *, logical_path: Path | str | None = None) -> str:
         return self.uri_for_path(logical_path or local_path)
+
+    def upload_bytes(self, logical_path: Path | str, payload: bytes) -> str:
+        path = Path(logical_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return self.uri_for_path(path)
+
+    def copy_path(self, source_path: Path | str, dest_path: Path | str) -> str:
+        source = Path(source_path)
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.read_bytes())
+        return self.uri_for_path(dest)
 
     def delete_path(self, local_path: Path | str) -> None:
         path = Path(local_path)
@@ -329,6 +348,33 @@ class S3CatalogStorage:
         else:
             self.fs.put(str(path), self._fs_path_for_key(key))
         return self._uri_for_key(key)
+
+    def upload_bytes(self, logical_path: Path | str, payload: bytes) -> str:
+        key = self._key_for_path(Path(logical_path))
+        with self.fs.open(self._fs_path_for_key(key), "wb") as fh:
+            fh.write(payload)
+        return self._uri_for_key(key)
+
+    def copy_path(self, source_path: Path | str, dest_path: Path | str) -> str:
+        source_key = self._key_for_path(Path(source_path))
+        dest_key = self._key_for_path(Path(dest_path))
+        source = self._fs_path_for_key(source_key)
+        dest = self._fs_path_for_key(dest_key)
+        cp_file = getattr(self.fs, "cp_file", None)
+        if callable(cp_file):
+            cp_file(source, dest)
+        else:
+            copy = getattr(self.fs, "copy", None)
+            if callable(copy):
+                copy(source, dest)
+            else:
+                with self.fs.open(source, "rb") as src, self.fs.open(dest, "wb") as dst:
+                    while True:
+                        chunk = src.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+        return self._uri_for_key(dest_key)
 
     def delete_path(self, local_path: Path | str) -> None:
         key = self._key_for_path(Path(local_path))

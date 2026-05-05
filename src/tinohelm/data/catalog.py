@@ -87,6 +87,35 @@ def ensure_catalog_dirs(catalog_path: str | Path) -> Path:
     return path
 
 
+def _is_remote_storage(storage: Any | None) -> bool:
+    return storage is not None and getattr(storage, "provider", "local") != "local"
+
+
+def _catalog_for_root(catalog_root: str | Path, storage: Any | None = None):
+    """Create an NT catalog for a logical root, using object storage directly when active."""
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    root = Path(catalog_root)
+    if _is_remote_storage(storage):
+        uri_for_root = getattr(storage, "uri_for_catalog_root", None)
+        if not callable(uri_for_root):
+            raise ValueError("Remote catalog storage must expose uri_for_catalog_root()")
+        return ParquetDataCatalog.from_uri(
+            uri_for_root(root),
+            fs_storage_options=getattr(storage, "fs_storage_options", None),
+            fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
+        )
+    return ParquetDataCatalog(str(root))
+
+
+def _iter_catalog_files(storage: Any | None, path: Path, *, suffix: str = ".parquet", recursive: bool = False) -> list[Path]:
+    if _is_remote_storage(storage):
+        return [obj.path for obj in storage.iter_files(path, suffix=suffix, recursive=recursive)]
+    if path.is_file():
+        return [path] if path.name.endswith(suffix) else []
+    return list(path.rglob(f"*{suffix}") if recursive else path.glob(f"*{suffix}")) if path.exists() else []
+
+
 def validate_bars(
     symbol: str,
     interval: str,
@@ -224,6 +253,7 @@ def write_bars(
     catalog_path: str | Path,
     merge: bool = True,
     source_type: str | None = None,
+    storage: Any | None = None,
 ) -> list[Path]:
     """Write pre-converted NT Bar objects to Parquet catalog.
 
@@ -236,12 +266,12 @@ def write_bars(
 
     Returns list of written file paths.
     """
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
     if not bars:
         return []
 
-    catalog_path = ensure_catalog_dirs(resolve_catalog_path(catalog_path, source_type))
+    catalog_path = Path(resolve_catalog_path(catalog_path, source_type))
+    if not _is_remote_storage(storage):
+        catalog_path = ensure_catalog_dirs(catalog_path)
     instrument = _make_instrument(symbol)
     bar_type = _make_bar_type(instrument.id, interval)
 
@@ -249,15 +279,14 @@ def write_bars(
     if merge:
         # Merge with existing bars if present (incremental update case)
         try:
-            catalog = ParquetDataCatalog(str(catalog_path))
+            catalog = _catalog_for_root(catalog_path, storage)
             existing_bars = catalog.bars(bar_types=[str(bar_type)])
             if existing_bars:
                 # Track old files — they will be deleted AFTER the merged write
                 # succeeds, so a crash between write and delete leaves the old
                 # data intact (at worst we have duplicate bars, not missing ones).
                 bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-                if bar_dir.exists():
-                    existing_files_to_delete = list(bar_dir.glob("*.parquet"))
+                existing_files_to_delete = _iter_catalog_files(storage, bar_dir, recursive=False)
 
                 existing_count = len(existing_bars)
                 bars = merge_bars(existing_bars, bars)
@@ -266,7 +295,7 @@ def write_bars(
         except Exception:
             logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
 
-    catalog = ParquetDataCatalog(str(catalog_path))
+    catalog = _catalog_for_root(catalog_path, storage)
     catalog.write_data([instrument])
     # When merge=False (streaming mode), multiple files accumulate in the same
     # directory within one ingest session.  NT uses P.closed() intervals so two
@@ -283,11 +312,13 @@ def write_bars(
     # write (the previous order) all data would be gone.  Now the worst case
     # is stale duplicates that compact_bars can clean up.
     for old_file in existing_files_to_delete:
-        if old_file.exists():
+        if _is_remote_storage(storage):
+            storage.delete_path(old_file)
+        elif old_file.exists():
             old_file.unlink()
 
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-    return list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
+    return _iter_catalog_files(storage, bar_dir, recursive=False)
 
 
 def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
@@ -419,28 +450,28 @@ def write_trade_ticks(
     symbol: str,
     catalog_path: str | Path,
     source_type: str | None = None,
+    storage: Any | None = None,
 ) -> list[str]:
     """Write TradeTick objects to the Parquet catalog.
 
     Returns list of written Parquet file paths.
     """
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
-    catalog_path = resolve_catalog_path(catalog_path, source_type)
-    catalog_path = Path(catalog_path)
-    catalog = ParquetDataCatalog(str(catalog_path))
+    catalog_path = Path(resolve_catalog_path(catalog_path, source_type))
+    if not _is_remote_storage(storage):
+        ensure_catalog_dirs(catalog_path)
+    catalog = _catalog_for_root(catalog_path, storage)
 
     from tinohelm.data.instruments import make_instrument
     instrument = make_instrument(symbol)
     tick_dir = catalog_path / "data" / "trade_tick" / str(instrument.id)
 
     # Snapshot existing files before write to return only new ones
-    existing = set(str(f) for f in tick_dir.glob("*.parquet")) if tick_dir.exists() else set()
+    existing = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
 
     catalog.write_data(ticks, skip_disjoint_check=True)
 
     # Return only newly created files
-    current = set(str(f) for f in tick_dir.glob("*.parquet")) if tick_dir.exists() else set()
+    current = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
     written = sorted(current - existing)
     logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
@@ -451,20 +482,21 @@ def write_quote_ticks(
     symbol: str,
     catalog_path: str | Path,
     source_type: str | None = None,
+    storage: Any | None = None,
 ) -> list[str]:
     """Write QuoteTick objects to a source-aware Parquet catalog root."""
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
     catalog_path = Path(resolve_catalog_path(catalog_path, source_type))
-    catalog = ParquetDataCatalog(str(catalog_path))
+    if not _is_remote_storage(storage):
+        ensure_catalog_dirs(catalog_path)
+    catalog = _catalog_for_root(catalog_path, storage)
 
     from tinohelm.data.instruments import make_instrument
     instrument = make_instrument(symbol)
     tick_dir = catalog_path / "data" / "quote_tick" / str(instrument.id)
 
-    existing = set(str(f) for f in tick_dir.glob("*.parquet")) if tick_dir.exists() else set()
+    existing = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
     catalog.write_data(ticks, skip_disjoint_check=True)
-    current = set(str(f) for f in tick_dir.glob("*.parquet")) if tick_dir.exists() else set()
+    current = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
     written = sorted(current - existing)
     logger.info("Wrote %d QuoteTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
@@ -483,19 +515,43 @@ def _write_raw_records_parquet(
     out_path: Path,
     rows: list[dict[str, Any]],
     dedupe_subset: list[str],
+    storage: Any | None = None,
 ) -> Path:
     import fcntl
     import os
     import tempfile
+    from io import BytesIO
 
     import polars as pl
+
+    frame = pl.DataFrame(rows)
+    if _is_remote_storage(storage):
+        try:
+            if storage.exists(out_path):
+                frame = pl.concat([
+                    pl.read_parquet(BytesIO(storage.read_bytes(out_path))),
+                    frame,
+                ], how="diagonal_relaxed")
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.warning("Failed to merge existing remote raw parquet at %s", out_path, exc_info=True)
+        frame = frame.sort(dedupe_subset).unique(
+            subset=dedupe_subset,
+            keep="last",
+            maintain_order=True,
+        )
+        buf = BytesIO()
+        frame.write_parquet(buf)
+        storage.upload_bytes(out_path, buf.getvalue())
+        logger.info("Wrote %d raw rows to remote %s", len(records), out_path)
+        return out_path
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = out_path.with_suffix(out_path.suffix + ".lock")
     with lock_path.open("a+b") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            frame = pl.DataFrame(rows)
             if out_path.exists():
                 try:
                     frame = pl.concat([pl.read_parquet(out_path), frame], how="diagonal_relaxed")
@@ -521,7 +577,7 @@ def _write_raw_records_parquet(
     return out_path
 
 
-def write_metrics_parquet(records: list, symbol: str, catalog_root: str | Path) -> Path:
+def write_metrics_parquet(records: list, symbol: str, catalog_root: str | Path, storage: Any | None = None) -> Path:
     """Write BinanceMetrics dataclass records as source-aware raw Parquet."""
     rows: list[dict[str, Any]] = []
     for record in records:
@@ -538,10 +594,10 @@ def write_metrics_parquet(records: list, symbol: str, catalog_root: str | Path) 
             "global_long_short_ratio": float(getattr(record, "global_long_short_ratio", 0.0)),
             "taker_long_short_vol_ratio": float(getattr(record, "taker_long_short_vol_ratio", 0.0)),
         })
-    return _write_raw_records_parquet(records, metrics_parquet_path(symbol, catalog_root), rows, ["ts_event"])
+    return _write_raw_records_parquet(records, metrics_parquet_path(symbol, catalog_root), rows, ["ts_event"], storage=storage)
 
 
-def write_book_depth_parquet(records: list, symbol: str, catalog_root: str | Path) -> Path:
+def write_book_depth_parquet(records: list, symbol: str, catalog_root: str | Path, storage: Any | None = None) -> Path:
     """Write BinanceBookDepth dataclass records as source-aware raw Parquet."""
     rows: list[dict[str, Any]] = []
     for record in records:
@@ -553,7 +609,7 @@ def write_book_depth_parquet(records: list, symbol: str, catalog_root: str | Pat
             "depth": float(getattr(record, "depth")),
             "notional": float(getattr(record, "notional")),
         })
-    return _write_raw_records_parquet(records, book_depth_parquet_path(symbol, catalog_root), rows, ["ts_event", "percentage"])
+    return _write_raw_records_parquet(records, book_depth_parquet_path(symbol, catalog_root), rows, ["ts_event", "percentage"], storage=storage)
 
 
 def read_metrics_parquet(symbol: str, catalog_root: str | Path) -> "pl.DataFrame | None":
@@ -589,6 +645,7 @@ def write_funding_rate_parquet(
     records: list,
     symbol: str,
     catalog_root: str | Path,
+    storage: Any | None = None,
 ) -> Path:
     """Write BinanceFundingRate records to a single Parquet file per symbol.
 
@@ -608,9 +665,11 @@ def write_funding_rate_parquet(
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
+    from io import BytesIO
 
     out_path = funding_rate_parquet_path(symbol, catalog_root)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not _is_remote_storage(storage):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Normalise records → list of (ts_event_ns, funding_rate)
     def _to_tuple(r):
@@ -626,7 +685,20 @@ def write_funding_rate_parquet(
         new_rows[ts_ns] = rate
 
     # Merge with existing Parquet if present
-    if out_path.exists():
+    if _is_remote_storage(storage):
+        try:
+            if storage.exists(out_path):
+                existing_table = pq.read_table(BytesIO(storage.read_bytes(out_path)))
+                for ts_ns, rate in zip(
+                    existing_table["ts_event"].to_pylist(),
+                    existing_table["funding_rate"].to_pylist(),
+                ):
+                    # New records take precedence (overwrite existing by ts_event key)
+                    if ts_ns not in new_rows:
+                        new_rows[ts_ns] = float(rate)
+        except FileNotFoundError:
+            pass
+    elif out_path.exists():
         existing_table = pq.read_table(str(out_path))
         for ts_ns, rate in zip(
             existing_table["ts_event"].to_pylist(),
@@ -644,7 +716,12 @@ def write_funding_rate_parquet(
             "funding_rate": pa.array([new_rows[t] for t in sorted_ts], type=pa.float64()),
         }
     )
-    pq.write_table(table, str(out_path))
+    if _is_remote_storage(storage):
+        buf = BytesIO()
+        pq.write_table(table, buf)
+        storage.upload_bytes(out_path, buf.getvalue())
+    else:
+        pq.write_table(table, str(out_path))
     logger.info(
         "Wrote %d funding-rate rows to %s", len(sorted_ts), out_path
     )

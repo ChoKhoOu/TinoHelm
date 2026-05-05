@@ -443,7 +443,7 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
 
     from tinohelm.data.catalog import _make_bar_type, _make_instrument
     from tinohelm.data.catalog_helpers import dedupe_by_ts
-    from tinohelm.data.storage import delete_prefix, upload_paths
+    from tinohelm.data.storage import delete_prefix
 
     catalog_path = Path(catalog_path)
     instrument = _make_instrument(symbol)
@@ -481,25 +481,29 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
         }
 
     bars = dedupe_by_ts(bars)
-    if bar_dir.exists():
-        for local_file in bar_dir.glob("*.parquet"):
-            local_file.unlink(missing_ok=True)
-    bar_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Compacting remote %s %s: %d files -> %d bars", symbol, interval, files_before, len(bars))
 
-    local_catalog = ParquetDataCatalog(str(catalog_path))
-    local_catalog.write_data([instrument])
-    local_catalog.write_data(bars)
-    new_files = list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
-    if not new_files:
-        raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
-    size_after = sum(path.stat().st_size for path in new_files)
-
+    # Object storage has no local rename/lock semantics.  For remote catalogs,
+    # write the compacted Nautilus parquet output through NT's fsspec-backed
+    # remote catalog instead of staging files under catalog_path and uploading
+    # them afterwards.
     delete_prefix(storage, bar_dir)
-    upload_paths(storage, new_files)
+    catalog = ParquetDataCatalog.from_uri(
+        catalog_uri,
+        fs_storage_options=getattr(storage, "fs_storage_options", None),
+        fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
+    )
+    catalog.write_data([instrument])
+    catalog.write_data(bars)
+
+    new_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
+    if not new_objects:
+        raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
+    size_after = sum(int(obj.size or 0) for obj in new_objects)
 
     return {
         "files_before": files_before,
-        "files_after": len(new_files),
+        "files_after": len(new_objects),
         "bars_count": len(bars),
         "size_before": size_before,
         "size_after": size_after,

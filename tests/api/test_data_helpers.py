@@ -726,7 +726,7 @@ class TestSourceAwareBarMaintenance:
         assert args == ("BTCUSDT-PERP", "1m", settings, "markPriceKlines", "markPriceKlines")
         assert kwargs == {}
 
-    def test_remote_compact_uses_remote_nt_catalog_and_uploads_result(self, tmp_path: Path, monkeypatch):
+    def test_remote_compact_writes_remote_nt_catalog_without_local_upload(self, tmp_path: Path, monkeypatch):
         bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
         bar_dir = tmp_path / "data" / "bar" / bar_type_str
         old_keys = [
@@ -762,8 +762,7 @@ class TestSourceAwareBarMaintenance:
 
             def write_data(self, data, skip_disjoint_check=False):
                 if data and hasattr(data[0], "ts_event"):
-                    bar_dir.mkdir(parents=True, exist_ok=True)
-                    (bar_dir / "compacted.parquet").write_bytes(b"new")
+                    fs.objects[f"bucket/catalog/data/bar/{bar_type_str}/compacted.parquet"] = b"new"
 
         import sys
         import types
@@ -788,10 +787,13 @@ class TestSourceAwareBarMaintenance:
             "size_after": len(b"new"),
         }
         assert FakeCatalog.from_uri_calls == [
-            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options)
+            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options),
+            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options),
         ]
         assert fs.rm_calls == old_keys
-        assert fs.put_calls == [(str(bar_dir / "compacted.parquet"), f"bucket/catalog/data/bar/{bar_type_str}/compacted.parquet")]
+        assert fs.put_calls == []
+        assert fs.objects == {f"bucket/catalog/data/bar/{bar_type_str}/compacted.parquet": b"new"}
+        assert not bar_dir.exists()
 
 
 # ---------------------------------------------------------------------------
