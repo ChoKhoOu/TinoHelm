@@ -316,3 +316,24 @@ class TestAllThreeSegmentsCombined:
         )
         assert "btc_trend" in result
         assert _is_eval_result(result["btc_trend"]["up"])
+
+    def test_segment_evaluate_accepts_mixed_timestamp_units(self):
+        """Mixed ts units between factor panel and forward returns must not break slicing."""
+        panel = _make_panel(64, seed=21).with_columns(pl.col("ts").cast(pl.Datetime("ns")))
+        fwd = _make_fwd(64, seed=21).with_columns(pl.col("ts").cast(pl.Datetime("us")))
+        close = _make_close(64, seed=22)
+        funding = _make_funding(64, seed=23)
+
+        result = segment_evaluate(
+            panel,
+            fwd,
+            btc_close_series=close,
+            btc_vol_series=close,
+            funding_series=funding,
+            eval_config=_CONFIG,
+        )
+
+        assert set(result.keys()) == {"btc_trend", "vol_regime", "funding_level"}
+        for provider_results in result.values():
+            for eval_res in provider_results.values():
+                assert isinstance(eval_res, EvalResult)

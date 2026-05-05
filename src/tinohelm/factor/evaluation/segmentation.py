@@ -51,6 +51,13 @@ def _empty_eval_result() -> EvalResult:
     return EvalResult()
 
 
+def _ts_set_to_series(ts_set: set, dtype: pl.DataType) -> pl.Series:
+    """Materialize ``ts_set`` as a dtype-matched series for ``is_in`` filters."""
+    if not ts_set:
+        return pl.Series(_TS_COL, [], dtype=dtype)
+    return pl.Series(_TS_COL, list(ts_set)).cast(dtype)
+
+
 def _filter_panel_by_ts(panel: pl.DataFrame, ts_set: set) -> pl.DataFrame:
     """Filter ``panel`` rows whose ``ts`` value is in ``ts_set``.
 
@@ -59,14 +66,16 @@ def _filter_panel_by_ts(panel: pl.DataFrame, ts_set: set) -> pl.DataFrame:
     """
     if not ts_set:
         return panel.filter(pl.lit(False))
-    return panel.filter(pl.col(_TS_COL).is_in(list(ts_set)))
+    ts_dtype = panel.schema[_TS_COL]
+    return panel.filter(pl.col(_TS_COL).is_in(_ts_set_to_series(ts_set, ts_dtype).implode()))
 
 
 def _filter_ts_value_by_ts(df: pl.DataFrame, ts_set: set) -> pl.DataFrame:
     """Filter a 2-col ``[ts, value]`` frame to matching timestamps."""
     if not ts_set:
         return df.filter(pl.lit(False))
-    return df.filter(pl.col(_TS_COL).is_in(list(ts_set)))
+    ts_dtype = df.schema[_TS_COL]
+    return df.filter(pl.col(_TS_COL).is_in(_ts_set_to_series(ts_set, ts_dtype).implode()))
 
 
 def _evaluate_slice(
@@ -258,13 +267,20 @@ def segment_evaluate(
         eval_config = EvalConfig(universe=(), start="", end="")
     eval_config = dataclasses.replace(eval_config, returns_kind="forward_returns")
 
-    # Extract the ts column from the panel for mask computation.
-    if _TS_COL not in panel.columns:
-        raise ValueError(f"panel is missing required '{_TS_COL}' column")
-    ref_ts: pl.Series = panel[_TS_COL]
-
     # Flatten forward_returns_df to [ts, value] so it can be filtered by ts set.
     fwd_flat = _to_ts_value(forward_returns_df)
+
+    # Align the panel timestamp unit to the flattened forward-return frame.
+    # _to_ts_value normalizes temporal inputs to Datetime(ns); if the panel
+    # stays in a different temporal unit, the regime ts sets will not match the
+    # forward-return slice even when the underlying timestamps are identical.
+    if _TS_COL not in panel.columns:
+        raise ValueError(f"panel is missing required '{_TS_COL}' column")
+    panel_ts_dtype = panel.schema[_TS_COL]
+    fwd_ts_dtype = fwd_flat.schema[_TS_COL]
+    if panel_ts_dtype.is_temporal() and fwd_ts_dtype.is_temporal() and panel_ts_dtype != fwd_ts_dtype:
+        panel = panel.with_columns(pl.col(_TS_COL).cast(fwd_ts_dtype))
+    ref_ts: pl.Series = panel[_TS_COL]
 
     out: dict[str, dict[str, EvalResult]] = {}
 
