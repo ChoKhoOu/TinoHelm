@@ -75,6 +75,16 @@ def _ensure_ts_value_frame(df: pl.DataFrame, name: str) -> pl.DataFrame:
     return df
 
 
+def _cast_temporal_ts_to_ns(df: pl.DataFrame) -> pl.DataFrame:
+    """Cast temporal ``ts`` columns to a common nanosecond unit for joins."""
+    if _TS_COL not in df.columns:
+        return df
+    ts_dtype = df.schema[_TS_COL]
+    if ts_dtype.is_temporal():
+        return df.with_columns(pl.col(_TS_COL).cast(pl.Datetime("ns")))
+    return df
+
+
 def _join_keys(left: pl.DataFrame, right: pl.DataFrame) -> list[str]:
     """Return identity-preserving join keys for evaluation frames.
 
@@ -198,6 +208,8 @@ def _build_paired(factor: pl.DataFrame, fwd_ret: pl.DataFrame) -> pl.DataFrame:
     """
     _ensure_ts_value_frame(factor, "factor")
     _ensure_ts_value_frame(fwd_ret, "fwd_ret")
+    factor = _cast_temporal_ts_to_ns(factor)
+    fwd_ret = _cast_temporal_ts_to_ns(fwd_ret)
     keys = _join_keys(factor, fwd_ret)
     _ensure_unique_identity_keys(factor, keys, "factor")
     _ensure_unique_identity_keys(fwd_ret, keys, "fwd_ret")

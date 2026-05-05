@@ -51,6 +51,7 @@ import polars as pl
 from tinohelm.factor.evaluation.cost import edge_waterfall
 from tinohelm.factor.evaluation.distribution import compute_distribution
 from tinohelm.factor.evaluation.ic import (
+    _cast_temporal_ts_to_ns,
     _ensure_factor_keys_covered,
     _ensure_unique_identity_keys,
     _join_keys,
@@ -163,26 +164,26 @@ def _to_ts_value(values: Panel | pl.Series | Any) -> pl.DataFrame:
             )
         non_ts = [c for c in cols if c != _TS_COL]
         if _SYMBOL_COL in cols and _VAL_COL in cols:
-            return values.select([_TS_COL, _SYMBOL_COL, _VAL_COL])
+            return _cast_temporal_ts_to_ns(values.select([_TS_COL, _SYMBOL_COL, _VAL_COL]))
         if len(non_ts) == 1 and non_ts[0] == _VAL_COL:
-            return values
+            return _cast_temporal_ts_to_ns(values)
         if len(non_ts) == 1:
             # Single symbol column — keep the asset identity instead of
             # collapsing it away, so wide-panel callers get consistent schema
             # whether they pass one symbol or many.
-            return values.select([
+            return _cast_temporal_ts_to_ns(values.select([
                 pl.col(_TS_COL),
                 pl.lit(non_ts[0]).alias(_SYMBOL_COL),
                 pl.col(non_ts[0]).alias(_VAL_COL),
-            ])
+            ]))
         # Multi-symbol panel — unpivot to long form so every (ts, symbol)
         # cell becomes a row without losing the symbol identity.
-        return values.unpivot(
+        return _cast_temporal_ts_to_ns(values.unpivot(
             index=[_TS_COL],
             on=non_ts,
             variable_name=_SYMBOL_COL,
             value_name=_VAL_COL,
-        ).select([_TS_COL, _SYMBOL_COL, _VAL_COL])
+        ).select([_TS_COL, _SYMBOL_COL, _VAL_COL]))
 
     if isinstance(values, pl.Series):
         ts = list(range(len(values)))
@@ -191,7 +192,7 @@ def _to_ts_value(values: Panel | pl.Series | Any) -> pl.DataFrame:
     # Pandas duck-typed fall-throughs — keeps the evaluation module pandas-free
     # while still letting orchestrator + integration tests pass pandas inputs.
     if _is_pandas_series(values):
-        return _pandas_series_to_polars(values)
+        return _cast_temporal_ts_to_ns(_pandas_series_to_polars(values))
     if _is_pandas_dataframe(values):
         # Re-route through the panel conversion + recursive flatten.
         panel = _pandas_dataframe_to_polars_panel(values)

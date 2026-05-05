@@ -204,6 +204,32 @@ class TestComputeIcSeries:
             (pl.col("symbol") == "ETH") & (pl.col("fwd_ret") > 0)
         ).height == 0
 
+    def test_build_paired_casts_temporal_join_keys_to_common_unit(self):
+        ts_ns = _hourly_ts(4).cast(pl.Datetime("ns"))
+        ts_us = ts_ns.cast(pl.Datetime("us"))
+        factor = pl.DataFrame(
+            {
+                "ts": [*ts_us.to_list(), *ts_us.to_list()],
+                "symbol": ["BTC", "BTC", "BTC", "BTC", "ETH", "ETH", "ETH", "ETH"],
+                "value": [0.10, 0.11, 0.12, 0.13, -0.10, -0.11, -0.12, -0.13],
+            },
+            schema={"ts": pl.Datetime("us"), "symbol": pl.Utf8, "value": pl.Float64},
+        )
+        fwd = pl.DataFrame(
+            {
+                "ts": [*ts_ns.to_list(), *ts_ns.to_list()],
+                "symbol": ["BTC", "BTC", "BTC", "BTC", "ETH", "ETH", "ETH", "ETH"],
+                "value": [0.01, 0.02, 0.03, None, -0.01, -0.02, -0.03, None],
+            },
+            schema={"ts": pl.Datetime("ns"), "symbol": pl.Utf8, "value": pl.Float64},
+        )
+
+        paired = _build_paired(factor, fwd)
+
+        assert paired.height == 6
+        assert paired.schema["ts"] == pl.Datetime("ns")
+        assert paired.select(["ts", "symbol"]).unique().height == 6
+
     def test_build_paired_rejects_asymmetric_symbol_schema(self):
         ts = _hourly_ts(3)
         factor = pl.DataFrame({
