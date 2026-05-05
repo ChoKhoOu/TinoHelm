@@ -780,15 +780,17 @@ async def validate_data(
             detail=f"Unsupported bar data_type {data_type!r}. Supported values: {supported}",
         )
 
-    from tinohelm.data.storage import get_active_catalog_root
+    from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
     base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
-    catalog_path = _bar_catalog_path_for(base_catalog_path, data_type, symbol, interval, source_type=data_type)
+    storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path) if settings else get_catalog_storage(catalog_root=base_catalog_path)
+    catalog_path = _bar_catalog_path_for(base_catalog_path, data_type, symbol, interval, source_type=data_type, storage=storage)
     try:
         result = await asyncio.to_thread(
             validate_bars,
             symbol=symbol,
             interval=interval,
             catalog_path=catalog_path,
+            storage=storage,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

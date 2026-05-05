@@ -460,7 +460,7 @@ class TestSourceAwareBarMaintenance:
 
         calls = []
 
-        def fake_validate_bars(*, symbol, interval, catalog_path):
+        def fake_validate_bars(*, symbol, interval, catalog_path, storage=None):
             calls.append((symbol, interval, catalog_path))
             return {"status": "ok"}
 
@@ -491,7 +491,7 @@ class TestSourceAwareBarMaintenance:
 
         calls = []
 
-        def fake_validate_bars(*, symbol, interval, catalog_path):
+        def fake_validate_bars(*, symbol, interval, catalog_path, storage=None):
             calls.append((symbol, interval, catalog_path))
             return {"status": "ok"}
 
@@ -507,6 +507,95 @@ class TestSourceAwareBarMaintenance:
 
         assert result == {"status": "ok"}
         assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path))]
+
+    def test_validate_data_passes_remote_storage_to_validate_bars(self, tmp_path: Path, monkeypatch):
+        import asyncio
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+        calls = []
+        storage = SimpleNamespace(provider="s3", catalog_root=tmp_path)
+
+        def fake_validate_bars(*, symbol, interval, catalog_path, storage=None):
+            calls.append((symbol, interval, catalog_path, storage))
+            return {"status": "ok"}
+
+        monkeypatch.setattr("tinohelm.data.catalog.validate_bars", fake_validate_bars)
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings=None: tmp_path)
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: storage)
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        result = asyncio.run(validate_data(
+            "BTCUSDT-PERP",
+            "1m",
+            data_type="markPriceKlines",
+            settings=settings,
+        ))
+
+        assert result == {"status": "ok"}
+        assert calls == [(
+            "BTCUSDT-PERP",
+            "1m",
+            str(resolve_catalog_path(tmp_path, "markPriceKlines")),
+            storage,
+        )]
+
+    def test_validate_bars_uses_remote_catalog_uri_and_storage_file_stats(self, tmp_path: Path, monkeypatch):
+        from datetime import timedelta
+        import sys
+        import types
+
+        from tinohelm.data.catalog import validate_bars
+
+        bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
+        key = f"bucket/catalog/data/bar/{bar_type_str}/bars.parquet"
+        fs = _FakeS3FileSystem({key: b"payload"})
+        storage = _CompactStorage(tmp_path, fs)
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def _ts_ns(dt: datetime) -> int:
+            return int(dt.timestamp() * 1_000_000_000)
+
+        bars = [
+            SimpleNamespace(ts_event=_ts_ns(t0), open=100.0, high=101.0, low=99.0, close=100.5, volume=1.0),
+            SimpleNamespace(ts_event=_ts_ns(t0 + timedelta(minutes=1)), open=100.5, high=102.0, low=100.0, close=101.0, volume=2.0),
+        ]
+        instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+
+        class FakeBarType:
+            def __str__(self):
+                return bar_type_str
+
+        class FakeCatalog:
+            from_uri_calls = []
+
+            @classmethod
+            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
+                cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
+                return cls()
+
+            def bars(self, bar_types):
+                assert bar_types == [bar_type_str]
+                return bars
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
+        monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: FakeBarType())
+        nt_mod = types.ModuleType("nautilus_trader")
+        persistence_mod = types.ModuleType("nautilus_trader.persistence")
+        catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+        catalog_mod.ParquetDataCatalog = FakeCatalog
+        monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+        result = validate_bars("BTCUSDT-PERP", "1m", tmp_path, storage=storage)
+
+        assert FakeCatalog.from_uri_calls == [
+            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options)
+        ]
+        assert result["total_bars"] == 2
+        assert result["file_count"] == 1
+        assert result["size_bytes"] == len(b"payload")
+        assert result["status"] == "ok"
 
     def test_run_compact_falls_back_to_legacy_flat_default_klines_root(self, tmp_path: Path, monkeypatch):
         import asyncio

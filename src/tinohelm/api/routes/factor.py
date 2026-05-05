@@ -452,25 +452,36 @@ async def list_symbols(
 
     catalog_root = get_active_catalog_root(settings)
     storage = get_catalog_storage(settings=settings)
-    catalog_bar_dir = catalog_root / "data" / "bar"
     symbols: set[str] = set()
-    if storage.provider == "local":
-        if not catalog_bar_dir.exists():
-            return []
-        for sub in catalog_bar_dir.iterdir():
-            if sub.is_dir():
-                # NT bar dir name format: SYMBOL.VENUE-N-UNIT-LAST-EXTERNAL
-                name = sub.name
-                dot_idx = name.find(".")
-                if dot_idx > 0:
-                    symbols.add(name[:dot_idx])
-        return sorted(symbols)
+    bar_source_types = ("klines", "markPriceKlines", "indexPriceKlines", "premiumIndexKlines")
 
-    for obj in storage.iter_files(catalog_bar_dir, suffix=".parquet", recursive=True):
-        name = obj.path.parent.name
+    def add_symbol_from_bar_type_dir(name: str) -> None:
         dot_idx = name.find(".")
         if dot_idx > 0:
             symbols.add(name[:dot_idx])
+
+    from tinohelm.data.catalog_helpers import resolve_catalog_path
+
+    catalog_roots = [resolve_catalog_path(catalog_root, source_type) for source_type in bar_source_types]
+    catalog_roots.append(catalog_root)  # legacy flat fallback
+
+    seen_roots: set[Path] = set()
+    for root in catalog_roots:
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        catalog_bar_dir = root / "data" / "bar"
+        if storage.provider == "local":
+            if not catalog_bar_dir.exists():
+                continue
+            for sub in catalog_bar_dir.iterdir():
+                if sub.is_dir():
+                    # NT bar dir name format: SYMBOL.VENUE-N-UNIT-LAST-EXTERNAL
+                    add_symbol_from_bar_type_dir(sub.name)
+            continue
+
+        for obj in storage.iter_files(catalog_bar_dir, suffix=".parquet", recursive=True):
+            add_symbol_from_bar_type_dir(obj.path.parent.name)
 
     return sorted(symbols)
 

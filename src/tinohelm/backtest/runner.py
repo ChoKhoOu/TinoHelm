@@ -326,7 +326,14 @@ class BacktestRunner:
                 break
             cur = nxt
 
-    def _bar_data_iterator(self, catalog_path: Path, bar_type_str: str, interval: str):
+    def _bar_data_iterator(
+        self,
+        catalog_path: Path,
+        bar_type_str: str,
+        interval: str,
+        *,
+        benchmark_daily_closes: dict[str, float] | None = None,
+    ):
         """Yield NT Bar batches from ParquetDataCatalog without holding the full range."""
         catalog = self._catalog_for_path(catalog_path)
         last_ts_init: int | None = None
@@ -344,6 +351,12 @@ class BacktestRunner:
             if not batch:
                 continue
             last_ts_init = int(getattr(batch[-1], "ts_init", 0))
+            if benchmark_daily_closes is not None:
+                benchmark_daily_closes.update(
+                    extract_benchmark_daily_closes(
+                        (int(bar.ts_init), float(bar.close)) for bar in batch
+                    )
+                )
             yield batch
 
     def _resolve_bar_stream(
@@ -351,13 +364,25 @@ class BacktestRunner:
         sym: str,
         nt_sym: str,
         ivl: str,
+        *,
+        benchmark_daily_closes: dict[str, float] | None = None,
     ) -> tuple[Any | None, str, str | None, int]:
         """Resolve an engine data iterator for one symbol/interval without full materialization."""
         bar_type_str = _make_bar_type_str(sym, ivl)
         location = self._find_bar_catalog_location(bar_type_str, self.data_type)
         if location is not None:
             root, bar_dir = location
-            return self._bar_data_iterator(root, bar_type_str, ivl), bar_type_str, None, self._count_parquet_rows(bar_dir)
+            return (
+                self._bar_data_iterator(
+                    root,
+                    bar_type_str,
+                    ivl,
+                    benchmark_daily_closes=benchmark_daily_closes,
+                ),
+                bar_type_str,
+                None,
+                self._count_parquet_rows(bar_dir),
+            )
 
         for candidate in candidate_source_intervals(ivl):
             candidate_bt = _make_bar_type_str(sym, candidate)
@@ -367,7 +392,12 @@ class BacktestRunner:
             root, bar_dir = location
             composite_bt_str = build_composite_bar_type_str(nt_sym, candidate, ivl, _INTERVAL_MAP)
             return (
-                self._bar_data_iterator(root, candidate_bt, candidate),
+                self._bar_data_iterator(
+                    root,
+                    candidate_bt,
+                    candidate,
+                    benchmark_daily_closes=benchmark_daily_closes,
+                ),
                 composite_bt_str,
                 candidate_bt,
                 self._count_parquet_rows(bar_dir),
@@ -1198,17 +1228,30 @@ class BacktestRunner:
         pending_bars_by_loaded_type: dict[str, list] = {}
         use_streaming_bars = self.streaming_enabled and hasattr(engine, "add_data_iterator")
         added_stream_types: set[str] = set()
+        benchmark_stream_symbols: set[str] = set()
         for sym in self.symbols:
             nt_sym = _normalize_symbol(sym)
             for ivl in self.intervals:
                 if use_streaming_bars:
-                    stream, bt_str, source_bt_str, row_count = self._resolve_bar_stream(sym, nt_sym, ivl)
+                    daily_close_target = benchmark_daily_closes.get(nt_sym, {})
+                    capture_benchmark = nt_sym not in benchmark_stream_symbols
+                    stream, bt_str, source_bt_str, row_count = self._resolve_bar_stream(
+                        sym,
+                        nt_sym,
+                        ivl,
+                        benchmark_daily_closes=daily_close_target if capture_benchmark else None,
+                    )
                     if stream is None:
                         logger.info("No local data for %s %s, submitting fetch job...", sym, ivl)
                         success = await self._submit_and_wait_fetch(sym, ivl)
                         if success:
                             self._invalidate_catalog_cache_for_source(self.data_type)
-                            stream, bt_str, source_bt_str, row_count = self._resolve_bar_stream(sym, nt_sym, ivl)
+                            stream, bt_str, source_bt_str, row_count = self._resolve_bar_stream(
+                                sym,
+                                nt_sym,
+                                ivl,
+                                benchmark_daily_closes=daily_close_target if capture_benchmark else None,
+                            )
                     if stream is not None:
                         loaded_bt_str = source_bt_str or bt_str
                         if loaded_bt_str not in added_stream_types:
@@ -1217,6 +1260,9 @@ class BacktestRunner:
                                 generator=stream,
                             )
                             added_stream_types.add(loaded_bt_str)
+                            if capture_benchmark:
+                                benchmark_stream_symbols.add(nt_sym)
+                                benchmark_daily_closes[nt_sym] = daily_close_target
                             total_bar_count += row_count
                             loaded_bar_type_strs.append(loaded_bt_str)
                         all_bar_type_strs.append(bt_str)
