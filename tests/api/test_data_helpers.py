@@ -33,6 +33,7 @@ from tinohelm.api.routes.data import (
     trigger_data_fetch_batch,
     validate_data,
 )
+from tinohelm.data.catalog import compact_bars
 
 
 class _FetchBatchDb:
@@ -754,6 +755,7 @@ class TestSourceAwareBarMaintenance:
 
         bar_type = FakeBarType()
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
+        compacted_name = "2024-01-01T00-00-00-000000000Z_2024-01-01T00-01-00-000000000Z.parquet"
 
         class FakeCatalog:
             from_uri_calls = []
@@ -773,7 +775,7 @@ class TestSourceAwareBarMaintenance:
             def write_data(self, data, skip_disjoint_check=False):
                 if data and hasattr(data[0], "ts_event"):
                     base = str(self.catalog_path).removeprefix("s3://")
-                    fs.objects[f"{base}/data/bar/{bar_type_str}/compacted.parquet"] = b"new"
+                    fs.objects[f"{base}/data/bar/{bar_type_str}/{compacted_name}"] = b"new"
 
         import sys
         import types
@@ -791,8 +793,8 @@ class TestSourceAwareBarMaintenance:
 
         result = _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
 
-        temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/compacted.parquet"
-        final_key = f"bucket/catalog/data/bar/{bar_type_str}/abc123-compacted.parquet"
+        temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
+        final_key = f"bucket/catalog/data/bar/{bar_type_str}/{compacted_name}"
         assert result == {
             "files_before": 2,
             "files_after": 1,
@@ -805,6 +807,70 @@ class TestSourceAwareBarMaintenance:
             (f"s3://bucket/catalog/.compaction/{bar_type_str}-abc123", storage.fs_storage_options, storage.fs_rust_storage_options),
         ]
         assert fs.rm_calls == old_keys + [temp_key]
+        assert fs.put_calls == []
+        assert fs.objects == {final_key: b"new"}
+        assert not bar_dir.exists()
+
+    def test_remote_compact_keeps_same_named_final_file_when_overwriting_existing_object(self, tmp_path: Path, monkeypatch):
+        bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
+        compacted_name = "2024-01-01T00-00-00-000000000Z_2024-01-01T00-01-00-000000000Z.parquet"
+        bar_dir = tmp_path / "data" / "bar" / bar_type_str
+        final_key = f"bucket/catalog/data/bar/{bar_type_str}/{compacted_name}"
+        other_old_key = f"bucket/catalog/data/bar/{bar_type_str}/old-b.parquet"
+        fs = _FakeS3FileSystem({final_key: b"old-final", other_old_key: b"old-b"})
+        storage = _CompactStorage(tmp_path, fs)
+
+        instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+
+        class FakeBarType:
+            def __str__(self):
+                return bar_type_str
+
+        bar_type = FakeBarType()
+        bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
+
+        class FakeCatalog:
+            def __init__(self, catalog_path=None):
+                self.catalog_path = catalog_path
+
+            @classmethod
+            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
+                return cls(uri)
+
+            def bars(self, bar_types):
+                assert bar_types == [bar_type_str]
+                return bars
+
+            def write_data(self, data, skip_disjoint_check=False):
+                if data and hasattr(data[0], "ts_event"):
+                    base = str(self.catalog_path).removeprefix("s3://")
+                    fs.objects[f"{base}/data/bar/{bar_type_str}/{compacted_name}"] = b"new"
+
+        import sys
+        import types
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
+        monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: bar_type)
+        monkeypatch.setattr("tinohelm.api.routes.data.uuid4", lambda: SimpleNamespace(hex="abc123"))
+        nt_mod = types.ModuleType("nautilus_trader")
+        persistence_mod = types.ModuleType("nautilus_trader.persistence")
+        catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+        catalog_mod.ParquetDataCatalog = FakeCatalog
+        monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+        result = _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
+
+        temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
+        assert result == {
+            "files_before": 2,
+            "files_after": 1,
+            "bars_count": 2,
+            "size_before": len(b"old-final") + len(b"old-b"),
+            "size_after": len(b"new"),
+        }
+        assert fs.rm_calls == [other_old_key, temp_key]
         assert fs.put_calls == []
         assert fs.objects == {final_key: b"new"}
         assert not bar_dir.exists()
@@ -861,6 +927,65 @@ class TestSourceAwareBarMaintenance:
 
         assert fs.rm_calls == []
         assert fs.objects == {old_keys[0]: b"old-a", old_keys[1]: b"old-b"}
+
+
+    def test_local_compact_preserves_nt_parquet_basename_and_skips_same_name_delete(self, tmp_path: Path, monkeypatch):
+        bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
+        compacted_name = "2024-01-01T00-00-00-000000000Z_2024-01-01T00-01-00-000000000Z.parquet"
+        bar_dir = tmp_path / "data" / "bar" / bar_type_str
+        bar_dir.mkdir(parents=True)
+        same_name_file = bar_dir / compacted_name
+        same_name_file.write_bytes(b"old-final")
+        other_old = bar_dir / "old-b.parquet"
+        other_old.write_bytes(b"old-b")
+
+        instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+
+        class FakeBarType:
+            def __str__(self):
+                return bar_type_str
+
+        bar_type = FakeBarType()
+        bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
+
+        class FakeCatalog:
+            def __init__(self, catalog_path=None):
+                self.catalog_path = Path(catalog_path)
+
+            def bars(self, bar_types):
+                assert bar_types == [bar_type_str]
+                return bars
+
+            def write_data(self, data, skip_disjoint_check=False):
+                if data and hasattr(data[0], "ts_event"):
+                    temp_bar_dir = self.catalog_path / "data" / "bar" / bar_type_str
+                    temp_bar_dir.mkdir(parents=True, exist_ok=True)
+                    (temp_bar_dir / compacted_name).write_bytes(b"new")
+
+        import sys
+        import types
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
+        monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: bar_type)
+        nt_mod = types.ModuleType("nautilus_trader")
+        persistence_mod = types.ModuleType("nautilus_trader.persistence")
+        catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+        catalog_mod.ParquetDataCatalog = FakeCatalog
+        monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+        result = compact_bars("BTCUSDT-PERP", "1m", tmp_path)
+
+        assert result == {
+            "files_before": 2,
+            "files_after": 1,
+            "bars_count": 2,
+            "size_before": len(b"old-final") + len(b"old-b"),
+            "size_after": len(b"new"),
+        }
+        assert same_name_file.read_bytes() == b"new"
+        assert not other_old.exists()
 
 
 # ---------------------------------------------------------------------------

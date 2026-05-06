@@ -499,13 +499,17 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
     if not temp_objects:
         raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
 
-    promotion_token = uuid4().hex
+    promotion_paths: set[Path] = set()
     for temp_object in temp_objects:
-        promoted_path = bar_dir / f"{promotion_token}-{temp_object.path.name}"
+        # Keep the NT-generated basename so the promoted parquet remains parseable.
+        promoted_path = bar_dir / temp_object.path.name
         storage.copy_path(temp_object.path, promoted_path)
+        promotion_paths.add(promoted_path)
 
     try:
         for old in existing_objects:
+            if old.path in promotion_paths:
+                continue
             storage.delete_path(old.path)
     finally:
         try:

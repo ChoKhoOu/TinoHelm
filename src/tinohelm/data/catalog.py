@@ -397,14 +397,19 @@ def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     if not temp_files:
         raise RuntimeError(f"Local compaction produced no parquet files for {symbol} {interval}")
 
-    promotion_token = uuid4().hex
+    promoted_files: set[Path] = set()
     for temp_file in temp_files:
-        final_path = bar_dir / f"{promotion_token}-{temp_file.name}"
+        # NT encodes the interval in the parquet basename. Preserve that exact
+        # name during promotion so downstream directory scans keep working.
+        final_path = bar_dir / temp_file.name
         final_path.parent.mkdir(parents=True, exist_ok=True)
         temp_file.replace(final_path)
+        promoted_files.add(final_path)
 
     try:
         for f in existing_files:
+            if f in promoted_files:
+                continue
             f.unlink(missing_ok=True)
     finally:
         shutil.rmtree(temp_catalog_path, ignore_errors=True)
