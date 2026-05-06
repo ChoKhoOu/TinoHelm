@@ -485,22 +485,22 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
     logger.info("Compacting remote %s %s: %d files -> %d bars", symbol, interval, files_before, len(bars))
 
     temp_catalog_path = catalog_path / ".compaction" / f"{bar_type}-{uuid4().hex}"
-    temp_catalog_uri = storage.uri_for_catalog_root(temp_catalog_path)
-    temp_catalog = ParquetDataCatalog.from_uri(
-        temp_catalog_uri,
-        fs_storage_options=getattr(storage, "fs_storage_options", None),
-        fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
-    )
-    temp_catalog.write_data([instrument])
-    temp_catalog.write_data(bars)
-
-    temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
-    temp_objects = list(storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False))
-    if not temp_objects:
-        raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
-
     rollback_prefix = catalog_path / ".compaction-rollback" / f"{bar_type}-{uuid4().hex}"
     try:
+        temp_catalog_uri = storage.uri_for_catalog_root(temp_catalog_path)
+        temp_catalog = ParquetDataCatalog.from_uri(
+            temp_catalog_uri,
+            fs_storage_options=getattr(storage, "fs_storage_options", None),
+            fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
+        )
+        temp_catalog.write_data([instrument])
+        temp_catalog.write_data(bars)
+
+        temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
+        temp_objects = list(storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False))
+        if not temp_objects:
+            raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
+
         promote_objects_with_rollback(
             storage,
             temp_objects,

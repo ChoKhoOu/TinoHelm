@@ -286,6 +286,7 @@ def write_bars(
         catalog_path = ensure_catalog_dirs(catalog_path)
     instrument = _make_instrument(symbol)
     bar_type = _make_bar_type(instrument.id, interval)
+    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
 
     existing_files_to_delete: list[Path] = []
     existing_objects_to_delete: list[Any] = []
@@ -293,17 +294,25 @@ def write_bars(
     if merge:
         # Merge with existing bars if present (incremental update case)
         try:
-            catalog = _catalog_for_root(catalog_path, storage)
-            existing_bars = catalog.bars(bar_types=[str(bar_type)])
+            if _is_remote_storage(storage):
+                existing_objects_to_delete = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
+                existing_files_to_delete = [obj.path for obj in existing_objects_to_delete]
+                existing_bars = []
+                if existing_objects_to_delete:
+                    catalog = _catalog_for_root(catalog_path, storage)
+                    existing_bars = catalog.bars(bar_types=[str(bar_type)])
+                    if not existing_bars:
+                        raise RuntimeError(
+                            f"Remote catalog has parquet objects but no readable bars for {symbol} {interval}"
+                        )
+            else:
+                catalog = _catalog_for_root(catalog_path, storage)
+                existing_bars = catalog.bars(bar_types=[str(bar_type)])
             if existing_bars:
                 # Track old files — they will be deleted AFTER the merged write
                 # succeeds, so a crash between write and delete leaves the old
                 # data intact (at worst we have duplicate bars, not missing ones).
-                bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-                if _is_remote_storage(storage):
-                    existing_objects_to_delete = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
-                    existing_files_to_delete = [obj.path for obj in existing_objects_to_delete]
-                else:
+                if not _is_remote_storage(storage):
                     existing_files_to_delete = _iter_catalog_files(storage, bar_dir, recursive=False)
 
                 existing_count = len(existing_bars)
@@ -312,9 +321,10 @@ def write_bars(
                 logger.info("Merged %d existing + %d new bars = %d total",
                             existing_count, len(bars) - existing_count, len(bars))
         except Exception:
+            if _is_remote_storage(storage):
+                raise
             logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
 
-    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
     if _is_remote_storage(storage) and merged_existing_bars:
         from uuid import uuid4
 
@@ -438,31 +448,58 @@ def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     logger.info("Compacting %s %s: %d files -> %d bars (deduped)", symbol, interval, files_before, len(bars))
 
     temp_catalog_path = catalog_path / ".compaction" / f"{bar_type}-{uuid4().hex}"
-    temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
-    temp_catalog = ParquetDataCatalog(str(temp_catalog_path))
-    temp_catalog.write_data([instrument])
-    temp_catalog.write_data(bars)
-
-    temp_files = list(temp_bar_dir.glob("*.parquet")) if temp_bar_dir.exists() else []
-    if not temp_files:
-        raise RuntimeError(f"Local compaction produced no parquet files for {symbol} {interval}")
-
+    rollback_path = catalog_path / ".compaction-rollback" / f"{bar_type}-{uuid4().hex}"
+    backup_paths: dict[Path, Path] = {}
     promoted_files: set[Path] = set()
-    for temp_file in temp_files:
-        # NT encodes the interval in the parquet basename. Preserve that exact
-        # name during promotion so downstream directory scans keep working.
-        final_path = bar_dir / temp_file.name
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_file.replace(final_path)
-        promoted_files.add(final_path)
-
+    rollback_created = False
+    cleanup_rollback = True
     try:
+        temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
+        temp_catalog = ParquetDataCatalog(str(temp_catalog_path))
+        temp_catalog.write_data([instrument])
+        temp_catalog.write_data(bars)
+
+        temp_files = list(temp_bar_dir.glob("*.parquet")) if temp_bar_dir.exists() else []
+        if not temp_files:
+            raise RuntimeError(f"Local compaction produced no parquet files for {symbol} {interval}")
+
+        rollback_path.mkdir(parents=True, exist_ok=True)
+        rollback_created = True
+        for old_file in existing_files:
+            backup_path = rollback_path / old_file.name
+            shutil.copy2(old_file, backup_path)
+            backup_paths[old_file] = backup_path
+
+        for temp_file in temp_files:
+            # NT encodes the interval in the parquet basename. Preserve that exact
+            # name during promotion so downstream directory scans keep working.
+            final_path = bar_dir / temp_file.name
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_file.replace(final_path)
+            promoted_files.add(final_path)
+
         for f in existing_files:
             if f in promoted_files:
                 continue
             f.unlink(missing_ok=True)
+    except Exception:
+        for promoted_file in reversed(list(promoted_files)):
+            try:
+                promoted_file.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("Failed to rollback promoted local compaction file %s", promoted_file, exc_info=True)
+        for old_file, backup_path in backup_paths.items():
+            try:
+                old_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup_path, old_file)
+            except Exception:
+                cleanup_rollback = False
+                logger.warning("Failed to restore local compaction backup %s", old_file, exc_info=True)
+        raise
     finally:
         shutil.rmtree(temp_catalog_path, ignore_errors=True)
+        if rollback_created and cleanup_rollback:
+            shutil.rmtree(rollback_path, ignore_errors=True)
 
     # 5. Compute summary
     new_files = list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []

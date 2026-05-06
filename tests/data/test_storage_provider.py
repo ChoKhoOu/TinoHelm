@@ -10,10 +10,12 @@ from tinohelm.core.config import Settings, StorageSettings, TosStorageSettings
 from tinohelm.data.storage import (
     LocalCatalogStorage,
     S3CatalogStorage,
+    StorageObject,
     TosCatalogStorage,
     _default_tos_endpoint,
     delete_prefix,
     get_catalog_storage,
+    promote_objects_with_rollback,
 )
 
 
@@ -276,6 +278,61 @@ def test_delete_prefix_treats_dotted_bar_type_path_as_prefix(tmp_path: Path) -> 
     assert fs.rm_calls == [key_path]
     assert not fs.objects
     assert not (storage.catalog_root / "data").exists()
+
+
+def test_promote_objects_with_rollback_keeps_backup_prefix_when_restore_fails(tmp_path: Path) -> None:
+    final_key = "bucket-a/dataset/root/catalog/data/bar/BTC/final.parquet"
+    other_key = "bucket-a/dataset/root/catalog/data/bar/BTC/old-b.parquet"
+    temp_key = "bucket-a/dataset/root/catalog/.merge/BTC/tmp/data/bar/BTC/final.parquet"
+    rollback_final_key = "bucket-a/dataset/root/catalog/.merge-rollback/BTC/final.parquet"
+    rollback_other_key = "bucket-a/dataset/root/catalog/.merge-rollback/BTC/old-b.parquet"
+    fs = _FakeS3FileSystem({
+        final_key: b"old-final",
+        other_key: b"old-b",
+        temp_key: b"new-final",
+    })
+    storage = TosCatalogStorage(_settings(), filesystem=fs, catalog_root=tmp_path / "catalog")
+    original_copy = fs.copy
+
+    def failing_restore_copy(source: str, dest: str) -> None:
+        if source == rollback_final_key and dest == final_key:
+            fs.copy_calls.append((source, dest))
+            raise RuntimeError("restore failed")
+        original_copy(source, dest)
+
+    def failing_old_delete(path: str) -> None:
+        fs.rm_calls.append(path)
+        if path == other_key:
+            raise RuntimeError("delete failed")
+        if path not in fs.objects:
+            raise FileNotFoundError(path)
+        del fs.objects[path]
+
+    fs.copy = failing_restore_copy
+    fs.rm = failing_old_delete
+    final_path = storage.catalog_root / "data" / "bar" / "BTC" / "final.parquet"
+    other_path = storage.catalog_root / "data" / "bar" / "BTC" / "old-b.parquet"
+    temp_path = storage.catalog_root / ".merge" / "BTC" / "tmp" / "data" / "bar" / "BTC" / "final.parquet"
+    rollback_prefix = storage.catalog_root / ".merge-rollback" / "BTC"
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        promote_objects_with_rollback(
+            storage,
+            [StorageObject(key=temp_key, path=temp_path, size=len(b"new-final"))],
+            final_path.parent,
+            [
+                StorageObject(key=final_key, path=final_path, size=len(b"old-final")),
+                StorageObject(key=other_key, path=other_path, size=len(b"old-b")),
+            ],
+            rollback_prefix=rollback_prefix,
+        )
+
+    assert rollback_final_key in fs.objects
+    assert rollback_other_key in fs.objects
+    assert fs.objects[rollback_final_key] == b"old-final"
+    assert fs.objects[rollback_other_key] == b"old-b"
+    assert rollback_final_key not in fs.rm_calls
+    assert rollback_other_key not in fs.rm_calls
 
 
 def test_get_catalog_storage_local_uses_configured_catalog_path(tmp_path: Path) -> None:

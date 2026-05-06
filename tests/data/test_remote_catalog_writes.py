@@ -417,3 +417,82 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
         (temp_key, same_name_file),
     ]
     assert deleted_paths == [other_old, rollback_same_key, rollback_other_key, temp_key]
+
+
+def test_write_bars_remote_merge_fails_closed_when_existing_catalog_read_fails(tmp_path: Path, monkeypatch) -> None:
+    from tinohelm.data.catalog import write_bars
+
+    symbol = "BTCUSDT-PERP"
+    source_type = "klines"
+    bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
+    resolved_root = tmp_path / "bar" / source_type
+    bar_dir = resolved_root / "data" / "bar" / bar_type_str
+    existing_path = bar_dir / "old.parquet"
+    write_data_calls = []
+
+    class RemoteStorage:
+        provider = "s3"
+        catalog_root = tmp_path
+        fs_storage_options = {"endpoint_url": "https://example.com"}
+        fs_rust_storage_options = {"endpoint_url": "https://example.com"}
+
+        def uri_for_catalog_root(self, logical_root):
+            assert Path(logical_root) == resolved_root
+            return "s3://bucket/catalog/bar/klines"
+
+        def iter_files(self, prefix, *, suffix="", recursive=True):
+            assert Path(prefix) == bar_dir
+            assert suffix == ".parquet"
+            assert recursive is False
+            return iter([SimpleNamespace(path=existing_path, size=9)])
+
+        def copy_path(self, *_args, **_kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("remote merge must not promote after catalog read failure")
+
+        def delete_path(self, *_args, **_kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("remote merge must not delete after catalog read failure")
+
+    class FakeCatalog:
+        def __init__(self, catalog_path=None):
+            self.catalog_path = catalog_path
+
+        @classmethod
+        def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
+            assert uri == "s3://bucket/catalog/bar/klines"
+            return cls(uri)
+
+        def bars(self, bar_types):
+            assert bar_types == [bar_type_str]
+            raise RuntimeError("remote read failed")
+
+        def write_data(self, data, skip_disjoint_check=False):  # pragma: no cover - must not be called
+            write_data_calls.append((list(data), skip_disjoint_check))
+
+    class FakeBarType:
+        def __str__(self) -> str:
+            return bar_type_str
+
+    instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+    bar = SimpleNamespace(ts_event=1)
+    monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda _symbol: instrument)
+    monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda _instrument_id, _interval: FakeBarType())
+    nt_mod = types.ModuleType("nautilus_trader")
+    persistence_mod = types.ModuleType("nautilus_trader.persistence")
+    catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+    catalog_mod.ParquetDataCatalog = FakeCatalog
+    monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+    monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+    monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+    with pytest.raises(RuntimeError, match="remote read failed"):
+        write_bars(
+            [bar],
+            symbol,
+            "1m",
+            tmp_path,
+            merge=True,
+            source_type=source_type,
+            storage=RemoteStorage(),
+        )
+
+    assert write_data_calls == []

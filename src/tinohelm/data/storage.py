@@ -622,10 +622,13 @@ def promote_objects_with_rollback(
     promotion_paths = {dest for _, dest in staged}
     backup_paths: dict[Path, Path] = {}
     promoted_paths: set[Path] = set()
+    backup_started = False
+    cleanup_rollback = True
 
     try:
         for old_path in old_paths:
             backup_path = rollback_prefix / old_path.name
+            backup_started = True
             provider.copy_path(old_path, backup_path)
             backup_paths[old_path] = backup_path
 
@@ -649,10 +652,11 @@ def promote_objects_with_rollback(
             try:
                 provider.copy_path(backup_path, old_path)
             except Exception:
+                cleanup_rollback = False
                 logger.warning("Failed to restore backed up object %s", old_path, exc_info=True)
         raise
     finally:
-        if backup_paths:
+        if backup_started and cleanup_rollback:
             try:
                 delete_prefix(provider, rollback_prefix)
             except Exception:
