@@ -10,10 +10,12 @@ from tinohelm.core.config import Settings, StorageSettings, TosStorageSettings
 from tinohelm.data.storage import (
     LocalCatalogStorage,
     S3CatalogStorage,
+    StorageObject,
     TosCatalogStorage,
     _default_tos_endpoint,
     delete_prefix,
     get_catalog_storage,
+    promote_objects_with_rollback,
 )
 
 
@@ -27,12 +29,25 @@ class _FakeS3File(BytesIO):
         super().close()
 
 
+class _WritableS3File(BytesIO):
+    def __init__(self, fs: "_FakeS3FileSystem", path: str) -> None:
+        super().__init__()
+        self._fs = fs
+        self._path = path
+
+    def close(self) -> None:
+        if not self.closed:
+            self._fs.objects[self._path] = self.getvalue()
+        super().close()
+
+
 class _FakeS3FileSystem:
     def __init__(self, objects: dict[str, bytes]) -> None:
         # keys are bucket-relative fsspec paths: bucket/key
         self.objects = dict(objects)
         self.open_calls: list[tuple[str, str]] = []
         self.put_calls: list[tuple[str, str]] = []
+        self.copy_calls: list[tuple[str, str]] = []
         self.rm_calls: list[str] = []
 
     def info(self, path: str) -> dict:
@@ -61,13 +76,20 @@ class _FakeS3FileSystem:
         return out
 
     def open(self, path: str, mode: str = "rb"):
-        assert mode == "rb"
         self.open_calls.append((path, mode))
-        return _FakeS3File(self.objects[path])
+        if mode == "rb":
+            return _FakeS3File(self.objects[path])
+        if mode == "wb":
+            return _WritableS3File(self, path)
+        raise AssertionError(f"unexpected open mode: {mode!r}")
 
     def put_file(self, local_path: str, remote_path: str) -> None:
         self.put_calls.append((local_path, remote_path))
         self.objects[remote_path] = Path(local_path).read_bytes()
+
+    def copy(self, source: str, dest: str) -> None:
+        self.copy_calls.append((source, dest))
+        self.objects[dest] = self.objects[source]
 
     def rm(self, path: str) -> None:
         self.rm_calls.append(path)
@@ -184,6 +206,39 @@ def test_tos_upload_path_returns_s3_uri(tmp_path: Path) -> None:
     assert fs.objects["bucket-a/dataset/root/catalog/data/bar/BTC/bars.parquet"] == b"payload"
 
 
+def test_tos_upload_bytes_returns_s3_uri_without_local_materialization(tmp_path: Path) -> None:
+    fs = _FakeS3FileSystem({})
+    storage = TosCatalogStorage(_settings(), filesystem=fs, catalog_root=tmp_path / "catalog")
+    logical_path = storage.catalog_root / "data" / "bar" / "BTC" / "bars.parquet"
+
+    uri = storage.upload_bytes(logical_path, b"payload")
+
+    remote_key = "bucket-a/dataset/root/catalog/data/bar/BTC/bars.parquet"
+    assert uri == "s3://bucket-a/dataset/root/catalog/data/bar/BTC/bars.parquet"
+    assert fs.open_calls == [(remote_key, "wb")]
+    assert fs.objects[remote_key] == b"payload"
+    assert not logical_path.exists()
+    assert not (storage.catalog_root / "data").exists()
+
+
+def test_tos_copy_path_copies_object_without_local_materialization(tmp_path: Path) -> None:
+    source_key = "bucket-a/dataset/root/catalog/data/bar/BTC/source.parquet"
+    dest_key = "bucket-a/dataset/root/catalog/data/bar/BTC/dest.parquet"
+    fs = _FakeS3FileSystem({source_key: b"payload"})
+    storage = TosCatalogStorage(_settings(), filesystem=fs, catalog_root=tmp_path / "catalog")
+    source = storage.catalog_root / "data" / "bar" / "BTC" / "source.parquet"
+    dest = storage.catalog_root / "data" / "bar" / "BTC" / "dest.parquet"
+
+    uri = storage.copy_path(source, dest)
+
+    assert uri == "s3://bucket-a/dataset/root/catalog/data/bar/BTC/dest.parquet"
+    assert fs.copy_calls == [(source_key, dest_key)]
+    assert fs.objects[source_key] == b"payload"
+    assert fs.objects[dest_key] == b"payload"
+    assert not source.exists()
+    assert not dest.exists()
+
+
 def test_tos_path_mapping_rejects_paths_outside_logical_catalog_root(tmp_path: Path) -> None:
     storage = TosCatalogStorage(_settings(), filesystem=_FakeS3FileSystem({}), catalog_root=tmp_path / "catalog")
 
@@ -223,6 +278,61 @@ def test_delete_prefix_treats_dotted_bar_type_path_as_prefix(tmp_path: Path) -> 
     assert fs.rm_calls == [key_path]
     assert not fs.objects
     assert not (storage.catalog_root / "data").exists()
+
+
+def test_promote_objects_with_rollback_keeps_backup_prefix_when_restore_fails(tmp_path: Path) -> None:
+    final_key = "bucket-a/dataset/root/catalog/data/bar/BTC/final.parquet"
+    other_key = "bucket-a/dataset/root/catalog/data/bar/BTC/old-b.parquet"
+    temp_key = "bucket-a/dataset/root/catalog/.merge/BTC/tmp/data/bar/BTC/final.parquet"
+    rollback_final_key = "bucket-a/dataset/root/catalog/.merge-rollback/BTC/final.parquet"
+    rollback_other_key = "bucket-a/dataset/root/catalog/.merge-rollback/BTC/old-b.parquet"
+    fs = _FakeS3FileSystem({
+        final_key: b"old-final",
+        other_key: b"old-b",
+        temp_key: b"new-final",
+    })
+    storage = TosCatalogStorage(_settings(), filesystem=fs, catalog_root=tmp_path / "catalog")
+    original_copy = fs.copy
+
+    def failing_restore_copy(source: str, dest: str) -> None:
+        if source == rollback_final_key and dest == final_key:
+            fs.copy_calls.append((source, dest))
+            raise RuntimeError("restore failed")
+        original_copy(source, dest)
+
+    def failing_old_delete(path: str) -> None:
+        fs.rm_calls.append(path)
+        if path == other_key:
+            raise RuntimeError("delete failed")
+        if path not in fs.objects:
+            raise FileNotFoundError(path)
+        del fs.objects[path]
+
+    fs.copy = failing_restore_copy
+    fs.rm = failing_old_delete
+    final_path = storage.catalog_root / "data" / "bar" / "BTC" / "final.parquet"
+    other_path = storage.catalog_root / "data" / "bar" / "BTC" / "old-b.parquet"
+    temp_path = storage.catalog_root / ".merge" / "BTC" / "tmp" / "data" / "bar" / "BTC" / "final.parquet"
+    rollback_prefix = storage.catalog_root / ".merge-rollback" / "BTC"
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        promote_objects_with_rollback(
+            storage,
+            [StorageObject(key=temp_key, path=temp_path, size=len(b"new-final"))],
+            final_path.parent,
+            [
+                StorageObject(key=final_key, path=final_path, size=len(b"old-final")),
+                StorageObject(key=other_key, path=other_path, size=len(b"old-b")),
+            ],
+            rollback_prefix=rollback_prefix,
+        )
+
+    assert rollback_final_key in fs.objects
+    assert rollback_other_key in fs.objects
+    assert fs.objects[rollback_final_key] == b"old-final"
+    assert fs.objects[rollback_other_key] == b"old-b"
+    assert rollback_final_key not in fs.rm_calls
+    assert rollback_other_key not in fs.rm_calls
 
 
 def test_get_catalog_storage_local_uses_configured_catalog_path(tmp_path: Path) -> None:

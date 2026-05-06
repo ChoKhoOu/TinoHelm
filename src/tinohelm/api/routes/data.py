@@ -7,6 +7,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -443,7 +444,7 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
 
     from tinohelm.data.catalog import _make_bar_type, _make_instrument
     from tinohelm.data.catalog_helpers import dedupe_by_ts
-    from tinohelm.data.storage import delete_prefix, upload_paths
+    from tinohelm.data.storage import delete_prefix, promote_objects_with_rollback
 
     catalog_path = Path(catalog_path)
     instrument = _make_instrument(symbol)
@@ -481,30 +482,50 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
         }
 
     bars = dedupe_by_ts(bars)
-    if bar_dir.exists():
-        for local_file in bar_dir.glob("*.parquet"):
-            local_file.unlink(missing_ok=True)
-    bar_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Compacting remote %s %s: %d files -> %d bars", symbol, interval, files_before, len(bars))
 
-    local_catalog = ParquetDataCatalog(str(catalog_path))
-    local_catalog.write_data([instrument])
-    local_catalog.write_data(bars)
-    new_files = list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
-    if not new_files:
+    temp_catalog_path = catalog_path / ".compaction" / f"{bar_type}-{uuid4().hex}"
+    rollback_prefix = catalog_path / ".compaction-rollback" / f"{bar_type}-{uuid4().hex}"
+    try:
+        temp_catalog_uri = storage.uri_for_catalog_root(temp_catalog_path)
+        temp_catalog = ParquetDataCatalog.from_uri(
+            temp_catalog_uri,
+            fs_storage_options=getattr(storage, "fs_storage_options", None),
+            fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
+        )
+        temp_catalog.write_data([instrument])
+        temp_catalog.write_data(bars)
+
+        temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
+        temp_objects = list(storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False))
+        if not temp_objects:
+            raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
+
+        promote_objects_with_rollback(
+            storage,
+            temp_objects,
+            bar_dir,
+            existing_objects,
+            rollback_prefix=rollback_prefix,
+        )
+    finally:
+        try:
+            delete_prefix(storage, temp_catalog_path)
+        except Exception:
+            logger.warning("Failed to clean temporary remote compaction prefix %s", temp_catalog_path, exc_info=True)
+
+    new_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
+    if not new_objects:
         raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
-    size_after = sum(path.stat().st_size for path in new_files)
-
-    delete_prefix(storage, bar_dir)
-    upload_paths(storage, new_files)
+    size_after = sum(int(obj.size or 0) for obj in new_objects)
 
     return {
         "files_before": files_before,
-        "files_after": len(new_files),
+        "files_after": len(new_objects),
         "bars_count": len(bars),
         "size_before": size_before,
         "size_after": size_after,
     }
-
 
 # ---- routes ----
 

@@ -80,7 +80,7 @@ class TestIngestResult:
 
 
 class TestCatalogStorageStats:
-    def test_remote_single_file_metrics_write_seeds_existing_object_before_merge(self, tmp_path: Path, monkeypatch):
+    def test_remote_single_file_metrics_write_passes_storage_for_in_memory_upload(self, tmp_path: Path, monkeypatch):
         from tinohelm.data.catalog import metrics_parquet_path
 
         symbol = "BTCUSDT-PERP"
@@ -91,24 +91,20 @@ class TestCatalogStorageStats:
             provider = "s3"
             catalog_root = tmp_path
 
-            def exists(self, logical_path):
-                assert Path(logical_path) == path
-                return True
-
-            def read_bytes(self, logical_path):
-                assert Path(logical_path) == path
-                return b"existing-remote"
-
-            def upload_path(self, local_path, *, logical_path=None):
-                uploaded.append((Path(local_path), Path(local_path).read_bytes()))
+            def upload_bytes(self, logical_path, payload):
+                uploaded.append((Path(logical_path), payload))
                 return "s3://bucket/catalog/metrics.parquet"
 
-        def fake_write_metrics(records, write_symbol, catalog_root):
+            def upload_path(self, local_path, *, logical_path=None):  # pragma: no cover - must not be called
+                raise AssertionError("remote metrics writes must not upload a local staged file")
+
+        def fake_write_metrics(records, write_symbol, catalog_root, storage=None):
             assert records == [object_marker]
             assert write_symbol == symbol
             assert Path(catalog_root) == tmp_path
-            assert path.read_bytes() == b"existing-remote"
-            path.write_bytes(b"merged-local")
+            assert storage is p._storage
+            assert not path.exists()
+            storage.upload_bytes(path, b"merged-in-memory")
             return path
 
         object_marker = object()
@@ -120,7 +116,28 @@ class TestCatalogStorageStats:
         result = p._write_objects([object_marker], symbol, "metrics", None)
 
         assert result == [str(path)]
-        assert uploaded == [(path, b"merged-local")]
+        assert uploaded == [(path, b"merged-in-memory")]
+        assert not path.exists()
+
+    def test_written_file_size_uses_remote_storage_iter_files(self, tmp_path: Path):
+        from tinohelm.data.catalog import metrics_parquet_path
+
+        symbol = "BTCUSDT-PERP"
+        path = metrics_parquet_path(symbol, tmp_path)
+
+        class RemoteStorage:
+            provider = "s3"
+
+            def iter_files(self, prefix, *, suffix="", recursive=True):
+                assert Path(prefix) == path
+                assert suffix == ".parquet"
+                assert recursive is False
+                return iter([SimpleNamespace(path=path, size=123)])
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._storage = RemoteStorage()
+
+        assert p._written_file_size({str(path)}) == 123
 
     def test_trade_tick_stats_sum_all_parquet_files_in_source_path(self, tmp_path: Path):
         from tinohelm.data.catalog import resolve_catalog_path

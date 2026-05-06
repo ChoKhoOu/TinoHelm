@@ -64,6 +64,12 @@ class CatalogStorageProvider(Protocol):
     def upload_path(self, local_path: Path | str, *, logical_path: Path | str | None = None) -> str:
         """Upload one local file and return its logical URI."""
 
+    def upload_bytes(self, logical_path: Path | str, payload: bytes) -> str:
+        """Upload bytes directly to one logical catalog path."""
+
+    def copy_path(self, source_path: Path | str, dest_path: Path | str) -> str:
+        """Copy one logical catalog object without materializing local files."""
+
     def delete_path(self, local_path: Path | str) -> None:
         """Delete one catalog object from the backing store if present."""
 
@@ -129,6 +135,19 @@ class LocalCatalogStorage:
 
     def upload_path(self, local_path: Path | str, *, logical_path: Path | str | None = None) -> str:
         return self.uri_for_path(logical_path or local_path)
+
+    def upload_bytes(self, logical_path: Path | str, payload: bytes) -> str:
+        path = Path(logical_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return self.uri_for_path(path)
+
+    def copy_path(self, source_path: Path | str, dest_path: Path | str) -> str:
+        source = Path(source_path)
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.read_bytes())
+        return self.uri_for_path(dest)
 
     def delete_path(self, local_path: Path | str) -> None:
         path = Path(local_path)
@@ -329,6 +348,33 @@ class S3CatalogStorage:
         else:
             self.fs.put(str(path), self._fs_path_for_key(key))
         return self._uri_for_key(key)
+
+    def upload_bytes(self, logical_path: Path | str, payload: bytes) -> str:
+        key = self._key_for_path(Path(logical_path))
+        with self.fs.open(self._fs_path_for_key(key), "wb") as fh:
+            fh.write(payload)
+        return self._uri_for_key(key)
+
+    def copy_path(self, source_path: Path | str, dest_path: Path | str) -> str:
+        source_key = self._key_for_path(Path(source_path))
+        dest_key = self._key_for_path(Path(dest_path))
+        source = self._fs_path_for_key(source_key)
+        dest = self._fs_path_for_key(dest_key)
+        cp_file = getattr(self.fs, "cp_file", None)
+        if callable(cp_file):
+            cp_file(source, dest)
+        else:
+            copy = getattr(self.fs, "copy", None)
+            if callable(copy):
+                copy(source, dest)
+            else:
+                with self.fs.open(source, "rb") as src, self.fs.open(dest, "wb") as dst:
+                    while True:
+                        chunk = src.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+        return self._uri_for_key(dest_key)
 
     def delete_path(self, local_path: Path | str) -> None:
         key = self._key_for_path(Path(local_path))
@@ -551,6 +597,70 @@ def upload_paths(
                 logical_path = None
         uris.append(provider.upload_path(p, logical_path=logical_path))
     return uris
+
+
+def promote_objects_with_rollback(
+    provider: CatalogStorageProvider,
+    temp_objects: Iterable[StorageObject],
+    dest_dir: Path | str,
+    old_objects: Iterable[StorageObject],
+    *,
+    rollback_prefix: Path | str,
+) -> set[Path]:
+    """Promote staged objects into *dest_dir* and rollback on cleanup failure.
+
+    Object stores cannot atomically replace a directory.  This helper copies
+    staged parquet objects to their final NT basenames, deletes stale old
+    objects only after every copy succeeds, and restores overwritten same-name
+    objects if any later copy/delete step fails.
+    """
+
+    dest_dir = Path(dest_dir)
+    rollback_prefix = Path(rollback_prefix)
+    staged = [(obj.path, dest_dir / obj.path.name) for obj in temp_objects]
+    old_paths = [obj.path for obj in old_objects]
+    promotion_paths = {dest for _, dest in staged}
+    backup_paths: dict[Path, Path] = {}
+    promoted_paths: set[Path] = set()
+    backup_started = False
+    cleanup_rollback = True
+
+    try:
+        for old_path in old_paths:
+            backup_path = rollback_prefix / old_path.name
+            backup_started = True
+            provider.copy_path(old_path, backup_path)
+            backup_paths[old_path] = backup_path
+
+        for source_path, dest_path in staged:
+            provider.copy_path(source_path, dest_path)
+            promoted_paths.add(dest_path)
+
+        for old_path in old_paths:
+            if old_path in promotion_paths:
+                continue
+            provider.delete_path(old_path)
+
+        return promoted_paths
+    except Exception:
+        for promoted_path in reversed(list(promoted_paths)):
+            try:
+                provider.delete_path(promoted_path)
+            except Exception:
+                logger.warning("Failed to rollback promoted object %s", promoted_path, exc_info=True)
+        for old_path, backup_path in backup_paths.items():
+            try:
+                provider.copy_path(backup_path, old_path)
+            except Exception:
+                cleanup_rollback = False
+                logger.warning("Failed to restore backed up object %s", old_path, exc_info=True)
+        raise
+    finally:
+        if backup_started and cleanup_rollback:
+            try:
+                delete_prefix(provider, rollback_prefix)
+            except Exception:
+                logger.warning("Failed to clean rollback prefix %s", rollback_prefix, exc_info=True)
 
 
 def delete_prefix(provider: CatalogStorageProvider, local_prefix: Path | str) -> tuple[int, int]:

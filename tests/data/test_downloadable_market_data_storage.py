@@ -57,12 +57,13 @@ def test_write_objects_dispatches_book_ticker_to_quote_writer(monkeypatch, tmp_p
 
     called = {}
 
-    def fake_writer(*, ticks, symbol, catalog_path, source_type):
+    def fake_writer(*, ticks, symbol, catalog_path, source_type, storage=None):
         called.update({
             "ticks": ticks,
             "symbol": symbol,
             "catalog_path": catalog_path,
             "source_type": source_type,
+            "storage": storage,
         })
         return ["quote-file.parquet"]
 
@@ -76,6 +77,7 @@ def test_write_objects_dispatches_book_ticker_to_quote_writer(monkeypatch, tmp_p
     assert called["symbol"] == "BTCUSDT-PERP"
     assert Path(called["catalog_path"]) == tmp_path / "catalog"
     assert called["source_type"] == "bookTicker"
+    assert called["storage"].provider == "local"
 
 
 def test_metrics_parquet_merges_and_dedupes_by_ts(tmp_path: Path) -> None:

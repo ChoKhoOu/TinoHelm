@@ -324,10 +324,7 @@ class BinanceVisionPipeline:
         await _progress(96, "Updating catalog database...")
         # Compute size_bytes from written files
         unique_paths = set(all_file_paths)
-        written_size = sum(
-            Path(p).stat().st_size for p in unique_paths
-            if Path(p).exists()
-        ) if unique_paths else None
+        written_size = self._written_file_size(unique_paths) if unique_paths else None
         try:
             await self._update_db_catalog(
                 symbol, data_type, interval, start, end,
@@ -561,8 +558,8 @@ class BinanceVisionPipeline:
                 bars=objects, symbol=symbol,
                 interval=interval, catalog_path=self.catalog_path,
                 merge=merge, source_type=data_type,
+                storage=self._storage,
             )
-            self._sync_written_paths(paths)
             return [str(p) for p in paths]
 
         elif category == "trade_tick":
@@ -571,8 +568,8 @@ class BinanceVisionPipeline:
                 ticks=objects, symbol=symbol,
                 catalog_path=self.catalog_path,
                 source_type=data_type,
+                storage=self._storage,
             )
-            self._sync_written_paths(paths)
             return paths
 
         elif category == "quote_tick":
@@ -581,8 +578,8 @@ class BinanceVisionPipeline:
                 ticks=objects, symbol=symbol,
                 catalog_path=self.catalog_path,
                 source_type=data_type,
+                storage=self._storage,
             )
-            self._sync_written_paths(paths)
             return paths
 
         elif category == "funding_rate":
@@ -591,19 +588,13 @@ class BinanceVisionPipeline:
             return [parquet_path] if parquet_path else []
 
         elif category == "metrics":
-            from tinohelm.data.catalog import metrics_parquet_path, write_metrics_parquet
-            path = metrics_parquet_path(symbol, self.catalog_path)
-            self._stage_remote_file_for_merge(path)
-            path = write_metrics_parquet(objects, symbol, self.catalog_path)
-            self._sync_written_paths([path])
+            from tinohelm.data.catalog import write_metrics_parquet
+            path = write_metrics_parquet(objects, symbol, self.catalog_path, storage=self._storage)
             return [str(path)]
 
         elif category == "order_book_delta":
-            from tinohelm.data.catalog import book_depth_parquet_path, write_book_depth_parquet
-            path = book_depth_parquet_path(symbol, self.catalog_path)
-            self._stage_remote_file_for_merge(path)
-            path = write_book_depth_parquet(objects, symbol, self.catalog_path)
-            self._sync_written_paths([path])
+            from tinohelm.data.catalog import write_book_depth_parquet
+            path = write_book_depth_parquet(objects, symbol, self.catalog_path, storage=self._storage)
             return [str(path)]
 
         else:
@@ -612,45 +603,6 @@ class BinanceVisionPipeline:
                 data_type, category,
             )
             return []
-
-    def _stage_remote_file_for_merge(self, logical_path: Path | str) -> Path:
-        """Seed local write staging with an existing remote single-file dataset.
-
-        The raw single-file writers merge by reading ``out_path`` before an
-        atomic local replace.  On S3/TOS the existing file lives only in object
-        storage, so seed the logical local staging path explicitly before
-        invoking those writers; otherwise the subsequent upload would replace
-        the remote object with only the new batch.
-        """
-        path = Path(logical_path)
-        if getattr(self._storage, "provider", "local") == "local":
-            return path
-        try:
-            if not self._storage.exists(path):
-                if path.exists():
-                    path.unlink()
-                return path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(self._storage.read_bytes(path))
-        except FileNotFoundError:
-            if path.exists():
-                path.unlink()
-            return path
-        return path
-
-    def _sync_written_paths(self, paths: list[str] | list[Path]) -> None:
-        """Upload written catalog files when the active provider is remote."""
-        if getattr(self._storage, "provider", "local") == "local":
-            return
-        for item in paths:
-            path = Path(item)
-            if not path.is_file():
-                continue
-            try:
-                self._storage.upload_path(path)
-            except Exception:
-                logger.warning("Failed to upload catalog file to storage: %s", path, exc_info=True)
-                raise
 
     @staticmethod
     def _funding_cache_covers(symbol: str, start: date, end: date) -> bool:
@@ -685,7 +637,7 @@ class BinanceVisionPipeline:
         Returns the Parquet file path string if written, else None.
         """
         from tinohelm.data.funding_cache import _save_cache
-        from tinohelm.data.catalog import funding_rate_parquet_path, write_funding_rate_parquet
+        from tinohelm.data.catalog import write_funding_rate_parquet
 
         cache_records = [
             {
@@ -700,17 +652,16 @@ class BinanceVisionPipeline:
 
         # Parquet write (new primary path)
         try:
-            self._stage_remote_file_for_merge(funding_rate_parquet_path(symbol, self.catalog_path))
             parquet_path = write_funding_rate_parquet(
                 records=records,
                 symbol=symbol,
                 catalog_root=self.catalog_path,
+                storage=self._storage,
             )
             logger.info(
                 "Wrote %d funding rate records for %s (Parquet + JSON)",
                 len(records), symbol,
             )
-            self._sync_written_paths([parquet_path])
             return str(parquet_path)
         except Exception:
             logger.warning(
@@ -801,8 +752,15 @@ class BinanceVisionPipeline:
         df = pd.DataFrame(klines)
         bars = converter.convert(df, instrument, **kwargs)
         if bars:
-            paths = write_bars(bars, symbol, interval, self.catalog_path, merge=False, source_type=data_type)
-            self._sync_written_paths(paths)
+            paths = write_bars(
+                bars,
+                symbol,
+                interval,
+                self.catalog_path,
+                merge=False,
+                source_type=data_type,
+                storage=self._storage,
+            )
             return len(bars), [str(p) for p in paths]
         return 0, []
 
@@ -824,8 +782,13 @@ class BinanceVisionPipeline:
 
         ticks = agg_trades_to_trade_ticks(agg_trades, symbol)
         if ticks:
-            paths = write_trade_ticks(ticks, symbol, self.catalog_path, source_type="aggTrades")
-            self._sync_written_paths(paths)
+            paths = write_trade_ticks(
+                ticks,
+                symbol,
+                self.catalog_path,
+                source_type="aggTrades",
+                storage=self._storage,
+            )
             return len(ticks), paths
         return 0, []
 
@@ -933,6 +896,26 @@ class BinanceVisionPipeline:
             return int(pq.ParquetFile(str(Path(path))).metadata.num_rows)
         except Exception:
             return None
+
+    def _written_file_size(self, paths: set[str | Path] | list[str | Path]) -> int | None:
+        """Return total size for freshly written catalog files.
+
+        Remote writers return logical paths that do not materialize on the local
+        filesystem, so remote size accounting must query the active storage
+        provider instead of relying on ``Path.exists()``.
+        """
+        unique_paths = {Path(p) for p in paths}
+        if not unique_paths:
+            return None
+
+        if getattr(self._storage, "provider", "local") == "local":
+            return sum(path.stat().st_size for path in unique_paths if path.exists())
+
+        total = 0
+        for path in unique_paths:
+            for obj in self._storage.iter_files(path, suffix=".parquet", recursive=False):
+                total += int(obj.size or 0)
+        return total
 
     @staticmethod
     def _parquet_file_time_range(pf) -> tuple[int, int] | None:
