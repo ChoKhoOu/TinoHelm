@@ -553,6 +553,8 @@ def _write_raw_records_parquet(
     import polars as pl
 
     frame = pl.DataFrame(rows)
+    if not _is_remote_storage(storage):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _catalog_write_lock_path(out_path, storage)
     with lock_path.open("a+b") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -583,7 +585,6 @@ def _write_raw_records_parquet(
                 logger.info("Wrote %d raw rows to remote %s", len(records), out_path)
                 return out_path
 
-            out_path.parent.mkdir(parents=True, exist_ok=True)
             if out_path.exists():
                 try:
                     frame = pl.concat([pl.read_parquet(out_path), frame], how="diagonal_relaxed")
