@@ -7,6 +7,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -483,18 +484,34 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
     bars = dedupe_by_ts(bars)
     logger.info("Compacting remote %s %s: %d files -> %d bars", symbol, interval, files_before, len(bars))
 
-    # Object storage has no local rename/lock semantics.  For remote catalogs,
-    # write the compacted Nautilus parquet output through NT's fsspec-backed
-    # remote catalog instead of staging files under catalog_path and uploading
-    # them afterwards.
-    delete_prefix(storage, bar_dir)
-    catalog = ParquetDataCatalog.from_uri(
-        catalog_uri,
+    temp_catalog_path = catalog_path / ".compaction" / f"{bar_type}-{uuid4().hex}"
+    temp_catalog_uri = storage.uri_for_catalog_root(temp_catalog_path)
+    temp_catalog = ParquetDataCatalog.from_uri(
+        temp_catalog_uri,
         fs_storage_options=getattr(storage, "fs_storage_options", None),
         fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
     )
-    catalog.write_data([instrument])
-    catalog.write_data(bars)
+    temp_catalog.write_data([instrument])
+    temp_catalog.write_data(bars)
+
+    temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
+    temp_objects = list(storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False))
+    if not temp_objects:
+        raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
+
+    promotion_token = uuid4().hex
+    for temp_object in temp_objects:
+        promoted_path = bar_dir / f"{promotion_token}-{temp_object.path.name}"
+        storage.copy_path(temp_object.path, promoted_path)
+
+    try:
+        for old in existing_objects:
+            storage.delete_path(old.path)
+    finally:
+        try:
+            delete_prefix(storage, temp_catalog_path)
+        except Exception:
+            logger.warning("Failed to clean temporary remote compaction prefix %s", temp_catalog_path, exc_info=True)
 
     new_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
     if not new_objects:
@@ -508,7 +525,6 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
         "size_before": size_before,
         "size_after": size_after,
     }
-
 
 # ---- routes ----
 

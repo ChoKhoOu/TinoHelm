@@ -324,10 +324,7 @@ class BinanceVisionPipeline:
         await _progress(96, "Updating catalog database...")
         # Compute size_bytes from written files
         unique_paths = set(all_file_paths)
-        written_size = sum(
-            Path(p).stat().st_size for p in unique_paths
-            if Path(p).exists()
-        ) if unique_paths else None
+        written_size = self._written_file_size(unique_paths) if unique_paths else None
         try:
             await self._update_db_catalog(
                 symbol, data_type, interval, start, end,
@@ -899,6 +896,26 @@ class BinanceVisionPipeline:
             return int(pq.ParquetFile(str(Path(path))).metadata.num_rows)
         except Exception:
             return None
+
+    def _written_file_size(self, paths: set[str | Path] | list[str | Path]) -> int | None:
+        """Return total size for freshly written catalog files.
+
+        Remote writers return logical paths that do not materialize on the local
+        filesystem, so remote size accounting must query the active storage
+        provider instead of relying on ``Path.exists()``.
+        """
+        unique_paths = {Path(p) for p in paths}
+        if not unique_paths:
+            return None
+
+        if getattr(self._storage, "provider", "local") == "local":
+            return sum(path.stat().st_size for path in unique_paths if path.exists())
+
+        total = 0
+        for path in unique_paths:
+            for obj in self._storage.iter_files(path, suffix=".parquet", recursive=False):
+                total += int(obj.size or 0)
+        return total
 
     @staticmethod
     def _parquet_file_time_range(pf) -> tuple[int, int] | None:

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
 from pydantic import SecretStr
 
 from tinohelm.core.config import TosStorageSettings
@@ -170,6 +171,46 @@ def test_remote_single_file_metrics_uploads_merged_parquet_bytes_without_local_s
     merged = pl.read_parquet(BytesIO(uploaded[logical_path]))
     assert merged.select("ts_event").to_series().to_list() == [1, 2]
     assert merged.select("open_interest").to_series().to_list() == [10.0, 11.0]
+
+
+def test_remote_single_file_metrics_raises_on_existing_object_read_error(tmp_path: Path) -> None:
+    from tinohelm.data.catalog import metrics_parquet_path
+
+    symbol = "BTCUSDT-PERP"
+    logical_path = metrics_parquet_path(symbol, tmp_path)
+
+    class RemoteStorage:
+        provider = "s3"
+        catalog_root = tmp_path
+
+        def exists(self, path):
+            assert Path(path) == logical_path
+            return True
+
+        def read_bytes(self, path):
+            assert Path(path) == logical_path
+            raise ValueError("corrupted remote object")
+
+        def upload_bytes(self, path, payload: bytes):  # pragma: no cover - must not be called
+            raise AssertionError("remote metrics writes must not fall back to uploading the new batch only")
+
+    record = SimpleNamespace(
+        symbol=symbol,
+        ts_event=2,
+        ts_init=2,
+        open_interest=11.0,
+        open_interest_value=110.0,
+        toptrader_long_short_ratio_count=0.0,
+        toptrader_long_short_ratio_sum=0.0,
+        global_long_short_ratio=0.0,
+        taker_long_short_vol_ratio=0.0,
+    )
+    pipeline = BinanceVisionPipeline(catalog_path=tmp_path)
+    pipeline._storage = RemoteStorage()
+    pipeline.catalog_path = str(tmp_path)
+
+    with pytest.raises(ValueError, match="corrupted remote object"):
+        pipeline._write_objects([record], symbol, "metrics", None)
 
 
 def test_write_bars_remote_storage_uses_nt_from_uri_without_local_catalog(tmp_path: Path, monkeypatch) -> None:

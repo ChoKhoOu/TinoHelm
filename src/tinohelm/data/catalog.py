@@ -116,6 +116,18 @@ def _iter_catalog_files(storage: Any | None, path: Path, *, suffix: str = ".parq
     return list(path.rglob(f"*{suffix}") if recursive else path.glob(f"*{suffix}")) if path.exists() else []
 
 
+def _catalog_write_lock_path(out_path: Path, storage: Any | None = None) -> Path:
+    if _is_remote_storage(storage):
+        import hashlib
+        import tempfile
+
+        lock_root = Path(tempfile.gettempdir()) / "tinohelm-remote-locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(str(out_path).encode("utf-8")).hexdigest()
+        return lock_root / f"{digest}.lock"
+    return out_path.with_suffix(out_path.suffix + ".lock")
+
+
 def validate_bars(
     symbol: str,
     interval: str,
@@ -324,13 +336,17 @@ def write_bars(
 def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     """Compact multiple Parquet files for a symbol/interval into a single file.
 
-    Reads all bars, deduplicates by ts_event (keeping last), deletes existing
-    parquet files, then writes back as a single sorted file.
+    Reads all bars, deduplicates by ts_event (keeping last), then stages the
+    compacted catalog under a temporary prefix and promotes the new files only
+    after the write succeeds.  That keeps the old catalog intact if anything
+    fails before promotion.
 
     Returns summary dict with files_before, files_after, bars_count,
     size_before, size_after.
     """
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
+    from uuid import uuid4
+    import shutil
 
     catalog_path = Path(catalog_path)
 
@@ -371,17 +387,29 @@ def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
     bars = dedupe_by_ts(bars)
     logger.info("Compacting %s %s: %d files -> %d bars (deduped)", symbol, interval, files_before, len(bars))
 
-    # 5. Delete all existing parquet files in the bar_type directory
-    for f in existing_files:
-        f.unlink()
-    logger.info("Deleted %d old parquet files from %s", files_before, bar_dir)
+    temp_catalog_path = catalog_path / ".compaction" / f"{bar_type}-{uuid4().hex}"
+    temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
+    temp_catalog = ParquetDataCatalog(str(temp_catalog_path))
+    temp_catalog.write_data([instrument])
+    temp_catalog.write_data(bars)
 
-    # 6. Write all bars back as a single sorted file
-    catalog = ParquetDataCatalog(str(catalog_path))
-    catalog.write_data([instrument])
-    catalog.write_data(bars)
+    temp_files = list(temp_bar_dir.glob("*.parquet")) if temp_bar_dir.exists() else []
+    if not temp_files:
+        raise RuntimeError(f"Local compaction produced no parquet files for {symbol} {interval}")
 
-    # 7. Compute summary
+    promotion_token = uuid4().hex
+    for temp_file in temp_files:
+        final_path = bar_dir / f"{promotion_token}-{temp_file.name}"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_file.replace(final_path)
+
+    try:
+        for f in existing_files:
+            f.unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(temp_catalog_path, ignore_errors=True)
+
+    # 5. Compute summary
     new_files = list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
     files_after = len(new_files)
     size_after = sum(f.stat().st_size for f in new_files)
@@ -525,33 +553,37 @@ def _write_raw_records_parquet(
     import polars as pl
 
     frame = pl.DataFrame(rows)
-    if _is_remote_storage(storage):
-        try:
-            if storage.exists(out_path):
-                frame = pl.concat([
-                    pl.read_parquet(BytesIO(storage.read_bytes(out_path))),
-                    frame,
-                ], how="diagonal_relaxed")
-        except FileNotFoundError:
-            pass
-        except Exception:
-            logger.warning("Failed to merge existing remote raw parquet at %s", out_path, exc_info=True)
-        frame = frame.sort(dedupe_subset).unique(
-            subset=dedupe_subset,
-            keep="last",
-            maintain_order=True,
-        )
-        buf = BytesIO()
-        frame.write_parquet(buf)
-        storage.upload_bytes(out_path, buf.getvalue())
-        logger.info("Wrote %d raw rows to remote %s", len(records), out_path)
-        return out_path
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = out_path.with_suffix(out_path.suffix + ".lock")
+    lock_path = _catalog_write_lock_path(out_path, storage)
     with lock_path.open("a+b") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            if _is_remote_storage(storage):
+                try:
+                    exists = storage.exists(out_path)
+                except FileNotFoundError:
+                    exists = False
+                if exists:
+                    try:
+                        existing_bytes = storage.read_bytes(out_path)
+                    except FileNotFoundError:
+                        existing_bytes = None
+                    else:
+                        frame = pl.concat([
+                            pl.read_parquet(BytesIO(existing_bytes)),
+                            frame,
+                        ], how="diagonal_relaxed")
+                frame = frame.sort(dedupe_subset).unique(
+                    subset=dedupe_subset,
+                    keep="last",
+                    maintain_order=True,
+                )
+                buf = BytesIO()
+                frame.write_parquet(buf)
+                storage.upload_bytes(out_path, buf.getvalue())
+                logger.info("Wrote %d raw rows to remote %s", len(records), out_path)
+                return out_path
+
+            out_path.parent.mkdir(parents=True, exist_ok=True)
             if out_path.exists():
                 try:
                     frame = pl.concat([pl.read_parquet(out_path), frame], how="diagonal_relaxed")
@@ -663,6 +695,7 @@ def write_funding_rate_parquet(
 
     Returns the path of the written Parquet file.
     """
+    import fcntl
     import pyarrow as pa
     import pyarrow.parquet as pq
     from io import BytesIO
@@ -684,11 +717,32 @@ def write_funding_rate_parquet(
         ts_ns, rate = _to_tuple(r)
         new_rows[ts_ns] = rate
 
-    # Merge with existing Parquet if present
-    if _is_remote_storage(storage):
+    lock_path = _catalog_write_lock_path(out_path, storage)
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            if storage.exists(out_path):
-                existing_table = pq.read_table(BytesIO(storage.read_bytes(out_path)))
+            # Merge with existing Parquet if present
+            if _is_remote_storage(storage):
+                try:
+                    exists = storage.exists(out_path)
+                except FileNotFoundError:
+                    exists = False
+                if exists:
+                    try:
+                        existing_payload = storage.read_bytes(out_path)
+                    except FileNotFoundError:
+                        existing_payload = None
+                    else:
+                        existing_table = pq.read_table(BytesIO(existing_payload))
+                        for ts_ns, rate in zip(
+                            existing_table["ts_event"].to_pylist(),
+                            existing_table["funding_rate"].to_pylist(),
+                        ):
+                            # New records take precedence (overwrite existing by ts_event key)
+                            if ts_ns not in new_rows:
+                                new_rows[ts_ns] = float(rate)
+            elif out_path.exists():
+                existing_table = pq.read_table(str(out_path))
                 for ts_ns, rate in zip(
                     existing_table["ts_event"].to_pylist(),
                     existing_table["funding_rate"].to_pylist(),
@@ -696,36 +750,27 @@ def write_funding_rate_parquet(
                     # New records take precedence (overwrite existing by ts_event key)
                     if ts_ns not in new_rows:
                         new_rows[ts_ns] = float(rate)
-        except FileNotFoundError:
-            pass
-    elif out_path.exists():
-        existing_table = pq.read_table(str(out_path))
-        for ts_ns, rate in zip(
-            existing_table["ts_event"].to_pylist(),
-            existing_table["funding_rate"].to_pylist(),
-        ):
-            # New records take precedence (overwrite existing by ts_event key)
-            if ts_ns not in new_rows:
-                new_rows[ts_ns] = float(rate)
 
-    # Sort by ts_event and build Arrow table
-    sorted_ts = sorted(new_rows)
-    table = pa.table(
-        {
-            "ts_event": pa.array(sorted_ts, type=pa.int64()),
-            "funding_rate": pa.array([new_rows[t] for t in sorted_ts], type=pa.float64()),
-        }
-    )
-    if _is_remote_storage(storage):
-        buf = BytesIO()
-        pq.write_table(table, buf)
-        storage.upload_bytes(out_path, buf.getvalue())
-    else:
-        pq.write_table(table, str(out_path))
-    logger.info(
-        "Wrote %d funding-rate rows to %s", len(sorted_ts), out_path
-    )
-    return out_path
+            # Sort by ts_event and build Arrow table
+            sorted_ts = sorted(new_rows)
+            table = pa.table(
+                {
+                    "ts_event": pa.array(sorted_ts, type=pa.int64()),
+                    "funding_rate": pa.array([new_rows[t] for t in sorted_ts], type=pa.float64()),
+                }
+            )
+            if _is_remote_storage(storage):
+                buf = BytesIO()
+                pq.write_table(table, buf)
+                storage.upload_bytes(out_path, buf.getvalue())
+            else:
+                pq.write_table(table, str(out_path))
+            logger.info(
+                "Wrote %d funding-rate rows to %s", len(sorted_ts), out_path
+            )
+            return out_path
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def read_funding_rate_parquet(

@@ -119,6 +119,26 @@ class TestCatalogStorageStats:
         assert uploaded == [(path, b"merged-in-memory")]
         assert not path.exists()
 
+    def test_written_file_size_uses_remote_storage_iter_files(self, tmp_path: Path):
+        from tinohelm.data.catalog import metrics_parquet_path
+
+        symbol = "BTCUSDT-PERP"
+        path = metrics_parquet_path(symbol, tmp_path)
+
+        class RemoteStorage:
+            provider = "s3"
+
+            def iter_files(self, prefix, *, suffix="", recursive=True):
+                assert Path(prefix) == path
+                assert suffix == ".parquet"
+                assert recursive is False
+                return iter([SimpleNamespace(path=path, size=123)])
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._storage = RemoteStorage()
+
+        assert p._written_file_size({str(path)}) == 123
+
     def test_trade_tick_stats_sum_all_parquet_files_in_source_path(self, tmp_path: Path):
         from tinohelm.data.catalog import resolve_catalog_path
         from tinohelm.strategy.loader_helpers import normalize_symbol
