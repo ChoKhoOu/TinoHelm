@@ -306,6 +306,7 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
     other_old = bar_dir / "old-b.parquet"
     other_old.write_bytes(b"old-b")
     deleted_paths: list[Path] = []
+    copied_paths: list[tuple[Path, Path]] = []
 
     class RemoteStorage:
         provider = "s3"
@@ -314,36 +315,55 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
         fs_rust_storage_options = {"endpoint_url": "https://example.com"}
 
         def uri_for_catalog_root(self, logical_root):
-            assert Path(logical_root) == resolved_root
-            return "s3://bucket/catalog/bar/klines"
+            logical_root = Path(logical_root)
+            assert logical_root.is_relative_to(resolved_root)
+            rel = logical_root.relative_to(tmp_path).as_posix()
+            return f"s3://bucket/catalog/{rel}"
 
         def iter_files(self, prefix, *, suffix="", recursive=True):
-            assert Path(prefix) == bar_dir
-            assert suffix == ".parquet"
-            assert recursive is False
+            prefix = Path(prefix)
+            if not prefix.exists():
+                return iter(())
+            iterator = prefix.rglob("*") if recursive else prefix.glob("*")
+            files = [
+                path
+                for path in sorted(iterator)
+                if path.is_file() and (not suffix or path.name.endswith(suffix))
+            ]
             return iter(
                 [
                     SimpleNamespace(path=path, size=path.stat().st_size)
-                    for path in sorted(bar_dir.glob("*.parquet"))
+                    for path in files
                 ]
             )
+
+        def copy_path(self, source_path, dest_path):
+            source = Path(source_path)
+            dest = Path(dest_path)
+            copied_paths.append((source, dest))
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(source.read_bytes())
+            rel = dest.relative_to(tmp_path).as_posix()
+            return f"s3://bucket/catalog/{rel}"
 
         def delete_path(self, local_path):
             path = Path(local_path)
             deleted_paths.append(path)
             if path.exists():
                 path.unlink()
+            else:  # pragma: no cover - defensive
+                raise FileNotFoundError(path)
 
     class FakeCatalog:
         from_uri_calls: list[tuple[str, dict, dict]] = []
 
         def __init__(self, catalog_path=None):
-            raise AssertionError(f"local ParquetDataCatalog must not be used for remote storage: {catalog_path}")
+            self.catalog_path = catalog_path
 
         @classmethod
         def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
             cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
-            return cls.__new__(cls)
+            return cls(uri)
 
         def bars(self, bar_types):
             assert bar_types == [bar_type_str]
@@ -351,7 +371,10 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
 
         def write_data(self, data, skip_disjoint_check=False):
             if data and hasattr(data[0], "ts_event"):
-                same_name_file.write_bytes(b"new")
+                rel = Path(str(self.catalog_path).removeprefix("s3://bucket/catalog/"))
+                dest = tmp_path / rel / "data" / "bar" / bar_type_str / same_name_file.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b"new")
 
     class FakeBarType:
         def __str__(self) -> str:
@@ -361,6 +384,7 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
     bar = SimpleNamespace(ts_event=1)
     monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda _symbol: instrument)
     monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda _instrument_id, _interval: FakeBarType())
+    monkeypatch.setattr("uuid.uuid4", lambda: SimpleNamespace(hex="abc123"))
     nt_mod = types.ModuleType("nautilus_trader")
     persistence_mod = types.ModuleType("nautilus_trader.persistence")
     catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
@@ -379,7 +403,17 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
         storage=RemoteStorage(),
     )
 
+    temp_key = resolved_root / ".merge" / f"{bar_type_str}-abc123" / "data" / "bar" / bar_type_str / same_name_file.name
+    rollback_dir = resolved_root / ".merge-rollback" / f"{bar_type_str}-abc123"
+    rollback_same_key = rollback_dir / same_name_file.name
+    rollback_other_key = rollback_dir / other_old.name
     assert paths == [same_name_file]
     assert same_name_file.read_bytes() == b"new"
     assert not other_old.exists()
-    assert deleted_paths == [other_old]
+    assert bar_dir.exists()
+    assert copied_paths == [
+        (same_name_file, rollback_same_key),
+        (other_old, rollback_other_key),
+        (temp_key, same_name_file),
+    ]
+    assert deleted_paths == [other_old, rollback_same_key, rollback_other_key, temp_key]

@@ -444,7 +444,7 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
 
     from tinohelm.data.catalog import _make_bar_type, _make_instrument
     from tinohelm.data.catalog_helpers import dedupe_by_ts
-    from tinohelm.data.storage import delete_prefix
+    from tinohelm.data.storage import delete_prefix, promote_objects_with_rollback
 
     catalog_path = Path(catalog_path)
     instrument = _make_instrument(symbol)
@@ -499,18 +499,15 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
     if not temp_objects:
         raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
 
-    promotion_paths: set[Path] = set()
-    for temp_object in temp_objects:
-        # Keep the NT-generated basename so the promoted parquet remains parseable.
-        promoted_path = bar_dir / temp_object.path.name
-        storage.copy_path(temp_object.path, promoted_path)
-        promotion_paths.add(promoted_path)
-
+    rollback_prefix = catalog_path / ".compaction-rollback" / f"{bar_type}-{uuid4().hex}"
     try:
-        for old in existing_objects:
-            if old.path in promotion_paths:
-                continue
-            storage.delete_path(old.path)
+        promote_objects_with_rollback(
+            storage,
+            temp_objects,
+            bar_dir,
+            existing_objects,
+            rollback_prefix=rollback_prefix,
+        )
     finally:
         try:
             delete_prefix(storage, temp_catalog_path)

@@ -288,7 +288,8 @@ def write_bars(
     bar_type = _make_bar_type(instrument.id, interval)
 
     existing_files_to_delete: list[Path] = []
-    existing_file_signatures: dict[Path, tuple[Any | None, Any | None, Any | None]] = {}
+    existing_objects_to_delete: list[Any] = []
+    merged_existing_bars = False
     if merge:
         # Merge with existing bars if present (incremental update case)
         try:
@@ -300,30 +301,57 @@ def write_bars(
                 # data intact (at worst we have duplicate bars, not missing ones).
                 bar_dir = catalog_path / "data" / "bar" / str(bar_type)
                 if _is_remote_storage(storage):
-                    existing_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
-                    existing_files_to_delete = [obj.path for obj in existing_objects]
-                    existing_file_signatures = {
-                        obj.path: (
-                            getattr(obj, "size", None),
-                            getattr(obj, "last_modified", None),
-                            getattr(obj, "etag", None),
-                        )
-                        for obj in existing_objects
-                    }
+                    existing_objects_to_delete = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
+                    existing_files_to_delete = [obj.path for obj in existing_objects_to_delete]
                 else:
                     existing_files_to_delete = _iter_catalog_files(storage, bar_dir, recursive=False)
-                    for path in existing_files_to_delete:
-                        if not path.exists():
-                            continue
-                        stat = path.stat()
-                        existing_file_signatures[path] = (stat.st_size, stat.st_mtime_ns, None)
 
                 existing_count = len(existing_bars)
                 bars = merge_bars(existing_bars, bars)
+                merged_existing_bars = True
                 logger.info("Merged %d existing + %d new bars = %d total",
                             existing_count, len(bars) - existing_count, len(bars))
         except Exception:
             logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
+
+    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
+    if _is_remote_storage(storage) and merged_existing_bars:
+        from uuid import uuid4
+
+        from tinohelm.data.storage import delete_prefix, promote_objects_with_rollback
+
+        catalog = _catalog_for_root(catalog_path, storage)
+        catalog.write_data([instrument])
+
+        temp_catalog_path = catalog_path / ".merge" / f"{bar_type}-{uuid4().hex}"
+        rollback_prefix = catalog_path / ".merge-rollback" / f"{bar_type}-{uuid4().hex}"
+        try:
+            temp_catalog = _catalog_for_root(temp_catalog_path, storage)
+            temp_catalog.write_data([instrument])
+            temp_catalog.write_data(bars, skip_disjoint_check=True)
+            temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
+            temp_objects = list(storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False))
+            if not temp_objects:
+                raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
+
+            promote_objects_with_rollback(
+                storage,
+                temp_objects,
+                bar_dir,
+                existing_objects_to_delete,
+                rollback_prefix=rollback_prefix,
+            )
+        finally:
+            try:
+                delete_prefix(storage, temp_catalog_path)
+            except Exception:
+                logger.warning("Failed to clean temporary remote merge prefix %s", temp_catalog_path, exc_info=True)
+
+        written_files = _iter_catalog_files(storage, bar_dir, recursive=False)
+        if not written_files:
+            raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
+        logger.info("Wrote %d bars to remote catalog at %s", len(bars), catalog_path)
+        return written_files
 
     catalog = _catalog_for_root(catalog_path, storage)
     catalog.write_data([instrument])
@@ -337,38 +365,15 @@ def write_bars(
     catalog.write_data(bars, skip_disjoint_check=True)
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
 
-    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-    if _is_remote_storage(storage):
-        current_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
-        current_files = {obj.path for obj in current_objects}
-        current_file_signatures = {
-            obj.path: (
-                getattr(obj, "size", None),
-                getattr(obj, "last_modified", None),
-                getattr(obj, "etag", None),
-            )
-            for obj in current_objects
-        }
-    else:
-        current_objects = _iter_catalog_files(storage, bar_dir, recursive=False)
-        current_files = set(current_objects)
-        current_file_signatures = {}
-        for path in current_objects:
-            if not path.exists():
-                continue
-            stat = path.stat()
-            current_file_signatures[path] = (stat.st_size, stat.st_mtime_ns, None)
-
+    current_files = set(_iter_catalog_files(storage, bar_dir, recursive=False))
     if not current_files:
         raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
 
-    # Delete old parquet files AFTER the merged write has succeeded.  Skip only
-    # the paths that were actually rewritten in place; unchanged stale files
-    # still need to be removed.
+    # Delete old parquet files AFTER the merged write has succeeded.  Skip any
+    # same-name output path; deleting by path after a rewrite can remove the
+    # freshly written parquet.
     for old_file in existing_files_to_delete:
-        old_signature = existing_file_signatures.get(old_file)
-        current_signature = current_file_signatures.get(old_file)
-        if current_signature is not None and old_signature != current_signature:
+        if old_file in current_files:
             continue
         if _is_remote_storage(storage):
             storage.delete_path(old_file)

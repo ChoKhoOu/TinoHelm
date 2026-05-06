@@ -795,6 +795,8 @@ class TestSourceAwareBarMaintenance:
 
         temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
         final_key = f"bucket/catalog/data/bar/{bar_type_str}/{compacted_name}"
+        backup_a_key = f"bucket/catalog/.compaction-rollback/{bar_type_str}-abc123/old-a.parquet"
+        backup_b_key = f"bucket/catalog/.compaction-rollback/{bar_type_str}-abc123/old-b.parquet"
         assert result == {
             "files_before": 2,
             "files_after": 1,
@@ -806,7 +808,7 @@ class TestSourceAwareBarMaintenance:
             ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options),
             (f"s3://bucket/catalog/.compaction/{bar_type_str}-abc123", storage.fs_storage_options, storage.fs_rust_storage_options),
         ]
-        assert fs.rm_calls == old_keys + [temp_key]
+        assert fs.rm_calls == old_keys + [backup_a_key, backup_b_key, temp_key]
         assert fs.put_calls == []
         assert fs.objects == {final_key: b"new"}
         assert not bar_dir.exists()
@@ -863,6 +865,8 @@ class TestSourceAwareBarMaintenance:
         result = _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
 
         temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
+        rollback_key = f"bucket/catalog/.compaction-rollback/{bar_type_str}-abc123/{compacted_name}"
+        rollback_other_key = f"bucket/catalog/.compaction-rollback/{bar_type_str}-abc123/old-b.parquet"
         assert result == {
             "files_before": 2,
             "files_after": 1,
@@ -870,9 +874,77 @@ class TestSourceAwareBarMaintenance:
             "size_before": len(b"old-final") + len(b"old-b"),
             "size_after": len(b"new"),
         }
-        assert fs.rm_calls == [other_old_key, temp_key]
+        assert fs.rm_calls == [other_old_key, rollback_key, rollback_other_key, temp_key]
         assert fs.put_calls == []
         assert fs.objects == {final_key: b"new"}
+        assert not bar_dir.exists()
+
+    def test_remote_compact_restores_same_named_file_if_old_delete_fails(self, tmp_path: Path, monkeypatch):
+        bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
+        compacted_name = "2024-01-01T00-00-00-000000000Z_2024-01-01T00-01-00-000000000Z.parquet"
+        bar_dir = tmp_path / "data" / "bar" / bar_type_str
+        final_key = f"bucket/catalog/data/bar/{bar_type_str}/{compacted_name}"
+        other_old_key = f"bucket/catalog/data/bar/{bar_type_str}/old-b.parquet"
+        fs = _FakeS3FileSystem({final_key: b"old-final", other_old_key: b"old-b"})
+        storage = _CompactStorage(tmp_path, fs)
+
+        instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+
+        class FakeBarType:
+            def __str__(self):
+                return bar_type_str
+
+        bar_type = FakeBarType()
+        bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
+
+        class FakeCatalog:
+            def __init__(self, catalog_path=None):
+                self.catalog_path = catalog_path
+
+            @classmethod
+            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
+                return cls(uri)
+
+            def bars(self, bar_types):
+                assert bar_types == [bar_type_str]
+                return bars
+
+            def write_data(self, data, skip_disjoint_check=False):
+                if data and hasattr(data[0], "ts_event"):
+                    base = str(self.catalog_path).removeprefix("s3://")
+                    fs.objects[f"{base}/data/bar/{bar_type_str}/{compacted_name}"] = b"new"
+
+        def failing_rm(path: str) -> None:
+            fs.rm_calls.append(path)
+            if path == other_old_key:
+                raise RuntimeError("delete failed")
+            if path not in fs.objects:
+                raise FileNotFoundError(path)
+            del fs.objects[path]
+
+        import sys
+        import types
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
+        monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: bar_type)
+        monkeypatch.setattr("tinohelm.api.routes.data.uuid4", lambda: SimpleNamespace(hex="abc123"))
+        fs.rm = failing_rm
+        nt_mod = types.ModuleType("nautilus_trader")
+        persistence_mod = types.ModuleType("nautilus_trader.persistence")
+        catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+        catalog_mod.ParquetDataCatalog = FakeCatalog
+        monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+        with pytest.raises(RuntimeError, match="delete failed"):
+            _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
+
+        temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
+        rollback_key = f"bucket/catalog/.compaction-rollback/{bar_type_str}-abc123/{compacted_name}"
+        rollback_other_key = f"bucket/catalog/.compaction-rollback/{bar_type_str}-abc123/old-b.parquet"
+        assert fs.rm_calls == [other_old_key, final_key, rollback_key, rollback_other_key, temp_key]
+        assert fs.objects == {final_key: b"old-final", other_old_key: b"old-b"}
         assert not bar_dir.exists()
 
     def test_remote_compact_leaves_old_objects_intact_if_write_fails(self, tmp_path: Path, monkeypatch):

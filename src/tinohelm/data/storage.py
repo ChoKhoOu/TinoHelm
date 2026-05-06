@@ -599,6 +599,66 @@ def upload_paths(
     return uris
 
 
+def promote_objects_with_rollback(
+    provider: CatalogStorageProvider,
+    temp_objects: Iterable[StorageObject],
+    dest_dir: Path | str,
+    old_objects: Iterable[StorageObject],
+    *,
+    rollback_prefix: Path | str,
+) -> set[Path]:
+    """Promote staged objects into *dest_dir* and rollback on cleanup failure.
+
+    Object stores cannot atomically replace a directory.  This helper copies
+    staged parquet objects to their final NT basenames, deletes stale old
+    objects only after every copy succeeds, and restores overwritten same-name
+    objects if any later copy/delete step fails.
+    """
+
+    dest_dir = Path(dest_dir)
+    rollback_prefix = Path(rollback_prefix)
+    staged = [(obj.path, dest_dir / obj.path.name) for obj in temp_objects]
+    old_paths = [obj.path for obj in old_objects]
+    promotion_paths = {dest for _, dest in staged}
+    backup_paths: dict[Path, Path] = {}
+    promoted_paths: set[Path] = set()
+
+    try:
+        for old_path in old_paths:
+            backup_path = rollback_prefix / old_path.name
+            provider.copy_path(old_path, backup_path)
+            backup_paths[old_path] = backup_path
+
+        for source_path, dest_path in staged:
+            provider.copy_path(source_path, dest_path)
+            promoted_paths.add(dest_path)
+
+        for old_path in old_paths:
+            if old_path in promotion_paths:
+                continue
+            provider.delete_path(old_path)
+
+        return promoted_paths
+    except Exception:
+        for promoted_path in reversed(list(promoted_paths)):
+            try:
+                provider.delete_path(promoted_path)
+            except Exception:
+                logger.warning("Failed to rollback promoted object %s", promoted_path, exc_info=True)
+        for old_path, backup_path in backup_paths.items():
+            try:
+                provider.copy_path(backup_path, old_path)
+            except Exception:
+                logger.warning("Failed to restore backed up object %s", old_path, exc_info=True)
+        raise
+    finally:
+        if backup_paths:
+            try:
+                delete_prefix(provider, rollback_prefix)
+            except Exception:
+                logger.warning("Failed to clean rollback prefix %s", rollback_prefix, exc_info=True)
+
+
 def delete_prefix(provider: CatalogStorageProvider, local_prefix: Path | str) -> tuple[int, int]:
     """Delete one catalog file or all files under a catalog prefix."""
 
