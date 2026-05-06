@@ -288,6 +288,7 @@ def write_bars(
     bar_type = _make_bar_type(instrument.id, interval)
 
     existing_files_to_delete: list[Path] = []
+    existing_file_signatures: dict[Path, tuple[Any | None, Any | None, Any | None]] = {}
     if merge:
         # Merge with existing bars if present (incremental update case)
         try:
@@ -298,7 +299,24 @@ def write_bars(
                 # succeeds, so a crash between write and delete leaves the old
                 # data intact (at worst we have duplicate bars, not missing ones).
                 bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-                existing_files_to_delete = _iter_catalog_files(storage, bar_dir, recursive=False)
+                if _is_remote_storage(storage):
+                    existing_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
+                    existing_files_to_delete = [obj.path for obj in existing_objects]
+                    existing_file_signatures = {
+                        obj.path: (
+                            getattr(obj, "size", None),
+                            getattr(obj, "last_modified", None),
+                            getattr(obj, "etag", None),
+                        )
+                        for obj in existing_objects
+                    }
+                else:
+                    existing_files_to_delete = _iter_catalog_files(storage, bar_dir, recursive=False)
+                    for path in existing_files_to_delete:
+                        if not path.exists():
+                            continue
+                        stat = path.stat()
+                        existing_file_signatures[path] = (stat.st_size, stat.st_mtime_ns, None)
 
                 existing_count = len(existing_bars)
                 bars = merge_bars(existing_bars, bars)
@@ -319,17 +337,44 @@ def write_bars(
     catalog.write_data(bars, skip_disjoint_check=True)
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
 
-    # Delete old parquet files AFTER the merged write has succeeded.  This
-    # order prevents data loss: if the process crashes between delete and
-    # write (the previous order) all data would be gone.  Now the worst case
-    # is stale duplicates that compact_bars can clean up.
+    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
+    if _is_remote_storage(storage):
+        current_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
+        current_files = {obj.path for obj in current_objects}
+        current_file_signatures = {
+            obj.path: (
+                getattr(obj, "size", None),
+                getattr(obj, "last_modified", None),
+                getattr(obj, "etag", None),
+            )
+            for obj in current_objects
+        }
+    else:
+        current_objects = _iter_catalog_files(storage, bar_dir, recursive=False)
+        current_files = set(current_objects)
+        current_file_signatures = {}
+        for path in current_objects:
+            if not path.exists():
+                continue
+            stat = path.stat()
+            current_file_signatures[path] = (stat.st_size, stat.st_mtime_ns, None)
+
+    if not current_files:
+        raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
+
+    # Delete old parquet files AFTER the merged write has succeeded.  Skip only
+    # the paths that were actually rewritten in place; unchanged stale files
+    # still need to be removed.
     for old_file in existing_files_to_delete:
+        old_signature = existing_file_signatures.get(old_file)
+        current_signature = current_file_signatures.get(old_file)
+        if current_signature is not None and old_signature != current_signature:
+            continue
         if _is_remote_storage(storage):
             storage.delete_path(old_file)
         elif old_file.exists():
             old_file.unlink()
 
-    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
     return _iter_catalog_files(storage, bar_dir, recursive=False)
 
 
