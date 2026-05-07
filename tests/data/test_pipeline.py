@@ -5,7 +5,7 @@ All network, DB, and filesystem side-effects are mocked.
 from __future__ import annotations
 
 import asyncio
-import tempfile
+from io import BytesIO
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,9 +19,7 @@ from tinohelm.data.pipeline import BinanceVisionPipeline, IngestResult, _ns_to_u
 
 
 def _csv_payload(name: str, content: bytes) -> VisionCsvPayload:
-    file_obj = tempfile.SpooledTemporaryFile(max_size=1, mode="w+b")
-    file_obj.write(content)
-    file_obj.seek(0)
+    file_obj = BytesIO(content)
     return VisionCsvPayload(name=name, file=file_obj)
 
 
@@ -158,7 +156,7 @@ class TestBoundedCsvConversion:
         assert paths == ["memory://catalog/a.parquet", "memory://catalog/b.parquet"]
         assert seen_progress == [1, 2]
 
-    def test_cleanup_closes_spooled_csv_payload(self, tmp_path: Path):
+    def test_cleanup_closes_in_memory_csv_payload(self, tmp_path: Path):
         payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"1,2\n")
         p = BinanceVisionPipeline(catalog_path=tmp_path)
 

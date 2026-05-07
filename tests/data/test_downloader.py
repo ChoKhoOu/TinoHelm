@@ -301,8 +301,8 @@ class TestInMemoryExecuteTask:
         assert result == task.dest_path
 
     @pytest.mark.asyncio
-    async def test_execute_task_streams_zip_to_bounded_csv_source_without_raw_files(self, tmp_path):
-        """Fresh Vision downloads must stream the ZIP and avoid full response.content materialization."""
+    async def test_execute_task_keeps_fresh_zip_and_csv_fully_in_memory(self, tmp_path):
+        """Fresh Vision downloads must avoid tempfile-backed staging entirely."""
         dl = _make_dl(tmp_path)
         task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
         zip_payload = _zip_bytes("BTCUSDT-aggTrades-2025-01-15.csv", "a,b\n1,2\n")
@@ -349,9 +349,13 @@ class TestInMemoryExecuteTask:
                 assert url == task.checksum_url, "fresh ZIP body must be streamed, not read via response.content"
                 return checksum_response
 
+        def fail_spooled_tempfile(*args, **kwargs):
+            raise AssertionError("fresh Vision ingest must not use tempfile.SpooledTemporaryFile")
+
         fake_client = FakeClient()
 
-        with patch("httpx.AsyncClient", return_value=fake_client):
+        with patch("httpx.AsyncClient", return_value=fake_client), \
+             patch("tempfile.SpooledTemporaryFile", side_effect=fail_spooled_tempfile):
             result = await dl.execute_task(task)
 
         assert isinstance(result, VisionCsvPayload)
@@ -420,9 +424,7 @@ class TestInMemoryExecuteTask:
         """ZIP member extraction must not call ZipExtFile.read() without a size."""
         dl = _make_dl(tmp_path)
         zip_payload = _zip_bytes("data.csv", "a,b\n1,2\n3,4\n")
-        zip_file = tempfile.SpooledTemporaryFile(max_size=1, mode="w+b")
-        zip_file.write(zip_payload)
-        zip_file.seek(0)
+        zip_file = BytesIO(zip_payload)
 
         original_read = zipfile.ZipExtFile.read
 
@@ -443,9 +445,7 @@ class TestInMemoryExecuteTask:
     def test_extract_zip_stream_rejects_entries_that_escape_logical_root(self, tmp_path):
         dl = _make_dl(tmp_path)
         zip_payload = _zip_bytes("../evil.csv", "a,b\n1,2\n")
-        zip_file = tempfile.SpooledTemporaryFile(max_size=1, mode="w+b")
-        zip_file.write(zip_payload)
-        zip_file.seek(0)
+        zip_file = BytesIO(zip_payload)
 
         with pytest.raises(ValueError, match="would escape"):
             dl.extract_zip_stream(zip_file, "evil.zip")

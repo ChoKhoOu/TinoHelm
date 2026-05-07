@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import date, timedelta
+from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -64,7 +64,6 @@ _KLINES_TYPES = frozenset({
 _VISION_BASE = "https://data.binance.vision"
 _MAX_RETRIES = DEFAULT_MAX_RETRIES
 _STREAM_CHUNK_SIZE = 1024 * 1024
-_SPOOL_MAX_BYTES = 8 * 1024 * 1024
 
 
 class ChecksumError(Exception):
@@ -81,7 +80,7 @@ class DownloadTask:
 
 
 class _BorrowedBinaryReader:
-    """File-like proxy whose close() does not close the owned spool."""
+    """File-like proxy whose close() does not close the owned buffer."""
 
     def __init__(self, raw: BinaryIO) -> None:
         self._raw = raw
@@ -115,7 +114,7 @@ class _BorrowedBinaryReader:
 
 @dataclass
 class VisionCsvPayload:
-    """Bounded-memory CSV source extracted from a Binance Vision ZIP archive."""
+    """RAM-only CSV source extracted from a Binance Vision ZIP archive."""
 
     name: str
     file: BinaryIO
@@ -413,10 +412,10 @@ class VisionDownloader:
         return payload
 
     async def download_stream(self, url: str) -> BinaryIO:
-        """Download a file by streaming response chunks into a bounded spool."""
+        """Download a file by streaming response chunks into a RAM-only buffer."""
         attempt = 0
         while True:
-            spool = tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX_BYTES, mode="w+b")
+            buffer = BytesIO()
             try:
                 total = 0
                 async with httpx.AsyncClient(timeout=60.0) as client:
@@ -425,13 +424,13 @@ class VisionDownloader:
                         async for chunk in resp.aiter_bytes():
                             if not chunk:
                                 continue
-                            spool.write(chunk)
+                            buffer.write(chunk)
                             total += len(chunk)
-                spool.seek(0)
+                buffer.seek(0)
                 logger.debug("Downloaded stream: %s (%d bytes)", url.rsplit("/", 1)[-1], total)
-                return spool
+                return buffer
             except httpx.HTTPStatusError as exc:
-                spool.close()
+                buffer.close()
                 status = exc.response.status_code
                 kind = classify_http_status(status)
                 if kind == "not_found":
@@ -459,7 +458,7 @@ class VisionDownloader:
                     continue
                 raise
             except httpx.RequestError as exc:
-                spool.close()
+                buffer.close()
                 attempt += 1
                 if attempt > _MAX_RETRIES:
                     raise
@@ -470,7 +469,7 @@ class VisionDownloader:
                 await asyncio.sleep(REQUEST_ERROR_SLEEP_SECONDS)
                 continue
             except Exception:
-                spool.close()
+                buffer.close()
                 raise
 
     async def verify_checksum_bytes(
@@ -641,8 +640,8 @@ class VisionDownloader:
         return csv_path
 
     def extract_zip_bytes(self, zip_payload: bytes, zip_name: str) -> VisionCsvPayload:
-        """Extract the first CSV from a ZIP payload into a bounded CSV spool."""
-        zip_file = tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX_BYTES, mode="w+b")
+        """Extract the first CSV from a ZIP payload into a RAM-only CSV source."""
+        zip_file = BytesIO()
         try:
             zip_file.write(zip_payload)
             zip_file.seek(0)
@@ -651,8 +650,8 @@ class VisionDownloader:
             zip_file.close()
 
     def extract_zip_stream(self, zip_file: BinaryIO, zip_name: str) -> VisionCsvPayload:
-        """Extract the first CSV from a seekable ZIP stream into a bounded spool."""
-        csv_file = tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX_BYTES, mode="w+b")
+        """Extract the first CSV from a seekable ZIP stream into a RAM-only buffer."""
+        csv_file = BytesIO()
         try:
             zip_file.seek(0)
             with zipfile.ZipFile(zip_file, "r") as zf:
@@ -674,7 +673,7 @@ class VisionDownloader:
 
             csv_file.seek(0)
             name = logical.name or member
-            logger.debug("Extracted to bounded CSV source: %s", name)
+            logger.debug("Extracted to in-memory CSV source: %s", name)
             return VisionCsvPayload(name=name, file=csv_file)
         except Exception:
             csv_file.close()
