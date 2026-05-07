@@ -69,7 +69,8 @@ class PathSettings(BaseModel):
 
 
 class DataSettings(BaseModel):
-    download_concurrency: int = Field(default=2, ge=1)
+    download_concurrency: int = Field(default=4, ge=1)
+    job_concurrency: int = Field(default=4, ge=1)
     convert_workers: int = Field(default=1, ge=1)
     chunk_rows: int = Field(default=1_000_000, ge=1)
     agg_trades_chunk_rows: int = Field(default=500_000, ge=1)

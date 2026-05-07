@@ -219,22 +219,23 @@ class BinanceVisionPipeline:
         convert_done = 0
         total_objects = 0
         all_file_paths: list[str] = []
-        download_failed = 0
+        download_errors: list[tuple[str, Exception]] = []
+        convert_errors: list[tuple[str, Exception]] = []
 
         async def _download_one(task):
-            nonlocal download_done, download_failed
+            nonlocal download_done
             async with sem:
                 try:
                     csv_path = await self.downloader.execute_task(task)
                     if csv_path:
                         await csv_queue.put(csv_path)
                     else:
-                        download_failed += 1
+                        download_errors.append((task.url, RuntimeError("downloader returned no CSV payload")))
                 except Exception as exc:
                     logger.warning(
-                        "Download failed for %s: %s — skipping", task.url, exc,
+                        "Download failed for %s: %s", task.url, exc,
                     )
-                    download_failed += 1
+                    download_errors.append((task.url, exc))
                 download_done += 1
                 await _progress(
                     compute_stage_pct(convert_done, total_tasks),
@@ -278,8 +279,9 @@ class BinanceVisionPipeline:
                     schema_validated = True
                     total_objects += n
                     all_file_paths.extend(fps)
-                except Exception:
+                except Exception as exc:
                     logger.warning("Convert failed for %s", csv_name, exc_info=True)
+                    convert_errors.append((csv_name, exc))
                 self._cleanup_raw_file(csv_path)
                 convert_done += 1
                 pct = compute_stage_pct(convert_done, total_tasks)
@@ -291,12 +293,23 @@ class BinanceVisionPipeline:
         consumers = [_convert_consumer() for _ in range(n_converters)]
         await asyncio.gather(_download_all(), *consumers)
 
-        if total_objects == 0 and download_failed == total_tasks:
-            await _progress(100, "All downloads failed")
-            return IngestResult(
-                symbol=symbol, data_type=data_type,
-                objects_count=0, files_written=0,
-                start=start, end=end,
+        if download_errors or convert_errors:
+            parts: list[str] = []
+            first_exc: Exception | None = None
+            if download_errors:
+                first_url, first_exc = download_errors[0]
+                parts.append(f"download failed for {first_url}: {first_exc}")
+            if convert_errors:
+                first_name, exc = convert_errors[0]
+                first_exc = first_exc or exc
+                parts.append(f"conversion failed for {first_name}: {exc}")
+            await _progress(100, "Failed")
+            raise RuntimeError("; ".join(parts)) from first_exc
+
+        if total_objects <= 0:
+            await _progress(100, "Failed")
+            raise RuntimeError(
+                f"{symbol} {data_type} converted 0 objects from {len(tasks)} downloaded file(s)"
             )
 
         # 4. REST API fallback for recent data gap
@@ -317,11 +330,15 @@ class BinanceVisionPipeline:
                         all_file_paths.extend(fb_paths)
                         rest_fallback_used = True
                         rest_fallback_range = (rest_start, end)
-                except Exception:
+                except Exception as exc:
                     logger.warning(
                         "REST fallback failed for %s %s [%s..%s]",
                         symbol, data_type, rest_start, end, exc_info=True,
                     )
+                    await _progress(100, "Failed")
+                    raise RuntimeError(
+                        f"REST fallback failed for {symbol} {data_type} [{rest_start}..{end}]: {exc}"
+                    ) from exc
 
         # 5. Update DB catalog
         await _progress(96, "Updating catalog database...")
@@ -336,7 +353,9 @@ class BinanceVisionPipeline:
                 source_type=data_type,
             )
         except Exception:
-            logger.warning("Failed to update DB catalog", exc_info=True)
+            await _progress(100, "Failed")
+            logger.exception("Failed to update DB catalog")
+            raise
 
         await _progress(100, f"Done: {total_objects} objects")
 
@@ -397,11 +416,7 @@ class BinanceVisionPipeline:
     ) -> tuple[int, list[str]]:
         """Convert a single CSV file/payload (sync, runs in executor thread)."""
         csv_name = self._csv_display_name(csv_path)
-        try:
-            hdr = self._detect_header(csv_path)
-        except Exception:
-            logger.warning("Failed to read CSV header %s", csv_name, exc_info=True)
-            return 0, []
+        hdr = self._detect_header(csv_path)
 
         if converter.supports_chunked:
             return self._stream_chunked_file(
@@ -442,7 +457,7 @@ class BinanceVisionPipeline:
                 hdr = self._detect_header(csv_path)
             except Exception:
                 logger.warning("Failed to read CSV header %s", csv_name, exc_info=True)
-                continue
+                raise
 
             if converter.supports_chunked:
                 n, fps = self._stream_chunked_file(
@@ -456,6 +471,10 @@ class BinanceVisionPipeline:
                 )
 
             schema_validated = True
+            if n > 0 and not fps:
+                raise RuntimeError(
+                    f"{data_type} conversion produced {n} objects but wrote no parquet files"
+                )
             total_objects += n
             all_file_paths.extend(fps)
 
@@ -486,7 +505,7 @@ class BinanceVisionPipeline:
             if source is not None:
                 source.close()
             logger.warning("Failed to open CSV %s", csv_name, exc_info=True)
-            return 0, []
+            raise
 
         count = 0
         fps: list[str] = []
@@ -507,6 +526,10 @@ class BinanceVisionPipeline:
                     fp = self._write_objects(
                         chunk_objects, symbol, data_type, interval, merge=False,
                     )
+                    if not fp:
+                        raise RuntimeError(
+                            f"{data_type} conversion produced {len(chunk_objects)} objects but wrote no parquet files"
+                        )
                     count += len(chunk_objects)
                     fps.extend(fp)
                     chunk_objects = []
@@ -519,6 +542,10 @@ class BinanceVisionPipeline:
             fp = self._write_objects(
                 chunk_objects, symbol, data_type, interval, merge=False,
             )
+            if not fp:
+                raise RuntimeError(
+                    f"{data_type} conversion produced {len(chunk_objects)} objects but wrote no parquet files"
+                )
             count += len(chunk_objects)
             fps.extend(fp)
             if chunk_cb:
@@ -544,7 +571,7 @@ class BinanceVisionPipeline:
                 df.columns = range(len(df.columns))
         except Exception:
             logger.warning("Failed to read CSV %s", csv_name, exc_info=True)
-            return 0, []
+            raise
 
         if not schema_validated:
             converter.validate_schema(df)
@@ -558,6 +585,10 @@ class BinanceVisionPipeline:
         fps = self._write_objects(
             objects, symbol, data_type, interval, merge=False,
         )
+        if not fps:
+            raise RuntimeError(
+                f"{data_type} conversion produced {len(objects)} objects but wrote no parquet files"
+            )
         count = len(objects)
         del objects
         return count, fps
@@ -583,8 +614,7 @@ class BinanceVisionPipeline:
         if category == "bar":
             from tinohelm.data.catalog import write_bars
             if not interval:
-                logger.warning("Cannot write bars without interval")
-                return []
+                raise ValueError(f"Cannot write bars without interval for data_type={data_type!r}")
             paths = write_bars(
                 bars=objects, symbol=symbol,
                 interval=interval, catalog_path=self.catalog_path,
@@ -629,11 +659,9 @@ class BinanceVisionPipeline:
             return [str(path)]
 
         else:
-            logger.warning(
-                "No catalog writer for data_type=%r (category=%r), skipping write",
-                data_type, category,
+            raise RuntimeError(
+                f"No catalog writer for data_type={data_type!r} (category={category!r})"
             )
-            return []
 
     @staticmethod
     def _funding_cache_covers(symbol: str, start: date, end: date) -> bool:
@@ -1127,7 +1155,7 @@ class BinanceVisionPipeline:
         source_type: str | None = None,
     ) -> None:
         """Upsert a DataCatalog row for the ingested data."""
-        from sqlalchemy import select
+        from sqlalchemy import select, text
         from tinohelm.db.models import DataCatalog
         from tinohelm.db.session import get_session_factory
 
@@ -1136,15 +1164,27 @@ class BinanceVisionPipeline:
         category = resolve_db_category(data_type)
         db_interval = resolve_db_interval(data_type, interval)
         effective_path = str(resolve_catalog_path(self.catalog_path, source_type))
+        lock_key = f"data_catalog:{symbol}:{category}:{db_interval}:{source_type or ''}"
 
         factory = get_session_factory()
         async with factory() as session:
+            try:
+                bind = session.get_bind()
+                dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+            except Exception:
+                dialect_name = ""
+            if dialect_name == "postgresql":
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:key)::bigint)"),
+                    {"key": lock_key},
+                )
+
             stmt = select(DataCatalog).where(
                 DataCatalog.symbol == symbol,
                 DataCatalog.data_type == category,
                 DataCatalog.interval == db_interval,
                 DataCatalog.source_type == source_type,
-            )
+            ).with_for_update()
             existing = (await session.execute(stmt)).scalar_one_or_none()
 
             if existing:

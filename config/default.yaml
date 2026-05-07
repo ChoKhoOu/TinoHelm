@@ -24,7 +24,8 @@ paths:
   factor_cache: "tino/factor_cache"
 
 data:
-  download_concurrency: 2
+  download_concurrency: 4
+  job_concurrency: 4
   convert_workers: 1
   chunk_rows: 1000000
   agg_trades_chunk_rows: 500000

@@ -9,7 +9,7 @@ from io import BytesIO
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import polars as pl
 import pytest
@@ -994,6 +994,184 @@ class TestIngestNoTasks:
         assert result.files_written == 0
         assert result.symbol == "BTCUSDT-PERP"
         assert result.data_type == "fundingRate"
+
+
+class TestIngestFailClosed:
+    def test_conversion_write_failure_raises_before_catalog_db_update(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+
+        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-aggTrades.zip")
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return [task]
+
+            async def execute_task(self, _task):
+                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr(p, "_clean_overlapping_parquet", lambda *_args: None)
+        monkeypatch.setattr(p, "_detect_vision_coverage_end", lambda _tasks: None)
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        p._write_objects = MagicMock(side_effect=RuntimeError("remote parquet write failed"))
+        p._update_db_catalog = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="remote parquet write failed"):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 1),
+            ))
+
+        p._update_db_catalog.assert_not_awaited()
+
+    def test_csv_read_failure_raises_before_catalog_db_update(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-aggTrades.zip")
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return [task]
+
+            async def execute_task(self, _task):
+                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+
+        class Converter:
+            supports_chunked = False
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr(p, "_clean_overlapping_parquet", lambda *_args: None)
+        monkeypatch.setattr(p, "_detect_vision_coverage_end", lambda _tasks: None)
+        monkeypatch.setattr(p, "_detect_header", MagicMock(side_effect=OSError("csv header unreadable")))
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        p._update_db_catalog = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="csv header unreadable"):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 1),
+            ))
+
+        p._update_db_catalog.assert_not_awaited()
+
+    def test_nonempty_conversion_with_no_written_files_raises_before_catalog_db_update(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-aggTrades.zip")
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return [task]
+
+            async def execute_task(self, _task):
+                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                pass
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr(p, "_clean_overlapping_parquet", lambda *_args: None)
+        monkeypatch.setattr(p, "_detect_vision_coverage_end", lambda _tasks: None)
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        p._write_objects = MagicMock(return_value=[])
+        p._update_db_catalog = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="wrote no parquet files"):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 1),
+            ))
+
+        p._update_db_catalog.assert_not_awaited()
+
+    def test_rest_fallback_failure_raises_before_catalog_db_update(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-aggTrades.zip")
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return [task]
+
+            async def execute_task(self, _task):
+                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                pass
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr(p, "_clean_overlapping_parquet", lambda *_args: None)
+        monkeypatch.setattr(p, "_detect_vision_coverage_end", lambda _tasks: date(2025, 1, 1))
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        p._write_objects = MagicMock(return_value=["s3://bucket/catalog/ticks/aggTrades/day.parquet"])
+        p._rest_fallback = AsyncMock(side_effect=RuntimeError("rest fallback write failed"))
+        p._update_db_catalog = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="rest fallback write failed"):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 2),
+            ))
+
+        p._update_db_catalog.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

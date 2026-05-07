@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from tinohelm.data.catalog_helpers import (
     CATEGORY_DIR,
@@ -91,17 +92,30 @@ def _is_remote_storage(storage: Any | None) -> bool:
     return storage is not None and getattr(storage, "provider", "local") != "local"
 
 
+def _remote_catalog_constructor_args(catalog_root: Path, storage: Any) -> tuple[str, str]:
+    """Return ``(path, protocol)`` for NT's constructor without URI-parsed host leakage."""
+    uri_for_root = getattr(storage, "uri_for_catalog_root", None)
+    if not callable(uri_for_root):
+        raise ValueError("Remote catalog storage must expose uri_for_catalog_root()")
+    uri = str(uri_for_root(catalog_root))
+    parsed = urlparse(uri)
+    if not parsed.scheme:
+        return uri, getattr(storage, "fs_protocol", "file")
+    if parsed.scheme == "file":
+        return parsed.path, "file"
+    return f"{parsed.netloc}{parsed.path}".lstrip("/"), parsed.scheme
+
+
 def _catalog_for_root(catalog_root: str | Path, storage: Any | None = None):
     """Create an NT catalog for a logical root, using object storage directly when active."""
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     root = Path(catalog_root)
     if _is_remote_storage(storage):
-        uri_for_root = getattr(storage, "uri_for_catalog_root", None)
-        if not callable(uri_for_root):
-            raise ValueError("Remote catalog storage must expose uri_for_catalog_root()")
-        return ParquetDataCatalog.from_uri(
-            uri_for_root(root),
+        remote_path, fs_protocol = _remote_catalog_constructor_args(root, storage)
+        return ParquetDataCatalog(
+            remote_path,
+            fs_protocol=fs_protocol,
             fs_storage_options=getattr(storage, "fs_storage_options", None),
             fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
         )
@@ -593,6 +607,10 @@ def write_trade_ticks(
     # Return only newly created files
     current = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
     written = sorted(current - existing)
+    if ticks and not written:
+        raise RuntimeError(
+            f"TradeTick write for {symbol} produced no parquet files under {tick_dir}"
+        )
     logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
 
@@ -618,6 +636,10 @@ def write_quote_ticks(
     catalog.write_data(ticks, skip_disjoint_check=True)
     current = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
     written = sorted(current - existing)
+    if ticks and not written:
+        raise RuntimeError(
+            f"QuoteTick write for {symbol} produced no parquet files under {tick_dir}"
+        )
     logger.info("Wrote %d QuoteTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
 

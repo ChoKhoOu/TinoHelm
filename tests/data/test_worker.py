@@ -208,6 +208,47 @@ class TestProcessJob:
         assert pipeline_constructed == []
         fake_rds.publish.assert_not_called()
 
+    async def test_stale_duplicate_queue_item_returns_when_atomic_claim_lost(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTC", data_type="aggTrades", interval=None,
+            start_date="2025-01-01", end_date="2025-01-01", asset_class="futures",
+        )
+        calls = {"count": 0}
+
+        def factory():
+            calls["count"] += 1
+            db = AsyncMock()
+            if calls["count"] == 1:
+                select_result = MagicMock()
+                select_result.scalar_one_or_none = MagicMock(return_value=job)
+                claim_result = MagicMock()
+                claim_result.rowcount = 0
+                db.execute = AsyncMock(side_effect=[select_result, claim_result])
+            else:
+                db.execute = AsyncMock(return_value=MagicMock())
+            return _FakeSessionCtx(db)
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        pipeline_constructed = []
+        import tinohelm.data.pipeline as pkg_pipeline
+
+        class _Boom(pkg_pipeline.BinanceVisionPipeline):
+            def __init__(self, *a, **k):
+                pipeline_constructed.append(True)
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _Boom)
+
+        await dw._process_job("jid", "redis://x", "/cat")
+
+        assert pipeline_constructed == []
+        fake_rds.publish.assert_not_called()
+
     async def test_happy_path_runs_pipeline_and_publishes_completion(self, monkeypatch):
         job = SimpleNamespace(
             status="queued",
@@ -373,6 +414,40 @@ class TestProcessJob:
 # ---------------------------------------------------------------------------
 
 class TestWorkerLifecycle:
+    async def test_start_launches_configured_parallel_consumers(self, monkeypatch):
+        started: list[dict] = []
+
+        async def _fake_consumer(redis_url, queue_key, process_job, *,
+                                  pop_timeout=5.0, worker_label="queue-worker"):
+            started.append({
+                "redis_url": redis_url,
+                "queue_key": queue_key,
+                "worker_label": worker_label,
+            })
+            await asyncio.sleep(5)
+
+        monkeypatch.setattr(dw, "consumer_loop", _fake_consumer)
+        monkeypatch.setattr(
+            dw,
+            "get_settings",
+            lambda: SimpleNamespace(data=SimpleNamespace(job_concurrency=3)),
+            raising=False,
+        )
+        dw._handle.stop()
+
+        task = dw.start_data_worker(redis_url="redis://x", catalog_path="/cat")
+        try:
+            await asyncio.sleep(0.02)
+            assert len(started) == 3
+            assert {call["redis_url"] for call in started} == {"redis://x"}
+            assert {call["queue_key"] for call in started} == {"tino:data:queue"}
+        finally:
+            dw.stop_data_worker()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
     async def test_start_creates_task_via_handle(self, monkeypatch):
         # Replace consumer_loop with a coroutine that sleeps briefly
         started: dict = {}

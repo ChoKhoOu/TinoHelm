@@ -23,6 +23,7 @@ from tinohelm.core.async_queue_worker import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_QUEUED,
     STATUS_RUNNING,
     TimeThrottle,
     WorkerHandle,
@@ -30,6 +31,7 @@ from tinohelm.core.async_queue_worker import (
     enqueue_job as _shared_enqueue_job,
     requeue_running_jobs,
 )
+from tinohelm.core.config import get_settings
 from tinohelm.db.models import DataFetchJob
 from tinohelm.db.session import get_session_factory
 
@@ -83,12 +85,34 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             if job.status == STATUS_CANCELLED:
                 logger.info("Data-fetch job %s was cancelled, skipping", job_id)
                 return
+            if job.status != STATUS_QUEUED:
+                logger.info(
+                    "Data-fetch job %s is %s, skipping stale queue item",
+                    job_id,
+                    job.status,
+                )
+                return
 
-            # Mark running
-            job.status = STATUS_RUNNING
-            job.progress = 0
-            job.message = "Starting..."
+            claim_result = await db.execute(
+                update(DataFetchJob)
+                .where(
+                    DataFetchJob.job_id == job_id,
+                    DataFetchJob.status == STATUS_QUEUED,
+                )
+                .values(
+                    status=STATUS_RUNNING,
+                    progress=0,
+                    message="Starting...",
+                    error=None,
+                )
+            )
             await db.commit()
+            if getattr(claim_result, "rowcount", None) == 0:
+                logger.info(
+                    "Data-fetch job %s was claimed by another worker, skipping stale queue item",
+                    job_id,
+                )
+                return
 
             # Capture params before session closes
             symbol = job.symbol
@@ -194,14 +218,19 @@ def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
     async def _process(job_id: str) -> None:
         await _process_job(job_id, redis_url, catalog_path)
 
-    return _handle.start(
-        lambda: consumer_loop(
-            redis_url,
-            QUEUE_KEY,
-            _process,
-            worker_label="Data-fetch worker",
-        )
-    )
+    async def _run_consumers() -> None:
+        concurrency = max(1, get_settings().data.job_concurrency)
+        await asyncio.gather(*[
+            consumer_loop(
+                redis_url,
+                QUEUE_KEY,
+                _process,
+                worker_label="Data-fetch worker",
+            )
+            for _ in range(concurrency)
+        ])
+
+    return _handle.start(_run_consumers)
 
 
 def stop_data_worker() -> None:

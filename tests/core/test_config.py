@@ -114,7 +114,8 @@ class TestSettingsDefaults:
 
     def test_data_defaults(self):
         s = DataSettings()
-        assert s.download_concurrency == 2
+        assert s.download_concurrency == 4
+        assert s.job_concurrency == 4
         assert s.convert_workers == 1
         assert s.chunk_rows == 1_000_000
         assert s.agg_trades_chunk_rows == 500_000
@@ -125,6 +126,7 @@ class TestSettingsDefaults:
         "field",
         [
             "download_concurrency",
+            "job_concurrency",
             "convert_workers",
             "chunk_rows",
             "agg_trades_chunk_rows",
@@ -202,7 +204,8 @@ class TestLoadSettings:
         """Repo default.yaml must not override hardened DataSettings defaults."""
         s = load_settings()
 
-        assert s.data.download_concurrency == 2
+        assert s.data.download_concurrency == 4
+        assert s.data.job_concurrency == 4
         assert s.data.convert_workers == 1
         assert s.data.chunk_rows == 1_000_000
         assert s.data.agg_trades_chunk_rows == 500_000
