@@ -188,6 +188,47 @@ def test_backtest_runner_defaults_do_not_request_extra_replay():
     assert runner.extra_data_types == []
 
 
+def test_backtest_runner_remote_catalog_constructor_avoids_from_uri_host_leak(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from tinohelm.backtest import runner as runner_mod
+    from tinohelm.backtest.runner import BacktestRunner
+
+    class FakeCatalog:
+        init_calls = []
+        from_uri_calls = []
+
+        def __init__(self, catalog_path, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
+            if str(catalog_path).startswith("s3://"):
+                raise AssertionError("remote runner must pass bucket/key path, not an s3 URI")
+            self.init_calls.append((catalog_path, fs_protocol, fs_storage_options, fs_rust_storage_options))
+
+        @classmethod
+        def from_uri(cls, *args, **kwargs):
+            cls.from_uri_calls.append((args, kwargs))
+            raise AssertionError("from_uri would merge fsspec's host into s3fs options")
+
+    storage = SimpleNamespace(
+        provider="s3",
+        fs_storage_options={"endpoint_url": "https://example.com"},
+        fs_rust_storage_options={"endpoint_url": "https://example.com"},
+        uri_for_catalog_root=lambda _path: "s3://bucket/catalog/bar/klines",
+    )
+    monkeypatch.setattr(runner_mod, "_NT_AVAILABLE", True)
+    monkeypatch.setattr(runner_mod, "ParquetDataCatalog", FakeCatalog)
+
+    runner = BacktestRunner(symbol="BTCUSDT-PERP", interval="1m")
+    runner._storage = storage
+
+    catalog = runner._catalog_for_path(tmp_path)
+
+    assert isinstance(catalog, FakeCatalog)
+    assert FakeCatalog.from_uri_calls == []
+    assert FakeCatalog.init_calls == [
+        ("bucket/catalog/bar/klines", "s3", storage.fs_storage_options, storage.fs_rust_storage_options)
+    ]
+
+
 def test_backtest_runner_optional_replay_loads_and_injects(monkeypatch):
     from tinohelm.backtest.runner import BacktestRunner
 

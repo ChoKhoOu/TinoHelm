@@ -440,9 +440,7 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
 
         return compact_bars(symbol=symbol, interval=interval, catalog_path=catalog_path)
 
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
-    from tinohelm.data.catalog import _make_bar_type, _make_instrument
+    from tinohelm.data.catalog import _catalog_for_root, _make_bar_type, _make_instrument
     from tinohelm.data.catalog_helpers import dedupe_by_ts
     from tinohelm.data.storage import delete_prefix, promote_objects_with_rollback
 
@@ -464,12 +462,7 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
             "size_after": size_before,
         }
 
-    catalog_uri = storage.uri_for_catalog_root(catalog_path)
-    catalog = ParquetDataCatalog.from_uri(
-        catalog_uri,
-        fs_storage_options=getattr(storage, "fs_storage_options", None),
-        fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
-    )
+    catalog = _catalog_for_root(catalog_path, storage)
     bars = catalog.bars(bar_types=[str(bar_type)])
     if not bars:
         logger.warning("No bars found for %s %s during compaction", symbol, interval)
@@ -487,12 +480,7 @@ def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path
     temp_catalog_path = catalog_path / ".compaction" / f"{bar_type}-{uuid4().hex}"
     rollback_prefix = catalog_path / ".compaction-rollback" / f"{bar_type}-{uuid4().hex}"
     try:
-        temp_catalog_uri = storage.uri_for_catalog_root(temp_catalog_path)
-        temp_catalog = ParquetDataCatalog.from_uri(
-            temp_catalog_uri,
-            fs_storage_options=getattr(storage, "fs_storage_options", None),
-            fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
-        )
+        temp_catalog = _catalog_for_root(temp_catalog_path, storage)
         temp_catalog.write_data([instrument])
         temp_catalog.write_data(bars)
 

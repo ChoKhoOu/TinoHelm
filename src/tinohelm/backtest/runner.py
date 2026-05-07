@@ -261,8 +261,14 @@ class BacktestRunner:
         catalog = self._catalog_cache.get(key)
         if catalog is None:
             if uri.startswith(("s3://", "gcs://", "abfs://", "az://")):
-                catalog = ParquetDataCatalog.from_uri(
-                    uri,
+                from tinohelm.data.catalog import _remote_catalog_constructor_args
+
+                remote_path, fs_protocol = _remote_catalog_constructor_args(
+                    Path(path), self._storage,
+                )
+                catalog = ParquetDataCatalog(
+                    remote_path,
+                    fs_protocol=fs_protocol,
                     fs_storage_options=self._catalog_fs_storage_options(),
                     fs_rust_storage_options=self._catalog_fs_rust_storage_options(),
                 )

@@ -577,12 +577,18 @@ class TestSourceAwareBarMaintenance:
                 return bar_type_str
 
         class FakeCatalog:
+            init_calls = []
             from_uri_calls = []
 
+            def __init__(self, catalog_path, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
+                if str(catalog_path).startswith("s3://"):
+                    raise AssertionError("remote validator must pass bucket/key path, not an s3 URI")
+                self.init_calls.append((catalog_path, fs_protocol, fs_storage_options, fs_rust_storage_options))
+
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
-                return cls()
+            def from_uri(cls, *args, **kwargs):
+                cls.from_uri_calls.append((args, kwargs))
+                raise AssertionError("from_uri would merge fsspec's host into s3fs options")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -600,8 +606,9 @@ class TestSourceAwareBarMaintenance:
 
         result = validate_bars("BTCUSDT-PERP", "1m", tmp_path, storage=storage)
 
-        assert FakeCatalog.from_uri_calls == [
-            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options)
+        assert FakeCatalog.from_uri_calls == []
+        assert FakeCatalog.init_calls == [
+            ("bucket/catalog", "s3", storage.fs_storage_options, storage.fs_rust_storage_options)
         ]
         assert result["total_bars"] == 2
         assert result["file_count"] == 1
@@ -758,15 +765,19 @@ class TestSourceAwareBarMaintenance:
         compacted_name = "2024-01-01T00-00-00-000000000Z_2024-01-01T00-01-00-000000000Z.parquet"
 
         class FakeCatalog:
+            init_calls = []
             from_uri_calls = []
 
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
+                if str(catalog_path).startswith("s3://"):
+                    raise AssertionError("remote compaction must pass bucket/key path, not an s3 URI")
                 self.catalog_path = catalog_path
+                self.init_calls.append((catalog_path, fs_protocol, fs_storage_options, fs_rust_storage_options))
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                cls.from_uri_calls.append((args, kwargs))
+                raise AssertionError("from_uri would merge fsspec's host into s3fs options")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -774,7 +785,7 @@ class TestSourceAwareBarMaintenance:
 
             def write_data(self, data, skip_disjoint_check=False):
                 if data and hasattr(data[0], "ts_event"):
-                    base = str(self.catalog_path).removeprefix("s3://")
+                    base = str(self.catalog_path)
                     fs.objects[f"{base}/data/bar/{bar_type_str}/{compacted_name}"] = b"new"
 
         import sys
@@ -804,9 +815,10 @@ class TestSourceAwareBarMaintenance:
             "size_before": len(b"old-a") + len(b"old-b"),
             "size_after": len(b"new"),
         }
-        assert FakeCatalog.from_uri_calls == [
-            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options),
-            (f"s3://bucket/catalog/.compaction/{bar_type_str}-abc123", storage.fs_storage_options, storage.fs_rust_storage_options),
+        assert FakeCatalog.from_uri_calls == []
+        assert FakeCatalog.init_calls == [
+            ("bucket/catalog", "s3", storage.fs_storage_options, storage.fs_rust_storage_options),
+            (f"bucket/catalog/.compaction/{bar_type_str}-abc123", "s3", storage.fs_storage_options, storage.fs_rust_storage_options),
         ]
         assert fs.rm_calls == old_keys + [backup_a_key, backup_b_key, temp_key]
         assert fs.put_calls == []
@@ -832,12 +844,12 @@ class TestSourceAwareBarMaintenance:
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
 
         class FakeCatalog:
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
                 self.catalog_path = catalog_path
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                raise AssertionError("remote compaction must not use from_uri")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -898,12 +910,12 @@ class TestSourceAwareBarMaintenance:
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
 
         class FakeCatalog:
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
                 self.catalog_path = catalog_path
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                raise AssertionError("remote compaction must not use from_uri")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -966,12 +978,12 @@ class TestSourceAwareBarMaintenance:
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
 
         class FakeCatalog:
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
                 self.catalog_path = catalog_path
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                raise AssertionError("remote compaction must not use from_uri")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -1020,12 +1032,12 @@ class TestSourceAwareBarMaintenance:
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
 
         class FakeCatalog:
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
                 self.catalog_path = catalog_path
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                raise AssertionError("remote compaction must not use from_uri")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]

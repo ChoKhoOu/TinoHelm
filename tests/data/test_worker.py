@@ -109,24 +109,28 @@ class _FakeSessionCtx:
 def _make_session_factory(*, initial_job, commit_spy=None):
     """Build a factory that yields a fresh AsyncMock db each time.
 
-    - First enter: returns the job (select → scalar_one_or_none).
-    - Subsequent enters (progress-write or completion): benign execute/commit.
+    - First enter: atomic queued->running claim update.
+    - Second enter after a successful claim: load job params.
+    - Subsequent enters: guarded progress/terminal updates.
     """
     calls = {"count": 0}
+    claim_rowcount = 1 if initial_job is not None and initial_job.status == "queued" else 0
 
     def factory():
         calls["count"] += 1
         db = AsyncMock()
-        if calls["count"] == 1 and initial_job is not None:
+        if calls["count"] == 1:
+            result = MagicMock()
+            result.rowcount = claim_rowcount
+            db.execute = AsyncMock(return_value=result)
+        elif calls["count"] == 2 and claim_rowcount == 1:
             result = MagicMock()
             result.scalar_one_or_none = MagicMock(return_value=initial_job)
             db.execute = AsyncMock(return_value=result)
-        elif calls["count"] == 1 and initial_job is None:
-            result = MagicMock()
-            result.scalar_one_or_none = MagicMock(return_value=None)
-            db.execute = AsyncMock(return_value=result)
         else:
-            db.execute = AsyncMock(return_value=MagicMock())
+            result = MagicMock()
+            result.rowcount = 1
+            db.execute = AsyncMock(return_value=result)
         if commit_spy is not None:
             async def _commit():
                 commit_spy.append(calls["count"])
@@ -208,27 +212,13 @@ class TestProcessJob:
         assert pipeline_constructed == []
         fake_rds.publish.assert_not_called()
 
-    async def test_stale_duplicate_queue_item_returns_when_atomic_claim_lost(self, monkeypatch):
+    async def test_running_duplicate_queue_entry_returns_without_work(self, monkeypatch):
         job = SimpleNamespace(
-            status="queued",
+            status="running",
             symbol="BTC", data_type="aggTrades", interval=None,
             start_date="2025-01-01", end_date="2025-01-01", asset_class="futures",
         )
-        calls = {"count": 0}
-
-        def factory():
-            calls["count"] += 1
-            db = AsyncMock()
-            if calls["count"] == 1:
-                select_result = MagicMock()
-                select_result.scalar_one_or_none = MagicMock(return_value=job)
-                claim_result = MagicMock()
-                claim_result.rowcount = 0
-                db.execute = AsyncMock(side_effect=[select_result, claim_result])
-            else:
-                db.execute = AsyncMock(return_value=MagicMock())
-            return _FakeSessionCtx(db)
-
+        factory, _ = _make_session_factory(initial_job=job)
         monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
         fake_rds = AsyncMock()
         monkeypatch.setattr(
@@ -247,6 +237,63 @@ class TestProcessJob:
         await dw._process_job("jid", "redis://x", "/cat")
 
         assert pipeline_constructed == []
+        fake_rds.publish.assert_not_called()
+
+    async def test_cancelled_during_processing_is_not_overwritten_completed(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        calls = {"count": 0}
+        terminal_statements = []
+
+        def factory():
+            calls["count"] += 1
+            db = AsyncMock()
+            if calls["count"] == 1:
+                result = MagicMock()
+                result.rowcount = 1
+                db.execute = AsyncMock(return_value=result)
+            elif calls["count"] == 2:
+                result = MagicMock()
+                result.scalar_one_or_none = MagicMock(return_value=job)
+                db.execute = AsyncMock(return_value=result)
+            else:
+                result = MagicMock()
+                result.rowcount = 0
+
+                async def _execute(stmt):
+                    terminal_statements.append(stmt)
+                    return result
+
+                db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _NoProgressPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                return _fake_pipeline_result(objects_count=7)
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _NoProgressPipeline)
+
+        await dw._process_job("job-cancelled-mid-flight", "redis://x", "/cat")
+
+        assert terminal_statements, "worker should attempt a guarded terminal update"
+        assert all(
+            "WHERE data_fetch_jobs.job_id =" in str(stmt)
+            and "AND data_fetch_jobs.status =" in str(stmt)
+            for stmt in terminal_statements
+        )
         fake_rds.publish.assert_not_called()
 
     async def test_happy_path_runs_pipeline_and_publishes_completion(self, monkeypatch):

@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 import pandas as pd
 
@@ -86,6 +88,55 @@ class IngestResult:
     skipped: bool = False
     rest_fallback_used: bool = False
     rest_fallback_range: tuple[date, date] | None = None
+
+
+@dataclass
+class _CleanupBackup:
+    original_path: Path
+    backup_path: Path
+
+
+class _ParquetCleanupGuard:
+    """Rollback handle for overlapping parquet files removed before ingest writes."""
+
+    def __init__(self, storage: Any, rollback_prefix: Path) -> None:
+        self._storage = storage
+        self._rollback_prefix = rollback_prefix
+        self._backups: list[_CleanupBackup] = []
+        self._active = True
+
+    def add_backup(self, original_path: Path, backup_path: Path) -> None:
+        self._backups.append(
+            _CleanupBackup(original_path=Path(original_path), backup_path=Path(backup_path))
+        )
+
+    @property
+    def backups(self) -> list[_CleanupBackup]:
+        return list(self._backups)
+
+    def restore(self) -> None:
+        """Restore backed-up objects to their original logical paths."""
+        if not self._active:
+            return
+        try:
+            for backup in reversed(self._backups):
+                self._storage.copy_path(backup.backup_path, backup.original_path)
+        finally:
+            self.discard()
+
+    def discard(self) -> None:
+        """Drop rollback copies after the replacement is known-good."""
+        if not self._active:
+            return
+        self._active = False
+        if not self._backups:
+            return
+        if getattr(self._storage, "provider", "local") != "local":
+            from tinohelm.data.storage import delete_prefix
+
+            delete_prefix(self._storage, self._rollback_prefix)
+        else:
+            shutil.rmtree(self._rollback_prefix, ignore_errors=True)
 
 
 class BinanceVisionPipeline:
@@ -202,7 +253,7 @@ class BinanceVisionPipeline:
         kwargs = self._build_converter_kwargs(
             data_type, symbol, interval, instrument,
         )
-        self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
+        cleanup_guard = self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
 
         # 3. Pipelined download → convert (overlap via asyncio.Queue)
         dl_concurrency = self.downloader.concurrency
@@ -276,6 +327,10 @@ class BinanceVisionPipeline:
                         symbol, data_type, interval, schema_validated,
                         _chunk_cb,
                     )
+                    if n <= 0 or not fps:
+                        raise RuntimeError(
+                            f"conversion produced no objects/files for {csv_name}"
+                        )
                     schema_validated = True
                     total_objects += n
                     all_file_paths.extend(fps)
@@ -294,6 +349,8 @@ class BinanceVisionPipeline:
         await asyncio.gather(_download_all(), *consumers)
 
         if download_errors or convert_errors:
+            if cleanup_guard is not None:
+                cleanup_guard.restore()
             parts: list[str] = []
             first_exc: Exception | None = None
             if download_errors:
@@ -307,6 +364,8 @@ class BinanceVisionPipeline:
             raise RuntimeError("; ".join(parts)) from first_exc
 
         if total_objects <= 0:
+            if cleanup_guard is not None:
+                cleanup_guard.restore()
             await _progress(100, "Failed")
             raise RuntimeError(
                 f"{symbol} {data_type} converted 0 objects from {len(tasks)} downloaded file(s)"
@@ -335,6 +394,8 @@ class BinanceVisionPipeline:
                         "REST fallback failed for %s %s [%s..%s]",
                         symbol, data_type, rest_start, end, exc_info=True,
                     )
+                    if cleanup_guard is not None:
+                        cleanup_guard.restore()
                     await _progress(100, "Failed")
                     raise RuntimeError(
                         f"REST fallback failed for {symbol} {data_type} [{rest_start}..{end}]: {exc}"
@@ -353,9 +414,14 @@ class BinanceVisionPipeline:
                 source_type=data_type,
             )
         except Exception:
+            if cleanup_guard is not None:
+                cleanup_guard.restore()
             await _progress(100, "Failed")
             logger.exception("Failed to update DB catalog")
             raise
+
+        if cleanup_guard is not None:
+            cleanup_guard.discard()
 
         await _progress(100, f"Done: {total_objects} objects")
 
@@ -471,9 +537,9 @@ class BinanceVisionPipeline:
                 )
 
             schema_validated = True
-            if n > 0 and not fps:
+            if n <= 0 or not fps:
                 raise RuntimeError(
-                    f"{data_type} conversion produced {n} objects but wrote no parquet files"
+                    f"conversion produced no objects/files for {csv_name}"
                 )
             total_objects += n
             all_file_paths.extend(fps)
@@ -862,13 +928,13 @@ class BinanceVisionPipeline:
         interval: str | None,
         start: date,
         end: date,
-    ) -> None:
-        """Delete parquet files whose time range overlaps with [start, end].
+    ) -> _ParquetCleanupGuard | None:
+        """Delete overlapping parquet only after creating rollback copies.
 
-        Uses parquet row-group statistics to check each file's timestamp
-        range **without loading data into memory**.  Files whose range
-        cannot be determined are deleted conservatively.
-        Non-overlapping files from other date ranges are preserved.
+        Streaming writes need old overlapping files out of the target directory so
+        NT can return newly written files deterministically.  The destructive
+        delete is guarded by catalog-local rollback copies; if any later ingest
+        phase fails, the caller restores this guard before surfacing failure.
         """
         category = resolve_write_category(data_type)
         if category == "bar" and interval:
@@ -884,18 +950,18 @@ class BinanceVisionPipeline:
             nt_category = "quote_tick" if category == "quote_tick" else "trade_tick"
             target_dir = Path(resolved) / "data" / nt_category / str(inst.id)
         else:
-            return  # merged raw datasets clean themselves via their writers
+            return None  # merged raw datasets clean themselves via their writers
 
         from tinohelm.data.storage import delete_prefix
 
         parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=False))
         if not parquet_objects:
-            return
+            return None
 
         start_ns = date_start_ns(start)
         end_ns = date_end_ns(end)
+        overlapping: list[Any] = []
 
-        deleted = 0
         for obj in parquet_objects:
             try:
                 time_range = self._parquet_time_range(obj, storage=self._storage)
@@ -904,20 +970,34 @@ class BinanceVisionPipeline:
                 # one-argument helper signature.
                 time_range = self._parquet_time_range(obj.path)
             if time_range is None:
-                # Cannot determine range — delete to be safe (will be re-fetched)
-                delete_prefix(self._storage, obj.path)
-                deleted += 1
+                # Cannot determine range — replace conservatively, but keep rollback.
+                overlapping.append(obj)
                 continue
             file_min, file_max = time_range
             if file_max >= start_ns and file_min < end_ns:
-                delete_prefix(self._storage, obj.path)
-                deleted += 1
+                overlapping.append(obj)
 
-        if deleted:
-            logger.info(
-                "Cleaned %d overlapping parquet file(s) in %s for [%s, %s]",
-                deleted, target_dir, start, end,
-            )
+        if not overlapping:
+            return None
+
+        rollback_prefix = Path(self.catalog_path) / ".ingest-rollback" / uuid4().hex
+        guard = _ParquetCleanupGuard(self._storage, rollback_prefix)
+        try:
+            for obj in overlapping:
+                original_path = Path(obj.path)
+                backup_path = rollback_prefix / original_path.name
+                self._storage.copy_path(original_path, backup_path)
+                guard.add_backup(original_path, backup_path)
+                delete_prefix(self._storage, original_path)
+        except Exception:
+            guard.restore()
+            raise
+
+        logger.info(
+            "Cleaned %d overlapping parquet file(s) in %s for [%s, %s] with rollback",
+            len(overlapping), target_dir, start, end,
+        )
+        return guard
 
     @staticmethod
     def _parquet_time_range(path_or_object, storage=None) -> tuple[int, int] | None:

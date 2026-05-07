@@ -64,6 +64,63 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     )
 
 
+def _rowcount(result) -> int:
+    value = getattr(result, "rowcount", None)
+    return value if isinstance(value, int) else 0
+
+
+async def _claim_queued_job(factory, job_id: str):
+    async with factory() as db:
+        result = await db.execute(
+            update(DataFetchJob)
+            .where(DataFetchJob.job_id == job_id)
+            .where(DataFetchJob.status == STATUS_QUEUED)
+            .values(
+                status=STATUS_RUNNING,
+                progress=0,
+                message="Starting...",
+                error=None,
+                completed_at=None,
+            )
+        )
+        await db.commit()
+        if _rowcount(result) != 1:
+            return None
+
+    async with factory() as db:
+        job = (await db.execute(
+            select(DataFetchJob).where(DataFetchJob.job_id == job_id)
+        )).scalar_one_or_none()
+    if not job:
+        return None
+    if getattr(job, "status", STATUS_RUNNING) == STATUS_CANCELLED:
+        return None
+    return job
+
+
+async def _guarded_terminal_update(factory, job_id: str, values: dict) -> bool:
+    async with factory() as db:
+        result = await db.execute(
+            update(DataFetchJob)
+            .where(DataFetchJob.job_id == job_id)
+            .where(DataFetchJob.status == STATUS_RUNNING)
+            .values(**values)
+        )
+        await db.commit()
+    return _rowcount(result) == 1
+
+
+async def _persist_progress_if_running(factory, job_id: str, pct: int, msg: str) -> None:
+    async with factory() as db:
+        await db.execute(
+            update(DataFetchJob)
+            .where(DataFetchJob.job_id == job_id)
+            .where(DataFetchJob.status == STATUS_RUNNING)
+            .values(progress=pct, message=msg)
+        )
+        await db.commit()
+
+
 async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
     """Execute a single data-fetch job."""
     factory = get_session_factory()
@@ -72,55 +129,17 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
     symbol = data_type = ""
 
     try:
-        # Load job from DB
-        async with factory() as db:
-            job = (await db.execute(
-                select(DataFetchJob).where(DataFetchJob.job_id == job_id)
-            )).scalar_one_or_none()
+        job = await _claim_queued_job(factory, job_id)
+        if job is None:
+            logger.info("Data-fetch job %s is not queued, skipping stale queue item", job_id)
+            return
 
-            if not job:
-                logger.warning("Data-fetch job %s not found in DB, skipping", job_id)
-                return
-
-            if job.status == STATUS_CANCELLED:
-                logger.info("Data-fetch job %s was cancelled, skipping", job_id)
-                return
-            if job.status != STATUS_QUEUED:
-                logger.info(
-                    "Data-fetch job %s is %s, skipping stale queue item",
-                    job_id,
-                    job.status,
-                )
-                return
-
-            claim_result = await db.execute(
-                update(DataFetchJob)
-                .where(
-                    DataFetchJob.job_id == job_id,
-                    DataFetchJob.status == STATUS_QUEUED,
-                )
-                .values(
-                    status=STATUS_RUNNING,
-                    progress=0,
-                    message="Starting...",
-                    error=None,
-                )
-            )
-            await db.commit()
-            if getattr(claim_result, "rowcount", None) == 0:
-                logger.info(
-                    "Data-fetch job %s was claimed by another worker, skipping stale queue item",
-                    job_id,
-                )
-                return
-
-            # Capture params before session closes
-            symbol = job.symbol
-            data_type = job.data_type
-            interval = job.interval
-            start_date = job.start_date
-            end_date = job.end_date
-            asset_class = job.asset_class
+        symbol = job.symbol
+        data_type = job.data_type
+        interval = job.interval
+        start_date = job.start_date
+        end_date = job.end_date
+        asset_class = job.asset_class
 
         # Progress callback — publishes to Redis + throttled DB write
         throttle = TimeThrottle(interval=PROGRESS_THROTTLE_INTERVAL)
@@ -135,13 +154,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 payload["interval"] = interval
             await rds.publish(progress_channel, json.dumps(payload))
             if throttle.should_write(pct):
-                async with factory() as db2:
-                    await db2.execute(
-                        update(DataFetchJob)
-                        .where(DataFetchJob.job_id == job_id)
-                        .values(progress=pct, message=msg)
-                    )
-                    await db2.commit()
+                await _persist_progress_if_running(factory, job_id, pct, msg)
 
         # Run pipeline
         from tinohelm.data.pipeline import BinanceVisionPipeline
@@ -157,19 +170,19 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             progress_cb=_progress,
         )
 
-        # Mark completed
-        async with factory() as db:
-            await db.execute(
-                update(DataFetchJob)
-                .where(DataFetchJob.job_id == job_id)
-                .values(
-                    status=STATUS_COMPLETED,
-                    progress=100,
-                    message=f"Done: {result.objects_count} objects",
-                    completed_at=datetime.utcnow(),
-                )
-            )
-            await db.commit()
+        updated = await _guarded_terminal_update(
+            factory,
+            job_id,
+            {
+                "status": STATUS_COMPLETED,
+                "progress": 100,
+                "message": f"Done: {result.objects_count} objects",
+                "completed_at": datetime.utcnow(),
+            },
+        )
+        if not updated:
+            logger.info("Data-fetch job %s was no longer running at completion, skipping terminal event", job_id)
+            return
 
         logger.info(
             "Data-fetch job %s completed: %s %s — %d objects",
@@ -188,25 +201,24 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
     except Exception as exc:
         logger.exception("Data-fetch job %s failed: %s", job_id, exc)
         try:
-            async with factory() as db:
-                await db.execute(
-                    update(DataFetchJob)
-                    .where(DataFetchJob.job_id == job_id)
-                    .values(
-                        status=STATUS_FAILED,
-                        error=str(exc)[:2000],
-                        completed_at=datetime.utcnow(),
-                    )
-                )
-                await db.commit()
-            # Publish failure event → EventBridge → WS → toast
-            await rds.publish("tino:data:events", json.dumps({
-                "type": "data.fetch.failed",
-                "job_id": job_id,
-                "symbol": symbol,
-                "data_type": data_type,
-                "error": str(exc)[:200],
-            }))
+            updated = await _guarded_terminal_update(
+                factory,
+                job_id,
+                {
+                    "status": STATUS_FAILED,
+                    "error": str(exc)[:2000],
+                    "completed_at": datetime.utcnow(),
+                },
+            )
+            if updated:
+                # Publish failure event → EventBridge → WS → toast
+                await rds.publish("tino:data:events", json.dumps({
+                    "type": "data.fetch.failed",
+                    "job_id": job_id,
+                    "symbol": symbol,
+                    "data_type": data_type,
+                    "error": str(exc)[:200],
+                }))
         except Exception:
             logger.exception("Failed to update job %s status to failed", job_id)
     finally:

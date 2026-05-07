@@ -2,9 +2,10 @@
 
 The catalog layout stays NautilusTrader-native (``data/bar/...``,
 ``data/trade_tick/...`` etc.).  Remote Volcengine TOS storage is accessed
-through its S3-compatible endpoint, so every logical remote catalog path is an
-``s3://bucket/prefix/catalog`` URI that can also be handed to
-``ParquetDataCatalog.from_uri`` / ``DataCatalogConfig`` / ``BacktestDataConfig``.
+through its S3-compatible endpoint. Logical remote catalog roots can be exposed
+as ``s3://bucket/prefix/catalog`` URIs for high-level configs, while direct NT
+catalog construction uses ``bucket/prefix/catalog`` plus ``fs_protocol`` to avoid
+fsspec URI host leakage into storage options.
 """
 from __future__ import annotations
 
@@ -566,8 +567,9 @@ def stage_prefix_for_local_consumer(
     """Compatibility shim retained for old call sites.
 
     Remote S3/TOS catalogs are not materialized into a read cache.  New code
-    should use ``provider.iter_files`` / ``provider.open_input_file`` or NT's
-    ``from_uri`` path instead of checking ``Path.exists()`` after this call.
+    should use ``provider.iter_files`` / ``provider.open_input_file`` or NT
+    catalog construction with ``fs_protocol`` instead of checking
+    ``Path.exists()`` after this call.
     """
 
     return Path(logical_prefix)

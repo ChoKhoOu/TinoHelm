@@ -167,6 +167,80 @@ class TestBoundedCsvConversion:
         assert payload.closed
 
 
+class TestIngestFailClosed:
+    def test_empty_csv_payload_fails_before_catalog_db_update(self, tmp_path: Path, monkeypatch):
+        task = SimpleNamespace(url="memory://empty.csv")
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-empty.csv", b""))
+
+        class Converter:
+            supports_chunked = True
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        p._clean_overlapping_parquet = MagicMock(return_value=None)
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+        update_catalog = AsyncMock()
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
+        monkeypatch.setattr(p, "_update_db_catalog", update_catalog)
+
+        with pytest.raises(RuntimeError, match="conversion failed"):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 1),
+            ))
+
+        update_catalog.assert_not_awaited()
+
+    def test_overlapping_cleanup_restores_prior_files_when_later_conversion_fails(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        symbol = "BTCUSDT-PERP"
+        nt_symbol = "BTCUSDT-PERP.BINANCE"
+        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir.mkdir(parents=True)
+        old_path = trade_dir / "old-overlap.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
+        old_payload = old_path.read_bytes()
+
+        task = SimpleNamespace(url="memory://empty.csv")
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-empty.csv", b""))
+
+        class Converter:
+            supports_chunked = True
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
+        update_catalog = AsyncMock()
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
+        monkeypatch.setattr(p, "_update_db_catalog", update_catalog)
+
+        with pytest.raises(RuntimeError, match="conversion failed"):
+            asyncio.run(p.ingest(
+                symbol=symbol,
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 1),
+            ))
+
+        assert old_path.exists()
+        assert old_path.read_bytes() == old_payload
+        assert not (tmp_path / ".ingest-rollback").exists()
+        update_catalog.assert_not_awaited()
+
+
 class TestCatalogStorageStats:
     def test_remote_single_file_metrics_write_passes_storage_for_in_memory_upload(self, tmp_path: Path, monkeypatch):
         from tinohelm.data.catalog import metrics_parquet_path
