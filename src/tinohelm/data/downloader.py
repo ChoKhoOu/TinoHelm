@@ -15,7 +15,9 @@ import logging
 import zipfile
 from dataclasses import dataclass
 from datetime import date, timedelta
-from pathlib import Path
+from io import BytesIO
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 import httpx
 
@@ -23,6 +25,11 @@ from tinohelm.core.utils import is_within_dir
 from tinohelm.data.instruments import strip_to_binance_api_symbol
 from tinohelm.data.providers._rest import (
     DEFAULT_MAX_RETRIES,
+    MAX_BACKOFF_SECONDS,
+    REQUEST_ERROR_SLEEP_SECONDS,
+    SERVER_ERROR_SLEEP_SECONDS,
+    backoff_seconds,
+    classify_http_status,
     request_with_retry,
 )
 
@@ -56,6 +63,7 @@ _KLINES_TYPES = frozenset({
 
 _VISION_BASE = "https://data.binance.vision"
 _MAX_RETRIES = DEFAULT_MAX_RETRIES
+_STREAM_CHUNK_SIZE = 1024 * 1024
 
 
 class ChecksumError(Exception):
@@ -69,6 +77,85 @@ class DownloadTask:
     dest_path: Path   # final CSV path after extraction
     zip_path: Path    # ZIP file path
     granularity: str  # "daily" or "monthly"
+
+
+class _BorrowedBinaryReader:
+    """File-like proxy whose close() does not close the owned buffer."""
+
+    def __init__(self, raw: BinaryIO) -> None:
+        self._raw = raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def close(self) -> None:
+        return None
+
+    @property
+    def closed(self) -> bool:
+        return bool(getattr(self._raw, "closed", False))
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def __iter__(self):
+        return iter(self._raw)
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw, name)
+
+
+@dataclass
+class VisionCsvPayload:
+    """In-memory CSV source extracted from a Binance Vision ZIP archive."""
+
+    name: str
+    file: BinaryIO
+
+    @property
+    def path(self) -> Path:
+        """Logical CSV path used only for logging/backward-compatible helpers."""
+        return Path(self.name)
+
+    @property
+    def stem(self) -> str:
+        return Path(self.name).stem
+
+    @property
+    def suffix(self) -> str:
+        return Path(self.name).suffix
+
+    @property
+    def closed(self) -> bool:
+        return bool(getattr(self.file, "closed", False))
+
+    def open(self):
+        """Return a readable handle reset to the start without transferring ownership."""
+        if self.closed:
+            raise ValueError(f"CSV source {self.name!r} is closed")
+        self.file.seek(0)
+        return _BorrowedBinaryReader(self.file)
+
+    def close(self) -> None:
+        self.file.close()
+
+    def __repr__(self) -> str:
+        if self.closed:
+            return f"VisionCsvPayload(name={self.name!r}, closed=True)"
+        pos = self.file.tell()
+        try:
+            self.file.seek(0, 2)
+            size = self.file.tell()
+        finally:
+            self.file.seek(pos)
+        return f"VisionCsvPayload(name={self.name!r}, bytes={size}, closed=False)"
 
 
 class VisionDownloader:
@@ -251,7 +338,6 @@ class VisionDownloader:
 
         # Storage: raw_dir/{data_type}/{symbol}/{filename}
         dest_dir = self.raw_dir / data_type / api_symbol
-        dest_dir.mkdir(parents=True, exist_ok=True)
 
         if data_type in _KLINES_TYPES and interval:
             stem = f"{api_symbol}-{interval}-{date_str}"
@@ -309,6 +395,162 @@ class VisionDownloader:
         dest_path.write_bytes(resp.content)
         logger.debug("Downloaded: %s (%d bytes)", dest_path.name, len(resp.content))
         return dest_path
+
+    async def download_bytes(self, url: str) -> bytes:
+        """Download a single file into memory with the shared retry policy."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await request_with_retry(
+                client,
+                url,
+                max_retries=_MAX_RETRIES,
+                raise_on_404=True,
+                follow_redirects=True,
+            )
+        assert resp is not None  # raise_on_404=True — None path is impossible
+        payload = resp.content
+        logger.debug("Downloaded in memory: %s (%d bytes)", url.rsplit("/", 1)[-1], len(payload))
+        return payload
+
+    async def download_stream(self, url: str) -> BinaryIO:
+        """Download a file by streaming response chunks into an in-memory buffer."""
+        attempt = 0
+        while True:
+            stream = BytesIO()
+            try:
+                total = 0
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    async with client.stream("GET", url, follow_redirects=True) as resp:
+                        resp.raise_for_status()
+                        async for chunk in resp.aiter_bytes():
+                            if not chunk:
+                                continue
+                            stream.write(chunk)
+                            total += len(chunk)
+                stream.seek(0)
+                logger.debug("Downloaded stream: %s (%d bytes)", url.rsplit("/", 1)[-1], total)
+                return stream
+            except httpx.HTTPStatusError as exc:
+                stream.close()
+                status = exc.response.status_code
+                kind = classify_http_status(status)
+                if kind == "not_found":
+                    raise
+                if kind == "rate_limit":
+                    attempt += 1
+                    if attempt > _MAX_RETRIES:
+                        raise
+                    wait = backoff_seconds(attempt, max_seconds=MAX_BACKOFF_SECONDS)
+                    logger.warning(
+                        "Rate limited (HTTP %d) for %s, retry %d/%d in %ds",
+                        status, url, attempt, _MAX_RETRIES, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                if kind == "server_error":
+                    attempt += 1
+                    if attempt > _MAX_RETRIES:
+                        raise
+                    logger.warning(
+                        "Server error (HTTP %d) for %s, retry %d/%d in %.1fs",
+                        status, url, attempt, _MAX_RETRIES, SERVER_ERROR_SLEEP_SECONDS,
+                    )
+                    await asyncio.sleep(SERVER_ERROR_SLEEP_SECONDS)
+                    continue
+                raise
+            except httpx.RequestError as exc:
+                stream.close()
+                attempt += 1
+                if attempt > _MAX_RETRIES:
+                    raise
+                logger.warning(
+                    "Request error for %s: %s, retry %d/%d",
+                    url, exc, attempt, _MAX_RETRIES,
+                )
+                await asyncio.sleep(REQUEST_ERROR_SLEEP_SECONDS)
+                continue
+            except Exception:
+                stream.close()
+                raise
+
+    async def verify_checksum_bytes(
+        self,
+        zip_payload: bytes,
+        zip_name: str,
+        checksum_url: str,
+    ) -> None:
+        """Verify a ZIP payload against Binance Vision's SHA-256 checksum."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                resp = await client.get(checksum_url, follow_redirects=True)
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    logger.warning("Checksum file not found (404): %s — skipping", checksum_url)
+                    return
+                raise
+
+        checksum_text = resp.text.strip()
+        parts = checksum_text.split(None, 1)
+        if not parts:
+            logger.warning("Empty checksum file at %s — skipping", checksum_url)
+            return
+        expected_hash = parts[0].lower()
+
+        digest = hashlib.sha256()
+        view = memoryview(zip_payload)
+        chunk_size = 1024 * 1024
+        for offset in range(0, len(view), chunk_size):
+            digest.update(view[offset:offset + chunk_size])
+        actual_hash = digest.hexdigest().lower()
+
+        if actual_hash != expected_hash:
+            raise ChecksumError(
+                f"Checksum mismatch for {zip_name}: "
+                f"expected {expected_hash}, got {actual_hash}"
+            )
+
+        logger.debug("Checksum OK: %s", zip_name)
+
+    async def verify_checksum_stream(
+        self,
+        zip_file: BinaryIO,
+        zip_name: str,
+        checksum_url: str,
+    ) -> None:
+        """Verify a seekable ZIP stream against Binance Vision's SHA-256 checksum."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                resp = await client.get(checksum_url, follow_redirects=True)
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    logger.warning("Checksum file not found (404): %s — skipping", checksum_url)
+                    zip_file.seek(0)
+                    return
+                raise
+
+        checksum_text = resp.text.strip()
+        parts = checksum_text.split(None, 1)
+        if not parts:
+            logger.warning("Empty checksum file at %s — skipping", checksum_url)
+            zip_file.seek(0)
+            return
+        expected_hash = parts[0].lower()
+
+        digest = hashlib.sha256()
+        zip_file.seek(0)
+        for chunk in iter(lambda: zip_file.read(_STREAM_CHUNK_SIZE), b""):
+            digest.update(chunk)
+        zip_file.seek(0)
+        actual_hash = digest.hexdigest().lower()
+
+        if actual_hash != expected_hash:
+            raise ChecksumError(
+                f"Checksum mismatch for {zip_name}: "
+                f"expected {expected_hash}, got {actual_hash}"
+            )
+
+        logger.debug("Checksum OK: %s", zip_name)
 
     async def verify_checksum(self, zip_path: Path, checksum_url: str) -> None:
         """Verify the SHA-256 checksum of a downloaded ZIP.
@@ -397,34 +639,67 @@ class VisionDownloader:
         logger.debug("Extracted: %s", csv_path.name)
         return csv_path
 
-    async def execute_task(self, task: DownloadTask) -> Path:
-        """Execute a single download task end-to-end.
+    def extract_zip_bytes(self, zip_payload: bytes, zip_name: str) -> VisionCsvPayload:
+        """Extract the first CSV from a ZIP payload into an in-memory CSV source."""
+        return self.extract_zip_stream(BytesIO(zip_payload), zip_name)
 
-        Steps: incremental skip check → download ZIP → verify checksum
-        → extract CSV → return CSV path.
+    def extract_zip_stream(self, zip_file: BinaryIO, zip_name: str) -> VisionCsvPayload:
+        """Extract the first CSV from a seekable ZIP stream into an in-memory buffer."""
+        csv_file = BytesIO()
+        try:
+            zip_file.seek(0)
+            with zipfile.ZipFile(zip_file, "r") as zf:
+                csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                if not csv_names:
+                    raise FileNotFoundError(f"No CSV file found inside {zip_name}")
+                member = csv_names[0]
+                logical = PurePosixPath(member.replace("\\", "/"))
+                if logical.is_absolute() or ".." in logical.parts:
+                    raise ValueError(
+                        f"Zip entry {member!r} would escape extraction directory"
+                    )
+                with zf.open(member, "r") as fh:
+                    while True:
+                        chunk = fh.read(_STREAM_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        csv_file.write(chunk)
 
-        Parameters
-        ----------
-        task:
-            A ``DownloadTask`` produced by :meth:`plan_downloads`.
+            csv_file.seek(0)
+            name = logical.name or member
+            logger.debug("Extracted to in-memory CSV source: %s", name)
+            return VisionCsvPayload(name=name, file=csv_file)
+        except Exception:
+            csv_file.close()
+            raise
 
-        Returns
-        -------
-        Path
-            Path to the extracted CSV file.
-        """
-        # Incremental skip: CSV already present and non-empty
+    async def execute_task(self, task: DownloadTask) -> Path | VisionCsvPayload:
+        """Execute one download task without staging fresh raw ZIP/CSV files."""
+        # Backward-compatible incremental skip: leave existing raw CSVs path-
+        # backed so chunked converters can stream them instead of reading the
+        # whole file into memory up front.
         if task.dest_path.exists() and task.dest_path.stat().st_size > 0:
             logger.debug("Skip (csv exists): %s", task.dest_path.name)
             return task.dest_path
 
         logger.info("Downloading %s [%s]", task.zip_path.name, task.granularity)
-        await self.download_file(task.url, task.zip_path)
-        await self.verify_checksum(task.zip_path, task.checksum_url)
-        # Run sync extraction in thread pool to avoid blocking the event loop
-        loop = asyncio.get_running_loop()
-        csv_path = await loop.run_in_executor(None, self.extract_zip, task.zip_path)
-        return csv_path
+        zip_file = await self.download_stream(task.url)
+        try:
+            await self.verify_checksum_stream(
+                zip_file,
+                task.zip_path.name,
+                task.checksum_url,
+            )
+            # Run sync extraction in thread pool to avoid blocking the event loop.
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                self.extract_zip_stream,
+                zip_file,
+                task.zip_path.name,
+            )
+        finally:
+            zip_file.close()
 
 
 # ---------------------------------------------------------------------------

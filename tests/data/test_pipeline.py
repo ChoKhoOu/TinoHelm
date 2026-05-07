@@ -5,6 +5,7 @@ All network, DB, and filesystem side-effects are mocked.
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,15 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 
+from tinohelm.data.downloader import VisionCsvPayload
 from tinohelm.data.pipeline import BinanceVisionPipeline, IngestResult, _ns_to_utc_date
+
+
+def _csv_payload(name: str, content: bytes) -> VisionCsvPayload:
+    file_obj = BytesIO()
+    file_obj.write(content)
+    file_obj.seek(0)
+    return VisionCsvPayload(name=name, file=file_obj)
 
 
 def test_ns_to_utc_date_uses_integer_seconds_at_day_boundary() -> None:
@@ -77,6 +86,85 @@ class TestIngestResult:
         assert r.skipped is True
         assert r.rest_fallback_used is True
         assert r.rest_fallback_range == (date(2025, 1, 28), date(2025, 1, 31))
+
+
+class TestBoundedCsvConversion:
+    def test_full_file_conversion_reads_csv_payload_without_filesystem_staging(self, tmp_path: Path):
+        payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"a,b\n1,2\n")
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._write_objects = MagicMock(return_value=["memory://catalog/file.parquet"])
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                assert df["a"].tolist() == [1]
+                assert kwargs == {"symbol": "BTCUSDT-PERP"}
+                return ["object-1"]
+
+        count, paths = p._convert_one_file(
+            payload,
+            Converter(),
+            object(),
+            {"symbol": "BTCUSDT-PERP"},
+            "BTCUSDT-PERP",
+            "metrics",
+            None,
+            False,
+        )
+
+        assert count == 1
+        assert paths == ["memory://catalog/file.parquet"]
+        p._write_objects.assert_called_once_with(
+            ["object-1"], "BTCUSDT-PERP", "metrics", None, merge=False,
+        )
+
+    def test_chunked_conversion_reads_csv_payload_in_chunks(self, tmp_path: Path):
+        payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"1,2\n3,4\n")
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._chunk_rows = 1
+        p._agg_trades_chunk_rows = 1
+        p._write_objects = MagicMock(side_effect=[
+            ["memory://catalog/a.parquet"],
+            ["memory://catalog/b.parquet"],
+        ])
+
+        class Converter:
+            supports_chunked = True
+
+            def validate_schema(self, df):
+                assert list(df.columns) == [0, 1]
+
+            def convert_chunk(self, chunk, instrument, **kwargs):
+                return [tuple(chunk.iloc[0].tolist())]
+
+        seen_progress: list[int] = []
+        count, paths = p._convert_one_file(
+            payload,
+            Converter(),
+            object(),
+            {"symbol": "BTCUSDT-PERP"},
+            "BTCUSDT-PERP",
+            "aggTrades",
+            None,
+            False,
+            chunk_cb=seen_progress.append,
+        )
+
+        assert count == 2
+        assert paths == ["memory://catalog/a.parquet", "memory://catalog/b.parquet"]
+        assert seen_progress == [1, 2]
+
+    def test_cleanup_closes_in_memory_csv_payload(self, tmp_path: Path):
+        payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"1,2\n")
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+
+        p._cleanup_raw_file(payload)
+
+        assert payload.closed
 
 
 class TestCatalogStorageStats:

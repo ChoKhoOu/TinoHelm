@@ -23,7 +23,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from tinohelm.data.converters import get_converter
-from tinohelm.data.downloader import VisionDownloader, _KLINES_TYPES
+from tinohelm.data.downloader import VisionCsvPayload, VisionDownloader, _KLINES_TYPES
 from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
     INTERVAL_CONVENTION,
@@ -69,6 +69,8 @@ _INTERVAL_CONVENTION = INTERVAL_CONVENTION
 
 # Backwards-compatible fallback; runtime chunking is settings-driven.
 _CHUNK_SIZE = 1_000_000
+
+CsvSource = Path | VisionCsvPayload
 
 
 @dataclass
@@ -212,7 +214,7 @@ class BinanceVisionPipeline:
             f"Downloading {len(tasks)} file(s) (×{dl_concurrency}, convert ×{n_converters})...",
         )
 
-        csv_queue: asyncio.Queue[Path | None] = asyncio.Queue(maxsize=self._csv_queue_maxsize)
+        csv_queue: asyncio.Queue[CsvSource | None] = asyncio.Queue(maxsize=self._csv_queue_maxsize)
         download_done = 0
         convert_done = 0
         total_objects = 0
@@ -254,6 +256,7 @@ class BinanceVisionPipeline:
                 if csv_path is None:
                     break
 
+                csv_name = self._csv_display_name(csv_path)
                 # Thread-safe chunk callback: interpolates within current file's range
                 _cd = convert_done  # snapshot before executor starts
                 def _chunk_cb(objects_so_far):
@@ -276,7 +279,7 @@ class BinanceVisionPipeline:
                     total_objects += n
                     all_file_paths.extend(fps)
                 except Exception:
-                    logger.warning("Convert failed for %s", csv_path, exc_info=True)
+                    logger.warning("Convert failed for %s", csv_name, exc_info=True)
                 self._cleanup_raw_file(csv_path)
                 convert_done += 1
                 pct = compute_stage_pct(convert_done, total_tasks)
@@ -362,25 +365,42 @@ class BinanceVisionPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _detect_header(path: Path) -> int | None:
+    def _csv_display_name(csv_source: CsvSource) -> str:
+        if isinstance(csv_source, VisionCsvPayload):
+            return csv_source.name
+        return str(csv_source)
+
+    @staticmethod
+    def _open_csv_binary(csv_source: CsvSource):
+        if isinstance(csv_source, VisionCsvPayload):
+            return csv_source.open()
+        return open(csv_source, "rb")
+
+    @staticmethod
+    def _detect_header(path: CsvSource) -> int | None:
         """Return 0 if the CSV has a text header row, else None (no header).
 
         Thin I/O wrapper around :func:`pipeline_helpers.csv_has_header`.
         """
-        with open(path) as f:
-            first = f.readline()
+        with BinanceVisionPipeline._open_csv_binary(path) as fh:
+            first_raw = fh.readline()
+        if isinstance(first_raw, bytes):
+            first = first_raw.decode("utf-8-sig", errors="replace")
+        else:
+            first = str(first_raw)
         return 0 if csv_has_header(first) else None
 
     def _convert_one_file(
-        self, csv_path, converter, instrument, kwargs,
+        self, csv_path: CsvSource, converter, instrument, kwargs,
         symbol, data_type, interval, schema_validated,
         chunk_cb=None,
     ) -> tuple[int, list[str]]:
-        """Convert a single CSV file (sync, runs in executor thread)."""
+        """Convert a single CSV file/payload (sync, runs in executor thread)."""
+        csv_name = self._csv_display_name(csv_path)
         try:
             hdr = self._detect_header(csv_path)
         except Exception:
-            logger.warning("Failed to read CSV header %s", csv_path, exc_info=True)
+            logger.warning("Failed to read CSV header %s", csv_name, exc_info=True)
             return 0, []
 
         if converter.supports_chunked:
@@ -397,7 +417,7 @@ class BinanceVisionPipeline:
 
     async def _ingest_streaming(
         self,
-        csv_paths: list[Path],
+        csv_paths: list[CsvSource],
         converter,
         instrument,
         kwargs: dict,
@@ -417,10 +437,11 @@ class BinanceVisionPipeline:
         schema_validated = False
 
         for csv_idx, csv_path in enumerate(csv_paths):
+            csv_name = self._csv_display_name(csv_path)
             try:
                 hdr = self._detect_header(csv_path)
             except Exception:
-                logger.warning("Failed to read CSV header %s", csv_path, exc_info=True)
+                logger.warning("Failed to read CSV header %s", csv_name, exc_info=True)
                 continue
 
             if converter.supports_chunked:
@@ -450,41 +471,49 @@ class BinanceVisionPipeline:
         return total_objects, all_file_paths
 
     def _stream_chunked_file(
-        self, csv_path, hdr, converter, instrument, kwargs,
+        self, csv_path: CsvSource, hdr, converter, instrument, kwargs,
         symbol, data_type, interval, schema_validated,
         chunk_cb=None,
     ) -> tuple[int, list[str]]:
-        """Read one CSV in chunks, convert, flush periodically."""
+        """Read one CSV source in chunks, convert, flush periodically."""
+        source = None
+        csv_name = self._csv_display_name(csv_path)
         try:
             chunk_rows = self._chunk_rows_for(data_type)
-            reader = pd.read_csv(csv_path, header=hdr, chunksize=chunk_rows)
+            source = self._open_csv_binary(csv_path)
+            reader = pd.read_csv(source, header=hdr, chunksize=chunk_rows)
         except Exception:
-            logger.warning("Failed to open CSV %s", csv_path, exc_info=True)
+            if source is not None:
+                source.close()
+            logger.warning("Failed to open CSV %s", csv_name, exc_info=True)
             return 0, []
 
         count = 0
         fps: list[str] = []
         chunk_objects: list = []
 
-        for chunk in reader:
-            if hdr is None:
-                chunk.columns = range(len(chunk.columns))
-            if not schema_validated:
-                converter.validate_schema(chunk)
-                schema_validated = True
+        try:
+            for chunk in reader:
+                if hdr is None:
+                    chunk.columns = range(len(chunk.columns))
+                if not schema_validated:
+                    converter.validate_schema(chunk)
+                    schema_validated = True
 
-            objs = converter.convert_chunk(chunk, instrument, **kwargs)
-            chunk_objects.extend(objs)
+                objs = converter.convert_chunk(chunk, instrument, **kwargs)
+                chunk_objects.extend(objs)
 
-            if len(chunk_objects) >= chunk_rows:
-                fp = self._write_objects(
-                    chunk_objects, symbol, data_type, interval, merge=False,
-                )
-                count += len(chunk_objects)
-                fps.extend(fp)
-                chunk_objects = []
-                if chunk_cb:
-                    chunk_cb(count)
+                if len(chunk_objects) >= chunk_rows:
+                    fp = self._write_objects(
+                        chunk_objects, symbol, data_type, interval, merge=False,
+                    )
+                    count += len(chunk_objects)
+                    fps.extend(fp)
+                    chunk_objects = []
+                    if chunk_cb:
+                        chunk_cb(count)
+        finally:
+            source.close()
 
         if chunk_objects:
             fp = self._write_objects(
@@ -503,16 +532,18 @@ class BinanceVisionPipeline:
         return self._chunk_rows
 
     def _stream_full_file(
-        self, csv_path, hdr, converter, instrument, kwargs,
+        self, csv_path: CsvSource, hdr, converter, instrument, kwargs,
         symbol, data_type, interval, schema_validated,
     ) -> tuple[int, list[str]]:
-        """Read one full CSV, convert, write."""
+        """Read one full CSV source, convert, write."""
+        csv_name = self._csv_display_name(csv_path)
         try:
-            df = pd.read_csv(csv_path, header=hdr)
+            with self._open_csv_binary(csv_path) as source:
+                df = pd.read_csv(source, header=hdr)
             if hdr is None:
                 df.columns = range(len(df.columns))
         except Exception:
-            logger.warning("Failed to read CSV %s", csv_path, exc_info=True)
+            logger.warning("Failed to read CSV %s", csv_name, exc_info=True)
             return 0, []
 
         if not schema_validated:
@@ -945,8 +976,11 @@ class BinanceVisionPipeline:
         return (int(min_ts), int(max_ts)) if min_ts is not None else None
 
     @staticmethod
-    def _cleanup_raw_file(csv_path: Path) -> None:
-        """Remove processed CSV and its ZIP to free disk space."""
+    def _cleanup_raw_file(csv_path: CsvSource) -> None:
+        """Remove processed legacy raw CSV/ZIP files; close bounded CSV payloads."""
+        if isinstance(csv_path, VisionCsvPayload):
+            csv_path.close()
+            return
         try:
             csv_path.unlink(missing_ok=True)
             csv_path.with_suffix(".zip").unlink(missing_ok=True)
