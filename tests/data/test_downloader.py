@@ -5,6 +5,7 @@ All HTTP calls are mocked — no network access required.
 from __future__ import annotations
 
 import hashlib
+from io import BytesIO
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 from tinohelm.data.downloader import (
     ChecksumError,
     DATA_TYPE_AVAILABILITY,
+    VisionCsvPayload,
     VisionDownloader,
 )
 
@@ -26,6 +28,13 @@ from tinohelm.data.downloader import (
 
 def _make_dl(tmp_path: Path) -> VisionDownloader:
     return VisionDownloader(raw_dir=str(tmp_path))
+
+
+def _zip_bytes(member_name: str, csv_content: str) -> bytes:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(member_name, csv_content)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +277,93 @@ class TestDownloadFile:
 
         # Should only be called once — no retries on 404
         assert mock_client.get.call_count == 1
+
+
+class TestInMemoryExecuteTask:
+    @pytest.mark.asyncio
+    async def test_execute_task_existing_csv_returns_path_for_chunked_streaming(self, tmp_path, monkeypatch):
+        """Legacy raw CSV cache skips network without loading the full CSV into memory."""
+        dl = _make_dl(tmp_path)
+        task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
+        task.dest_path.parent.mkdir(parents=True)
+        task.dest_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+        def fail_read_bytes(self):
+            raise AssertionError("existing raw CSV must remain path-backed for chunked streaming")
+
+        monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            result = await dl.execute_task(task)
+
+        mock_client_cls.assert_not_called()
+        assert result == task.dest_path
+
+    @pytest.mark.asyncio
+    async def test_execute_task_returns_csv_payload_without_raw_zip_or_csv_files(self, tmp_path):
+        """The end-to-end Vision path keeps downloaded ZIP and extracted CSV in memory."""
+        dl = _make_dl(tmp_path)
+        task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
+        zip_payload = _zip_bytes("BTCUSDT-aggTrades-2025-01-15.csv", "a,b\n1,2\n")
+        checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
+
+        zip_response = MagicMock()
+        zip_response.content = zip_payload
+        zip_response.raise_for_status = MagicMock()
+        checksum_response = MagicMock()
+        checksum_response.text = checksum_text
+        checksum_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[zip_response, checksum_response])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await dl.execute_task(task)
+
+        assert isinstance(result, VisionCsvPayload)
+        assert result.name == "BTCUSDT-aggTrades-2025-01-15.csv"
+        assert result.content == b"a,b\n1,2\n"
+        assert not task.zip_path.exists()
+        assert not task.dest_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_execute_task_does_not_use_path_writes_for_fresh_download(self, tmp_path, monkeypatch):
+        """A fresh download must not stage the raw ZIP through Path.write_bytes()."""
+        dl = _make_dl(tmp_path)
+        task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
+        zip_payload = _zip_bytes("data.csv", "a,b\n1,2\n")
+        checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
+
+        zip_response = MagicMock()
+        zip_response.content = zip_payload
+        zip_response.raise_for_status = MagicMock()
+        checksum_response = MagicMock()
+        checksum_response.text = checksum_text
+        checksum_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[zip_response, checksum_response])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        def fail_write_bytes(self, data):
+            raise AssertionError("execute_task must not write raw Vision ZIP/CSV files")
+
+        monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await dl.execute_task(task)
+
+        assert result.content == b"a,b\n1,2\n"
+
+    def test_extract_zip_bytes_rejects_entries_that_escape_logical_root(self, tmp_path):
+        dl = _make_dl(tmp_path)
+        zip_payload = _zip_bytes("../evil.csv", "a,b\n1,2\n")
+
+        with pytest.raises(ValueError, match="would escape"):
+            dl.extract_zip_bytes(zip_payload, "evil.zip")
 
 
 # ---------------------------------------------------------------------------
