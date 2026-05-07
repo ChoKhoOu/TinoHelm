@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import date, timedelta
-from io import BytesIO
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 import httpx
 
@@ -24,6 +25,11 @@ from tinohelm.core.utils import is_within_dir
 from tinohelm.data.instruments import strip_to_binance_api_symbol
 from tinohelm.data.providers._rest import (
     DEFAULT_MAX_RETRIES,
+    MAX_BACKOFF_SECONDS,
+    REQUEST_ERROR_SLEEP_SECONDS,
+    SERVER_ERROR_SLEEP_SECONDS,
+    backoff_seconds,
+    classify_http_status,
     request_with_retry,
 )
 
@@ -57,6 +63,8 @@ _KLINES_TYPES = frozenset({
 
 _VISION_BASE = "https://data.binance.vision"
 _MAX_RETRIES = DEFAULT_MAX_RETRIES
+_STREAM_CHUNK_SIZE = 1024 * 1024
+_SPOOL_MAX_BYTES = 8 * 1024 * 1024
 
 
 class ChecksumError(Exception):
@@ -72,12 +80,45 @@ class DownloadTask:
     granularity: str  # "daily" or "monthly"
 
 
-@dataclass(frozen=True)
+class _BorrowedBinaryReader:
+    """File-like proxy whose close() does not close the owned spool."""
+
+    def __init__(self, raw: BinaryIO) -> None:
+        self._raw = raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def close(self) -> None:
+        return None
+
+    @property
+    def closed(self) -> bool:
+        return bool(getattr(self._raw, "closed", False))
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def __iter__(self):
+        return iter(self._raw)
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw, name)
+
+
+@dataclass
 class VisionCsvPayload:
-    """In-memory CSV extracted from a Binance Vision ZIP archive."""
+    """Bounded-memory CSV source extracted from a Binance Vision ZIP archive."""
 
     name: str
-    content: bytes
+    file: BinaryIO
 
     @property
     def path(self) -> Path:
@@ -92,8 +133,30 @@ class VisionCsvPayload:
     def suffix(self) -> str:
         return Path(self.name).suffix
 
+    @property
+    def closed(self) -> bool:
+        return bool(getattr(self.file, "closed", False))
+
+    def open(self):
+        """Return a readable handle reset to the start without transferring ownership."""
+        if self.closed:
+            raise ValueError(f"CSV source {self.name!r} is closed")
+        self.file.seek(0)
+        return _BorrowedBinaryReader(self.file)
+
+    def close(self) -> None:
+        self.file.close()
+
     def __repr__(self) -> str:
-        return f"VisionCsvPayload(name={self.name!r}, bytes={len(self.content)})"
+        if self.closed:
+            return f"VisionCsvPayload(name={self.name!r}, closed=True)"
+        pos = self.file.tell()
+        try:
+            self.file.seek(0, 2)
+            size = self.file.tell()
+        finally:
+            self.file.seek(pos)
+        return f"VisionCsvPayload(name={self.name!r}, bytes={size}, closed=False)"
 
 
 class VisionDownloader:
@@ -349,6 +412,67 @@ class VisionDownloader:
         logger.debug("Downloaded in memory: %s (%d bytes)", url.rsplit("/", 1)[-1], len(payload))
         return payload
 
+    async def download_stream(self, url: str) -> BinaryIO:
+        """Download a file by streaming response chunks into a bounded spool."""
+        attempt = 0
+        while True:
+            spool = tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX_BYTES, mode="w+b")
+            try:
+                total = 0
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    async with client.stream("GET", url, follow_redirects=True) as resp:
+                        resp.raise_for_status()
+                        async for chunk in resp.aiter_bytes():
+                            if not chunk:
+                                continue
+                            spool.write(chunk)
+                            total += len(chunk)
+                spool.seek(0)
+                logger.debug("Downloaded stream: %s (%d bytes)", url.rsplit("/", 1)[-1], total)
+                return spool
+            except httpx.HTTPStatusError as exc:
+                spool.close()
+                status = exc.response.status_code
+                kind = classify_http_status(status)
+                if kind == "not_found":
+                    raise
+                if kind == "rate_limit":
+                    attempt += 1
+                    if attempt > _MAX_RETRIES:
+                        raise
+                    wait = backoff_seconds(attempt, max_seconds=MAX_BACKOFF_SECONDS)
+                    logger.warning(
+                        "Rate limited (HTTP %d) for %s, retry %d/%d in %ds",
+                        status, url, attempt, _MAX_RETRIES, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                if kind == "server_error":
+                    attempt += 1
+                    if attempt > _MAX_RETRIES:
+                        raise
+                    logger.warning(
+                        "Server error (HTTP %d) for %s, retry %d/%d in %.1fs",
+                        status, url, attempt, _MAX_RETRIES, SERVER_ERROR_SLEEP_SECONDS,
+                    )
+                    await asyncio.sleep(SERVER_ERROR_SLEEP_SECONDS)
+                    continue
+                raise
+            except httpx.RequestError as exc:
+                spool.close()
+                attempt += 1
+                if attempt > _MAX_RETRIES:
+                    raise
+                logger.warning(
+                    "Request error for %s: %s, retry %d/%d",
+                    url, exc, attempt, _MAX_RETRIES,
+                )
+                await asyncio.sleep(REQUEST_ERROR_SLEEP_SECONDS)
+                continue
+            except Exception:
+                spool.close()
+                raise
+
     async def verify_checksum_bytes(
         self,
         zip_payload: bytes,
@@ -378,6 +502,47 @@ class VisionDownloader:
         chunk_size = 1024 * 1024
         for offset in range(0, len(view), chunk_size):
             digest.update(view[offset:offset + chunk_size])
+        actual_hash = digest.hexdigest().lower()
+
+        if actual_hash != expected_hash:
+            raise ChecksumError(
+                f"Checksum mismatch for {zip_name}: "
+                f"expected {expected_hash}, got {actual_hash}"
+            )
+
+        logger.debug("Checksum OK: %s", zip_name)
+
+    async def verify_checksum_stream(
+        self,
+        zip_file: BinaryIO,
+        zip_name: str,
+        checksum_url: str,
+    ) -> None:
+        """Verify a seekable ZIP stream against Binance Vision's SHA-256 checksum."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                resp = await client.get(checksum_url, follow_redirects=True)
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    logger.warning("Checksum file not found (404): %s — skipping", checksum_url)
+                    zip_file.seek(0)
+                    return
+                raise
+
+        checksum_text = resp.text.strip()
+        parts = checksum_text.split(None, 1)
+        if not parts:
+            logger.warning("Empty checksum file at %s — skipping", checksum_url)
+            zip_file.seek(0)
+            return
+        expected_hash = parts[0].lower()
+
+        digest = hashlib.sha256()
+        zip_file.seek(0)
+        for chunk in iter(lambda: zip_file.read(_STREAM_CHUNK_SIZE), b""):
+            digest.update(chunk)
+        zip_file.seek(0)
         actual_hash = digest.hexdigest().lower()
 
         if actual_hash != expected_hash:
@@ -476,23 +641,44 @@ class VisionDownloader:
         return csv_path
 
     def extract_zip_bytes(self, zip_payload: bytes, zip_name: str) -> VisionCsvPayload:
-        """Extract the first CSV from a ZIP payload without touching disk."""
-        with zipfile.ZipFile(BytesIO(zip_payload), "r") as zf:
-            csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-            if not csv_names:
-                raise FileNotFoundError(f"No CSV file found inside {zip_name}")
-            member = csv_names[0]
-            logical = PurePosixPath(member.replace("\\", "/"))
-            if logical.is_absolute() or ".." in logical.parts:
-                raise ValueError(
-                    f"Zip entry {member!r} would escape extraction directory"
-                )
-            with zf.open(member, "r") as fh:
-                content = fh.read()
+        """Extract the first CSV from a ZIP payload into a bounded CSV spool."""
+        zip_file = tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX_BYTES, mode="w+b")
+        try:
+            zip_file.write(zip_payload)
+            zip_file.seek(0)
+            return self.extract_zip_stream(zip_file, zip_name)
+        finally:
+            zip_file.close()
 
-        name = logical.name or member
-        logger.debug("Extracted in memory: %s", name)
-        return VisionCsvPayload(name=name, content=content)
+    def extract_zip_stream(self, zip_file: BinaryIO, zip_name: str) -> VisionCsvPayload:
+        """Extract the first CSV from a seekable ZIP stream into a bounded spool."""
+        csv_file = tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX_BYTES, mode="w+b")
+        try:
+            zip_file.seek(0)
+            with zipfile.ZipFile(zip_file, "r") as zf:
+                csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                if not csv_names:
+                    raise FileNotFoundError(f"No CSV file found inside {zip_name}")
+                member = csv_names[0]
+                logical = PurePosixPath(member.replace("\\", "/"))
+                if logical.is_absolute() or ".." in logical.parts:
+                    raise ValueError(
+                        f"Zip entry {member!r} would escape extraction directory"
+                    )
+                with zf.open(member, "r") as fh:
+                    while True:
+                        chunk = fh.read(_STREAM_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        csv_file.write(chunk)
+
+            csv_file.seek(0)
+            name = logical.name or member
+            logger.debug("Extracted to bounded CSV source: %s", name)
+            return VisionCsvPayload(name=name, file=csv_file)
+        except Exception:
+            csv_file.close()
+            raise
 
     async def execute_task(self, task: DownloadTask) -> Path | VisionCsvPayload:
         """Execute one download task without staging fresh raw ZIP/CSV files."""
@@ -504,20 +690,23 @@ class VisionDownloader:
             return task.dest_path
 
         logger.info("Downloading %s [%s]", task.zip_path.name, task.granularity)
-        zip_payload = await self.download_bytes(task.url)
-        await self.verify_checksum_bytes(
-            zip_payload,
-            task.zip_path.name,
-            task.checksum_url,
-        )
-        # Run sync extraction in thread pool to avoid blocking the event loop.
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            self.extract_zip_bytes,
-            zip_payload,
-            task.zip_path.name,
-        )
+        zip_file = await self.download_stream(task.url)
+        try:
+            await self.verify_checksum_stream(
+                zip_file,
+                task.zip_path.name,
+                task.checksum_url,
+            )
+            # Run sync extraction in thread pool to avoid blocking the event loop.
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                self.extract_zip_stream,
+                zip_file,
+                task.zip_path.name,
+            )
+        finally:
+            zip_file.close()
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,6 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -374,7 +373,7 @@ class BinanceVisionPipeline:
     @staticmethod
     def _open_csv_binary(csv_source: CsvSource):
         if isinstance(csv_source, VisionCsvPayload):
-            return BytesIO(csv_source.content)
+            return csv_source.open()
         return open(csv_source, "rb")
 
     @staticmethod
@@ -978,8 +977,9 @@ class BinanceVisionPipeline:
 
     @staticmethod
     def _cleanup_raw_file(csv_path: CsvSource) -> None:
-        """Remove processed legacy raw CSV/ZIP files; in-memory payloads are no-op."""
+        """Remove processed legacy raw CSV/ZIP files; close bounded CSV payloads."""
         if isinstance(csv_path, VisionCsvPayload):
+            csv_path.close()
             return
         try:
             csv_path.unlink(missing_ok=True)

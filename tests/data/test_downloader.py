@@ -5,6 +5,7 @@ All HTTP calls are mocked — no network access required.
 from __future__ import annotations
 
 import hashlib
+import tempfile
 from io import BytesIO
 import zipfile
 from datetime import date
@@ -300,31 +301,66 @@ class TestInMemoryExecuteTask:
         assert result == task.dest_path
 
     @pytest.mark.asyncio
-    async def test_execute_task_returns_csv_payload_without_raw_zip_or_csv_files(self, tmp_path):
-        """The end-to-end Vision path keeps downloaded ZIP and extracted CSV in memory."""
+    async def test_execute_task_streams_zip_to_bounded_csv_source_without_raw_files(self, tmp_path):
+        """Fresh Vision downloads must stream the ZIP and avoid full response.content materialization."""
         dl = _make_dl(tmp_path)
         task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
         zip_payload = _zip_bytes("BTCUSDT-aggTrades-2025-01-15.csv", "a,b\n1,2\n")
         checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
 
-        zip_response = MagicMock()
-        zip_response.content = zip_payload
-        zip_response.raise_for_status = MagicMock()
         checksum_response = MagicMock()
         checksum_response.text = checksum_text
         checksum_response.raise_for_status = MagicMock()
 
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=[zip_response, checksum_response])
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        class FakeStreamResponse:
+            def __init__(self, payload: bytes):
+                self._payload = payload
 
-        with patch("httpx.AsyncClient", return_value=mock_client):
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self):
+                for idx in range(0, len(self._payload), 3):
+                    yield self._payload[idx:idx + 3]
+
+        class FakeClient:
+            def __init__(self):
+                self.streamed_urls: list[str] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method: str, url: str, **kwargs):
+                assert method == "GET"
+                assert url == task.url
+                self.streamed_urls.append(url)
+                return FakeStreamResponse(zip_payload)
+
+            async def get(self, url: str, **kwargs):
+                assert url == task.checksum_url, "fresh ZIP body must be streamed, not read via response.content"
+                return checksum_response
+
+        fake_client = FakeClient()
+
+        with patch("httpx.AsyncClient", return_value=fake_client):
             result = await dl.execute_task(task)
 
         assert isinstance(result, VisionCsvPayload)
         assert result.name == "BTCUSDT-aggTrades-2025-01-15.csv"
-        assert result.content == b"a,b\n1,2\n"
+        assert not hasattr(result, "content")
+        with result.open() as fh:
+            assert fh.read() == b"a,b\n1,2\n"
+        result.close()
+        assert fake_client.streamed_urls == [task.url]
         assert not task.zip_path.exists()
         assert not task.dest_path.exists()
 
@@ -336,34 +372,83 @@ class TestInMemoryExecuteTask:
         zip_payload = _zip_bytes("data.csv", "a,b\n1,2\n")
         checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
 
-        zip_response = MagicMock()
-        zip_response.content = zip_payload
-        zip_response.raise_for_status = MagicMock()
         checksum_response = MagicMock()
         checksum_response.text = checksum_text
         checksum_response.raise_for_status = MagicMock()
 
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=[zip_response, checksum_response])
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        class FakeStreamResponse:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self):
+                yield zip_payload[:5]
+                yield zip_payload[5:]
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method: str, url: str, **kwargs):
+                return FakeStreamResponse()
+
+            async def get(self, url: str, **kwargs):
+                assert url == task.checksum_url
+                return checksum_response
 
         def fail_write_bytes(self, data):
             raise AssertionError("execute_task must not write raw Vision ZIP/CSV files")
 
         monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
 
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        with patch("httpx.AsyncClient", return_value=FakeClient()):
             result = await dl.execute_task(task)
 
-        assert result.content == b"a,b\n1,2\n"
+        with result.open() as fh:
+            assert fh.read() == b"a,b\n1,2\n"
+        result.close()
 
-    def test_extract_zip_bytes_rejects_entries_that_escape_logical_root(self, tmp_path):
+    def test_extract_zip_stream_copies_csv_member_in_bounded_chunks(self, tmp_path, monkeypatch):
+        """ZIP member extraction must not call ZipExtFile.read() without a size."""
+        dl = _make_dl(tmp_path)
+        zip_payload = _zip_bytes("data.csv", "a,b\n1,2\n3,4\n")
+        zip_file = tempfile.SpooledTemporaryFile(max_size=1, mode="w+b")
+        zip_file.write(zip_payload)
+        zip_file.seek(0)
+
+        original_read = zipfile.ZipExtFile.read
+
+        def guarded_read(self, n=-1):
+            if n is None or n < 0:
+                raise AssertionError("CSV member must be copied with bounded read(size) calls")
+            return original_read(self, n)
+
+        monkeypatch.setattr(zipfile.ZipExtFile, "read", guarded_read)
+
+        result = dl.extract_zip_stream(zip_file, "data.zip")
+
+        assert isinstance(result, VisionCsvPayload)
+        with result.open() as fh:
+            assert fh.read() == b"a,b\n1,2\n3,4\n"
+        result.close()
+
+    def test_extract_zip_stream_rejects_entries_that_escape_logical_root(self, tmp_path):
         dl = _make_dl(tmp_path)
         zip_payload = _zip_bytes("../evil.csv", "a,b\n1,2\n")
+        zip_file = tempfile.SpooledTemporaryFile(max_size=1, mode="w+b")
+        zip_file.write(zip_payload)
+        zip_file.seek(0)
 
         with pytest.raises(ValueError, match="would escape"):
-            dl.extract_zip_bytes(zip_payload, "evil.zip")
+            dl.extract_zip_stream(zip_file, "evil.zip")
 
 
 # ---------------------------------------------------------------------------
