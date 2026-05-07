@@ -19,7 +19,9 @@ from tinohelm.data.pipeline import BinanceVisionPipeline, IngestResult, _ns_to_u
 
 
 def _csv_payload(name: str, content: bytes) -> VisionCsvPayload:
-    file_obj = BytesIO(content)
+    file_obj = BytesIO()
+    file_obj.write(content)
+    file_obj.seek(0)
     return VisionCsvPayload(name=name, file=file_obj)
 
 

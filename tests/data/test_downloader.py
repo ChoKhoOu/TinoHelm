@@ -301,12 +301,18 @@ class TestInMemoryExecuteTask:
         assert result == task.dest_path
 
     @pytest.mark.asyncio
-    async def test_execute_task_keeps_fresh_zip_and_csv_fully_in_memory(self, tmp_path):
-        """Fresh Vision downloads must avoid tempfile-backed staging entirely."""
+    async def test_execute_task_keeps_fresh_vision_ingest_fully_in_memory_without_tempfile(self, tmp_path, monkeypatch):
+        """Fresh Vision downloads must stay in RAM and never use tempfile-backed staging."""
         dl = _make_dl(tmp_path)
         task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
         zip_payload = _zip_bytes("BTCUSDT-aggTrades-2025-01-15.csv", "a,b\n1,2\n")
         checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
+
+        def fail_spooled(*args, **kwargs):
+            raise AssertionError("fresh Vision ingest must not use tempfile.SpooledTemporaryFile")
+
+        monkeypatch.setattr(tempfile, "SpooledTemporaryFile", fail_spooled)
+        monkeypatch.setattr(Path, "write_bytes", lambda self, data: (_ for _ in ()).throw(AssertionError("fresh Vision ingest must not stage raw ZIP/CSV files")))
 
         checksum_response = MagicMock()
         checksum_response.text = checksum_text
@@ -349,13 +355,9 @@ class TestInMemoryExecuteTask:
                 assert url == task.checksum_url, "fresh ZIP body must be streamed, not read via response.content"
                 return checksum_response
 
-        def fail_spooled_tempfile(*args, **kwargs):
-            raise AssertionError("fresh Vision ingest must not use tempfile.SpooledTemporaryFile")
-
         fake_client = FakeClient()
 
-        with patch("httpx.AsyncClient", return_value=fake_client), \
-             patch("tempfile.SpooledTemporaryFile", side_effect=fail_spooled_tempfile):
+        with patch("httpx.AsyncClient", return_value=fake_client):
             result = await dl.execute_task(task)
 
         assert isinstance(result, VisionCsvPayload)
@@ -375,6 +377,11 @@ class TestInMemoryExecuteTask:
         task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
         zip_payload = _zip_bytes("data.csv", "a,b\n1,2\n")
         checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
+
+        def fail_spooled(*args, **kwargs):
+            raise AssertionError("fresh Vision ingest must not use tempfile.SpooledTemporaryFile")
+
+        monkeypatch.setattr(tempfile, "SpooledTemporaryFile", fail_spooled)
 
         checksum_response = MagicMock()
         checksum_response.text = checksum_text
@@ -425,6 +432,11 @@ class TestInMemoryExecuteTask:
         dl = _make_dl(tmp_path)
         zip_payload = _zip_bytes("data.csv", "a,b\n1,2\n3,4\n")
         zip_file = BytesIO(zip_payload)
+
+        def fail_spooled(*args, **kwargs):
+            raise AssertionError("extract_zip_stream must not use tempfile.SpooledTemporaryFile")
+
+        monkeypatch.setattr(tempfile, "SpooledTemporaryFile", fail_spooled)
 
         original_read = zipfile.ZipExtFile.read
 

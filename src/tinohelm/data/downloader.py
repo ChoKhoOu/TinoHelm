@@ -114,7 +114,7 @@ class _BorrowedBinaryReader:
 
 @dataclass
 class VisionCsvPayload:
-    """RAM-only CSV source extracted from a Binance Vision ZIP archive."""
+    """In-memory CSV source extracted from a Binance Vision ZIP archive."""
 
     name: str
     file: BinaryIO
@@ -412,10 +412,10 @@ class VisionDownloader:
         return payload
 
     async def download_stream(self, url: str) -> BinaryIO:
-        """Download a file by streaming response chunks into a RAM-only buffer."""
+        """Download a file by streaming response chunks into an in-memory buffer."""
         attempt = 0
         while True:
-            buffer = BytesIO()
+            stream = BytesIO()
             try:
                 total = 0
                 async with httpx.AsyncClient(timeout=60.0) as client:
@@ -424,13 +424,13 @@ class VisionDownloader:
                         async for chunk in resp.aiter_bytes():
                             if not chunk:
                                 continue
-                            buffer.write(chunk)
+                            stream.write(chunk)
                             total += len(chunk)
-                buffer.seek(0)
+                stream.seek(0)
                 logger.debug("Downloaded stream: %s (%d bytes)", url.rsplit("/", 1)[-1], total)
-                return buffer
+                return stream
             except httpx.HTTPStatusError as exc:
-                buffer.close()
+                stream.close()
                 status = exc.response.status_code
                 kind = classify_http_status(status)
                 if kind == "not_found":
@@ -458,7 +458,7 @@ class VisionDownloader:
                     continue
                 raise
             except httpx.RequestError as exc:
-                buffer.close()
+                stream.close()
                 attempt += 1
                 if attempt > _MAX_RETRIES:
                     raise
@@ -469,7 +469,7 @@ class VisionDownloader:
                 await asyncio.sleep(REQUEST_ERROR_SLEEP_SECONDS)
                 continue
             except Exception:
-                buffer.close()
+                stream.close()
                 raise
 
     async def verify_checksum_bytes(
@@ -640,17 +640,11 @@ class VisionDownloader:
         return csv_path
 
     def extract_zip_bytes(self, zip_payload: bytes, zip_name: str) -> VisionCsvPayload:
-        """Extract the first CSV from a ZIP payload into a RAM-only CSV source."""
-        zip_file = BytesIO()
-        try:
-            zip_file.write(zip_payload)
-            zip_file.seek(0)
-            return self.extract_zip_stream(zip_file, zip_name)
-        finally:
-            zip_file.close()
+        """Extract the first CSV from a ZIP payload into an in-memory CSV source."""
+        return self.extract_zip_stream(BytesIO(zip_payload), zip_name)
 
     def extract_zip_stream(self, zip_file: BinaryIO, zip_name: str) -> VisionCsvPayload:
-        """Extract the first CSV from a seekable ZIP stream into a RAM-only buffer."""
+        """Extract the first CSV from a seekable ZIP stream into an in-memory buffer."""
         csv_file = BytesIO()
         try:
             zip_file.seek(0)
