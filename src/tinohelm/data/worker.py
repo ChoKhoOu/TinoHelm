@@ -135,6 +135,15 @@ async def _await_preserving_cancellation(awaitable):
             raise
 
 
+async def _load_queued_job(factory, job_id: str):
+    async with factory() as db:
+        return (await db.execute(
+            select(DataFetchJob)
+            .where(DataFetchJob.job_id == job_id)
+            .where(DataFetchJob.status == STATUS_QUEUED)
+        )).scalar_one_or_none()
+
+
 async def _claim_queued_job(factory, job_id: str):
     async with factory() as db:
         result = await db.execute(
@@ -203,42 +212,44 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
     symbol = data_type = ""
 
     try:
-        job = await _claim_queued_job(factory, job_id)
-        if job is None:
+        queued_job = await _load_queued_job(factory, job_id)
+        if queued_job is None:
             logger.info("Data-fetch job %s is not queued, skipping stale queue item", job_id)
             return
 
-        symbol = job.symbol
-        data_type = job.data_type
-        interval = job.interval
-        start_date = job.start_date
-        end_date = job.end_date
-        asset_class = job.asset_class
-
-        # Progress callback — publishes to Redis + throttled DB write
-        throttle = TimeThrottle(interval=PROGRESS_THROTTLE_INTERVAL)
-
-        async def _progress(pct: int, msg: str):
-            payload = {
-                "type": "data.fetch.progress",
-                "job_id": job_id, "symbol": symbol, "data_type": data_type,
-                "progress": pct, "message": msg,
-            }
-            if interval:
-                payload["interval"] = interval
-            await rds.publish(progress_channel, json.dumps(payload))
-            if throttle.should_write(pct):
-                await _persist_progress_if_running(factory, job_id, pct, msg)
-
-        # Run pipeline.  Same catalog targets are serialized across local
-        # consumers so cleanup/write/update is one critical section per key.
-        from tinohelm.data.pipeline import BinanceVisionPipeline
-
-        lock_key = _catalog_lock_key(symbol, data_type, interval)
+        lock_key = _catalog_lock_key(queued_job.symbol, queued_job.data_type, queued_job.interval)
         async with _get_catalog_lock(lock_key):
-            if not await _job_is_still_running(factory, job_id):
+            job = await _claim_queued_job(factory, job_id)
+            if job is None:
                 logger.info("Data-fetch job %s was cancelled before ingest, skipping catalog mutation", job_id)
                 return
+
+            symbol = job.symbol
+            data_type = job.data_type
+            interval = job.interval
+            start_date = job.start_date
+            end_date = job.end_date
+            asset_class = job.asset_class
+
+            # Progress callback — publishes to Redis + throttled DB write
+            throttle = TimeThrottle(interval=PROGRESS_THROTTLE_INTERVAL)
+
+            async def _progress(pct: int, msg: str):
+                payload = {
+                    "type": "data.fetch.progress",
+                    "job_id": job_id, "symbol": symbol, "data_type": data_type,
+                    "progress": pct, "message": msg,
+                }
+                if interval:
+                    payload["interval"] = interval
+                await rds.publish(progress_channel, json.dumps(payload))
+                if throttle.should_write(pct):
+                    await _persist_progress_if_running(factory, job_id, pct, msg)
+
+            # Run pipeline.  Same catalog targets are serialized across local
+            # consumers so cleanup/write/update is one critical section per key.
+            from tinohelm.data.pipeline import BinanceVisionPipeline
+
             pipeline = BinanceVisionPipeline(catalog_path=catalog_path)
             result = await pipeline.ingest(
                 symbol=symbol,
@@ -332,34 +343,39 @@ def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
     async def _process(job_id: str) -> None:
         await _process_job(job_id, redis_url, catalog_path)
 
-    async def _run_consumers() -> None:
-        concurrency = max(1, get_settings().data.job_concurrency)
-        tasks = [
-            asyncio.create_task(
-                consumer_loop(
+    async def _run_consumer_forever(idx: int) -> None:
+        backoff = 0.1
+        while True:
+            try:
+                await consumer_loop(
                     redis_url,
                     QUEUE_KEY,
                     _process,
                     worker_label="Data-fetch worker",
-                ),
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Data-fetch consumer %d crashed; restarting in %.1fs",
+                    idx,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+
+    async def _run_consumers() -> None:
+        concurrency = max(1, get_settings().data.job_concurrency)
+        tasks = [
+            asyncio.create_task(
+                _run_consumer_forever(idx),
                 name=f"data-fetch-consumer-{idx}",
             )
             for idx in range(concurrency)
         ]
         try:
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-            for task in done:
-                if task.cancelled():
-                    continue
-                exc = task.exception()
-                if exc is not None:
-                    for sibling in pending:
-                        sibling.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
-                    raise exc
-            for sibling in pending:
-                sibling.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             for task in tasks:
                 task.cancel()

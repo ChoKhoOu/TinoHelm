@@ -94,6 +94,32 @@ class TestIngestResult:
         assert r.rest_fallback_range == (date(2025, 1, 28), date(2025, 1, 31))
 
 
+class TestFundingRateWrites:
+    def test_legacy_json_cache_merges_incremental_records(self, tmp_path: Path, paths_override, monkeypatch):
+        from tinohelm.data.funding_cache import _load_cache, _save_cache
+
+        paths_override("funding_rates", tmp_path / "funding_rates")
+        _save_cache("BTCUSDT-PERP", [
+            {"funding_time_ms": 1_000, "funding_rate": 0.01, "mark_price": 100.0},
+        ])
+
+        def _write_parquet(**_kwargs):
+            return tmp_path / "catalog" / "funding_rates" / "BTCUSDT-PERP.parquet"
+
+        monkeypatch.setattr("tinohelm.data.catalog.write_funding_rate_parquet", _write_parquet)
+        pipeline = BinanceVisionPipeline(catalog_path=tmp_path / "catalog")
+        records = [
+            SimpleNamespace(funding_time_ms=2_000, funding_rate=0.02),
+        ]
+
+        pipeline._write_funding_rates(records, "BTCUSDT-PERP")
+
+        cached = _load_cache("BTCUSDT-PERP")
+        assert [row["funding_time_ms"] for row in cached] == [1_000, 2_000]
+        assert cached[0]["mark_price"] == 100.0
+        assert cached[1]["funding_rate"] == 0.02
+
+
 class TestBoundedCsvConversion:
     def test_full_file_conversion_reads_csv_payload_without_filesystem_staging(self, tmp_path: Path):
         payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"a,b\n1,2\n")

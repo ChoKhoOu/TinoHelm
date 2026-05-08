@@ -1332,7 +1332,7 @@ class BinanceVisionPipeline:
 
         Returns the Parquet file path string if written, else None.
         """
-        from tinohelm.data.funding_cache import _save_cache
+        from tinohelm.data.funding_cache import _load_cache, _save_cache
         from tinohelm.data.catalog import write_funding_rate_parquet
 
         cache_records = [
@@ -1352,7 +1352,7 @@ class BinanceVisionPipeline:
             catalog_root=self.catalog_path,
             storage=self._storage,
         )
-        _save_cache(symbol, cache_records)
+        _save_cache(symbol, [*_load_cache(symbol), *cache_records])
         logger.info(
             "Wrote %d funding rate records for %s (Parquet + JSON)",
             len(records), symbol,
