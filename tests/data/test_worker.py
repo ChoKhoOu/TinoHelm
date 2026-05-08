@@ -78,11 +78,14 @@ class TestRecoverInterruptedJobs:
 
         monkeypatch.setattr(dw, "requeue_running_jobs", _fake_requeue)
         monkeypatch.setattr(dw, "get_session_factory", lambda: "FAKE_FACTORY")
+        recover = AsyncMock(return_value=0)
+        monkeypatch.setattr(dw, "_recover_pending_ingest_rollbacks_on_startup", recover)
 
         rds = AsyncMock()
         count = await dw.recover_interrupted_jobs(rds)
 
         assert count == 7
+        recover.assert_awaited_once()
         assert called["model"] is dw.DataFetchJob
         assert called["rds"] is rds
         assert called["key"] == "tino:data:queue"
@@ -429,13 +432,151 @@ class TestProcessJob:
         task = asyncio.create_task(dw._process_job("job-terminal-cancel", "redis://x", "/cat"))
         await terminal_started.wait()
         task.cancel()
-        await task
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
         final = fake_rds.publish.await_args_list[-1]
         assert final.args[0] == "tino:data:events"
         payload = json.loads(final.args[1])
         assert payload["type"] == "data.fetch.completed"
         assert payload["job_id"] == "job-terminal-cancel"
+
+    async def test_terminal_failure_after_shutdown_cancellation_preserves_cancellation(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        factory, _ = _make_session_factory(initial_job=job)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+
+        fake_rds = AsyncMock()
+        fake_rds.publish.side_effect = RuntimeError("redis publish down")
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _NoProgressPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                return _fake_pipeline_result(objects_count=5)
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _NoProgressPipeline)
+
+        terminal_started = asyncio.Event()
+        release_terminal = asyncio.Event()
+        cancellation_cleared = asyncio.Event()
+        original_clear = dw._clear_current_task_cancellation
+
+        def clear_and_signal():
+            cancellation_cleared.set()
+            return original_clear()
+
+        monkeypatch.setattr(dw, "_clear_current_task_cancellation", clear_and_signal)
+
+        async def terminal_update(_factory, _job_id, _values):
+            terminal_started.set()
+            await release_terminal.wait()
+            return True
+
+        monkeypatch.setattr(dw, "_guarded_terminal_update", terminal_update)
+
+        task = asyncio.create_task(dw._process_job("job-terminal-publish-fails-after-cancel", "redis://x", "/cat"))
+        await terminal_started.wait()
+        task.cancel()
+        await asyncio.wait_for(cancellation_cleared.wait(), timeout=1)
+        release_terminal.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        fake_rds.publish.assert_awaited_once()
+        fake_rds.close.assert_awaited()
+
+    async def test_pipeline_post_commit_cancellation_still_marks_completed_then_exits(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        factory, _ = _make_session_factory(initial_job=job)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _CommittedThenRecancelPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                current = asyncio.current_task()
+                assert current is not None
+                current.cancel()
+                return _fake_pipeline_result(objects_count=13)
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _CommittedThenRecancelPipeline)
+
+        with pytest.raises(asyncio.CancelledError):
+            await dw._process_job("job-pipeline-recanceled", "redis://x", "/cat")
+
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.completed"
+        assert payload["job_id"] == "job-pipeline-recanceled"
+        assert payload["objects_count"] == 13
+
+    async def test_cancellation_during_failed_terminal_update_still_marks_failed_then_exits(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        factory, _ = _make_session_factory(initial_job=job)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _BoomPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                raise RuntimeError("network down")
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _BoomPipeline)
+
+        terminal_started = asyncio.Event()
+
+        async def terminal_update(_factory, _job_id, _values):
+            terminal_started.set()
+            await asyncio.sleep(0.01)
+            return True
+
+        monkeypatch.setattr(dw, "_guarded_terminal_update", terminal_update)
+
+        task = asyncio.create_task(dw._process_job("job-failed-terminal-cancel", "redis://x", "/cat"))
+        await terminal_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-failed-terminal-cancel"
+        assert "network down" in payload["error"]
 
     async def test_pipeline_exception_marks_failed_and_publishes_failure(self, monkeypatch):
         job = SimpleNamespace(

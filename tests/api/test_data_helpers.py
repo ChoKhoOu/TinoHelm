@@ -5,6 +5,7 @@ storage-file deletion helper used by DELETE /api/data/catalog/{id}.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -29,6 +30,7 @@ from tinohelm.api.routes.data import (
     _run_compact,
     _compact_bars_with_storage,
     cancel_data_fetch_job,
+    delete_catalog_entry,
     scan_data_catalog,
     trigger_compact,
     trigger_data_fetch_batch,
@@ -1541,6 +1543,114 @@ class TestDeleteStorageFiles:
         assert freed == 5
         assert bar_dir.exists()
         assert (bar_dir / "meta.txt").exists()
+
+
+class TestDeleteCatalogEntry:
+    async def test_delete_waits_on_legacy_default_catalog_lock(self, tmp_path: Path, monkeypatch):
+        from tinohelm.data.catalog_locks import _catalog_locks, catalog_lock_key, get_catalog_lock
+
+        _catalog_locks.clear()
+        row = SimpleNamespace(
+            id=123,
+            symbol="BTCUSDT-PERP",
+            data_type="bar",
+            interval="1m",
+            source_type=None,
+        )
+        calls = []
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return row
+
+        db = SimpleNamespace(
+            execute=AsyncMock(return_value=FakeResult()),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        def fake_delete_storage_files(*args):
+            calls.append(args)
+            return (2, 17)
+
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data._delete_storage_files",
+            fake_delete_storage_files,
+        )
+
+        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "klines", "1m"))
+        await lock.acquire()
+        try:
+            task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+            await asyncio.sleep(0.02)
+            assert calls == []
+            db.delete.assert_not_awaited()
+        finally:
+            lock.release()
+
+        result = await task
+
+        assert result["status"] == "deleted"
+        assert result["deleted_files"] == 2
+        assert calls == [("BTCUSDT-PERP", "bar", "1m", str(tmp_path), None)]
+        db.delete.assert_awaited_once_with(row)
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("row_data_type", "row_interval", "worker_data_type"),
+        [
+            ("funding_rate", "8h", "fundingRate"),
+            ("order_book_delta", "tick", "bookDepth"),
+        ],
+    )
+    async def test_delete_waits_on_non_bar_legacy_default_source_lock(
+        self,
+        row_data_type: str,
+        row_interval: str,
+        worker_data_type: str,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        from tinohelm.data.catalog_locks import _catalog_locks, catalog_lock_key, get_catalog_lock
+
+        _catalog_locks.clear()
+        row = SimpleNamespace(
+            id=123,
+            symbol="BTCUSDT-PERP",
+            data_type=row_data_type,
+            interval=row_interval,
+            source_type=None,
+        )
+        calls = []
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return row
+
+        db = SimpleNamespace(
+            execute=AsyncMock(return_value=FakeResult()),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data._delete_storage_files",
+            lambda *args: calls.append(args) or (1, 3),
+        )
+
+        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", worker_data_type, None))
+        await lock.acquire()
+        try:
+            task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+            await asyncio.sleep(0.02)
+            assert calls == []
+        finally:
+            lock.release()
+
+        await task
+
+        assert calls == [("BTCUSDT-PERP", row_data_type, row_interval, str(tmp_path), None)]
 
 
 class TestScanDataCatalog:

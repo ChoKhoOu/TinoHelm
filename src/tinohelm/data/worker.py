@@ -59,6 +59,9 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     re-push so we can't double-enqueue anything still living in the list from
     before the restart. Returns the number of rows flipped running → queued.
     """
+    restored = await _recover_pending_ingest_rollbacks_on_startup()
+    if restored:
+        logger.warning("Recovered %d pending ingest rollback object(s) before requeue", restored)
     return await requeue_running_jobs(
         get_session_factory(),
         DataFetchJob,
@@ -68,26 +71,68 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     )
 
 
+async def _recover_pending_ingest_rollbacks_on_startup() -> int:
+    """Restore crash-stranded ingest rollback objects before consumers start."""
+    from tinohelm.data.pipeline import recover_pending_ingest_rollbacks
+    from tinohelm.data.storage import get_catalog_storage
+
+    settings = get_settings()
+    storage = get_catalog_storage(settings=settings, catalog_root=settings.paths.catalog)
+    return await asyncio.to_thread(
+        recover_pending_ingest_rollbacks,
+        storage.catalog_root,
+        storage=storage,
+    )
+
+
 def _rowcount(result) -> int:
     value = getattr(result, "rowcount", None)
     return value if isinstance(value, int) else 0
 
 
-def _clear_current_task_cancellation() -> None:
+def _clear_current_task_cancellation() -> int:
     current_task = asyncio.current_task()
+    cleared = 0
     while current_task is not None and current_task.cancelling():
         current_task.uncancel()
+        cleared += 1
+    return cleared
 
 
-async def _await_ignoring_cancellation(awaitable):
+async def _await_preserving_cancellation(awaitable):
+    """Await a critical awaitable to completion without losing caller cancellation.
+
+    The inner awaitable is shielded so durable terminal DB/event writes can
+    finish during shutdown. Any cancellation request received while waiting is
+    reported to the caller, which must re-raise after the critical section.
+    If the critical awaitable itself fails after such a cancellation, shutdown
+    still wins; log the inner failure and surface ``CancelledError``.
+    """
     task = asyncio.ensure_future(awaitable)
+    was_cancelled = False
     while True:
         try:
-            return await asyncio.shield(task)
+            result = await asyncio.shield(task)
+            return result, was_cancelled
         except asyncio.CancelledError:
+            was_cancelled = True
             _clear_current_task_cancellation()
-            if task.done():
-                return task.result()
+            if not task.done():
+                continue
+        except Exception as exc:
+            if was_cancelled:
+                logger.exception("Critical terminal update failed after cancellation")
+                raise asyncio.CancelledError from exc
+            raise
+        try:
+            return task.result(), was_cancelled
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if was_cancelled:
+                logger.exception("Critical terminal update failed after cancellation")
+                raise asyncio.CancelledError from exc
+            raise
 
 
 async def _claim_queued_job(factory, job_id: str):
@@ -205,55 +250,77 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 progress_cb=_progress,
             )
 
-        updated = await _await_ignoring_cancellation(_guarded_terminal_update(
-            factory,
-            job_id,
-            {
-                "status": STATUS_COMPLETED,
-                "progress": 100,
-                "message": f"Done: {result.objects_count} objects",
-                "completed_at": datetime.utcnow(),
-            },
-        ))
-        if not updated:
-            logger.info("Data-fetch job %s was no longer running at completion, skipping terminal event", job_id)
-            return
-
-        logger.info(
-            "Data-fetch job %s completed: %s %s — %d objects",
-            job_id, symbol, data_type, result.objects_count,
-        )
-
-        # Publish completion event → EventBridge → WS → toast
-        await rds.publish("tino:data:events", json.dumps({
-            "type": "data.fetch.completed",
-            "job_id": job_id,
-            "symbol": symbol,
-            "data_type": data_type,
-            "objects_count": result.objects_count,
-        }))
-
-    except Exception as exc:
-        logger.exception("Data-fetch job %s failed: %s", job_id, exc)
-        try:
+        async def _complete_success() -> bool:
             updated = await _guarded_terminal_update(
                 factory,
                 job_id,
                 {
-                    "status": STATUS_FAILED,
-                    "error": str(exc)[:2000],
+                    "status": STATUS_COMPLETED,
+                    "progress": 100,
+                    "message": f"Done: {result.objects_count} objects",
                     "completed_at": datetime.utcnow(),
                 },
             )
-            if updated:
-                # Publish failure event → EventBridge → WS → toast
-                await rds.publish("tino:data:events", json.dumps({
-                    "type": "data.fetch.failed",
-                    "job_id": job_id,
-                    "symbol": symbol,
-                    "data_type": data_type,
-                    "error": str(exc)[:200],
-                }))
+            if not updated:
+                return False
+
+            logger.info(
+                "Data-fetch job %s completed: %s %s — %d objects",
+                job_id, symbol, data_type, result.objects_count,
+            )
+
+            # Publish completion event → EventBridge → WS → toast
+            await rds.publish("tino:data:events", json.dumps({
+                "type": "data.fetch.completed",
+                "job_id": job_id,
+                "symbol": symbol,
+                "data_type": data_type,
+                "objects_count": result.objects_count,
+            }))
+            return True
+
+        updated, terminal_update_was_cancelled = await _await_preserving_cancellation(
+            _complete_success()
+        )
+        if not updated:
+            logger.info("Data-fetch job %s was no longer running at completion, skipping terminal event", job_id)
+        if terminal_update_was_cancelled:
+            raise asyncio.CancelledError
+        if not updated:
+            return
+
+    except Exception as exc:
+        failure_error = str(exc)
+        logger.exception("Data-fetch job %s failed: %s", job_id, exc)
+        try:
+            async def _complete_failure() -> bool:
+                updated = await _guarded_terminal_update(
+                    factory,
+                    job_id,
+                    {
+                        "status": STATUS_FAILED,
+                        "error": failure_error[:2000],
+                        "completed_at": datetime.utcnow(),
+                    },
+                )
+                if updated:
+                    # Publish failure event → EventBridge → WS → toast
+                    await rds.publish("tino:data:events", json.dumps({
+                        "type": "data.fetch.failed",
+                        "job_id": job_id,
+                        "symbol": symbol,
+                        "data_type": data_type,
+                        "error": failure_error[:200],
+                    }))
+                return updated
+
+            _, failure_update_was_cancelled = await _await_preserving_cancellation(
+                _complete_failure()
+            )
+            if failure_update_was_cancelled:
+                raise asyncio.CancelledError
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("Failed to update job %s status to failed", job_id)
     finally:

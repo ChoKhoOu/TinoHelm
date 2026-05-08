@@ -5,6 +5,7 @@ All network, DB, and filesystem side-effects are mocked.
 from __future__ import annotations
 
 import asyncio
+import json
 from io import BytesIO
 from datetime import date
 from pathlib import Path
@@ -15,7 +16,12 @@ import polars as pl
 import pytest
 
 from tinohelm.data.downloader import VisionCsvPayload
-from tinohelm.data.pipeline import BinanceVisionPipeline, IngestResult, _ns_to_utc_date
+from tinohelm.data.pipeline import (
+    BinanceVisionPipeline,
+    IngestResult,
+    _ns_to_utc_date,
+    recover_pending_ingest_rollbacks,
+)
 
 
 def _csv_payload(name: str, content: bytes) -> VisionCsvPayload:
@@ -333,6 +339,208 @@ class TestIngestEarlyFailClosed:
         assert old_path.read_bytes() == old_payload
         assert partial_path.exists()
 
+    def test_recover_pending_ingest_rollbacks_restores_crash_stranded_backup(self, tmp_path: Path):
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        symbol = "BTCUSDT-PERP"
+        nt_symbol = "BTCUSDT-PERP.BINANCE"
+        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir.mkdir(parents=True)
+        old_path = trade_dir / "old-overlap.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
+        old_payload = old_path.read_bytes()
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="aggTrades",
+            interval=None,
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+
+        assert guard is not None
+        assert not old_path.exists()
+        partial_path = trade_dir / "partial-current-run.parquet"
+        partial_path.write_bytes(b"partial")
+        assert list((tmp_path / ".ingest-rollback").rglob("manifest.json"))
+
+        restored = recover_pending_ingest_rollbacks(tmp_path)
+
+        assert restored == 1
+        assert old_path.exists()
+        assert old_path.read_bytes() == old_payload
+        assert not partial_path.exists()
+        assert not (tmp_path / ".ingest-rollback").exists()
+
+    def test_recover_skips_resolved_manifest_left_after_success_cleanup_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        symbol = "BTCUSDT-PERP"
+        nt_symbol = "BTCUSDT-PERP.BINANCE"
+        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir.mkdir(parents=True)
+        old_path = trade_dir / "old-overlap.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="aggTrades",
+            interval=None,
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+        committed_path = trade_dir / "committed-current-run.parquet"
+        committed_path.write_bytes(b"committed")
+
+        assert guard is not None
+        assert not old_path.exists()
+        monkeypatch.setattr("tinohelm.data.pipeline.shutil.rmtree", lambda *_args, **_kwargs: None)
+        guard.discard(best_effort=True)
+        manifest = next((tmp_path / ".ingest-rollback").rglob("manifest.json"))
+        assert json.loads(manifest.read_text())["resolved"] is True
+
+        restored = recover_pending_ingest_rollbacks(tmp_path)
+
+        assert restored == 0
+        assert not old_path.exists()
+        assert committed_path.exists()
+        assert committed_path.read_bytes() == b"committed"
+
+    def test_rollback_manifest_write_failure_preserves_previous_valid_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from tinohelm.data.pipeline import _ParquetCleanupGuard
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        rollback_prefix = tmp_path / ".ingest-rollback" / "job"
+        guard = _ParquetCleanupGuard(p._storage, rollback_prefix)
+        old_a = tmp_path / "data" / "trade_tick" / "BTC" / "old-a.parquet"
+        old_b = old_a.with_name("old-b.parquet")
+        backup_a = rollback_prefix / "old-a.parquet"
+        backup_b = rollback_prefix / "old-b.parquet"
+        backup_a.parent.mkdir(parents=True)
+        backup_a.write_bytes(b"old-a")
+        backup_b.write_bytes(b"old-b")
+
+        guard.add_backup(old_a, backup_a)
+        guard.persist_manifest()
+        manifest_path = rollback_prefix / "manifest.json"
+        first_manifest = json.loads(manifest_path.read_text())
+        assert len(first_manifest["backups"]) == 1
+
+        original_replace = Path.replace
+
+        def fail_manifest_replace(path: Path, target: Path | str):
+            if path.name.startswith(".manifest.json.") and Path(target).name == "manifest.json":
+                raise RuntimeError("crash during manifest replace")
+            return original_replace(path, target)
+
+        monkeypatch.setattr(Path, "replace", fail_manifest_replace)
+        guard.add_backup(old_b, backup_b)
+        with pytest.raises(RuntimeError, match="crash during manifest replace"):
+            guard.persist_manifest()
+
+        assert json.loads(manifest_path.read_text()) == first_manifest
+
+    def test_recover_no_overlap_manifest_removes_partial_current_run_file(self, tmp_path: Path):
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        symbol = "BTCUSDT-PERP"
+        nt_symbol = "BTCUSDT-PERP.BINANCE"
+        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir.mkdir(parents=True)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="aggTrades",
+            interval=None,
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+        partial_path = trade_dir / "partial-current-run.parquet"
+        partial_path.write_bytes(b"partial")
+
+        assert guard is not None
+        assert list((tmp_path / ".ingest-rollback").rglob("manifest.json"))
+
+        restored = recover_pending_ingest_rollbacks(tmp_path)
+
+        assert restored == 0
+        assert not partial_path.exists()
+        assert not (tmp_path / ".ingest-rollback").exists()
+
+    def test_recover_first_time_single_file_manifest_removes_partial_current_run_file(self, tmp_path: Path):
+        from tinohelm.data.catalog import funding_rate_parquet_path
+
+        symbol = "BTCUSDT-PERP"
+        partial_path = funding_rate_parquet_path(symbol, tmp_path)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="fundingRate",
+            interval=None,
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+        partial_path.parent.mkdir(parents=True)
+        partial_path.write_bytes(b"partial")
+
+        assert guard is not None
+        manifest = next((tmp_path / ".ingest-rollback").rglob("manifest.json"))
+        payload = json.loads(manifest.read_text())
+        assert payload["backups"] == []
+        assert payload["original_paths"] == []
+
+        restored = recover_pending_ingest_rollbacks(tmp_path)
+
+        assert restored == 0
+        assert not partial_path.exists()
+        assert not (tmp_path / ".ingest-rollback").exists()
+
+    def test_recover_partial_manifest_preserves_unlisted_original_parquet(self, tmp_path: Path):
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        nt_symbol = "BTCUSDT-PERP.BINANCE"
+        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir.mkdir(parents=True)
+        old_a = trade_dir / "old-a.parquet"
+        old_b = trade_dir / "old-b.parquet"
+        old_b.write_bytes(b"old-b")
+        rollback_prefix = tmp_path / ".ingest-rollback" / "job"
+        backup_a = rollback_prefix / "old-a.parquet"
+        backup_a.parent.mkdir(parents=True)
+        backup_a.write_bytes(b"old-a")
+        manifest = {
+            "version": 1,
+            "complete": True,
+            "resolved": False,
+            "rollback_prefix": str(rollback_prefix),
+            "target_dir": str(trade_dir),
+            "preserved_paths": [],
+            "original_paths": [str(old_a), str(old_b)],
+            "backups": [{"original_path": str(old_a), "backup_path": str(backup_a)}],
+        }
+        (rollback_prefix / "manifest.json").write_text(json.dumps(manifest))
+        partial_path = trade_dir / "partial-current-run.parquet"
+        partial_path.write_bytes(b"partial")
+
+        restored = recover_pending_ingest_rollbacks(tmp_path)
+
+        assert restored == 1
+        assert old_a.read_bytes() == b"old-a"
+        assert old_b.read_bytes() == b"old-b"
+        assert not partial_path.exists()
+        assert not (tmp_path / ".ingest-rollback").exists()
+
     def test_cleanup_guard_best_effort_discard_does_not_fail_success_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -352,13 +560,16 @@ class TestIngestEarlyFailClosed:
         guard.discard(best_effort=True)
         assert guard._active is True
 
-    def test_db_update_cancellation_after_commit_returns_success(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_db_update_cancellation_after_commit_recancels_after_successful_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
         mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
         written_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "current.parquet"
+        update_completed = []
 
         class Converter:
             supports_chunked = False
@@ -380,6 +591,7 @@ class TestIngestEarlyFailClosed:
             async def update_catalog(*_args, **_kwargs):
                 update_started.set()
                 await asyncio.sleep(0.01)
+                update_completed.append(True)
 
             p = BinanceVisionPipeline(catalog_path=tmp_path)
             p.downloader = mock_dl
@@ -399,14 +611,15 @@ class TestIngestEarlyFailClosed:
             ))
             await update_started.wait()
             ingest_task.cancel()
-            return await ingest_task
+            await ingest_task
 
-        result = asyncio.run(run_ingest_with_cancel())
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(run_ingest_with_cancel())
 
-        assert result.objects_count == 1
-        assert result.file_paths == [str(written_path)]
+        assert update_completed == [True]
+        assert written_path.exists()
 
-    def test_final_progress_cancellation_after_db_commit_returns_success(
+    def test_final_progress_cancellation_after_db_commit_recancels(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
@@ -447,16 +660,17 @@ class TestIngestEarlyFailClosed:
         p._update_db_catalog = AsyncMock()
         monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
 
-        result = asyncio.run(p.ingest(
-            symbol="BTCUSDT-PERP",
-            data_type="aggTrades",
-            start=date(2025, 1, 1),
-            end=date(2025, 1, 1),
-            progress_cb=progress,
-        ))
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 1),
+                progress_cb=progress,
+            ))
 
-        assert result.objects_count == 1
-        assert result.file_paths == [str(written_path)]
+        p._update_db_catalog.assert_awaited_once()
+        assert written_path.exists()
 
     def test_no_guard_rollback_preserves_preexisting_single_file_parquet(self, tmp_path: Path):
         p = BinanceVisionPipeline(catalog_path=tmp_path)

@@ -14,6 +14,7 @@ without the heavy framework dependencies.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 from dataclasses import dataclass, field
@@ -71,6 +72,7 @@ _INTERVAL_CONVENTION = INTERVAL_CONVENTION
 
 # Backwards-compatible fallback; runtime chunking is settings-driven.
 _CHUNK_SIZE = 1_000_000
+_ROLLBACK_MANIFEST = "manifest.json"
 
 CsvSource = Path | VisionCsvPayload
 
@@ -113,18 +115,67 @@ class _ParquetCleanupGuard:
         *,
         target_dir: Path | None = None,
         preserved_paths: set[Path] | None = None,
+        original_paths: set[Path] | None = None,
     ) -> None:
         self._storage = storage
         self._rollback_prefix = rollback_prefix
         self._target_dir = Path(target_dir) if target_dir is not None else None
         self._preserved_paths = {Path(p) for p in preserved_paths or set()}
+        self._original_paths = {Path(p) for p in original_paths or set()}
         self._backups: list[_CleanupBackup] = []
         self._active = True
 
     def add_backup(self, original_path: Path, backup_path: Path) -> None:
+        original = Path(original_path)
+        self._original_paths.add(original)
         self._backups.append(
-            _CleanupBackup(original_path=Path(original_path), backup_path=Path(backup_path))
+            _CleanupBackup(original_path=original, backup_path=Path(backup_path))
         )
+
+    def _manifest_payload(self, *, resolved: bool = False) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "complete": True,
+            "resolved": resolved,
+            "rollback_prefix": str(self._rollback_prefix),
+            "target_dir": str(self._target_dir) if self._target_dir is not None else None,
+            "preserved_paths": sorted(str(path) for path in self._preserved_paths),
+            "original_paths": sorted(str(path) for path in self._original_paths),
+            "backups": [
+                {
+                    "original_path": str(backup.original_path),
+                    "backup_path": str(backup.backup_path),
+                }
+                for backup in self._backups
+            ],
+        }
+
+    def _write_manifest(self, payload: dict[str, Any]) -> None:
+        manifest_path = self._rollback_prefix / _ROLLBACK_MANIFEST
+        temp_path = self._rollback_prefix / f".{_ROLLBACK_MANIFEST}.{uuid4().hex}.tmp"
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        if getattr(self._storage, "provider", "local") == "local":
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_bytes(encoded)
+            temp_path.replace(manifest_path)
+            return
+
+        self._storage.upload_bytes(temp_path, encoded)
+        try:
+            self._storage.copy_path(temp_path, manifest_path)
+        finally:
+            try:
+                self._storage.delete_path(temp_path)
+            except Exception:
+                logger.warning("Failed to delete temporary rollback manifest %s", temp_path, exc_info=True)
+
+    def persist_manifest(self) -> None:
+        """Persist enough rollback metadata for crash recovery before delete."""
+        self._write_manifest(self._manifest_payload(resolved=False))
+
+    def mark_resolved(self) -> None:
+        """Mark rollback metadata as already handled before best-effort cleanup."""
+        self._write_manifest(self._manifest_payload(resolved=True))
 
     @property
     def backups(self) -> list[_CleanupBackup]:
@@ -193,10 +244,21 @@ class _ParquetCleanupGuard:
         """Drop rollback copies after the replacement is known-good."""
         if not self._active:
             return
-        if not self._backups:
+        if not self._backups and self._target_dir is None:
             self._active = False
             return
         try:
+            try:
+                self.mark_resolved()
+            except Exception:
+                if best_effort:
+                    logger.warning(
+                        "Failed to mark rollback parquet backups resolved under %s",
+                        self._rollback_prefix,
+                        exc_info=True,
+                    )
+                else:
+                    raise
             if getattr(self._storage, "provider", "local") != "local":
                 from tinohelm.data.storage import delete_prefix
 
@@ -217,6 +279,83 @@ class _ParquetCleanupGuard:
                 return
             raise
         self._active = False
+
+
+def recover_pending_ingest_rollbacks(
+    catalog_path: str | Path,
+    *,
+    storage: Any | None = None,
+) -> int:
+    """Restore crash-stranded ingest rollback backups before new mutations."""
+    from tinohelm.data.storage import delete_prefix, get_catalog_storage
+
+    catalog_root = Path(catalog_path)
+    active_storage = storage or get_catalog_storage(catalog_root=catalog_root)
+    rollback_root = catalog_root / ".ingest-rollback"
+    manifests = [
+        obj for obj in active_storage.iter_files(rollback_root, suffix=".json", recursive=True)
+        if Path(obj.path).name == _ROLLBACK_MANIFEST
+    ]
+    restored = 0
+    for manifest_obj in manifests:
+        try:
+            payload = json.loads(active_storage.read_bytes(manifest_obj).decode("utf-8"))
+            backups = payload.get("backups") or []
+            rollback_prefix = Path(payload.get("rollback_prefix") or Path(manifest_obj.path).parent)
+            target_dir_raw = payload.get("target_dir")
+            target_dir = Path(target_dir_raw) if target_dir_raw else None
+            preserved_paths = {Path(path) for path in payload.get("preserved_paths") or []}
+            original_paths = {Path(path) for path in payload.get("original_paths") or []}
+        except Exception as exc:
+            raise RuntimeError(f"failed to read ingest rollback manifest {manifest_obj.path}") from exc
+
+        if payload.get("resolved") is True:
+            try:
+                if getattr(active_storage, "provider", "local") != "local":
+                    delete_prefix(active_storage, rollback_prefix)
+                else:
+                    shutil.rmtree(rollback_prefix, ignore_errors=True)
+                    try:
+                        rollback_prefix.parent.rmdir()
+                    except OSError:
+                        pass
+            except Exception:
+                logger.warning(
+                    "Failed to discard resolved ingest rollback prefix %s",
+                    rollback_prefix,
+                    exc_info=True,
+                )
+            continue
+
+        restored_paths = {Path(entry["original_path"]) for entry in backups}
+        try:
+            for entry in reversed(backups):
+                active_storage.copy_path(Path(entry["backup_path"]), Path(entry["original_path"]))
+                restored += 1
+            if target_dir is not None and payload.get("complete") is True:
+                keep_paths = restored_paths | preserved_paths | original_paths
+                for obj in list(active_storage.iter_files(target_dir, suffix=".parquet", recursive=False)):
+                    active_path = Path(obj.path)
+                    if active_path in keep_paths:
+                        continue
+                    delete_prefix(active_storage, active_path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to restore ingest rollback backups from {manifest_obj.path}"
+            ) from exc
+
+        if getattr(active_storage, "provider", "local") != "local":
+            delete_prefix(active_storage, rollback_prefix)
+        else:
+            shutil.rmtree(rollback_prefix, ignore_errors=True)
+            try:
+                rollback_prefix.parent.rmdir()
+            except OSError:
+                pass
+
+    if restored:
+        logger.warning("Restored %d parquet object(s) from pending ingest rollback", restored)
+    return restored
 
 
 class BinanceVisionPipeline:
@@ -369,6 +508,11 @@ class BinanceVisionPipeline:
             current_task = asyncio.current_task()
             while current_task is not None and current_task.cancelling():
                 current_task.uncancel()
+
+        def _recancel_current_task() -> None:
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                current_task.cancel()
 
         def _discard_convert_future(convert_future: asyncio.Future) -> None:
             pending_convert_futures.discard(convert_future)
@@ -660,7 +804,7 @@ class BinanceVisionPipeline:
             if task_cancelled.cancelling():
                 _rollback_once()
                 raise asyncio.CancelledError
-        db_update_was_cancelled = False
+        post_commit_was_cancelled = False
         update_task = asyncio.create_task(self._update_db_catalog(
             symbol, data_type, interval, start, end,
             record_count=total_objects if total_objects > 0 else None,
@@ -670,7 +814,7 @@ class BinanceVisionPipeline:
         try:
             await asyncio.shield(update_task)
         except asyncio.CancelledError:
-            db_update_was_cancelled = True
+            post_commit_was_cancelled = True
             _clear_current_task_cancellation()
             try:
                 await _await_ignoring_cancellation(update_task)
@@ -693,7 +837,7 @@ class BinanceVisionPipeline:
         if cleanup_guard is not None:
             cleanup_guard.discard(best_effort=True)
 
-        if db_update_was_cancelled:
+        if post_commit_was_cancelled:
             logger.info(
                 "Cancellation arrived after DB catalog commit for %s %s; treating committed ingest as success",
                 symbol,
@@ -704,6 +848,7 @@ class BinanceVisionPipeline:
             await _progress(100, f"Done: {total_objects} objects")
         except asyncio.CancelledError:
             _clear_current_task_cancellation()
+            post_commit_was_cancelled = True
             logger.info(
                 "Cancellation arrived after DB catalog commit while publishing final progress for %s %s; "
                 "treating committed ingest as success",
@@ -711,7 +856,7 @@ class BinanceVisionPipeline:
                 data_type,
             )
 
-        return IngestResult(
+        result = IngestResult(
             symbol=symbol,
             data_type=data_type,
             objects_count=total_objects,
@@ -722,6 +867,9 @@ class BinanceVisionPipeline:
             rest_fallback_used=rest_fallback_used,
             rest_fallback_range=rest_fallback_range,
         )
+        if post_commit_was_cancelled:
+            _recancel_current_task()
+        return result
 
     def _rollback_failed_ingest(
         self,
@@ -1373,6 +1521,7 @@ class BinanceVisionPipeline:
             except Exception:
                 guard.restore()
                 raise
+            guard.persist_manifest()
             return guard
         else:
             return None  # unsupported data types have no catalog cleanup target
@@ -1402,12 +1551,15 @@ class BinanceVisionPipeline:
 
         rollback_prefix = Path(self.catalog_path) / ".ingest-rollback" / uuid4().hex
         preserved_paths = {Path(obj.path) for obj in parquet_objects if obj not in overlapping}
+        original_paths = {Path(obj.path) for obj in parquet_objects}
         guard = _ParquetCleanupGuard(
             self._storage,
             rollback_prefix,
             target_dir=target_dir,
             preserved_paths=preserved_paths,
+            original_paths=original_paths,
         )
+        guard.persist_manifest()
         if not overlapping:
             return guard
 
@@ -1417,7 +1569,9 @@ class BinanceVisionPipeline:
                 backup_path = rollback_prefix / original_path.name
                 self._storage.copy_path(original_path, backup_path)
                 guard.add_backup(original_path, backup_path)
-                delete_prefix(self._storage, original_path)
+            guard.persist_manifest()
+            for obj in overlapping:
+                delete_prefix(self._storage, Path(obj.path))
         except Exception:
             guard.restore()
             raise

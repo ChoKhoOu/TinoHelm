@@ -73,7 +73,19 @@ _LEGACY_DEFAULT_SOURCE = {
     "bar": "klines",
     "trade_tick": "aggTrades",
     "quote_tick": "bookTicker",
+    "funding_rate": "fundingRate",
+    "order_book_delta": "bookDepth",
+    "liquidation": "liquidationSnapshot",
+    "metrics": "metrics",
 }
+
+
+def _catalog_row_lock_key(row: Any) -> str:
+    """Return the mutation lock key for one persisted catalog row."""
+    source_type = getattr(row, "source_type", None)
+    data_type = getattr(row, "data_type")
+    effective_source = source_type or _LEGACY_DEFAULT_SOURCE.get(data_type) or data_type
+    return catalog_lock_key(getattr(row, "symbol"), effective_source, getattr(row, "interval", None))
 
 
 def _interval_to_nt(interval: str) -> str:
@@ -1076,15 +1088,16 @@ async def delete_catalog_entry(
         raise HTTPException(status_code=404, detail="Catalog entry not found")
 
     from tinohelm.data.storage import get_active_catalog_root
-    deleted_files, freed_bytes = await asyncio.to_thread(
-        _delete_storage_files,
-        row.symbol, row.data_type, row.interval,
-        str(get_active_catalog_root(settings)),
-        row.source_type,
-    )
+    async with get_catalog_lock(_catalog_row_lock_key(row)):
+        deleted_files, freed_bytes = await asyncio.to_thread(
+            _delete_storage_files,
+            row.symbol, row.data_type, row.interval,
+            str(get_active_catalog_root(settings)),
+            row.source_type,
+        )
 
-    await db.delete(row)
-    await db.commit()
+        await db.delete(row)
+        await db.commit()
     return {
         "status": "deleted",
         "symbol": row.symbol,
