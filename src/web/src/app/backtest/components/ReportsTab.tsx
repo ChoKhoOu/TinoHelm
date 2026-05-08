@@ -69,11 +69,7 @@ export function ReportsTab({ runId }: ReportsTabProps) {
     setPageIndex(0);
 
     const url = `${API_BASE}/api/backtest/${runId}/artifacts/${activeSource}_report.csv`;
-    fetch(url, {
-      headers: {
-        ...(process.env.NEXT_PUBLIC_API_KEY ? { "X-API-Key": process.env.NEXT_PUBLIC_API_KEY } : {}),
-      },
-    })
+    fetch(url)
       .then((r) => {
         if (r.status === 404) return "";
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
