@@ -347,6 +347,71 @@ class TestProcessJob:
         fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-lock-busy")
         fake_rds.publish.assert_not_called()
 
+    async def test_preclaim_cancellation_requeues_queued_job(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "_load_queued_job", AsyncMock(return_value=job))
+        claim = AsyncMock()
+        monkeypatch.setattr(dw, "_claim_queued_job", claim)
+
+        acquire_started = asyncio.Event()
+
+        async def acquire_never_finishes(_lock_key):
+            acquire_started.set()
+            await asyncio.sleep(10)
+
+        monkeypatch.setattr(dw, "_try_acquire_catalog_lock", acquire_never_finishes)
+
+        task = asyncio.create_task(dw._process_job("job-preclaim-cancel", "redis://x", "/cat"))
+        await acquire_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-preclaim-cancel")
+        claim.assert_not_awaited()
+        fake_rds.close.assert_awaited()
+
+    async def test_preclaim_exception_marks_queued_job_failed(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "_load_queued_job", AsyncMock(return_value=job))
+
+        async def acquire_raises(_lock_key):
+            raise RuntimeError("catalog lock unavailable")
+
+        monkeypatch.setattr(dw, "_try_acquire_catalog_lock", acquire_raises)
+        claim = AsyncMock()
+        mark_failed = AsyncMock(return_value=True)
+        monkeypatch.setattr(dw, "_claim_queued_job", claim)
+        monkeypatch.setattr(dw, "_guarded_queued_failure_update", mark_failed)
+
+        await dw._process_job("job-preclaim-error", "redis://x", "/cat")
+
+        claim.assert_not_awaited()
+        mark_failed.assert_awaited_once()
+        values = mark_failed.await_args.args[2]
+        assert values["status"] == "failed"
+        assert "catalog lock unavailable" in values["error"]
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-preclaim-error"
+        fake_rds.close.assert_awaited()
+
     async def test_cancelled_during_processing_is_not_overwritten_completed(self, monkeypatch):
         job = SimpleNamespace(
             status="queued",

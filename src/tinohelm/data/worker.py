@@ -194,6 +194,25 @@ async def _guarded_terminal_update(factory, job_id: str, values: dict) -> bool:
     return _rowcount(result) == 1
 
 
+async def _guarded_queued_failure_update(factory, job_id: str, values: dict) -> bool:
+    async with factory() as db:
+        result = await db.execute(
+            update(DataFetchJob)
+            .where(DataFetchJob.job_id == job_id)
+            .where(DataFetchJob.status == STATUS_QUEUED)
+            .values(**values)
+        )
+        await db.commit()
+    return _rowcount(result) == 1
+
+
+async def _requeue_queued_job_best_effort(rds: aioredis.Redis, job_id: str) -> None:
+    try:
+        await rds.lpush(QUEUE_KEY, job_id)
+    except Exception:
+        logger.warning("Failed to requeue pre-claim data-fetch job %s", job_id, exc_info=True)
+
+
 async def _job_is_still_running(factory, job_id: str) -> bool:
     async with factory() as db:
         job = (await db.execute(
@@ -219,12 +238,18 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
     rds = aioredis.from_url(redis_url, decode_responses=True)
     progress_channel = f"tino:data:progress:{job_id}"
     symbol = data_type = ""
+    queued_loaded = False
+    claimed = False
 
     try:
         queued_job = await _load_queued_job(factory, job_id)
         if queued_job is None:
             logger.info("Data-fetch job %s is not queued, skipping stale queue item", job_id)
             return
+
+        queued_loaded = True
+        symbol = queued_job.symbol
+        data_type = queued_job.data_type
 
         lock_key = _catalog_lock_key(queued_job.symbol, queued_job.data_type, queued_job.interval)
         lock = await _try_acquire_catalog_lock(lock_key)
@@ -241,6 +266,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             if job is None:
                 logger.info("Data-fetch job %s was cancelled before ingest, skipping catalog mutation", job_id)
                 return
+            claimed = True
 
             symbol = job.symbol
             data_type = job.data_type
@@ -320,10 +346,34 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
         if not updated:
             return
 
+    except asyncio.CancelledError:
+        if queued_loaded and not claimed:
+            await _requeue_queued_job_best_effort(rds, job_id)
+        raise
     except Exception as exc:
         failure_error = str(exc)
         logger.exception("Data-fetch job %s failed: %s", job_id, exc)
         try:
+            if queued_loaded and not claimed:
+                updated = await _guarded_queued_failure_update(
+                    factory,
+                    job_id,
+                    {
+                        "status": STATUS_FAILED,
+                        "error": failure_error[:2000],
+                        "completed_at": datetime.utcnow(),
+                    },
+                )
+                if updated:
+                    await rds.publish("tino:data:events", json.dumps({
+                        "type": "data.fetch.failed",
+                        "job_id": job_id,
+                        "symbol": symbol,
+                        "data_type": data_type,
+                        "error": failure_error[:200],
+                    }))
+                return
+
             async def _complete_failure() -> bool:
                 updated = await _guarded_terminal_update(
                     factory,

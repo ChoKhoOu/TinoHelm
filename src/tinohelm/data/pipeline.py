@@ -123,6 +123,7 @@ class _ParquetCleanupGuard:
         self._preserved_paths = {Path(p) for p in preserved_paths or set()}
         self._original_paths = {Path(p) for p in original_paths or set()}
         self._backups: list[_CleanupBackup] = []
+        self._catalog_commit: dict[str, Any] | None = None
         self._active = True
 
     def add_backup(self, original_path: Path, backup_path: Path) -> None:
@@ -141,6 +142,7 @@ class _ParquetCleanupGuard:
             "target_dir": str(self._target_dir) if self._target_dir is not None else None,
             "preserved_paths": sorted(str(path) for path in self._preserved_paths),
             "original_paths": sorted(str(path) for path in self._original_paths),
+            "catalog_commit": self._catalog_commit,
             "backups": [
                 {
                     "original_path": str(backup.original_path),
@@ -176,6 +178,40 @@ class _ParquetCleanupGuard:
     def mark_resolved(self) -> None:
         """Mark rollback metadata as already handled before best-effort cleanup."""
         self._write_manifest(self._manifest_payload(resolved=True))
+
+    def record_catalog_commit(
+        self,
+        *,
+        symbol: str,
+        data_type: str,
+        interval: str,
+        source_type: str | None,
+        start: date,
+        end: date,
+        file_path: str,
+        record_count: int | None,
+        size_bytes: int | None,
+    ) -> None:
+        """Persist the intended DB catalog commit without resolving rollback.
+
+        Startup recovery uses this as proof material: if the process crashes
+        after the DB commit but before ``discard()``, recovery can verify the
+        catalog row and avoid restoring old parquet over a committed ingest. If
+        the DB row is absent or stale, the same manifest remains unresolved and
+        recovery restores the backups.
+        """
+        self._catalog_commit = {
+            "symbol": symbol,
+            "data_type": data_type,
+            "interval": interval,
+            "source_type": source_type,
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "file_path": file_path,
+            "record_count": record_count,
+            "size_bytes": size_bytes,
+        }
+        self._write_manifest(self._manifest_payload(resolved=False))
 
     @property
     def backups(self) -> list[_CleanupBackup]:
@@ -223,7 +259,7 @@ class _ParquetCleanupGuard:
         if delete_failures:
             raise RuntimeError(f"failed to delete current-run parquet: {delete_failures}")
 
-    def restore(self) -> None:
+    def restore(self, *, discard: bool = True) -> None:
         """Restore backed-up objects to their original logical paths."""
         if not self._active:
             return
@@ -238,7 +274,8 @@ class _ParquetCleanupGuard:
                 f"{src} -> {dest}: {exc}" for src, dest, exc in restore_failures
             )
             raise RuntimeError(f"failed to restore rollback parquet backups: {detail}") from restore_failures[0][2]
-        self.discard(best_effort=True)
+        if discard:
+            self.discard(best_effort=True)
 
     def discard(self, *, best_effort: bool = False) -> None:
         """Drop rollback copies after the replacement is known-good."""
@@ -279,6 +316,51 @@ class _ParquetCleanupGuard:
                 return
             raise
         self._active = False
+
+
+def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
+    """Return True when an unresolved rollback manifest has a matching DB row."""
+    if not isinstance(commit_payload, dict):
+        return False
+    try:
+        symbol = str(commit_payload["symbol"])
+        data_type = str(commit_payload["data_type"])
+        interval = str(commit_payload["interval"])
+        source_type = commit_payload.get("source_type")
+        if source_type is not None:
+            source_type = str(source_type)
+        start = date.fromisoformat(str(commit_payload["start_date"]))
+        end = date.fromisoformat(str(commit_payload["end_date"]))
+        file_path = str(commit_payload["file_path"])
+    except Exception:
+        return False
+
+    async def _check() -> bool:
+        from sqlalchemy import select
+        from tinohelm.db.models import DataCatalog
+        from tinohelm.db.session import get_session_factory
+
+        factory = get_session_factory()
+        async with factory() as session:
+            stmt = select(DataCatalog).where(
+                DataCatalog.symbol == symbol,
+                DataCatalog.data_type == data_type,
+                DataCatalog.interval == interval,
+            )
+            if source_type is None:
+                stmt = stmt.where(DataCatalog.source_type.is_(None))
+            else:
+                stmt = stmt.where(DataCatalog.source_type == source_type)
+            row = (await session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        if row.file_path != file_path:
+            return False
+        if row.start_date > start or row.end_date < end:
+            return False
+        return True
+
+    return asyncio.run(_check())
 
 
 def recover_pending_ingest_rollbacks(
@@ -322,6 +404,25 @@ def recover_pending_ingest_rollbacks(
             except Exception:
                 logger.warning(
                     "Failed to discard resolved ingest rollback prefix %s",
+                    rollback_prefix,
+                    exc_info=True,
+                )
+            continue
+
+        catalog_commit = payload.get("catalog_commit")
+        if catalog_commit and _catalog_commit_is_persisted(catalog_commit):
+            try:
+                if getattr(active_storage, "provider", "local") != "local":
+                    delete_prefix(active_storage, rollback_prefix)
+                else:
+                    shutil.rmtree(rollback_prefix, ignore_errors=True)
+                    try:
+                        rollback_prefix.parent.rmdir()
+                    except OSError:
+                        pass
+            except Exception:
+                logger.warning(
+                    "Failed to discard committed ingest rollback prefix %s",
                     rollback_prefix,
                     exc_info=True,
                 )
@@ -387,6 +488,7 @@ class BinanceVisionPipeline:
         self._chunk_rows = max(1, cfg.data.chunk_rows)
         self._agg_trades_chunk_rows = max(1, cfg.data.agg_trades_chunk_rows)
         self._csv_queue_maxsize = max(1, cfg.data.csv_queue_maxsize)
+        self._pending_funding_cache_updates: dict[str, list[dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -600,6 +702,7 @@ class BinanceVisionPipeline:
                     preexisting_output_paths,
                 )
             finally:
+                self._pending_funding_cache_updates.pop(symbol, None)
                 self._restore_funding_cache(funding_cache_snapshot)
 
         try:
@@ -804,22 +907,31 @@ class BinanceVisionPipeline:
             if task_cancelled.cancelling():
                 _rollback_once()
                 raise asyncio.CancelledError
-        post_commit_was_cancelled = False
+        record_count = total_objects if total_objects > 0 else None
         if cleanup_guard is not None:
             try:
-                # Crash-safe ordering: once storage writes are complete, startup
-                # recovery must not restore old parquet after the DB commit lands.
-                # Keep the in-memory guard active so same-process DB failures can
-                # still roll storage back via _rollback_once().
-                cleanup_guard.mark_resolved()
+                from tinohelm.data.catalog import resolve_catalog_path
+
+                cleanup_guard.record_catalog_commit(
+                    symbol=symbol,
+                    data_type=resolve_db_category(data_type),
+                    interval=resolve_db_interval(data_type, interval),
+                    source_type=data_type,
+                    start=start,
+                    end=end,
+                    file_path=str(resolve_catalog_path(self.catalog_path, data_type)),
+                    record_count=record_count,
+                    size_bytes=written_size,
+                )
             except Exception:
                 _rollback_once()
                 await _progress(100, "Failed")
-                logger.exception("Failed to mark ingest rollback resolved before DB catalog update")
+                logger.exception("Failed to persist ingest rollback DB-commit intent")
                 raise
+        post_commit_was_cancelled = False
         update_task = asyncio.create_task(self._update_db_catalog(
             symbol, data_type, interval, start, end,
-            record_count=total_objects if total_objects > 0 else None,
+            record_count=record_count,
             size_bytes=written_size,
             source_type=data_type,
         ))
@@ -845,6 +957,12 @@ class BinanceVisionPipeline:
             await _progress(100, "Failed")
             logger.exception("Failed to update DB catalog")
             raise
+
+        if data_type == "fundingRate":
+            try:
+                self._flush_pending_funding_cache(symbol)
+            except Exception:
+                logger.warning("Failed to update legacy funding JSON cache for %s", symbol, exc_info=True)
 
         if cleanup_guard is not None:
             cleanup_guard.discard(best_effort=True)
@@ -902,7 +1020,7 @@ class BinanceVisionPipeline:
                 )
 
             try:
-                cleanup_guard.restore()
+                cleanup_guard.restore(discard=delete_exc is None)
             except BaseException as restore_exc:
                 if delete_exc is not None:
                     raise RuntimeError(
@@ -1328,11 +1446,10 @@ class BinanceVisionPipeline:
         return _ns_to_utc_date(min_ts) <= start and _ns_to_utc_date(max_ts) >= end
 
     def _write_funding_rates(self, records: list, symbol: str) -> str | None:
-        """Write funding rate records to Parquet (primary) and JSON (fallback cache).
+        """Write funding rate records to primary Parquet and stage JSON cache update.
 
         Returns the Parquet file path string if written, else None.
         """
-        from tinohelm.data.funding_cache import _load_cache, _save_cache
         from tinohelm.data.catalog import write_funding_rate_parquet
 
         cache_records = [
@@ -1343,21 +1460,33 @@ class BinanceVisionPipeline:
             }
             for r in records
         ]
-        # Parquet write is the primary durable state.  Only update the legacy
-        # JSON cache after Parquet succeeds, so a failed Parquet write cannot
-        # poison the fallback cache into skipping future repairs.
         parquet_path = write_funding_rate_parquet(
             records=records,
             symbol=symbol,
             catalog_root=self.catalog_path,
             storage=self._storage,
         )
-        _save_cache(symbol, [*_load_cache(symbol), *cache_records])
+        self._pending_funding_cache_updates.setdefault(symbol, []).extend(cache_records)
         logger.info(
-            "Wrote %d funding rate records for %s (Parquet + JSON)",
+            "Wrote %d funding rate records for %s (Parquet primary; JSON pending DB commit)",
             len(records), symbol,
         )
         return str(parquet_path)
+
+    def _flush_pending_funding_cache(self, symbol: str) -> None:
+        """Merge staged funding records into the legacy JSON cache after DB commit."""
+        pending = self._pending_funding_cache_updates.pop(symbol, [])
+        if not pending:
+            return
+        from tinohelm.data.funding_cache import _load_cache, _save_cache
+
+        by_time: dict[int, dict] = {}
+        for row in _load_cache(symbol):
+            if isinstance(row, dict) and isinstance(row.get("funding_time_ms"), (int, float)):
+                by_time[int(row["funding_time_ms"])] = row
+        for row in pending:
+            by_time[int(row["funding_time_ms"])] = row
+        _save_cache(symbol, [by_time[key] for key in sorted(by_time)])
 
     # ------------------------------------------------------------------
     # REST API fallback

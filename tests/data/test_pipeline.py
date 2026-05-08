@@ -113,6 +113,11 @@ class TestFundingRateWrites:
         ]
 
         pipeline._write_funding_rates(records, "BTCUSDT-PERP")
+        assert _load_cache("BTCUSDT-PERP") == [
+            {"funding_time_ms": 1_000, "funding_rate": 0.01, "mark_price": 100.0},
+        ]
+
+        pipeline._flush_pending_funding_cache("BTCUSDT-PERP")
 
         cached = _load_cache("BTCUSDT-PERP")
         assert [row["funding_time_ms"] for row in cached] == [1_000, 2_000]
@@ -364,6 +369,60 @@ class TestIngestEarlyFailClosed:
         assert old_path.exists()
         assert old_path.read_bytes() == old_payload
         assert partial_path.exists()
+        assert list((tmp_path / ".ingest-rollback").rglob("manifest.json"))
+
+    def test_recover_skips_unresolved_manifest_after_verified_catalog_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        symbol = "BTCUSDT-PERP"
+        nt_symbol = "BTCUSDT-PERP.BINANCE"
+        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir.mkdir(parents=True)
+        old_path = trade_dir / "old-overlap.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="aggTrades",
+            interval=None,
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+        assert guard is not None
+        committed_path = trade_dir / "committed-current-run.parquet"
+        committed_path.write_bytes(b"committed")
+        guard.record_catalog_commit(
+            symbol=symbol,
+            data_type="trade_tick",
+            interval="tick",
+            source_type="aggTrades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+            file_path=str(resolve_catalog_path(tmp_path, "aggTrades")),
+            record_count=1,
+            size_bytes=9,
+        )
+        manifest = next((tmp_path / ".ingest-rollback").rglob("manifest.json"))
+        assert json.loads(manifest.read_text())["resolved"] is False
+        checked: list[dict] = []
+
+        def persisted(payload):
+            checked.append(payload)
+            return True
+
+        monkeypatch.setattr("tinohelm.data.pipeline._catalog_commit_is_persisted", persisted)
+
+        restored = recover_pending_ingest_rollbacks(tmp_path)
+
+        assert restored == 0
+        assert checked
+        assert not old_path.exists()
+        assert committed_path.exists()
+        assert not (tmp_path / ".ingest-rollback").exists()
 
     def test_recover_pending_ingest_rollbacks_restores_crash_stranded_backup(self, tmp_path: Path):
         from tinohelm.data.catalog import resolve_catalog_path
@@ -645,7 +704,7 @@ class TestIngestEarlyFailClosed:
         assert update_completed == [True]
         assert written_path.exists()
 
-    def test_rollback_manifest_marked_resolved_before_db_catalog_commit(
+    def test_rollback_manifest_records_commit_intent_before_db_catalog_update(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
@@ -657,6 +716,14 @@ class TestIngestEarlyFailClosed:
         events: list[str] = []
 
         class Guard:
+            def record_catalog_commit(self, **kwargs):
+                events.append("record_catalog_commit")
+                assert kwargs["symbol"] == "BTCUSDT-PERP"
+                assert kwargs["data_type"] == "trade_tick"
+                assert kwargs["source_type"] == "aggTrades"
+                assert kwargs["record_count"] == 1
+                assert kwargs["size_bytes"] == 123
+
             def mark_resolved(self):
                 events.append("mark_resolved")
 
@@ -666,8 +733,8 @@ class TestIngestEarlyFailClosed:
             def delete_current_outputs(self, *_args, **_kwargs):
                 events.append("delete_current_outputs")
 
-            def restore(self):
-                events.append("restore")
+            def restore(self, *, discard: bool = True):
+                events.append(f"restore:{discard}")
 
         class Converter:
             supports_chunked = False
@@ -685,7 +752,7 @@ class TestIngestEarlyFailClosed:
 
         async def update_catalog(*_args, **_kwargs):
             events.append("db_update")
-            assert events[:1] == ["mark_resolved"]
+            assert events[:1] == ["record_catalog_commit"]
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         p.downloader = mock_dl
@@ -705,7 +772,7 @@ class TestIngestEarlyFailClosed:
         ))
 
         assert result.objects_count == 1
-        assert events == ["mark_resolved", "db_update", "discard:True"]
+        assert events == ["record_catalog_commit", "db_update", "discard:True"]
         assert written_path.exists()
 
     def test_final_progress_cancellation_after_db_commit_recancels(
