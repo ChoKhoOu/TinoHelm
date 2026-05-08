@@ -915,8 +915,9 @@ async def test_start_stop_signal_worker_lifecycle():
     assert task is not None
     assert _handle.is_running()
     stop_signal_worker()
-    assert not _handle.is_running()
+    assert _handle.is_running()
     await asyncio.sleep(0)
+    assert not _handle.is_running()
 
 
 # ---------------------------------------------------------------------------

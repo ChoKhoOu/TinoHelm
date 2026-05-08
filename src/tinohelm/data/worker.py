@@ -32,6 +32,7 @@ from tinohelm.core.async_queue_worker import (
     requeue_running_jobs,
 )
 from tinohelm.core.config import get_settings
+from tinohelm.data.pipeline_helpers import resolve_db_category, resolve_db_interval
 from tinohelm.db.models import DataFetchJob
 from tinohelm.db.session import get_session_factory
 
@@ -41,6 +42,21 @@ QUEUE_KEY = "tino:data:queue"
 PROGRESS_THROTTLE_INTERVAL = 2.0
 
 _handle: WorkerHandle = WorkerHandle(name="data-fetch-worker")
+_catalog_locks: dict[str, asyncio.Lock] = {}
+
+
+def _catalog_lock_key(symbol: str, data_type: str, interval: str | None) -> str:
+    category = resolve_db_category(data_type)
+    db_interval = resolve_db_interval(data_type, interval)
+    return f"data_catalog:{symbol}:{category}:{db_interval}:{data_type}"
+
+
+def _get_catalog_lock(lock_key: str) -> asyncio.Lock:
+    lock = _catalog_locks.get(lock_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _catalog_locks[lock_key] = lock
+    return lock
 
 
 async def enqueue_job(rds: aioredis.Redis, job_id: str) -> None:
@@ -156,19 +172,22 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             if throttle.should_write(pct):
                 await _persist_progress_if_running(factory, job_id, pct, msg)
 
-        # Run pipeline
+        # Run pipeline.  Same catalog targets are serialized across local
+        # consumers so cleanup/write/update is one critical section per key.
         from tinohelm.data.pipeline import BinanceVisionPipeline
 
-        pipeline = BinanceVisionPipeline(catalog_path=catalog_path)
-        result = await pipeline.ingest(
-            symbol=symbol,
-            data_type=data_type,
-            start=start_date,
-            end=end_date,
-            asset_class=asset_class,
-            interval=interval,
-            progress_cb=_progress,
-        )
+        lock_key = _catalog_lock_key(symbol, data_type, interval)
+        async with _get_catalog_lock(lock_key):
+            pipeline = BinanceVisionPipeline(catalog_path=catalog_path)
+            result = await pipeline.ingest(
+                symbol=symbol,
+                data_type=data_type,
+                start=start_date,
+                end=end_date,
+                asset_class=asset_class,
+                interval=interval,
+                progress_cb=_progress,
+            )
 
         updated = await _guarded_terminal_update(
             factory,
@@ -232,15 +251,37 @@ def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
 
     async def _run_consumers() -> None:
         concurrency = max(1, get_settings().data.job_concurrency)
-        await asyncio.gather(*[
-            consumer_loop(
-                redis_url,
-                QUEUE_KEY,
-                _process,
-                worker_label="Data-fetch worker",
+        tasks = [
+            asyncio.create_task(
+                consumer_loop(
+                    redis_url,
+                    QUEUE_KEY,
+                    _process,
+                    worker_label="Data-fetch worker",
+                ),
+                name=f"data-fetch-consumer-{idx}",
             )
-            for _ in range(concurrency)
-        ])
+            for idx in range(concurrency)
+        ]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    for sibling in pending:
+                        sibling.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    raise exc
+            for sibling in pending:
+                sibling.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     return _handle.start(_run_consumers)
 

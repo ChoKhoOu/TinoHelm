@@ -96,12 +96,28 @@ class _CleanupBackup:
     backup_path: Path
 
 
+@dataclass
+class _FundingCacheSnapshot:
+    path: Path
+    existed: bool
+    payload: bytes | None
+
+
 class _ParquetCleanupGuard:
     """Rollback handle for overlapping parquet files removed before ingest writes."""
 
-    def __init__(self, storage: Any, rollback_prefix: Path) -> None:
+    def __init__(
+        self,
+        storage: Any,
+        rollback_prefix: Path,
+        *,
+        target_dir: Path | None = None,
+        preserved_paths: set[Path] | None = None,
+    ) -> None:
         self._storage = storage
         self._rollback_prefix = rollback_prefix
+        self._target_dir = Path(target_dir) if target_dir is not None else None
+        self._preserved_paths = {Path(p) for p in preserved_paths or set()}
         self._backups: list[_CleanupBackup] = []
         self._active = True
 
@@ -114,15 +130,55 @@ class _ParquetCleanupGuard:
     def backups(self) -> list[_CleanupBackup]:
         return list(self._backups)
 
+    def delete_current_outputs(self, file_paths: list[str] | set[str]) -> None:
+        """Delete parquet files produced by the current failed ingest attempt."""
+        from tinohelm.data.storage import delete_prefix
+
+        seen: set[Path] = set()
+        delete_failures: list[Path] = []
+        for raw_path in file_paths:
+            path = Path(raw_path)
+            if path in seen or path in self._preserved_paths:
+                continue
+            seen.add(path)
+            try:
+                delete_prefix(self._storage, path)
+            except Exception:
+                delete_failures.append(path)
+                logger.warning("Failed to delete current-run parquet %s", path, exc_info=True)
+
+        if self._target_dir is None:
+            if delete_failures:
+                raise RuntimeError(f"failed to delete current-run parquet: {delete_failures}")
+            return
+        try:
+            active_objects = list(
+                self._storage.iter_files(self._target_dir, suffix=".parquet", recursive=False)
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to list current-run parquet under {self._target_dir}"
+            ) from exc
+
+        for obj in active_objects:
+            path = Path(obj.path)
+            if path in self._preserved_paths or path in seen:
+                continue
+            try:
+                delete_prefix(self._storage, path)
+            except Exception:
+                delete_failures.append(path)
+                logger.warning("Failed to delete current-run parquet %s", path, exc_info=True)
+        if delete_failures:
+            raise RuntimeError(f"failed to delete current-run parquet: {delete_failures}")
+
     def restore(self) -> None:
         """Restore backed-up objects to their original logical paths."""
         if not self._active:
             return
-        try:
-            for backup in reversed(self._backups):
-                self._storage.copy_path(backup.backup_path, backup.original_path)
-        finally:
-            self.discard()
+        for backup in reversed(self._backups):
+            self._storage.copy_path(backup.backup_path, backup.original_path)
+        self.discard()
 
     def discard(self) -> None:
         """Drop rollback copies after the replacement is known-good."""
@@ -137,6 +193,10 @@ class _ParquetCleanupGuard:
             delete_prefix(self._storage, self._rollback_prefix)
         else:
             shutil.rmtree(self._rollback_prefix, ignore_errors=True)
+            try:
+                self._rollback_prefix.parent.rmdir()
+            except OSError:
+                pass
 
 
 class BinanceVisionPipeline:
@@ -221,7 +281,11 @@ class BinanceVisionPipeline:
         # Early exit: funding-rate JSON cache already covers [start, end].
         # Defense-in-depth — protects every caller (not just BacktestRunner)
         # from re-downloading an already-cached range.
-        if data_type == "fundingRate" and self._funding_cache_covers(symbol, start, end):
+        if (
+            data_type == "fundingRate"
+            and self._funding_cache_covers(symbol, start, end)
+            and self._funding_parquet_covers(symbol, start, end)
+        ):
             await _progress(100, "Funding rate cache already covers range")
             return IngestResult(
                 symbol=symbol, data_type=data_type,
@@ -254,24 +318,134 @@ class BinanceVisionPipeline:
             data_type, symbol, interval, instrument,
         )
         cleanup_guard = self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
+        funding_cache_snapshot = (
+            self._snapshot_funding_cache(symbol) if data_type == "fundingRate" else None
+        )
 
         # 3. Pipelined download → convert (overlap via asyncio.Queue)
         dl_concurrency = self.downloader.concurrency
         n_converters = self._convert_workers
         sem = asyncio.Semaphore(dl_concurrency)
         total_tasks = len(tasks)
-        await _progress(
-            DOWNLOAD_PROGRESS_BASE,
-            f"Downloading {len(tasks)} file(s) (×{dl_concurrency}, convert ×{n_converters})...",
-        )
 
         csv_queue: asyncio.Queue[CsvSource | None] = asyncio.Queue(maxsize=self._csv_queue_maxsize)
         download_done = 0
         convert_done = 0
         total_objects = 0
         all_file_paths: list[str] = []
+        preexisting_output_paths = self._catalog_current_paths(symbol, data_type, interval, data_type)
+        rollback_done = False
         download_errors: list[tuple[str, Exception]] = []
         convert_errors: list[tuple[str, Exception]] = []
+        import threading
+
+        pending_convert_futures: set[asyncio.Future] = set()
+        pending_convert_names: dict[asyncio.Future, str] = {}
+        pending_convert_events: dict[asyncio.Future, threading.Event] = {}
+        pending_convert_results: dict[asyncio.Future, dict[str, Any]] = {}
+        recorded_convert_futures: set[asyncio.Future] = set()
+
+        def _clear_current_task_cancellation() -> None:
+            current_task = asyncio.current_task()
+            while current_task is not None and current_task.cancelling():
+                current_task.uncancel()
+
+        def _discard_convert_future(convert_future: asyncio.Future) -> None:
+            pending_convert_futures.discard(convert_future)
+            pending_convert_names.pop(convert_future, None)
+            pending_convert_events.pop(convert_future, None)
+            pending_convert_results.pop(convert_future, None)
+
+        def _record_convert_result(
+            convert_future: asyncio.Future,
+            objects_count: int,
+            file_paths: list[str],
+        ) -> None:
+            nonlocal total_objects
+            if convert_future in recorded_convert_futures:
+                return
+            recorded_convert_futures.add(convert_future)
+            _discard_convert_future(convert_future)
+            if objects_count > 0:
+                total_objects += objects_count
+            if file_paths:
+                all_file_paths.extend(file_paths)
+
+        async def _await_convert_future_after_cancel(convert_future: asyncio.Future) -> None:
+            _clear_current_task_cancellation()
+            csv_name = pending_convert_names.get(convert_future, "<unknown>")
+            try:
+                n, fps = await asyncio.shield(convert_future)
+                _record_convert_result(convert_future, n, fps)
+            except asyncio.CancelledError:
+                done_event = pending_convert_events.get(convert_future)
+                result_box = pending_convert_results.get(convert_future)
+                if done_event is None or result_box is None:
+                    _discard_convert_future(convert_future)
+                    logger.warning(
+                        "Convert executor was cancelled before rollback collection for %s",
+                        csv_name,
+                    )
+                    return
+                await asyncio.to_thread(done_event.wait)
+                if "exception" in result_box:
+                    _discard_convert_future(convert_future)
+                    logger.warning(
+                        "Convert executor failed after cancellation for %s",
+                        csv_name,
+                        exc_info=(type(result_box["exception"]), result_box["exception"], None),
+                    )
+                    return
+                n, fps = result_box.get("result", (0, []))
+                _record_convert_result(convert_future, n, fps)
+            except Exception:
+                _discard_convert_future(convert_future)
+                logger.warning(
+                    "Convert executor failed after cancellation for %s",
+                    csv_name,
+                    exc_info=True,
+                )
+
+        async def _drain_pending_convert_futures() -> None:
+            while pending_convert_futures:
+                futures = list(pending_convert_futures)
+                await asyncio.gather(
+                    *(_await_convert_future_after_cancel(future) for future in futures),
+                    return_exceptions=True,
+                )
+
+        async def _await_ignoring_cancellation(awaitable) -> Any:
+            task = asyncio.ensure_future(awaitable)
+            while True:
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    _clear_current_task_cancellation()
+                    if task.done():
+                        return task.result()
+
+        def _rollback_once() -> None:
+            nonlocal rollback_done
+            if rollback_done:
+                return
+            rollback_done = True
+            try:
+                self._rollback_failed_ingest(
+                    cleanup_guard,
+                    all_file_paths,
+                    preexisting_output_paths,
+                )
+            finally:
+                self._restore_funding_cache(funding_cache_snapshot)
+
+        try:
+            await _progress(
+                DOWNLOAD_PROGRESS_BASE,
+                f"Downloading {len(tasks)} file(s) (×{dl_concurrency}, convert ×{n_converters})...",
+            )
+        except asyncio.CancelledError:
+            _rollback_once()
+            raise
 
         async def _download_one(task):
             nonlocal download_done
@@ -320,21 +494,46 @@ class BinanceVisionPipeline:
                         loop,
                     )
 
+                convert_future: asyncio.Future | None = None
                 try:
-                    n, fps = await loop.run_in_executor(
-                        None, self._convert_one_file,
-                        csv_path, converter, instrument, kwargs,
-                        symbol, data_type, interval, schema_validated,
-                        _chunk_cb,
-                    )
+                    done_event = threading.Event()
+                    result_box: dict[str, Any] = {}
+
+                    def _run_convert_one_file():
+                        try:
+                            result = self._convert_one_file(
+                                csv_path, converter, instrument, kwargs,
+                                symbol, data_type, interval, schema_validated,
+                                _chunk_cb,
+                            )
+                            result_box["result"] = result
+                            return result
+                        except BaseException as exc:
+                            result_box["exception"] = exc
+                            raise
+                        finally:
+                            done_event.set()
+
+                    convert_future = loop.run_in_executor(None, _run_convert_one_file)
+                    pending_convert_futures.add(convert_future)
+                    pending_convert_names[convert_future] = csv_name
+                    pending_convert_events[convert_future] = done_event
+                    pending_convert_results[convert_future] = result_box
+                    try:
+                        n, fps = await asyncio.shield(convert_future)
+                    except asyncio.CancelledError:
+                        await _await_convert_future_after_cancel(convert_future)
+                        raise
                     if n <= 0 or not fps:
+                        _discard_convert_future(convert_future)
                         raise RuntimeError(
                             f"conversion produced no objects/files for {csv_name}"
                         )
                     schema_validated = True
-                    total_objects += n
-                    all_file_paths.extend(fps)
+                    _record_convert_result(convert_future, n, fps)
                 except Exception as exc:
+                    if convert_future is not None:
+                        _discard_convert_future(convert_future)
                     logger.warning("Convert failed for %s", csv_name, exc_info=True)
                     convert_errors.append((csv_name, exc))
                 self._cleanup_raw_file(csv_path)
@@ -345,12 +544,24 @@ class BinanceVisionPipeline:
                     f"已完成 {convert_done}/{total_tasks} ({total_objects:,} objects)",
                 )
 
-        consumers = [_convert_consumer() for _ in range(n_converters)]
-        await asyncio.gather(_download_all(), *consumers)
+        consumer_tasks = [asyncio.create_task(_convert_consumer()) for _ in range(n_converters)]
+        download_task = asyncio.create_task(_download_all())
+        pipeline_tasks = [download_task, *consumer_tasks]
+        try:
+            await asyncio.gather(*pipeline_tasks)
+        except asyncio.CancelledError:
+            for task in pipeline_tasks:
+                task.cancel()
+            _clear_current_task_cancellation()
+            await _await_ignoring_cancellation(
+                asyncio.gather(*pipeline_tasks, return_exceptions=True)
+            )
+            await _await_ignoring_cancellation(_drain_pending_convert_futures())
+            _rollback_once()
+            raise
 
         if download_errors or convert_errors:
-            if cleanup_guard is not None:
-                cleanup_guard.restore()
+            _rollback_once()
             parts: list[str] = []
             first_exc: Exception | None = None
             if download_errors:
@@ -364,8 +575,7 @@ class BinanceVisionPipeline:
             raise RuntimeError("; ".join(parts)) from first_exc
 
         if total_objects <= 0:
-            if cleanup_guard is not None:
-                cleanup_guard.restore()
+            _rollback_once()
             await _progress(100, "Failed")
             raise RuntimeError(
                 f"{symbol} {data_type} converted 0 objects from {len(tasks)} downloaded file(s)"
@@ -379,49 +589,92 @@ class BinanceVisionPipeline:
             vision_end = self._detect_vision_coverage_end(tasks)
             if vision_end and vision_end < end:
                 rest_start = vision_end + timedelta(days=1)
-                await _progress(92, f"REST fallback: {rest_start} → {end}")
+                try:
+                    await _progress(92, f"REST fallback: {rest_start} → {end}")
+                except asyncio.CancelledError:
+                    _rollback_once()
+                    raise
                 try:
                     fb_count, fb_paths = await self._rest_fallback(
                         symbol, data_type, interval, rest_start, end, instrument,
                     )
-                    if fb_count > 0:
-                        total_objects += fb_count
-                        all_file_paths.extend(fb_paths)
-                        rest_fallback_used = True
-                        rest_fallback_range = (rest_start, end)
+                    if fb_count <= 0 or not fb_paths:
+                        raise RuntimeError(
+                            f"REST fallback produced no objects/files for {symbol} {data_type} "
+                            f"[{rest_start}..{end}]"
+                        )
+                    total_objects += fb_count
+                    all_file_paths.extend(fb_paths)
+                    rest_fallback_used = True
+                    rest_fallback_range = (rest_start, end)
+                except asyncio.CancelledError:
+                    _rollback_once()
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "REST fallback failed for %s %s [%s..%s]",
                         symbol, data_type, rest_start, end, exc_info=True,
                     )
-                    if cleanup_guard is not None:
-                        cleanup_guard.restore()
+                    _rollback_once()
                     await _progress(100, "Failed")
                     raise RuntimeError(
                         f"REST fallback failed for {symbol} {data_type} [{rest_start}..{end}]: {exc}"
                     ) from exc
 
         # 5. Update DB catalog
-        await _progress(96, "Updating catalog database...")
+        try:
+            await _progress(96, "Updating catalog database...")
+        except asyncio.CancelledError:
+            _rollback_once()
+            raise
         # Compute size_bytes from written files
         unique_paths = set(all_file_paths)
-        written_size = self._written_file_size(unique_paths) if unique_paths else None
         try:
-            await self._update_db_catalog(
-                symbol, data_type, interval, start, end,
-                record_count=total_objects if total_objects > 0 else None,
-                size_bytes=written_size,
-                source_type=data_type,
-            )
+            written_size = self._written_file_size(unique_paths) if unique_paths else None
         except Exception:
-            if cleanup_guard is not None:
-                cleanup_guard.restore()
+            _rollback_once()
+            await _progress(100, "Failed")
+            logger.exception("Failed to stat written catalog files")
+            raise
+        if task_cancelled := asyncio.current_task():
+            if task_cancelled.cancelling():
+                _rollback_once()
+                raise asyncio.CancelledError
+        db_update_cancelled = False
+        update_task = asyncio.create_task(self._update_db_catalog(
+            symbol, data_type, interval, start, end,
+            record_count=total_objects if total_objects > 0 else None,
+            size_bytes=written_size,
+            source_type=data_type,
+        ))
+        try:
+            await asyncio.shield(update_task)
+        except asyncio.CancelledError:
+            db_update_cancelled = True
+            _clear_current_task_cancellation()
+            try:
+                await _await_ignoring_cancellation(update_task)
+            except asyncio.CancelledError:
+                _rollback_once()
+                await _progress(100, "Failed")
+                logger.exception("DB catalog update was cancelled before commit")
+                raise
+            except Exception:
+                _rollback_once()
+                await _progress(100, "Failed")
+                logger.exception("Failed to update DB catalog")
+                raise
+        except Exception:
+            _rollback_once()
             await _progress(100, "Failed")
             logger.exception("Failed to update DB catalog")
             raise
 
         if cleanup_guard is not None:
             cleanup_guard.discard()
+
+        if db_update_cancelled:
+            raise asyncio.CancelledError
 
         await _progress(100, f"Done: {total_objects} objects")
 
@@ -436,6 +689,92 @@ class BinanceVisionPipeline:
             rest_fallback_used=rest_fallback_used,
             rest_fallback_range=rest_fallback_range,
         )
+
+    def _rollback_failed_ingest(
+        self,
+        cleanup_guard: _ParquetCleanupGuard | None,
+        file_paths: list[str],
+        preexisting_paths: set[Path] | None = None,
+    ) -> None:
+        """Remove current-run outputs, then restore old overlapping parquet."""
+        if cleanup_guard is not None:
+            cleanup_guard.delete_current_outputs(file_paths)
+            cleanup_guard.restore()
+            return
+        self._delete_written_paths(file_paths, preserve=preexisting_paths)
+
+    def _delete_written_paths(
+        self,
+        file_paths: list[str] | set[str],
+        *,
+        preserve: set[Path] | None = None,
+    ) -> None:
+        """Delete current-run outputs when no cleanup guard exists."""
+        from tinohelm.data.storage import delete_prefix
+
+        preserved = {Path(p) for p in preserve or set()}
+        seen: set[Path] = set()
+        delete_failures: list[Path] = []
+        for raw_path in file_paths:
+            path = Path(raw_path)
+            if path in seen or path in preserved:
+                continue
+            seen.add(path)
+            try:
+                delete_prefix(self._storage, path)
+            except Exception:
+                delete_failures.append(path)
+                logger.warning("Failed to delete current-run parquet %s", path, exc_info=True)
+        if delete_failures:
+            raise RuntimeError(f"failed to delete current-run parquet: {delete_failures}")
+
+    def _catalog_current_paths(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        source_type: str | None,
+    ) -> set[Path]:
+        """Snapshot existing parquet paths for rollback-safe no-guard writers."""
+        target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
+        if target_dir is None:
+            return set()
+        try:
+            return {
+                Path(obj.path)
+                for obj in self._storage.iter_files(target_dir, suffix=".parquet", recursive=True)
+            }
+        except Exception:
+            logger.warning("Failed to snapshot catalog paths under %s", target_dir, exc_info=True)
+            return set()
+
+    @staticmethod
+    def _snapshot_funding_cache(symbol: str) -> _FundingCacheSnapshot | None:
+        """Snapshot the legacy funding JSON cache for ingest rollback."""
+        from tinohelm.data.funding_cache import _cache_path
+
+        path = _cache_path(symbol)
+        try:
+            if path.exists():
+                return _FundingCacheSnapshot(path=path, existed=True, payload=path.read_bytes())
+            return _FundingCacheSnapshot(path=path, existed=False, payload=None)
+        except Exception:
+            logger.warning("Failed to snapshot funding cache %s", path, exc_info=True)
+            return None
+
+    @staticmethod
+    def _restore_funding_cache(snapshot: _FundingCacheSnapshot | None) -> None:
+        """Best-effort restore of the legacy funding JSON cache after ingest failure."""
+        if snapshot is None:
+            return
+        try:
+            if snapshot.existed:
+                snapshot.path.parent.mkdir(parents=True, exist_ok=True)
+                snapshot.path.write_bytes(snapshot.payload or b"")
+            else:
+                snapshot.path.unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Failed to restore funding cache %s", snapshot.path, exc_info=True)
 
     def ingest_sync(self, **kwargs) -> IngestResult:
         """Synchronous wrapper for :meth:`ingest`.
@@ -481,7 +820,6 @@ class BinanceVisionPipeline:
         chunk_cb=None,
     ) -> tuple[int, list[str]]:
         """Convert a single CSV file/payload (sync, runs in executor thread)."""
-        csv_name = self._csv_display_name(csv_path)
         hdr = self._detect_header(csv_path)
 
         if converter.supports_chunked:
@@ -756,6 +1094,25 @@ class BinanceVisionPipeline:
         end_dt = _dt.combine(end, _time.max, tzinfo=_tz.utc)
         return compute_fetch_start(cached_times, start=start_dt, end=end_dt) is None
 
+    def _funding_parquet_covers(self, symbol: str, start: date, end: date) -> bool:
+        """Return True iff the primary funding-rate Parquet spans ``[start, end]``."""
+        from tinohelm.data.catalog import funding_rate_parquet_path
+
+        path = funding_rate_parquet_path(symbol, self.catalog_path)
+        try:
+            if not self._storage.exists(path):
+                return False
+            time_range = self._parquet_time_range(path, storage=self._storage)
+        except Exception:
+            logger.warning(
+                "Funding-rate primary parquet is not readable for %s", symbol, exc_info=True
+            )
+            return False
+        if time_range is None:
+            return False
+        min_ts, max_ts = time_range
+        return _ns_to_utc_date(min_ts) <= start and _ns_to_utc_date(max_ts) >= end
+
     def _write_funding_rates(self, records: list, symbol: str) -> str | None:
         """Write funding rate records to Parquet (primary) and JSON (fallback cache).
 
@@ -772,28 +1129,21 @@ class BinanceVisionPipeline:
             }
             for r in records
         ]
-        # JSON write (backward compat — preserves existing deployments)
+        # Parquet write is the primary durable state.  Only update the legacy
+        # JSON cache after Parquet succeeds, so a failed Parquet write cannot
+        # poison the fallback cache into skipping future repairs.
+        parquet_path = write_funding_rate_parquet(
+            records=records,
+            symbol=symbol,
+            catalog_root=self.catalog_path,
+            storage=self._storage,
+        )
         _save_cache(symbol, cache_records)
-
-        # Parquet write (new primary path)
-        try:
-            parquet_path = write_funding_rate_parquet(
-                records=records,
-                symbol=symbol,
-                catalog_root=self.catalog_path,
-                storage=self._storage,
-            )
-            logger.info(
-                "Wrote %d funding rate records for %s (Parquet + JSON)",
-                len(records), symbol,
-            )
-            return str(parquet_path)
-        except Exception:
-            logger.warning(
-                "Failed to write funding rates as Parquet for %s — JSON cache written",
-                symbol, exc_info=True,
-            )
-            return None
+        logger.info(
+            "Wrote %d funding rate records for %s (Parquet + JSON)",
+            len(records), symbol,
+        )
+        return str(parquet_path)
 
     # ------------------------------------------------------------------
     # REST API fallback
@@ -949,14 +1299,33 @@ class BinanceVisionPipeline:
             resolved = resolve_catalog_path(self.catalog_path, data_type)
             nt_category = "quote_tick" if category == "quote_tick" else "trade_tick"
             target_dir = Path(resolved) / "data" / nt_category / str(inst.id)
+        elif category in {"metrics", "order_book_delta", "funding_rate"}:
+            target_path = self._catalog_item_dir(symbol, data_type, interval, data_type)
+            if target_path is None:
+                return None
+            rollback_prefix = Path(self.catalog_path) / ".ingest-rollback" / uuid4().hex
+            guard = _ParquetCleanupGuard(
+                self._storage,
+                rollback_prefix,
+                target_dir=target_path,
+            )
+            try:
+                if self._storage.exists(target_path):
+                    backup_path = rollback_prefix / target_path.name
+                    self._storage.copy_path(target_path, backup_path)
+                    guard.add_backup(target_path, backup_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                guard.restore()
+                raise
+            return guard
         else:
-            return None  # merged raw datasets clean themselves via their writers
+            return None  # unsupported data types have no catalog cleanup target
 
         from tinohelm.data.storage import delete_prefix
 
         parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=False))
-        if not parquet_objects:
-            return None
 
         start_ns = date_start_ns(start)
         end_ns = date_end_ns(end)
@@ -977,11 +1346,17 @@ class BinanceVisionPipeline:
             if file_max >= start_ns and file_min < end_ns:
                 overlapping.append(obj)
 
-        if not overlapping:
-            return None
-
         rollback_prefix = Path(self.catalog_path) / ".ingest-rollback" / uuid4().hex
-        guard = _ParquetCleanupGuard(self._storage, rollback_prefix)
+        preserved_paths = {Path(obj.path) for obj in parquet_objects if obj not in overlapping}
+        guard = _ParquetCleanupGuard(
+            self._storage,
+            rollback_prefix,
+            target_dir=target_dir,
+            preserved_paths=preserved_paths,
+        )
+        if not overlapping:
+            return guard
+
         try:
             for obj in overlapping:
                 original_path = Path(obj.path)
@@ -1003,24 +1378,20 @@ class BinanceVisionPipeline:
     def _parquet_time_range(path_or_object, storage=None) -> tuple[int, int] | None:
         """Read min/max timestamp from parquet row-group statistics.
 
-        Returns ``(min_ts_ns, max_ts_ns)`` or ``None`` if unavailable.
-        Only reads file metadata — zero row data loaded.  Remote storage objects
-        are opened through the provider instead of relying on local ``Path``
-        materialization.
+        Returns ``(min_ts_ns, max_ts_ns)`` or ``None`` if timestamp statistics are
+        genuinely absent. I/O, auth, and parse failures propagate so callers do
+        not treat unreadable remote objects as safely replaceable unknown ranges.
         """
-        try:
-            import pyarrow.parquet as pq
+        import pyarrow.parquet as pq
 
-            if storage is not None and getattr(storage, "provider", "local") != "local":
-                with storage.open_input_file(path_or_object) as fh:
-                    pf = pq.ParquetFile(fh)
-                    return BinanceVisionPipeline._parquet_file_time_range(pf)
+        if storage is not None and getattr(storage, "provider", "local") != "local":
+            with storage.open_input_file(path_or_object) as fh:
+                pf = pq.ParquetFile(fh)
+                return BinanceVisionPipeline._parquet_file_time_range(pf)
 
-            path = path_or_object.path if hasattr(path_or_object, "path") else path_or_object
-            pf = pq.ParquetFile(str(Path(path)))
-            return BinanceVisionPipeline._parquet_file_time_range(pf)
-        except Exception:
-            return None
+        path = path_or_object.path if hasattr(path_or_object, "path") else path_or_object
+        pf = pq.ParquetFile(str(Path(path)))
+        return BinanceVisionPipeline._parquet_file_time_range(pf)
 
     @staticmethod
     def _parquet_row_count(path_or_object, storage=None) -> int | None:
@@ -1048,12 +1419,22 @@ class BinanceVisionPipeline:
             return None
 
         if getattr(self._storage, "provider", "local") == "local":
-            return sum(path.stat().st_size for path in unique_paths if path.exists())
+            missing = [path for path in unique_paths if not path.exists()]
+            if missing:
+                raise FileNotFoundError(f"written parquet path(s) missing: {missing}")
+            return sum(path.stat().st_size for path in unique_paths)
 
         total = 0
+        missing: list[Path] = []
         for path in unique_paths:
-            for obj in self._storage.iter_files(path, suffix=".parquet", recursive=False):
+            objects = list(self._storage.iter_files(path, suffix=".parquet", recursive=False))
+            if not objects:
+                missing.append(path)
+                continue
+            for obj in objects:
                 total += int(obj.size or 0)
+        if missing:
+            raise FileNotFoundError(f"written parquet path(s) missing: {missing}")
         return total
 
     @staticmethod

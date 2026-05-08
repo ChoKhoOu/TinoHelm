@@ -186,8 +186,18 @@ def validate_bars(
     catalog = _catalog_for_root(catalog_path, storage_provider)
     try:
         bars = catalog.bars(bar_types=[str(bar_type)])
-    except Exception:
-        bars = []
+    except Exception as exc:
+        return {
+            "total_bars": 0,
+            "date_range": {"start": "", "end": ""},
+            "duplicates": 0,
+            "gaps": [],
+            "file_count": file_count,
+            "size_bytes": size_bytes,
+            "status": "errors",
+            "read_error": True,
+            "issues": [f"Failed to read bars from catalog: {exc}"],
+        }
 
     if not bars:
         return {
@@ -690,8 +700,8 @@ def _write_raw_records_parquet(
             if out_path.exists():
                 try:
                     frame = pl.concat([pl.read_parquet(out_path), frame], how="diagonal_relaxed")
-                except Exception:
-                    logger.warning("Failed to merge existing raw parquet at %s", out_path, exc_info=True)
+                except Exception as exc:
+                    raise RuntimeError(f"failed to read existing raw parquet at {out_path}") from exc
             frame = frame.sort(dedupe_subset).unique(
                 subset=dedupe_subset,
                 keep="last",

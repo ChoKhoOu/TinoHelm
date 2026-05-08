@@ -81,7 +81,7 @@ KLINES_REST_FETCH_FN: Mapping[str, str] = MappingProxyType({
 # Data types that support REST API fallback for recent data.
 REST_FALLBACK_TYPES: frozenset[str] = frozenset({
     "klines", "markPriceKlines", "indexPriceKlines",
-    "premiumIndexKlines", "aggTrades", "trades",
+    "premiumIndexKlines", "aggTrades",
 })
 
 # Default progress band for the download → convert phase. A small head room

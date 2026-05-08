@@ -136,7 +136,7 @@ class TestCanonicalMappings:
     def test_rest_fallback_types_pin(self):
         assert REST_FALLBACK_TYPES == frozenset({
             "klines", "markPriceKlines", "indexPriceKlines",
-            "premiumIndexKlines", "aggTrades", "trades",
+            "premiumIndexKlines", "aggTrades",
         })
 
     def test_progress_band_constants(self):
@@ -239,14 +239,14 @@ class TestResolveDbInterval:
 class TestRestFallbackSupport:
     @pytest.mark.parametrize("dt", [
         "klines", "markPriceKlines", "indexPriceKlines",
-        "premiumIndexKlines", "aggTrades", "trades",
+        "premiumIndexKlines", "aggTrades",
     ])
     def test_supported_types(self, dt: str):
         assert is_rest_fallback_supported(dt) is True
 
     @pytest.mark.parametrize("dt", [
         "fundingRate", "bookTicker", "bookDepth",
-        "liquidationSnapshot", "metrics", "unknown", "",
+        "liquidationSnapshot", "metrics", "trades", "unknown", "",
     ])
     def test_unsupported_types(self, dt: str):
         assert is_rest_fallback_supported(dt) is False

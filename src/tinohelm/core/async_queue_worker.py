@@ -201,10 +201,20 @@ class WorkerHandle:
         return self._task
 
     def stop(self) -> None:
-        """Cancel the task if running, then drop the reference."""
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
-        self._task = None
+        """Cancel the task if running and keep ownership until cancellation settles."""
+        if self._task is None:
+            return
+        if self._task.done():
+            self._task = None
+            return
+        task = self._task
+
+        def _clear_stopped_task(done_task: asyncio.Task) -> None:
+            if self._task is done_task:
+                self._task = None
+
+        task.cancel()
+        task.add_done_callback(_clear_stopped_task)
 
 
 # ---------------------------------------------------------------------------

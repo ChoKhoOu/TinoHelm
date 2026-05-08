@@ -545,6 +545,57 @@ class TestWorkerLifecycle:
         dw.stop_data_worker()  # Still no-op
         assert dw._handle.is_running() is False
 
+    async def test_same_catalog_key_jobs_are_serialized(self):
+        dw._catalog_locks.clear()
+        order: list[str] = []
+        lock_key = dw._catalog_lock_key("BTCUSDT-PERP", "aggTrades", None)
+
+        async def _job(name: str):
+            async with dw._get_catalog_lock(lock_key):
+                order.append(f"{name}:start")
+                await asyncio.sleep(0.02)
+                order.append(f"{name}:end")
+
+        await asyncio.gather(_job("a"), _job("b"))
+
+        assert order in (
+            ["a:start", "a:end", "b:start", "b:end"],
+            ["b:start", "b:end", "a:start", "a:end"],
+        )
+
+    async def test_consumer_supervisor_cancels_siblings_on_child_error(self, monkeypatch):
+        started = 0
+        cancelled: list[int] = []
+
+        async def _fake_consumer(*_a, **_k):
+            nonlocal started
+            idx = started
+            started += 1
+            if idx == 0:
+                await asyncio.sleep(0.01)
+                raise RuntimeError("consumer boom")
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                cancelled.append(idx)
+                raise
+
+        monkeypatch.setattr(dw, "consumer_loop", _fake_consumer)
+        monkeypatch.setattr(
+            dw,
+            "get_settings",
+            lambda: SimpleNamespace(data=SimpleNamespace(job_concurrency=2)),
+            raising=False,
+        )
+        dw._handle.stop()
+
+        task = dw.start_data_worker(redis_url="redis://x", catalog_path="/cat")
+        with pytest.raises(RuntimeError, match="consumer boom"):
+            await task
+
+        assert started == 2
+        assert cancelled == [1]
+
     async def test_process_callback_gets_job_id(self, monkeypatch):
         """The coroutine factory passed into consumer_loop unwraps the job_id correctly."""
         captured: dict = {}
