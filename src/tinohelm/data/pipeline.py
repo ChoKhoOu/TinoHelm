@@ -805,6 +805,18 @@ class BinanceVisionPipeline:
                 _rollback_once()
                 raise asyncio.CancelledError
         post_commit_was_cancelled = False
+        if cleanup_guard is not None:
+            try:
+                # Crash-safe ordering: once storage writes are complete, startup
+                # recovery must not restore old parquet after the DB commit lands.
+                # Keep the in-memory guard active so same-process DB failures can
+                # still roll storage back via _rollback_once().
+                cleanup_guard.mark_resolved()
+            except Exception:
+                _rollback_once()
+                await _progress(100, "Failed")
+                logger.exception("Failed to mark ingest rollback resolved before DB catalog update")
+                raise
         update_task = asyncio.create_task(self._update_db_catalog(
             symbol, data_type, interval, start, end,
             record_count=total_objects if total_objects > 0 else None,

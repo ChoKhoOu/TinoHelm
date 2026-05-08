@@ -619,6 +619,69 @@ class TestIngestEarlyFailClosed:
         assert update_completed == [True]
         assert written_path.exists()
 
+    def test_rollback_manifest_marked_resolved_before_db_catalog_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        written_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "current.parquet"
+        events: list[str] = []
+
+        class Guard:
+            def mark_resolved(self):
+                events.append("mark_resolved")
+
+            def discard(self, *, best_effort: bool = False):
+                events.append(f"discard:{best_effort}")
+
+            def delete_current_outputs(self, *_args, **_kwargs):
+                events.append("delete_current_outputs")
+
+            def restore(self):
+                events.append("restore")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        def write_objects(*_args, **_kwargs):
+            written_path.parent.mkdir(parents=True, exist_ok=True)
+            written_path.write_bytes(b"parquet-placeholder")
+            return [str(written_path)]
+
+        async def update_catalog(*_args, **_kwargs):
+            events.append("db_update")
+            assert events[:1] == ["mark_resolved"]
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        p._clean_overlapping_parquet = MagicMock(return_value=Guard())
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+        p._write_objects = MagicMock(side_effect=write_objects)
+        p._written_file_size = MagicMock(return_value=123)
+        p._update_db_catalog = AsyncMock(side_effect=update_catalog)
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
+
+        result = asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="aggTrades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        ))
+
+        assert result.objects_count == 1
+        assert events == ["mark_resolved", "db_update", "discard:True"]
+        assert written_path.exists()
+
     def test_final_progress_cancellation_after_db_commit_recancels(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

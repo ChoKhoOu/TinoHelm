@@ -1597,6 +1597,55 @@ class TestDeleteCatalogEntry:
         db.delete.assert_awaited_once_with(row)
         db.commit.assert_awaited_once()
 
+    async def test_delete_finishes_storage_and_db_after_request_cancellation(self, tmp_path: Path, monkeypatch):
+        import threading
+
+        row = SimpleNamespace(
+            id=123,
+            symbol="BTCUSDT-PERP",
+            data_type="bar",
+            interval="1m",
+            source_type="klines",
+        )
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return row
+
+        db = SimpleNamespace(
+            execute=AsyncMock(return_value=FakeResult()),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        def fake_delete_storage_files(*args):
+            calls.append(args)
+            started.set()
+            assert release.wait(timeout=1)
+            return (2, 17)
+
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data._delete_storage_files",
+            fake_delete_storage_files,
+        )
+
+        task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert calls == [("BTCUSDT-PERP", "bar", "1m", str(tmp_path), "klines")]
+        db.delete.assert_awaited_once_with(row)
+        db.commit.assert_awaited_once()
+
     @pytest.mark.parametrize(
         ("row_data_type", "row_interval", "worker_data_type"),
         [

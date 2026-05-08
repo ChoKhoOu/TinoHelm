@@ -88,6 +88,68 @@ def _catalog_row_lock_key(row: Any) -> str:
     return catalog_lock_key(getattr(row, "symbol"), effective_source, getattr(row, "interval", None))
 
 
+def _clear_current_task_cancellation() -> None:
+    current_task = asyncio.current_task()
+    while current_task is not None and current_task.cancelling():
+        current_task.uncancel()
+
+
+async def _await_critical_mutation(awaitable: Any) -> tuple[Any, bool]:
+    """Finish storage/DB mutation even if the request/background task is cancelled."""
+    task = asyncio.ensure_future(awaitable)
+    was_cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), was_cancelled
+        except asyncio.CancelledError:
+            was_cancelled = True
+            _clear_current_task_cancellation()
+            if not task.done():
+                continue
+        except Exception:
+            raise
+        return task.result(), was_cancelled
+
+
+async def _update_compact_catalog_row(
+    *,
+    symbol: str,
+    interval: str,
+    effective_source: str,
+    total_size: int,
+    bars_count: int | None,
+) -> None:
+    from tinohelm.db.session import get_session_factory
+
+    factory = get_session_factory()
+    async with factory() as db:
+        stmt = select(DataCatalog).where(
+            DataCatalog.symbol == symbol,
+            DataCatalog.data_type == "bar",
+            DataCatalog.interval == interval,
+            DataCatalog.source_type == effective_source,
+        )
+        existing = (await db.execute(stmt)).scalar_one_or_none()
+        if existing is None and effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
+            legacy_stmt = select(DataCatalog).where(
+                DataCatalog.symbol == symbol,
+                DataCatalog.data_type == "bar",
+                DataCatalog.interval == interval,
+                DataCatalog.source_type.is_(None),
+            )
+            existing = (await db.execute(legacy_stmt)).scalar_one_or_none()
+        if existing:
+            existing.size_bytes = total_size
+            if bars_count is not None:
+                existing.record_count = bars_count
+            await db.commit()
+
+
+async def _delete_catalog_row_after_storage(db: AsyncSession, row: DataCatalog) -> None:
+    await db.delete(row)
+    await db.commit()
+
+
 def _interval_to_nt(interval: str) -> str:
     """Convert interval like '7m' to NT dir suffix like '7-MINUTE'.
 
@@ -652,8 +714,6 @@ async def _run_compact(
 ) -> None:
     """Background task to compact Parquet files and update DB catalog size."""
     try:
-        from tinohelm.db.session import get_session_factory
-
         from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
         base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
         storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path)
@@ -667,38 +727,32 @@ async def _run_compact(
             storage=storage,
         )
         lock_key = catalog_lock_key(symbol, effective_source, interval)
+        was_cancelled = False
         async with get_catalog_lock(lock_key):
-            result = await asyncio.to_thread(
-                _compact_bars_with_storage, storage, symbol, interval, catalog_path
+            result, cancelled = await _await_critical_mutation(
+                asyncio.to_thread(_compact_bars_with_storage, storage, symbol, interval, catalog_path)
             )
+            was_cancelled = was_cancelled or cancelled
 
             # Update DB catalog size_bytes for the same source-aware bar row.
             total_size = result.get("size_after")
             if total_size is None:
-                total_size = await asyncio.to_thread(_parquet_size_for, catalog_path, symbol, interval, storage)
-
-            factory = get_session_factory()
-            async with factory() as db:
-                stmt = select(DataCatalog).where(
-                    DataCatalog.symbol == symbol,
-                    DataCatalog.data_type == "bar",
-                    DataCatalog.interval == interval,
-                    DataCatalog.source_type == effective_source,
+                total_size, cancelled = await _await_critical_mutation(
+                    asyncio.to_thread(_parquet_size_for, catalog_path, symbol, interval, storage)
                 )
-                existing = (await db.execute(stmt)).scalar_one_or_none()
-                if existing is None and effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
-                    legacy_stmt = select(DataCatalog).where(
-                        DataCatalog.symbol == symbol,
-                        DataCatalog.data_type == "bar",
-                        DataCatalog.interval == interval,
-                        DataCatalog.source_type.is_(None),
-                    )
-                    existing = (await db.execute(legacy_stmt)).scalar_one_or_none()
-                if existing:
-                    existing.size_bytes = total_size
-                    if "bars_count" in result:
-                        existing.record_count = result["bars_count"]
-                    await db.commit()
+                was_cancelled = was_cancelled or cancelled
+
+            _, cancelled = await _await_critical_mutation(_update_compact_catalog_row(
+                symbol=symbol,
+                interval=interval,
+                effective_source=effective_source,
+                total_size=total_size,
+                bars_count=result.get("bars_count"),
+            ))
+            was_cancelled = was_cancelled or cancelled
+
+        if was_cancelled:
+            raise asyncio.CancelledError
 
         logger.info(
             "Compaction background task done: %s %s %s — %d bars, %d -> %d bytes",
@@ -1088,16 +1142,20 @@ async def delete_catalog_entry(
         raise HTTPException(status_code=404, detail="Catalog entry not found")
 
     from tinohelm.data.storage import get_active_catalog_root
+    was_cancelled = False
     async with get_catalog_lock(_catalog_row_lock_key(row)):
-        deleted_files, freed_bytes = await asyncio.to_thread(
+        (deleted_files, freed_bytes), cancelled = await _await_critical_mutation(asyncio.to_thread(
             _delete_storage_files,
             row.symbol, row.data_type, row.interval,
             str(get_active_catalog_root(settings)),
             row.source_type,
-        )
+        ))
+        was_cancelled = was_cancelled or cancelled
 
-        await db.delete(row)
-        await db.commit()
+        _, cancelled = await _await_critical_mutation(_delete_catalog_row_after_storage(db, row))
+        was_cancelled = was_cancelled or cancelled
+    if was_cancelled:
+        raise asyncio.CancelledError
     return {
         "status": "deleted",
         "symbol": row.symbol,
