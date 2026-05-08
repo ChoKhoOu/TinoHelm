@@ -19,6 +19,7 @@ from tinohelm.data.downloader import VisionCsvPayload
 from tinohelm.data.pipeline import (
     BinanceVisionPipeline,
     IngestResult,
+    _catalog_commit_is_persisted,
     _ns_to_utc_date,
     recover_pending_ingest_rollbacks,
 )
@@ -315,6 +316,7 @@ class TestIngestEarlyFailClosed:
         p._convert_workers = 1
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
         p._write_objects = MagicMock(side_effect=write_partial)
+        p._read_db_catalog_snapshot = AsyncMock(return_value=None)
         monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
         monkeypatch.setattr(p, "_update_db_catalog", AsyncMock(side_effect=RuntimeError("db down")))
 
@@ -405,6 +407,7 @@ class TestIngestEarlyFailClosed:
             file_path=str(resolve_catalog_path(tmp_path, "aggTrades")),
             record_count=1,
             size_bytes=9,
+            pre_update_row=None,
         )
         manifest = next((tmp_path / ".ingest-rollback").rglob("manifest.json"))
         assert json.loads(manifest.read_text())["resolved"] is False
@@ -423,6 +426,61 @@ class TestIngestEarlyFailClosed:
         assert not old_path.exists()
         assert committed_path.exists()
         assert not (tmp_path / ".ingest-rollback").exists()
+
+    def test_catalog_commit_proof_rejects_unchanged_pre_update_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        row = SimpleNamespace(
+            symbol="BTCUSDT-PERP",
+            data_type="trade_tick",
+            interval="tick",
+            source_type="aggTrades",
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 1, 1),
+            file_path="/catalog/aggTrades",
+            record_count=100,
+            size_bytes=4096,
+        )
+        pre_update_row = {
+            "symbol": row.symbol,
+            "data_type": row.data_type,
+            "interval": row.interval,
+            "source_type": row.source_type,
+            "start_date": row.start_date.isoformat(),
+            "end_date": row.end_date.isoformat(),
+            "file_path": row.file_path,
+            "record_count": row.record_count,
+            "size_bytes": row.size_bytes,
+        }
+
+        class Result:
+            def scalar_one_or_none(self):
+                return row
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, _stmt):
+                return Result()
+
+        monkeypatch.setattr("tinohelm.db.session.get_session_factory", lambda: Session)
+
+        assert _catalog_commit_is_persisted({
+            "symbol": row.symbol,
+            "data_type": row.data_type,
+            "interval": row.interval,
+            "source_type": row.source_type,
+            "start_date": row.start_date.isoformat(),
+            "end_date": row.end_date.isoformat(),
+            "file_path": row.file_path,
+            "record_count": row.record_count,
+            "size_bytes": row.size_bytes,
+            "pre_update_row": pre_update_row,
+        }) is False
 
     def test_recover_pending_ingest_rollbacks_restores_crash_stranded_backup(self, tmp_path: Path):
         from tinohelm.data.catalog import resolve_catalog_path
@@ -723,6 +781,7 @@ class TestIngestEarlyFailClosed:
                 assert kwargs["source_type"] == "aggTrades"
                 assert kwargs["record_count"] == 1
                 assert kwargs["size_bytes"] == 123
+                assert kwargs["pre_update_row"] == {"old": "row"}
 
             def mark_resolved(self):
                 events.append("mark_resolved")
@@ -761,6 +820,7 @@ class TestIngestEarlyFailClosed:
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
         p._write_objects = MagicMock(side_effect=write_objects)
         p._written_file_size = MagicMock(return_value=123)
+        p._read_db_catalog_snapshot = AsyncMock(return_value={"old": "row"})
         p._update_db_catalog = AsyncMock(side_effect=update_catalog)
         monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
 
@@ -1045,6 +1105,7 @@ class TestIngestEarlyFailClosed:
         p._convert_workers = 1
         p._funding_cache_covers = MagicMock(return_value=False)
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+        p._read_db_catalog_snapshot = AsyncMock(return_value=None)
         monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
         monkeypatch.setattr("tinohelm.data.catalog.write_funding_rate_parquet", write_parquet)
         monkeypatch.setattr("tinohelm.data.funding_cache._cache_path", lambda _symbol: cache_path)

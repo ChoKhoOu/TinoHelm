@@ -191,6 +191,7 @@ class _ParquetCleanupGuard:
         file_path: str,
         record_count: int | None,
         size_bytes: int | None,
+        pre_update_row: dict[str, Any] | None,
     ) -> None:
         """Persist the intended DB catalog commit without resolving rollback.
 
@@ -210,6 +211,7 @@ class _ParquetCleanupGuard:
             "file_path": file_path,
             "record_count": record_count,
             "size_bytes": size_bytes,
+            "pre_update_row": pre_update_row,
         }
         self._write_manifest(self._manifest_payload(resolved=False))
 
@@ -318,9 +320,46 @@ class _ParquetCleanupGuard:
         self._active = False
 
 
+def _catalog_row_to_snapshot(row: Any | None) -> dict[str, Any] | None:
+    """Normalize a DataCatalog row into JSON-stable fields for recovery checks."""
+    if row is None:
+        return None
+    return {
+        "symbol": row.symbol,
+        "data_type": row.data_type,
+        "interval": row.interval,
+        "source_type": row.source_type,
+        "start_date": row.start_date.isoformat(),
+        "end_date": row.end_date.isoformat(),
+        "file_path": row.file_path,
+        "record_count": row.record_count,
+        "size_bytes": row.size_bytes,
+    }
+
+
+def _catalog_snapshot_matches(current: dict[str, Any] | None, expected: Any) -> bool:
+    if current is None:
+        return expected is None
+    if expected is None or not isinstance(expected, dict):
+        return False
+    return current == {
+        "symbol": expected.get("symbol"),
+        "data_type": expected.get("data_type"),
+        "interval": expected.get("interval"),
+        "source_type": expected.get("source_type"),
+        "start_date": expected.get("start_date"),
+        "end_date": expected.get("end_date"),
+        "file_path": expected.get("file_path"),
+        "record_count": expected.get("record_count"),
+        "size_bytes": expected.get("size_bytes"),
+    }
+
+
 def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
-    """Return True when an unresolved rollback manifest has a matching DB row."""
+    """Return True only when DB row changed from the manifest's pre-update row."""
     if not isinstance(commit_payload, dict):
+        return False
+    if "pre_update_row" not in commit_payload:
         return False
     try:
         symbol = str(commit_payload["symbol"])
@@ -332,6 +371,7 @@ def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
         start = date.fromisoformat(str(commit_payload["start_date"]))
         end = date.fromisoformat(str(commit_payload["end_date"]))
         file_path = str(commit_payload["file_path"])
+        pre_update_row = commit_payload["pre_update_row"]
     except Exception:
         return False
 
@@ -352,11 +392,16 @@ def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
             else:
                 stmt = stmt.where(DataCatalog.source_type == source_type)
             row = (await session.execute(stmt)).scalar_one_or_none()
-        if row is None:
+        current = _catalog_row_to_snapshot(row)
+        if current is None:
             return False
-        if row.file_path != file_path:
+        if _catalog_snapshot_matches(current, pre_update_row):
             return False
-        if row.start_date > start or row.end_date < end:
+        if current["file_path"] != file_path:
+            return False
+        if date.fromisoformat(current["start_date"]) > start:
+            return False
+        if date.fromisoformat(current["end_date"]) < end:
             return False
         return True
 
@@ -912,6 +957,12 @@ class BinanceVisionPipeline:
             try:
                 from tinohelm.data.catalog import resolve_catalog_path
 
+                pre_update_row = await self._read_db_catalog_snapshot(
+                    symbol,
+                    data_type,
+                    interval,
+                    data_type,
+                )
                 cleanup_guard.record_catalog_commit(
                     symbol=symbol,
                     data_type=resolve_db_category(data_type),
@@ -922,6 +973,7 @@ class BinanceVisionPipeline:
                     file_path=str(resolve_catalog_path(self.catalog_path, data_type)),
                     record_count=record_count,
                     size_bytes=written_size,
+                    pre_update_row=pre_update_row,
                 )
             except Exception:
                 _rollback_once()
@@ -1952,6 +2004,34 @@ class BinanceVisionPipeline:
         if category == "quote_tick":
             return Path(resolved) / "data" / "quote_tick" / nt_symbol
         return None
+
+    async def _read_db_catalog_snapshot(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any] | None:
+        """Read the pre-update DataCatalog row for crash-recovery proof."""
+        from sqlalchemy import select
+        from tinohelm.db.models import DataCatalog
+        from tinohelm.db.session import get_session_factory
+
+        category = resolve_db_category(data_type)
+        db_interval = resolve_db_interval(data_type, interval)
+        factory = get_session_factory()
+        async with factory() as session:
+            stmt = select(DataCatalog).where(
+                DataCatalog.symbol == symbol,
+                DataCatalog.data_type == category,
+                DataCatalog.interval == db_interval,
+            )
+            if source_type is None:
+                stmt = stmt.where(DataCatalog.source_type.is_(None))
+            else:
+                stmt = stmt.where(DataCatalog.source_type == source_type)
+            row = (await session.execute(stmt)).scalar_one_or_none()
+        return _catalog_row_to_snapshot(row)
 
     async def _update_db_catalog(
         self,

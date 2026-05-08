@@ -40,11 +40,13 @@ logger = logging.getLogger(__name__)
 
 QUEUE_KEY = "tino:data:queue"
 PROGRESS_THROTTLE_INTERVAL = 2.0
+LOCK_BUSY_REQUEUE_DELAY = 1.0
 
 _handle: WorkerHandle = WorkerHandle(name="data-fetch-worker")
 _catalog_locks = _catalog_locking._catalog_locks
 _catalog_lock_key = _catalog_locking.catalog_lock_key
 _get_catalog_lock = _catalog_locking.get_catalog_lock
+_catalog_lock_attempt_guard = asyncio.Lock()
 
 
 async def enqueue_job(rds: aioredis.Redis, job_id: str) -> None:
@@ -175,11 +177,12 @@ async def _claim_queued_job(factory, job_id: str):
 
 async def _try_acquire_catalog_lock(lock_key: str):
     """Acquire a catalog lock only if immediately available."""
-    lock = _get_catalog_lock(lock_key)
-    if lock.locked():
-        return None
-    await lock.acquire()
-    return lock
+    async with _catalog_lock_attempt_guard:
+        lock = _get_catalog_lock(lock_key)
+        if lock.locked():
+            return None
+        await lock.acquire()
+        return lock
 
 
 async def _guarded_terminal_update(factory, job_id: str, values: dict) -> bool:
@@ -211,6 +214,12 @@ async def _requeue_queued_job_best_effort(rds: aioredis.Redis, job_id: str) -> N
         await rds.lpush(QUEUE_KEY, job_id)
     except Exception:
         logger.warning("Failed to requeue pre-claim data-fetch job %s", job_id, exc_info=True)
+
+
+async def _defer_locked_queued_job(rds: aioredis.Redis, job_id: str) -> None:
+    if LOCK_BUSY_REQUEUE_DELAY > 0:
+        await asyncio.sleep(LOCK_BUSY_REQUEUE_DELAY)
+    await rds.lpush(QUEUE_KEY, job_id)
 
 
 async def _job_is_still_running(factory, job_id: str) -> bool:
@@ -259,7 +268,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 job_id,
                 lock_key,
             )
-            await rds.lpush(QUEUE_KEY, job_id)
+            await _defer_locked_queued_job(rds, job_id)
             return
         try:
             job = await _claim_queued_job(factory, job_id)
@@ -348,12 +357,22 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
 
     except asyncio.CancelledError:
         if queued_loaded and not claimed:
-            await _requeue_queued_job_best_effort(rds, job_id)
+            try:
+                claimed = await _job_is_still_running(factory, job_id)
+            except Exception:
+                logger.warning("Failed to re-read job %s after pre-claim cancellation", job_id, exc_info=True)
+            if not claimed:
+                await _requeue_queued_job_best_effort(rds, job_id)
         raise
     except Exception as exc:
         failure_error = str(exc)
         logger.exception("Data-fetch job %s failed: %s", job_id, exc)
         try:
+            if queued_loaded and not claimed:
+                try:
+                    claimed = await _job_is_still_running(factory, job_id)
+                except Exception:
+                    logger.warning("Failed to re-read job %s after pre-claim failure", job_id, exc_info=True)
             if queued_loaded and not claimed:
                 updated = await _guarded_queued_failure_update(
                     factory,
