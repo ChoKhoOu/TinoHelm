@@ -173,6 +173,15 @@ async def _claim_queued_job(factory, job_id: str):
     return job
 
 
+async def _try_acquire_catalog_lock(lock_key: str):
+    """Acquire a catalog lock only if immediately available."""
+    lock = _get_catalog_lock(lock_key)
+    if lock.locked():
+        return None
+    await lock.acquire()
+    return lock
+
+
 async def _guarded_terminal_update(factory, job_id: str, values: dict) -> bool:
     async with factory() as db:
         result = await db.execute(
@@ -218,7 +227,16 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             return
 
         lock_key = _catalog_lock_key(queued_job.symbol, queued_job.data_type, queued_job.interval)
-        async with _get_catalog_lock(lock_key):
+        lock = await _try_acquire_catalog_lock(lock_key)
+        if lock is None:
+            logger.info(
+                "Data-fetch job %s deferred because catalog lock %s is busy",
+                job_id,
+                lock_key,
+            )
+            await rds.lpush(QUEUE_KEY, job_id)
+            return
+        try:
             job = await _claim_queued_job(factory, job_id)
             if job is None:
                 logger.info("Data-fetch job %s was cancelled before ingest, skipping catalog mutation", job_id)
@@ -260,6 +278,8 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 interval=interval,
                 progress_cb=_progress,
             )
+        finally:
+            lock.release()
 
         async def _complete_success() -> bool:
             updated = await _guarded_terminal_update(

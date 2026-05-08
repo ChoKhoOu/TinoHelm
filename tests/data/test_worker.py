@@ -297,27 +297,16 @@ class TestProcessJob:
         assert pipeline_constructed == []
         fake_rds.publish.assert_not_called()
 
-    async def test_waits_for_catalog_lock_before_claiming_running(self, monkeypatch):
+    async def test_requeues_same_catalog_job_when_lock_busy_without_claiming_running(self, monkeypatch):
         job = SimpleNamespace(
             status="queued",
             symbol="BTCUSDT", data_type="klines", interval="1m",
             start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
         )
         events: list[str] = []
-        lock_waiting = asyncio.Event()
-        release_lock = asyncio.Event()
-
-        class _BlockingLock:
-            async def __aenter__(self):
-                events.append("lock-waiting")
-                lock_waiting.set()
-                await release_lock.wait()
-                events.append("lock-acquired")
-
-            async def __aexit__(self, *_exc):
-                return False
-
-        monkeypatch.setattr(dw, "_get_catalog_lock", lambda _key: _BlockingLock())
+        busy_lock = asyncio.Lock()
+        await busy_lock.acquire()
+        monkeypatch.setattr(dw, "_get_catalog_lock", lambda _key: busy_lock)
 
         def factory():
             db = AsyncMock()
@@ -328,8 +317,6 @@ class TestProcessJob:
                 if "UPDATE data_fetch_jobs" in text:
                     events.append("update")
                     result.rowcount = 1
-                elif "SELECT data_fetch_jobs.status" in text:
-                    result.scalar_one_or_none = MagicMock(return_value="running")
                 else:
                     result.scalar_one_or_none = MagicMock(return_value=job)
                 return result
@@ -341,21 +328,24 @@ class TestProcessJob:
         fake_rds = AsyncMock()
         monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
 
-        class _NoProgressPipeline:
-            def __init__(self, *a, **k):
-                pass
-
-            async def ingest(self, **_k):
-                return _fake_pipeline_result(objects_count=3)
-
+        pipeline_constructed = []
         import tinohelm.data.pipeline as pkg_pipeline
-        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _NoProgressPipeline)
 
-        task = asyncio.create_task(dw._process_job("job-lock-wait", "redis://x", "/cat"))
-        await asyncio.wait_for(lock_waiting.wait(), timeout=1)
+        class _Boom(pkg_pipeline.BinanceVisionPipeline):
+            def __init__(self, *a, **k):
+                pipeline_constructed.append(True)
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _Boom)
+
+        try:
+            await dw._process_job("job-lock-busy", "redis://x", "/cat")
+        finally:
+            busy_lock.release()
+
         assert "update" not in events
-        release_lock.set()
-        await task
+        assert pipeline_constructed == []
+        fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-lock-busy")
+        fake_rds.publish.assert_not_called()
 
     async def test_cancelled_during_processing_is_not_overwritten_completed(self, monkeypatch):
         job = SimpleNamespace(
