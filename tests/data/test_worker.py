@@ -371,20 +371,21 @@ class TestProcessJob:
             db = AsyncMock()
             if calls["count"] == 1:
                 result = MagicMock()
-                result.rowcount = 1
+                result.scalar_one_or_none = MagicMock(return_value=job)
                 db.execute = AsyncMock(return_value=result)
             elif calls["count"] == 2:
+                result = MagicMock()
+                result.rowcount = 1
+                db.execute = AsyncMock(return_value=result)
+            elif calls["count"] == 3:
                 result = MagicMock()
                 result.scalar_one_or_none = MagicMock(return_value=job)
                 db.execute = AsyncMock(return_value=result)
             else:
                 async def _execute(stmt):
                     result = MagicMock()
-                    if "SELECT data_fetch_jobs.status" in str(stmt):
-                        result.scalar_one_or_none = MagicMock(return_value="running")
-                    else:
-                        result.rowcount = 0
-                        terminal_statements.append(stmt)
+                    result.rowcount = 0
+                    terminal_statements.append(stmt)
                     return result
 
                 db.execute = AsyncMock(side_effect=_execute)
