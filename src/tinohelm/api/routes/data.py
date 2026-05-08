@@ -12,11 +12,12 @@ from uuid import uuid4
 import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
 from tinohelm.core.config import Settings
+from tinohelm.data.catalog_locks import catalog_lock_key, get_catalog_lock
 from tinohelm.data.pipeline_helpers import WRITE_CATEGORY, resolve_db_interval
 from tinohelm.data.storage import stage_prefix_for_local_consumer
 from tinohelm.data.worker import enqueue_job
@@ -603,17 +604,31 @@ async def cancel_data_fetch_job(
     job_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Cancel a queued data-fetch job."""
-    from sqlalchemy import update as sa_update
+    """Cancel a queued data-fetch job.
+
+    Running jobs are not cooperatively cancellable yet; refusing them avoids
+    reporting ``cancelled`` while the ingest continues mutating catalog files.
+    """
     result = await db.execute(
-        sa_update(DataFetchJob)
-        .where(DataFetchJob.job_id == job_id, DataFetchJob.status.in_(["queued", "running"]))
+        update(DataFetchJob)
+        .where(DataFetchJob.job_id == job_id, DataFetchJob.status == "queued")
         .values(status="cancelled")
     )
     await db.commit()
-    if result.rowcount == 0:  # type: ignore[union-attr]
-        raise HTTPException(status_code=404, detail="Job not found or already finished")
-    return {"status": "cancelled", "job_id": job_id}
+    if result.rowcount == 1:  # type: ignore[union-attr]
+        return {"status": "cancelled", "job_id": job_id}
+
+    job = (await db.execute(
+        select(DataFetchJob).where(DataFetchJob.job_id == job_id)
+    )).scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="Running data-fetch jobs cannot be cancelled safely; wait for completion",
+        )
+    raise HTTPException(status_code=404, detail="Job already finished")
 
 
 async def _run_compact(
@@ -639,37 +654,39 @@ async def _run_compact(
             source_type=effective_source,
             storage=storage,
         )
-        result = await asyncio.to_thread(
-            _compact_bars_with_storage, storage, symbol, interval, catalog_path
-        )
-
-        # Update DB catalog size_bytes for the same source-aware bar row.
-        total_size = result.get("size_after")
-        if total_size is None:
-            total_size = await asyncio.to_thread(_parquet_size_for, catalog_path, symbol, interval, storage)
-
-        factory = get_session_factory()
-        async with factory() as db:
-            stmt = select(DataCatalog).where(
-                DataCatalog.symbol == symbol,
-                DataCatalog.data_type == "bar",
-                DataCatalog.interval == interval,
-                DataCatalog.source_type == effective_source,
+        lock_key = catalog_lock_key(symbol, effective_source, interval)
+        async with get_catalog_lock(lock_key):
+            result = await asyncio.to_thread(
+                _compact_bars_with_storage, storage, symbol, interval, catalog_path
             )
-            existing = (await db.execute(stmt)).scalar_one_or_none()
-            if existing is None and effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
-                legacy_stmt = select(DataCatalog).where(
+
+            # Update DB catalog size_bytes for the same source-aware bar row.
+            total_size = result.get("size_after")
+            if total_size is None:
+                total_size = await asyncio.to_thread(_parquet_size_for, catalog_path, symbol, interval, storage)
+
+            factory = get_session_factory()
+            async with factory() as db:
+                stmt = select(DataCatalog).where(
                     DataCatalog.symbol == symbol,
                     DataCatalog.data_type == "bar",
                     DataCatalog.interval == interval,
-                    DataCatalog.source_type.is_(None),
+                    DataCatalog.source_type == effective_source,
                 )
-                existing = (await db.execute(legacy_stmt)).scalar_one_or_none()
-            if existing:
-                existing.size_bytes = total_size
-                if "bars_count" in result:
-                    existing.record_count = result["bars_count"]
-                await db.commit()
+                existing = (await db.execute(stmt)).scalar_one_or_none()
+                if existing is None and effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
+                    legacy_stmt = select(DataCatalog).where(
+                        DataCatalog.symbol == symbol,
+                        DataCatalog.data_type == "bar",
+                        DataCatalog.interval == interval,
+                        DataCatalog.source_type.is_(None),
+                    )
+                    existing = (await db.execute(legacy_stmt)).scalar_one_or_none()
+                if existing:
+                    existing.size_bytes = total_size
+                    if "bars_count" in result:
+                        existing.record_count = result["bars_count"]
+                    await db.commit()
 
         logger.info(
             "Compaction background task done: %s %s %s — %d bars, %d -> %d bytes",

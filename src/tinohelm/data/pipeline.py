@@ -176,27 +176,47 @@ class _ParquetCleanupGuard:
         """Restore backed-up objects to their original logical paths."""
         if not self._active:
             return
+        restore_failures: list[tuple[Path, Path, BaseException]] = []
         for backup in reversed(self._backups):
-            self._storage.copy_path(backup.backup_path, backup.original_path)
-        self.discard()
+            try:
+                self._storage.copy_path(backup.backup_path, backup.original_path)
+            except BaseException as exc:
+                restore_failures.append((backup.backup_path, backup.original_path, exc))
+        if restore_failures:
+            detail = ", ".join(
+                f"{src} -> {dest}: {exc}" for src, dest, exc in restore_failures
+            )
+            raise RuntimeError(f"failed to restore rollback parquet backups: {detail}") from restore_failures[0][2]
+        self.discard(best_effort=True)
 
-    def discard(self) -> None:
+    def discard(self, *, best_effort: bool = False) -> None:
         """Drop rollback copies after the replacement is known-good."""
         if not self._active:
             return
-        self._active = False
         if not self._backups:
+            self._active = False
             return
-        if getattr(self._storage, "provider", "local") != "local":
-            from tinohelm.data.storage import delete_prefix
+        try:
+            if getattr(self._storage, "provider", "local") != "local":
+                from tinohelm.data.storage import delete_prefix
 
-            delete_prefix(self._storage, self._rollback_prefix)
-        else:
-            shutil.rmtree(self._rollback_prefix, ignore_errors=True)
-            try:
-                self._rollback_prefix.parent.rmdir()
-            except OSError:
-                pass
+                delete_prefix(self._storage, self._rollback_prefix)
+            else:
+                shutil.rmtree(self._rollback_prefix, ignore_errors=True)
+                try:
+                    self._rollback_prefix.parent.rmdir()
+                except OSError:
+                    pass
+        except Exception:
+            if best_effort:
+                logger.warning(
+                    "Failed to discard rollback parquet backups under %s",
+                    self._rollback_prefix,
+                    exc_info=True,
+                )
+                return
+            raise
+        self._active = False
 
 
 class BinanceVisionPipeline:
@@ -640,7 +660,7 @@ class BinanceVisionPipeline:
             if task_cancelled.cancelling():
                 _rollback_once()
                 raise asyncio.CancelledError
-        db_update_cancelled = False
+        db_update_was_cancelled = False
         update_task = asyncio.create_task(self._update_db_catalog(
             symbol, data_type, interval, start, end,
             record_count=total_objects if total_objects > 0 else None,
@@ -650,7 +670,7 @@ class BinanceVisionPipeline:
         try:
             await asyncio.shield(update_task)
         except asyncio.CancelledError:
-            db_update_cancelled = True
+            db_update_was_cancelled = True
             _clear_current_task_cancellation()
             try:
                 await _await_ignoring_cancellation(update_task)
@@ -671,12 +691,25 @@ class BinanceVisionPipeline:
             raise
 
         if cleanup_guard is not None:
-            cleanup_guard.discard()
+            cleanup_guard.discard(best_effort=True)
 
-        if db_update_cancelled:
-            raise asyncio.CancelledError
+        if db_update_was_cancelled:
+            logger.info(
+                "Cancellation arrived after DB catalog commit for %s %s; treating committed ingest as success",
+                symbol,
+                data_type,
+            )
 
-        await _progress(100, f"Done: {total_objects} objects")
+        try:
+            await _progress(100, f"Done: {total_objects} objects")
+        except asyncio.CancelledError:
+            _clear_current_task_cancellation()
+            logger.info(
+                "Cancellation arrived after DB catalog commit while publishing final progress for %s %s; "
+                "treating committed ingest as success",
+                symbol,
+                data_type,
+            )
 
         return IngestResult(
             symbol=symbol,
@@ -698,8 +731,29 @@ class BinanceVisionPipeline:
     ) -> None:
         """Remove current-run outputs, then restore old overlapping parquet."""
         if cleanup_guard is not None:
-            cleanup_guard.delete_current_outputs(file_paths)
-            cleanup_guard.restore()
+            delete_exc: BaseException | None = None
+            try:
+                cleanup_guard.delete_current_outputs(file_paths)
+            except BaseException as exc:
+                delete_exc = exc
+                logger.warning(
+                    "Failed to delete current-run outputs during ingest rollback",
+                    exc_info=True,
+                )
+
+            try:
+                cleanup_guard.restore()
+            except BaseException as restore_exc:
+                if delete_exc is not None:
+                    raise RuntimeError(
+                        "rollback failed to restore old parquet after current-output deletion also failed"
+                    ) from restore_exc
+                raise
+
+            if delete_exc is not None:
+                raise RuntimeError(
+                    "rollback restored old parquet but failed to delete some current-run outputs"
+                ) from delete_exc
             return
         self._delete_written_paths(file_paths, preserve=preexisting_paths)
 

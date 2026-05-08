@@ -32,7 +32,7 @@ from tinohelm.core.async_queue_worker import (
     requeue_running_jobs,
 )
 from tinohelm.core.config import get_settings
-from tinohelm.data.pipeline_helpers import resolve_db_category, resolve_db_interval
+from tinohelm.data import catalog_locks as _catalog_locking
 from tinohelm.db.models import DataFetchJob
 from tinohelm.db.session import get_session_factory
 
@@ -42,21 +42,9 @@ QUEUE_KEY = "tino:data:queue"
 PROGRESS_THROTTLE_INTERVAL = 2.0
 
 _handle: WorkerHandle = WorkerHandle(name="data-fetch-worker")
-_catalog_locks: dict[str, asyncio.Lock] = {}
-
-
-def _catalog_lock_key(symbol: str, data_type: str, interval: str | None) -> str:
-    category = resolve_db_category(data_type)
-    db_interval = resolve_db_interval(data_type, interval)
-    return f"data_catalog:{symbol}:{category}:{db_interval}:{data_type}"
-
-
-def _get_catalog_lock(lock_key: str) -> asyncio.Lock:
-    lock = _catalog_locks.get(lock_key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _catalog_locks[lock_key] = lock
-    return lock
+_catalog_locks = _catalog_locking._catalog_locks
+_catalog_lock_key = _catalog_locking.catalog_lock_key
+_get_catalog_lock = _catalog_locking.get_catalog_lock
 
 
 async def enqueue_job(rds: aioredis.Redis, job_id: str) -> None:
@@ -83,6 +71,23 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
 def _rowcount(result) -> int:
     value = getattr(result, "rowcount", None)
     return value if isinstance(value, int) else 0
+
+
+def _clear_current_task_cancellation() -> None:
+    current_task = asyncio.current_task()
+    while current_task is not None and current_task.cancelling():
+        current_task.uncancel()
+
+
+async def _await_ignoring_cancellation(awaitable):
+    task = asyncio.ensure_future(awaitable)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            _clear_current_task_cancellation()
+            if task.done():
+                return task.result()
 
 
 async def _claim_queued_job(factory, job_id: str):
@@ -124,6 +129,14 @@ async def _guarded_terminal_update(factory, job_id: str, values: dict) -> bool:
         )
         await db.commit()
     return _rowcount(result) == 1
+
+
+async def _job_is_still_running(factory, job_id: str) -> bool:
+    async with factory() as db:
+        job = (await db.execute(
+            select(DataFetchJob.status).where(DataFetchJob.job_id == job_id)
+        )).scalar_one_or_none()
+    return job == STATUS_RUNNING
 
 
 async def _persist_progress_if_running(factory, job_id: str, pct: int, msg: str) -> None:
@@ -178,6 +191,9 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
 
         lock_key = _catalog_lock_key(symbol, data_type, interval)
         async with _get_catalog_lock(lock_key):
+            if not await _job_is_still_running(factory, job_id):
+                logger.info("Data-fetch job %s was cancelled before ingest, skipping catalog mutation", job_id)
+                return
             pipeline = BinanceVisionPipeline(catalog_path=catalog_path)
             result = await pipeline.ingest(
                 symbol=symbol,
@@ -189,7 +205,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 progress_cb=_progress,
             )
 
-        updated = await _guarded_terminal_update(
+        updated = await _await_ignoring_cancellation(_guarded_terminal_update(
             factory,
             job_id,
             {
@@ -198,7 +214,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 "message": f"Done: {result.objects_count} objects",
                 "completed_at": datetime.utcnow(),
             },
-        )
+        ))
         if not updated:
             logger.info("Data-fetch job %s was no longer running at completion, skipping terminal event", job_id)
             return

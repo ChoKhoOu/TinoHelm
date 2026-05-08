@@ -28,6 +28,7 @@ from tinohelm.api.routes.data import (
     _parquet_size_for,
     _run_compact,
     _compact_bars_with_storage,
+    cancel_data_fetch_job,
     scan_data_catalog,
     trigger_compact,
     trigger_data_fetch_batch,
@@ -463,6 +464,41 @@ class TestFetchBatchSplitting:
         enqueue.assert_awaited_once_with(rds, "job-1")
 
 
+class TestCancelDataFetchJob:
+    def test_cancel_queued_job_updates_to_cancelled(self):
+        import asyncio
+
+        db = AsyncMock()
+        update_result = MagicMock()
+        update_result.rowcount = 1
+        db.execute = AsyncMock(return_value=update_result)
+        db.commit = AsyncMock()
+
+        result = asyncio.run(cancel_data_fetch_job("job-queued", db))
+
+        assert result == {"status": "cancelled", "job_id": "job-queued"}
+        db.commit.assert_awaited_once()
+        assert db.execute.await_count == 1
+        assert "data_fetch_jobs.status =" in str(db.execute.await_args.args[0])
+
+    def test_cancel_running_job_returns_conflict_without_status_update(self):
+        import asyncio
+
+        db = AsyncMock()
+        update_result = MagicMock()
+        update_result.rowcount = 0
+        select_result = MagicMock()
+        select_result.scalar_one_or_none.return_value = SimpleNamespace(status="running")
+        db.execute = AsyncMock(side_effect=[update_result, select_result])
+        db.commit = AsyncMock()
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(cancel_data_fetch_job("job-running", db))
+
+        assert exc.value.status_code == 409
+        assert "cannot be cancelled safely" in exc.value.detail
+        db.commit.assert_awaited_once()
+
 
 class TestSourceAwareBarMaintenance:
     def test_validate_data_resolves_source_aware_bar_root(self, tmp_path: Path, monkeypatch):
@@ -658,6 +694,50 @@ class TestSourceAwareBarMaintenance:
         assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path))]
         assert statements
         assert "data_catalog.source_type = :source_type_1" in str(statements[0])
+
+    def test_run_compact_waits_on_shared_catalog_lock(self, tmp_path: Path, monkeypatch):
+        import asyncio
+        from tinohelm.data.catalog_locks import _catalog_locks, catalog_lock_key, get_catalog_lock
+
+        _catalog_locks.clear()
+        calls = []
+
+        def fake_compact(storage, symbol, interval, catalog_path):
+            calls.append((symbol, interval, catalog_path))
+            return {"bars_count": 1, "size_before": 6, "size_after": 6}
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return None
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def execute(self, stmt):
+                return FakeResult()
+
+        monkeypatch.setattr("tinohelm.api.routes.data._compact_bars_with_storage", fake_compact)
+        monkeypatch.setattr("tinohelm.db.session.get_session_factory", lambda: FakeSession)
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        async def scenario():
+            lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "klines", "1m"))
+            await lock.acquire()
+            try:
+                task = asyncio.create_task(_run_compact("BTCUSDT-PERP", "1m", settings, "klines", "klines"))
+                await asyncio.sleep(0.02)
+                assert calls == []
+            finally:
+                lock.release()
+            await task
+
+        asyncio.run(scenario())
+
+        assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path / "bar" / "klines"))]
 
     def test_run_compact_updates_legacy_null_source_row_for_default_klines(self, tmp_path: Path, monkeypatch):
         import asyncio
