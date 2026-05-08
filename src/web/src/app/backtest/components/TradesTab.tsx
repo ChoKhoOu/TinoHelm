@@ -38,13 +38,7 @@ export function TradesTab({ runId }: TradesTabProps) {
     setError(null);
     setResult(null);
 
-    fetch(`${API_BASE}/api/backtest/${runId}/result`, {
-      headers: {
-        ...(process.env.NEXT_PUBLIC_API_KEY
-          ? { "X-API-Key": process.env.NEXT_PUBLIC_API_KEY }
-          : {}),
-      },
-    })
+    fetch(`${API_BASE}/api/backtest/${runId}/result`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

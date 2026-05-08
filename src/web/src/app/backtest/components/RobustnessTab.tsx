@@ -504,13 +504,7 @@ export function RobustnessTab({ runId }: Props) {
     setLoading(true);
     setResult(null);
 
-    fetch(`${API_BASE}/api/backtest/${runId}/result`, {
-      headers: {
-        ...(process.env.NEXT_PUBLIC_API_KEY
-          ? { "x-api-key": process.env.NEXT_PUBLIC_API_KEY }
-          : {}),
-      },
-    })
+    fetch(`${API_BASE}/api/backtest/${runId}/result`)
       .then((res) => res.json())
       .then((data) => {
         if (!cancelled) {
