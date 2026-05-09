@@ -22,7 +22,6 @@ from tinohelm.api.routes.data import (
     _fetch_batch_intervals,
     _split_fetch_date_ranges,
     _run_compact,
-    _compact_bars_with_storage,
     cancel_data_fetch_job,
     delete_catalog_entry,
     scan_data_catalog,
@@ -30,7 +29,7 @@ from tinohelm.api.routes.data import (
     trigger_data_fetch_batch,
     validate_data,
 )
-from tinohelm.data.catalog import compact_bars
+from tinohelm.data.catalog import CatalogSession, compact_bars
 
 
 class _FetchBatchDb:
@@ -604,7 +603,10 @@ class TestSourceAwareBarMaintenance:
 
         asyncio.run(_run_compact("BTCUSDT-PERP", "1m", settings, "klines", "klines"))
 
-        assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path))]
+        assert len(calls) == 1
+        assert calls[0][0] == "BTCUSDT-PERP"
+        assert calls[0][1] == "1m"
+        assert Path(calls[0][2]) == tmp_path
         assert statements
         assert "data_catalog.source_type = :source_type_1" in str(statements[0])
 
@@ -615,8 +617,8 @@ class TestSourceAwareBarMaintenance:
         _catalog_locks.clear()
         calls = []
 
-        def fake_compact(storage, symbol, interval, catalog_path):
-            calls.append((symbol, interval, catalog_path))
+        def fake_compact(self, symbol, interval):
+            calls.append((symbol, interval))
             return {"bars_count": 1, "size_before": 6, "size_after": 6}
 
         class FakeResult:
@@ -633,7 +635,7 @@ class TestSourceAwareBarMaintenance:
             async def execute(self, stmt):
                 return FakeResult()
 
-        monkeypatch.setattr("tinohelm.api.routes.data._compact_bars_with_storage", fake_compact)
+        monkeypatch.setattr("tinohelm.data.catalog.CatalogSession.compact_bars", fake_compact)
         monkeypatch.setattr("tinohelm.db.session.get_session_factory", lambda: FakeSession)
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
 
@@ -650,7 +652,7 @@ class TestSourceAwareBarMaintenance:
 
         asyncio.run(scenario())
 
-        assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path / "bar" / "klines"))]
+        assert calls == [("BTCUSDT-PERP", "1m")]
 
     def test_run_compact_updates_legacy_null_source_row_for_default_klines(self, tmp_path: Path, monkeypatch):
         import asyncio
@@ -707,7 +709,10 @@ class TestSourceAwareBarMaintenance:
 
         asyncio.run(_run_compact("BTCUSDT-PERP", "1m", settings, "klines", "klines"))
 
-        assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path))]
+        assert len(calls) == 1
+        assert calls[0][0] == "BTCUSDT-PERP"
+        assert calls[0][1] == "1m"
+        assert Path(calls[0][2]) == tmp_path
         assert legacy_entry.size_bytes == len(b"legacy-bytes")
         assert legacy_entry.record_count == 7
         assert legacy_entry.source_type is None
@@ -786,7 +791,7 @@ class TestSourceAwareBarMaintenance:
 
         monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
         monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: bar_type)
-        monkeypatch.setattr("tinohelm.api.routes.data.uuid4", lambda: SimpleNamespace(hex="abc123"))
+        monkeypatch.setattr("tinohelm.data.catalog.uuid4", lambda: SimpleNamespace(hex="abc123"))
         nt_mod = types.ModuleType("nautilus_trader")
         persistence_mod = types.ModuleType("nautilus_trader.persistence")
         catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
@@ -795,7 +800,7 @@ class TestSourceAwareBarMaintenance:
         monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
         monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
 
-        result = _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
+        result = CatalogSession(tmp_path, storage=storage).compact_bars("BTCUSDT-PERP", "1m")
 
         temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
         final_key = f"bucket/catalog/data/bar/{bar_type_str}/{compacted_name}"
@@ -858,7 +863,7 @@ class TestSourceAwareBarMaintenance:
 
         monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
         monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: bar_type)
-        monkeypatch.setattr("tinohelm.api.routes.data.uuid4", lambda: SimpleNamespace(hex="abc123"))
+        monkeypatch.setattr("tinohelm.data.catalog.uuid4", lambda: SimpleNamespace(hex="abc123"))
         nt_mod = types.ModuleType("nautilus_trader")
         persistence_mod = types.ModuleType("nautilus_trader.persistence")
         catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
@@ -867,7 +872,7 @@ class TestSourceAwareBarMaintenance:
         monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
         monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
 
-        result = _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
+        result = CatalogSession(tmp_path, storage=storage).compact_bars("BTCUSDT-PERP", "1m")
 
         temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
         rollback_key = f"bucket/catalog/.compaction-rollback/{bar_type_str}-abc123/{compacted_name}"
@@ -932,7 +937,7 @@ class TestSourceAwareBarMaintenance:
 
         monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
         monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: bar_type)
-        monkeypatch.setattr("tinohelm.api.routes.data.uuid4", lambda: SimpleNamespace(hex="abc123"))
+        monkeypatch.setattr("tinohelm.data.catalog.uuid4", lambda: SimpleNamespace(hex="abc123"))
         fs.rm = failing_rm
         nt_mod = types.ModuleType("nautilus_trader")
         persistence_mod = types.ModuleType("nautilus_trader.persistence")
@@ -943,7 +948,7 @@ class TestSourceAwareBarMaintenance:
         monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
 
         with pytest.raises(RuntimeError, match="delete failed"):
-            _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
+            CatalogSession(tmp_path, storage=storage).compact_bars("BTCUSDT-PERP", "1m")
 
         temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
         rollback_key = f"bucket/catalog/.compaction-rollback/{bar_type_str}-abc123/{compacted_name}"
@@ -1000,7 +1005,7 @@ class TestSourceAwareBarMaintenance:
         monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
 
         with pytest.raises(RuntimeError, match="compaction write failed"):
-            _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
+            CatalogSession(tmp_path, storage=storage).compact_bars("BTCUSDT-PERP", "1m")
 
         assert fs.rm_calls == []
         assert fs.objects == {old_keys[0]: b"old-a", old_keys[1]: b"old-b"}
@@ -1047,7 +1052,7 @@ class TestSourceAwareBarMaintenance:
 
         monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
         monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda instrument_id, interval: bar_type)
-        monkeypatch.setattr("tinohelm.api.routes.data.uuid4", lambda: SimpleNamespace(hex="abc123"))
+        monkeypatch.setattr("tinohelm.data.catalog.uuid4", lambda: SimpleNamespace(hex="abc123"))
         nt_mod = types.ModuleType("nautilus_trader")
         persistence_mod = types.ModuleType("nautilus_trader.persistence")
         catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
@@ -1057,7 +1062,7 @@ class TestSourceAwareBarMaintenance:
         monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
 
         with pytest.raises(RuntimeError, match="compaction write failed after partial temp write"):
-            _compact_bars_with_storage(storage, "BTCUSDT-PERP", "1m", tmp_path)
+            CatalogSession(tmp_path, storage=storage).compact_bars("BTCUSDT-PERP", "1m")
 
         temp_key = f"bucket/catalog/.compaction/{bar_type_str}-abc123/data/bar/{bar_type_str}/{compacted_name}"
         assert fs.rm_calls == [temp_key]

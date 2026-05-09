@@ -660,7 +660,6 @@ class BinanceVisionPipeline:
         self._chunk_rows = max(1, cfg.data.chunk_rows)
         self._agg_trades_chunk_rows = max(1, cfg.data.agg_trades_chunk_rows)
         self._csv_queue_maxsize = max(1, cfg.data.csv_queue_maxsize)
-        self._pending_funding_cache_updates: dict[str, list[dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -711,20 +710,21 @@ class BinanceVisionPipeline:
 
         await _progress(0, f"Planning downloads for {symbol} {data_type}...")
 
-        # Early exit: funding-rate JSON cache already covers [start, end].
-        # Defense-in-depth — protects every caller (not just BacktestRunner)
-        # from re-downloading an already-cached range.
-        if (
-            data_type == "fundingRate"
-            and self._funding_cache_covers(symbol, start, end)
-            and self._funding_parquet_covers(symbol, start, end)
-        ):
-            await _progress(100, "Funding rate cache already covers range")
-            return IngestResult(
-                symbol=symbol, data_type=data_type,
-                objects_count=0, files_written=0,
-                start=start, end=end, skipped=True,
-            )
+        # Early exit: funding-rate cache already covers [start, end].
+        if data_type == "fundingRate":
+            from tinohelm.data.catalog import CatalogSession
+
+            _funding_session = CatalogSession(self.catalog_path, storage=self._storage)
+            if (
+                _funding_session.funding_cache_covers(symbol, start, end)
+                and _funding_session.funding_parquet_covers(symbol, start, end)
+            ):
+                await _progress(100, "Funding rate cache already covers range")
+                return IngestResult(
+                    symbol=symbol, data_type=data_type,
+                    objects_count=0, files_written=0,
+                    start=start, end=end, skipped=True,
+                )
 
         # 1. Plan downloads (monthly-first + daily-tail)
         tasks = self.downloader.plan_downloads(
@@ -751,9 +751,13 @@ class BinanceVisionPipeline:
             data_type, symbol, interval, instrument,
         )
         cleanup_guard = self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
-        funding_cache_snapshot = (
-            self._snapshot_funding_cache(symbol) if data_type == "fundingRate" else None
-        )
+        funding_txn = None
+        if data_type == "fundingRate":
+            from tinohelm.data.catalog import CatalogSession
+
+            _fs = CatalogSession(self.catalog_path, storage=self._storage)
+            funding_txn = _fs.create_funding_txn(symbol)
+            self._active_funding_txn = funding_txn
 
         # 3. Pipelined download → convert (overlap via asyncio.Queue)
         dl_concurrency = self.downloader.concurrency
@@ -876,8 +880,9 @@ class BinanceVisionPipeline:
                     preexisting_output_paths,
                 )
             finally:
-                self._pending_funding_cache_updates.pop(symbol, None)
-                self._restore_funding_cache(funding_cache_snapshot)
+                if funding_txn is not None:
+                    funding_txn.restore()
+                self._active_funding_txn = None
 
         try:
             await _progress(
@@ -1175,11 +1180,12 @@ class BinanceVisionPipeline:
             logger.exception("Failed to update DB catalog")
             raise
 
-        if data_type == "fundingRate":
+        if funding_txn is not None:
             try:
-                self._flush_pending_funding_cache(symbol)
+                funding_txn.flush_json()
             except Exception:
                 logger.warning("Failed to update legacy funding JSON cache for %s", symbol, exc_info=True)
+            self._active_funding_txn = None
 
         if cleanup_guard is not None:
             cleanup_guard.discard(best_effort=True)
@@ -1297,33 +1303,6 @@ class BinanceVisionPipeline:
             logger.warning("Failed to snapshot catalog paths under %s", target_dir, exc_info=True)
             return set()
 
-    @staticmethod
-    def _snapshot_funding_cache(symbol: str) -> _FundingCacheSnapshot | None:
-        """Snapshot the legacy funding JSON cache for ingest rollback."""
-        from tinohelm.data.funding_cache import _cache_path
-
-        path = _cache_path(symbol)
-        try:
-            if path.exists():
-                return _FundingCacheSnapshot(path=path, existed=True, payload=path.read_bytes())
-            return _FundingCacheSnapshot(path=path, existed=False, payload=None)
-        except Exception:
-            logger.warning("Failed to snapshot funding cache %s", path, exc_info=True)
-            return None
-
-    @staticmethod
-    def _restore_funding_cache(snapshot: _FundingCacheSnapshot | None) -> None:
-        """Best-effort restore of the legacy funding JSON cache after ingest failure."""
-        if snapshot is None:
-            return
-        try:
-            if snapshot.existed:
-                snapshot.path.parent.mkdir(parents=True, exist_ok=True)
-                snapshot.path.write_bytes(snapshot.payload or b"")
-            else:
-                snapshot.path.unlink(missing_ok=True)
-        except Exception:
-            logger.warning("Failed to restore funding cache %s", snapshot.path, exc_info=True)
 
     def ingest_sync(self, **kwargs) -> IngestResult:
         """Synchronous wrapper for :meth:`ingest`.
@@ -1597,9 +1576,13 @@ class BinanceVisionPipeline:
             return paths
 
         elif category == "funding_rate":
-            # Write to both Parquet (primary) and JSON (backward-compat fallback)
-            parquet_path = self._write_funding_rates(objects, symbol)
-            return [parquet_path] if parquet_path else []
+            txn = getattr(self, "_active_funding_txn", None)
+            if txn is None:
+                raise RuntimeError(
+                    "funding_rate write requires an active FundingRateTxn"
+                )
+            parquet_path = txn.write_parquet(objects)
+            return [str(parquet_path)]
 
         elif category == "metrics":
             from tinohelm.data.catalog import write_metrics_parquet
@@ -1616,94 +1599,6 @@ class BinanceVisionPipeline:
                 f"No catalog writer for data_type={data_type!r} (category={category!r})"
             )
 
-    @staticmethod
-    def _funding_cache_covers(symbol: str, start: date, end: date) -> bool:
-        """Return True iff the JSON funding-rate cache fully spans ``[start, end]``.
-
-        Reuses :func:`funding_cache_helpers.compute_fetch_start` — the same
-        decision the ``load_funding_rates`` orchestrator uses. A return value
-        of ``None`` from that helper means "no API call needed", which is
-        exactly our skip condition.
-        """
-        from datetime import datetime as _dt, time as _time, timezone as _tz
-        from tinohelm.data.funding_cache import _load_cache
-        from tinohelm.data.funding_cache_helpers import compute_fetch_start
-
-        cached = _load_cache(symbol)
-        cached_times = [
-            int(r["funding_time_ms"])
-            for r in cached
-            if isinstance(r, dict) and isinstance(r.get("funding_time_ms"), (int, float))
-        ]
-        if not cached_times:
-            return False
-        # Pipeline callers pass ``date``; promote to UTC datetime for the
-        # helper (start-of-day, end-of-day).
-        start_dt = _dt.combine(start, _time.min, tzinfo=_tz.utc)
-        end_dt = _dt.combine(end, _time.max, tzinfo=_tz.utc)
-        return compute_fetch_start(cached_times, start=start_dt, end=end_dt) is None
-
-    def _funding_parquet_covers(self, symbol: str, start: date, end: date) -> bool:
-        """Return True iff the primary funding-rate Parquet spans ``[start, end]``."""
-        from tinohelm.data.catalog import funding_rate_parquet_path
-
-        path = funding_rate_parquet_path(symbol, self.catalog_path)
-        try:
-            if not self._storage.exists(path):
-                return False
-            time_range = self._parquet_time_range(path, storage=self._storage)
-        except Exception:
-            logger.warning(
-                "Funding-rate primary parquet is not readable for %s", symbol, exc_info=True
-            )
-            return False
-        if time_range is None:
-            return False
-        min_ts, max_ts = time_range
-        return _ns_to_utc_date(min_ts) <= start and _ns_to_utc_date(max_ts) >= end
-
-    def _write_funding_rates(self, records: list, symbol: str) -> str | None:
-        """Write funding rate records to primary Parquet and stage JSON cache update.
-
-        Returns the Parquet file path string if written, else None.
-        """
-        from tinohelm.data.catalog import write_funding_rate_parquet
-
-        cache_records = [
-            {
-                "funding_time_ms": r.funding_time_ms,
-                "funding_rate": r.funding_rate,
-                "mark_price": 0,  # Not available in Vision data
-            }
-            for r in records
-        ]
-        parquet_path = write_funding_rate_parquet(
-            records=records,
-            symbol=symbol,
-            catalog_root=self.catalog_path,
-            storage=self._storage,
-        )
-        self._pending_funding_cache_updates.setdefault(symbol, []).extend(cache_records)
-        logger.info(
-            "Wrote %d funding rate records for %s (Parquet primary; JSON pending DB commit)",
-            len(records), symbol,
-        )
-        return str(parquet_path)
-
-    def _flush_pending_funding_cache(self, symbol: str) -> None:
-        """Merge staged funding records into the legacy JSON cache after DB commit."""
-        pending = self._pending_funding_cache_updates.pop(symbol, [])
-        if not pending:
-            return
-        from tinohelm.data.funding_cache import _load_cache, _save_cache
-
-        by_time: dict[int, dict] = {}
-        for row in _load_cache(symbol):
-            if isinstance(row, dict) and isinstance(row.get("funding_time_ms"), (int, float)):
-                by_time[int(row["funding_time_ms"])] = row
-        for row in pending:
-            by_time[int(row["funding_time_ms"])] = row
-        _save_cache(symbol, [by_time[key] for key in sorted(by_time)])
 
     # ------------------------------------------------------------------
     # REST API fallback
