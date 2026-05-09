@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import SecretStr
 
 from tinohelm.core.config import Settings, StorageSettings, TosStorageSettings
@@ -116,11 +117,14 @@ def test_tos_default_endpoint_uses_s3_specific_same_region_domain() -> None:
 
 
 def test_docker_compose_tos_default_endpoint_matches_public_flag() -> None:
-    compose = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
+    compose = yaml.safe_load((Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text())
 
-    assert "TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT: \"${TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT:-false}\"" in compose
-    assert "https://tos-s3-ap-southeast-3.volces.com" in compose
-    assert "https://tos-s3-ap-southeast-3.ivolces.com}" not in compose
+    for service_name in ("api", "node-sandbox", "node-live"):
+        env = compose["services"][service_name]["environment"]
+        assert env["TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT"] == "${TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT:-false}"
+        assert env["TINO_STORAGE__TOS__ENDPOINT"] == (
+            "${TINO_STORAGE__TOS__ENDPOINT:-https://tos-s3-ap-southeast-3.volces.com}"
+        )
 
 
 def test_tos_provider_exposes_s3_catalog_uri_and_nt_options(tmp_path: Path) -> None:
