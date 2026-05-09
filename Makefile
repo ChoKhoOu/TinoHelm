@@ -19,7 +19,7 @@ TARGET_BIN := $(CLI_DIR)/target/$(TARGET)/release/$(BIN)
 
 .DEFAULT_GOAL := install
 
-.PHONY: install verify-install build package check fmt test uninstall clean dist-clean help
+.PHONY: install verify-install build package check fmt test uninstall clean dist-clean deploy cli-deploy help
 
 install: build
 	@mkdir -p "$(BINDIR)"
@@ -96,6 +96,12 @@ clean:
 dist-clean:
 	$(RM) -r "$(DIST_DIR)"
 
+deploy:
+	docker compose -f docker-compose.yml --profile sandbox up -d --pull always --force-recreate --no-build
+
+cli-deploy:
+	./scripts/install-tino.sh --nightly
+
 help:
 	@printf 'make                  Build release CLI, install tino, and fail if PATH cannot resolve it\n'
 	@printf 'make install          Same as make; default BINDIR is /usr/local/bin when writable, else ~/.local/bin\n'
@@ -107,4 +113,6 @@ help:
 	@printf 'make test             Run CLI tests\n'
 	@printf 'make uninstall        Remove $(BINDIR)/$(BIN)\n'
 	@printf 'make dist-clean       Remove $(DIST_DIR)\n'
+	@printf 'make deploy           Pull latest remote images and recreate sandbox stack\n'
+	@printf 'make cli-deploy       Install latest nightly tino CLI from remote release\n'
 	@printf 'make BINDIR=/path     Override install directory, e.g. /usr/local/bin\n'
