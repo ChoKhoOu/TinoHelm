@@ -405,25 +405,35 @@ async def _run_compact(
             )
             was_cancelled = was_cancelled or cancelled
 
-            # Update DB catalog size_bytes for the same source-aware bar row.
-            total_size = result.get("size_after")
-            if total_size is None:
-                total_size, cancelled = await _await_critical_mutation(
-                    asyncio.to_thread(
-                        session.parquet_size_for,
-                        symbol,
-                        interval,
-                        source_type=effective_source,
-                    )
+            # Compact only rewrote the layout that resolve_bar_catalog_path
+            # picked, but the DB row describes *both* layouts — re-sum across
+            # source-aware + legacy flat so we don't drop the untouched side.
+            merged, cancelled = await _await_critical_mutation(
+                asyncio.to_thread(
+                    session.merged_bar_stats,
+                    symbol,
+                    interval,
+                    source_type=effective_source,
                 )
-                was_cancelled = was_cancelled or cancelled
+            )
+            was_cancelled = was_cancelled or cancelled
+            total_size = (
+                merged["size_bytes"] if merged is not None else result.get("size_after", 0)
+            )
+            # Prefer the merged record_count when both sides report rows; fall
+            # back to compact's own count if metadata was unreadable (e.g.
+            # empty/corrupt parquet) so we don't erase a healthy prior value.
+            if merged is not None and merged["record_count"] is not None:
+                bars_count = merged["record_count"]
+            else:
+                bars_count = result.get("bars_count")
 
             _, cancelled = await _await_critical_mutation(_update_compact_catalog_row(
                 symbol=symbol,
                 interval=interval,
                 effective_source=effective_source,
                 total_size=total_size,
-                bars_count=result.get("bars_count"),
+                bars_count=bars_count,
             ))
             was_cancelled = was_cancelled or cancelled
 
@@ -590,10 +600,15 @@ async def scan_data_catalog(
 
     bar_result = await asyncio.to_thread(session.scan_bars)
     tick_result = await asyncio.to_thread(session.scan_ticks)
+    single_file_result = await asyncio.to_thread(session.scan_single_files)
 
     created = 0
     updated = 0
-    for entry in (*bar_result.entries, *tick_result.entries):
+    for entry in (
+        *bar_result.entries,
+        *tick_result.entries,
+        *single_file_result.entries,
+    ):
         created_delta, updated_delta = await _upsert_scan_entry(db, entry)
         created += created_delta
         updated += updated_delta
@@ -601,7 +616,11 @@ async def scan_data_catalog(
     await db.commit()
     return {
         "status": "ok",
-        "scanned": bar_result.scanned + tick_result.scanned,
+        "scanned": (
+            bar_result.scanned
+            + tick_result.scanned
+            + single_file_result.scanned
+        ),
         "created": created,
         "updated": updated,
     }

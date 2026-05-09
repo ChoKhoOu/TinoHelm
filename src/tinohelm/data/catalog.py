@@ -438,6 +438,15 @@ _TICK_SCAN_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("trade_tick", "trade_tick", ("aggTrades", "trades")),
     ("quote_tick", "quote_tick", ("bookTicker",)),
 )
+# Single-file-per-symbol Parquet categories: one parquet sitting in a shared
+# parent dir, named ``{symbol.lower()}.parquet``. Interval is a sentinel
+# string because these categories don't have a time-bucket: funding rates
+# land on Binance's 8h schedule, metrics / bookDepth are per-tick snapshots.
+_SINGLE_FILE_SCAN_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("funding_rate", "fundingRate", "8h"),
+    ("metrics", "metrics", "tick"),
+    ("order_book_delta", "bookDepth", "tick"),
+)
 
 
 class CatalogSession:
@@ -654,6 +663,65 @@ class CatalogSession:
             return None
         return _aggregate_parquet_object_stats(objects, self.storage)
 
+    def merged_bar_stats(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        source_type: str,
+    ) -> dict[str, Any] | None:
+        """Return merged stats across source-aware + legacy flat bar layouts.
+
+        ``_run_compact`` only rewrites one side (whichever ``resolve_bar_catalog_path``
+        picked), but the DB row in ``data_catalog`` still describes the union
+        of both layouts — so after compacting klines we must re-sum both the
+        source-aware root and any legacy flat copy before updating
+        ``size_bytes`` / ``record_count``. Only the legacy default source
+        (``klines``) has a flat fallback; other sources stay scoped.
+        """
+        interval_to_nt_suffix(interval)  # eager validation — see parquet_size_for
+        from tinohelm.strategy.loader_helpers import make_bar_type_str
+
+        bar_type_dir_name = make_bar_type_str(symbol, interval)
+        resolved_root = self.resolve_catalog_path(source_type)
+
+        roots: list[Path] = [resolved_root / "data" / "bar" / bar_type_dir_name]
+        if (
+            source_type == _LEGACY_DEFAULT_SOURCE_FOR_BAR
+            and resolved_root != self.catalog_path
+        ):
+            roots.append(
+                self.catalog_path / "data" / "bar" / bar_type_dir_name
+            )
+
+        collected: list[dict[str, Any]] = []
+        storage = self.storage
+        for root in roots:
+            objects = list(storage.iter_files(root, suffix=".parquet", recursive=False))
+            if not objects:
+                continue
+            stats = _aggregate_parquet_object_stats(objects, storage)
+            if stats is not None:
+                collected.append(stats)
+
+        if not collected:
+            return None
+
+        size_bytes = sum(int(s["size_bytes"]) for s in collected)
+        all_rows_known = all(s["all_record_counts_known"] for s in collected)
+        record_count = (
+            sum(int(s["record_count"]) for s in collected) if all_rows_known else None
+        )
+        start_date = min(s["start_date"] for s in collected)
+        end_date = max(s["end_date"] for s in collected)
+        return {
+            "size_bytes": size_bytes,
+            "record_count": record_count,
+            "all_record_counts_known": all_rows_known,
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+
     def scan_bars(self) -> ScanResult:
         """Discover bar parquet files on disk and collapse to catalog entries.
 
@@ -734,6 +802,62 @@ class CatalogSession:
 
         entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
         return ScanResult(entries=entries, scanned=scanned)
+
+    def scan_single_files(self) -> ScanResult:
+        """Discover per-symbol Parquet files for single-file categories.
+
+        Covers ``funding_rate`` / ``metrics`` / ``order_book_delta`` — each
+        lives at a canonical path keyed by ``symbol.lower()``. These were
+        silently missed by the pre-PR2 route scan; lifting the discovery into
+        the session closes that gap without re-scattering data-type knowledge
+        across call sites.
+        """
+        merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        scanned = 0
+        for data_type, source_type, interval in _SINGLE_FILE_SCAN_SPECS:
+            parent_dir = self._single_file_parent_dir(data_type)
+            if parent_dir is None:
+                continue
+            storage = self.storage
+            for obj in storage.iter_files(parent_dir, suffix=".parquet", recursive=False):
+                symbol = self._symbol_from_single_file(obj.path)
+                if symbol is None:
+                    continue
+                stats = _aggregate_parquet_object_stats([obj], storage)
+                if stats is None:
+                    continue
+                scanned += 1
+                self._merge_scan_stats(
+                    merged,
+                    key=(symbol, data_type, interval, source_type),
+                    stats=stats,
+                    cat_root=self.catalog_path,
+                    is_source_aware=False,
+                )
+        entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
+        return ScanResult(entries=entries, scanned=scanned)
+
+    def _single_file_parent_dir(self, data_type: str) -> Path | None:
+        """Return the directory that holds one parquet per symbol for ``data_type``."""
+        # Use the canonical per-symbol path and walk one up to the parent dir.
+        # Keeping the branch here rather than another spec table lets the
+        # canonical-path helpers remain the single source of truth for layout.
+        sentinel = "scan"
+        if data_type == "funding_rate":
+            return funding_rate_parquet_path(sentinel, self.catalog_path).parent
+        if data_type == "metrics":
+            return metrics_parquet_path(sentinel, self.catalog_path).parent
+        if data_type == "order_book_delta":
+            return book_depth_parquet_path(sentinel, self.catalog_path).parent
+        return None
+
+    @staticmethod
+    def _symbol_from_single_file(path: Path) -> str | None:
+        """Recover ``symbol`` from a ``{symbol.lower()}.parquet`` filename."""
+        name = path.stem
+        if not name:
+            return None
+        return name.upper()
 
     def _collect_bar_entries_for_root(
         self,
