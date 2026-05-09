@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,10 +20,12 @@ from tinohelm.data.catalog_helpers import (
     detect_price_jumps,
     find_gaps,
     interval_to_nanoseconds,
+    interval_to_nt_suffix,
     interval_to_step_unit,
     is_ohlc_valid,
     merge_bars,
     ns_to_iso,
+    nt_suffix_to_interval,
     resolve_catalog_path,
 )
 from tinohelm.data.pipeline_helpers import WRITE_CATEGORY as _PIPELINE_WRITE_CATEGORY
@@ -398,6 +401,45 @@ class FundingRateTxn:
             logger.warning("Failed to restore funding cache %s", snapshot.path, exc_info=True)
 
 
+@dataclass(frozen=True)
+class ScanEntry:
+    """One catalog-row candidate produced by ``session.scan_bars`` / ``scan_ticks``.
+
+    Fields line up with ``DataCatalog`` columns so the route can upsert by
+    ``(symbol, data_type, interval, source_type)`` without re-deriving anything.
+    ``file_path`` is the canonical catalog root (source-aware when available,
+    base path otherwise) so consumers can resolve later parquet reads.
+    """
+
+    symbol: str
+    data_type: str
+    interval: str
+    source_type: str
+    start_date: Any
+    end_date: Any
+    size_bytes: int
+    record_count: int | None
+    file_path: str
+
+
+@dataclass(frozen=True)
+class ScanResult:
+    entries: list[ScanEntry]
+    scanned: int
+
+
+_BAR_SOURCE_TYPES: tuple[str, ...] = (
+    "klines",
+    "markPriceKlines",
+    "indexPriceKlines",
+    "premiumIndexKlines",
+)
+_TICK_SCAN_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("trade_tick", "trade_tick", ("aggTrades", "trades")),
+    ("quote_tick", "quote_tick", ("bookTicker",)),
+)
+
+
 class CatalogSession:
     """Entry point for Catalog CRUD (see Issue #156).
 
@@ -563,6 +605,37 @@ class CatalogSession:
             freed_bytes += size
         return deleted_files, freed_bytes
 
+    def parquet_size_for(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        source_type: str | None = None,
+    ) -> int:
+        """Sum on-disk sizes of all bar parquet files for ``(symbol, interval)``.
+
+        Matches the now-retired ``routes.data._parquet_size_for`` — raises
+        ``ValueError`` on a malformed interval so callers see the same
+        failure mode they used to. Defaults ``source_type`` to the legacy
+        bar default (``klines``) so callers that only know the interval
+        keep working.
+        """
+        # Validate interval shape eagerly: ``make_bar_type_str`` falls back to
+        # ``1-MINUTE`` on garbage inputs, but the route layer raised here.
+        interval_to_nt_suffix(interval)
+        effective_source = source_type or _LEGACY_DEFAULT_SOURCE_FOR_BAR
+        total = 0
+        for obj in self._parquet_objects_for(symbol, "bar", interval, effective_source):
+            size = getattr(obj, "size", None)
+            if size is not None:
+                total += int(size)
+                continue
+            try:
+                total += Path(obj.path).stat().st_size
+            except OSError:
+                pass
+        return total
+
     def aggregate_parquet_stats(
         self,
         symbol: str,
@@ -580,6 +653,244 @@ class CatalogSession:
         if not objects:
             return None
         return _aggregate_parquet_object_stats(objects, self.storage)
+
+    def scan_bars(self) -> ScanResult:
+        """Discover bar parquet files on disk and collapse to catalog entries.
+
+        One entry per ``(symbol, interval, source_type)``. Source-aware and
+        legacy flat layouts are merged when both coexist — source-aware wins
+        the reported ``file_path`` to steer future reads to the new layout.
+        """
+        bar_type_pattern = re.compile(r"^(.+\.BINANCE)-(\d+-\w+)-LAST-EXTERNAL$")
+        merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        scanned = 0
+
+        for source_type in _BAR_SOURCE_TYPES:
+            resolved_root = self.resolve_catalog_path(source_type)
+            bar_root = resolved_root / "data" / "bar"
+            is_source_aware = resolved_root != self.catalog_path
+            scanned += self._collect_bar_entries_for_root(
+                bar_root=bar_root,
+                cat_root=resolved_root,
+                source_type=source_type,
+                is_source_aware=is_source_aware,
+                merged=merged,
+                pattern=bar_type_pattern,
+            )
+
+        legacy_root = self.catalog_path / "data" / "bar"
+        already_scanned_legacy = any(
+            self.resolve_catalog_path(src) == self.catalog_path
+            for src in _BAR_SOURCE_TYPES
+        )
+        if not already_scanned_legacy:
+            scanned += self._collect_bar_entries_for_root(
+                bar_root=legacy_root,
+                cat_root=self.catalog_path,
+                source_type="klines",
+                is_source_aware=False,
+                merged=merged,
+                pattern=bar_type_pattern,
+            )
+
+        entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
+        return ScanResult(entries=entries, scanned=scanned)
+
+    def scan_ticks(self) -> ScanResult:
+        """Discover trade_tick / quote_tick parquet files and collapse to entries."""
+        sym_pattern = re.compile(r"^(.+)\.BINANCE$")
+        merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        scanned = 0
+
+        for data_type, dir_name, source_types in _TICK_SCAN_SPECS:
+            for source_type in source_types:
+                resolved_root = self.resolve_catalog_path(source_type)
+                tick_root = resolved_root / "data" / dir_name
+                is_source_aware = resolved_root != self.catalog_path
+                scanned += self._collect_tick_entries_for_root(
+                    tick_root=tick_root,
+                    cat_root=resolved_root,
+                    data_type=data_type,
+                    source_type=source_type,
+                    is_source_aware=is_source_aware,
+                    merged=merged,
+                    pattern=sym_pattern,
+                )
+            legacy_root = self.catalog_path / "data" / dir_name
+            legacy_already_scanned = any(
+                self.resolve_catalog_path(src) == self.catalog_path
+                for src in source_types
+            )
+            if not legacy_already_scanned:
+                scanned += self._collect_tick_entries_for_root(
+                    tick_root=legacy_root,
+                    cat_root=self.catalog_path,
+                    data_type=data_type,
+                    source_type=source_types[0],
+                    is_source_aware=False,
+                    merged=merged,
+                    pattern=sym_pattern,
+                )
+
+        entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
+        return ScanResult(entries=entries, scanned=scanned)
+
+    def _collect_bar_entries_for_root(
+        self,
+        *,
+        bar_root: Path,
+        cat_root: Path,
+        source_type: str,
+        is_source_aware: bool,
+        merged: dict[tuple[str, str, str, str], dict[str, Any]],
+        pattern: "re.Pattern[str]",
+    ) -> int:
+        grouped = self._group_parquet_objects_by_child_dir(bar_root)
+        scanned_here = 0
+        for entry_dir, parquet_objects in sorted(
+            grouped.items(), key=lambda item: item[0].name
+        ):
+            match = pattern.match(entry_dir.name)
+            if not match:
+                continue
+            interval = nt_suffix_to_interval(match.group(2))
+            if interval is None:
+                logger.warning(
+                    "Scan: unknown interval %s in %s, skipping",
+                    match.group(2),
+                    entry_dir.name,
+                )
+                continue
+            symbol = match.group(1).removesuffix(".BINANCE")
+            stats = _aggregate_parquet_object_stats(parquet_objects, self.storage)
+            if stats is None:
+                logger.warning(
+                    "Scan: no timestamp range readable for %s, skipping", entry_dir.name
+                )
+                continue
+            scanned_here += 1
+            self._merge_scan_stats(
+                merged,
+                key=(symbol, "bar", interval, source_type),
+                stats=stats,
+                cat_root=cat_root,
+                is_source_aware=is_source_aware,
+            )
+            logger.info(
+                "Scan: %s %s %s [%s..%s] %d bytes",
+                source_type,
+                symbol,
+                interval,
+                stats["start_date"],
+                stats["end_date"],
+                stats["size_bytes"],
+            )
+        return scanned_here
+
+    def _collect_tick_entries_for_root(
+        self,
+        *,
+        tick_root: Path,
+        cat_root: Path,
+        data_type: str,
+        source_type: str,
+        is_source_aware: bool,
+        merged: dict[tuple[str, str, str, str], dict[str, Any]],
+        pattern: "re.Pattern[str]",
+    ) -> int:
+        grouped = self._group_parquet_objects_by_child_dir(tick_root)
+        scanned_here = 0
+        for entry_dir, parquet_objects in sorted(
+            grouped.items(), key=lambda item: item[0].name
+        ):
+            match = pattern.match(entry_dir.name)
+            if not match:
+                continue
+            symbol = match.group(1)
+            stats = _aggregate_parquet_object_stats(parquet_objects, self.storage)
+            if stats is None:
+                continue
+            scanned_here += 1
+            self._merge_scan_stats(
+                merged,
+                key=(symbol, data_type, "tick", source_type),
+                stats=stats,
+                cat_root=cat_root,
+                is_source_aware=is_source_aware,
+            )
+        return scanned_here
+
+    @staticmethod
+    def _merge_scan_stats(
+        merged: dict[tuple[str, str, str, str], dict[str, Any]],
+        *,
+        key: tuple[str, str, str, str],
+        stats: dict[str, Any],
+        cat_root: Path,
+        is_source_aware: bool,
+    ) -> None:
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = {
+                "start_date": stats["start_date"],
+                "end_date": stats["end_date"],
+                "size_bytes": int(stats["size_bytes"]),
+                "record_count": stats["record_count"],
+                "all_record_counts_known": stats["record_count"] is not None,
+                "file_path": str(cat_root),
+                "has_source_aware": is_source_aware,
+            }
+            return
+        existing["start_date"] = min(existing["start_date"], stats["start_date"])
+        existing["end_date"] = max(existing["end_date"], stats["end_date"])
+        existing["size_bytes"] += int(stats["size_bytes"])
+        rc = stats["record_count"]
+        if rc is None:
+            existing["all_record_counts_known"] = False
+            existing["record_count"] = None
+        elif existing["all_record_counts_known"]:
+            existing["record_count"] = (existing["record_count"] or 0) + int(rc)
+        if is_source_aware and not existing["has_source_aware"]:
+            existing["file_path"] = str(cat_root)
+            existing["has_source_aware"] = True
+
+    @staticmethod
+    def _build_scan_entry(
+        key: tuple[str, str, str, str],
+        stats: dict[str, Any],
+    ) -> ScanEntry:
+        symbol, data_type, interval, source_type = key
+        return ScanEntry(
+            symbol=symbol,
+            data_type=data_type,
+            interval=interval,
+            source_type=source_type,
+            start_date=stats["start_date"],
+            end_date=stats["end_date"],
+            size_bytes=int(stats["size_bytes"]),
+            record_count=stats["record_count"],
+            file_path=stats["file_path"],
+        )
+
+    def _group_parquet_objects_by_child_dir(
+        self, root: Path
+    ) -> dict[Path, list]:
+        """Group parquet objects under ``root/<child>/*.parquet`` by child dir.
+
+        Mirrors the route-level helper removed in PR2 — placed here so scan
+        logic stays behind a single boundary, not split between session + route.
+        """
+        groups: dict[Path, list] = {}
+        storage = self.storage
+        for obj in storage.iter_files(root, suffix=".parquet", recursive=True):
+            try:
+                rel = obj.path.relative_to(root)
+            except ValueError:
+                continue
+            if len(rel.parts) < 2:
+                continue
+            groups.setdefault(root / rel.parts[0], []).append(obj)
+        return groups
 
     def _parquet_objects_for(
         self,
