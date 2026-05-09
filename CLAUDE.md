@@ -6,27 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 TinoHelm is a single-instance quantitative trading platform built on NautilusTrader. It provides backtesting, paper trading (sandbox), and live trading via a FastAPI backend, Redis job queue, PostgreSQL persistence, and a Next.js frontend.
 
-## Commands
-
-```bash
-# Docker (primary way to run)
-docker compose up -d                                    # Start core services (api, web, postgres, redis)
-docker compose --profile sandbox up -d                  # Include sandbox node
-docker compose --profile sandbox --profile live up -d   # Include sandbox + live nodes
-docker compose up -d --build api                        # Rebuild API after src/ code changes
-docker compose logs api --tail 50                       # Check API logs
-
-# Local dev (Python)
-python -m venv .venv && source .venv/bin/activate
-pip install -e "."                # Install package (includes plotly for tearsheets)
-pip install -e ".[optimize]"      # With Optuna support
-
-# Tests (must use venv python, system python has PEP 668 restrictions)
-.venv/bin/pip install pytest      # Install pytest in venv
-.venv/bin/python -m pytest tests/ -x -q            # Run all tests
-.venv/bin/python -m pytest tests/portfolio/ -x -q   # Run one test dir
-.venv/bin/python -m pytest tests/actors/test_risk_guard.py::test_daily_loss_breach -x -v  # Single test
-
 # Database migrations
 alembic upgrade head
 
@@ -361,5 +340,16 @@ Key gotchas that have caused bugs in this project:
 - `str.lstrip("./")` removes individual **characters**, NOT the prefix `"./"`. Use `str.removeprefix("./")`.
 - When handling relative paths, always `resolve()` and verify within expected boundary directory.
 
-## 禁区
-- cli/ 目录及所有 CLI 相关代码 — 正在手动维护，不要修改
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `ChoKhoOu/TinoHelm` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical 5-role vocabulary (`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`); `wontfix` already exists in the repo, the other four will be created lazily on first use. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` + `docs/adr/` at the repo root (both are lazily created by `/grill-with-docs` when needed). See `docs/agents/domain.md`.
