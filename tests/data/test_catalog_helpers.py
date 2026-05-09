@@ -50,6 +50,68 @@ from tinohelm.data.pipeline_helpers import WRITE_CATEGORY
 
 
 # ---------------------------------------------------------------------------
+# NT bar-dir suffix conversion (Issue #156 PR1)
+# ---------------------------------------------------------------------------
+
+class TestIntervalToNTSuffix:
+    def test_minute(self):
+        from tinohelm.data.catalog_helpers import interval_to_nt_suffix
+
+        assert interval_to_nt_suffix("7m") == "7-MINUTE"
+
+    def test_hour(self):
+        from tinohelm.data.catalog_helpers import interval_to_nt_suffix
+
+        assert interval_to_nt_suffix("4h") == "4-HOUR"
+
+    def test_day(self):
+        from tinohelm.data.catalog_helpers import interval_to_nt_suffix
+
+        assert interval_to_nt_suffix("1d") == "1-DAY"
+
+    def test_invalid_raises(self):
+        from tinohelm.data.catalog_helpers import interval_to_nt_suffix
+
+        with pytest.raises(ValueError):
+            interval_to_nt_suffix("5x")
+
+    def test_missing_number_raises(self):
+        from tinohelm.data.catalog_helpers import interval_to_nt_suffix
+
+        with pytest.raises(ValueError):
+            interval_to_nt_suffix("m")
+
+
+class TestNTSuffixToInterval:
+    def test_minute(self):
+        from tinohelm.data.catalog_helpers import nt_suffix_to_interval
+
+        assert nt_suffix_to_interval("7-MINUTE") == "7m"
+
+    def test_hour(self):
+        from tinohelm.data.catalog_helpers import nt_suffix_to_interval
+
+        assert nt_suffix_to_interval("4-HOUR") == "4h"
+
+    def test_day(self):
+        from tinohelm.data.catalog_helpers import nt_suffix_to_interval
+
+        assert nt_suffix_to_interval("1-DAY") == "1d"
+
+    def test_unknown_aggregation_returns_none(self):
+        from tinohelm.data.catalog_helpers import nt_suffix_to_interval
+
+        # WEEK not in _UNIT_REVERSE — unsupported shapes must be None, not raise.
+        assert nt_suffix_to_interval("1-WEEK") is None
+
+    def test_malformed_returns_none(self):
+        from tinohelm.data.catalog_helpers import nt_suffix_to_interval
+
+        assert nt_suffix_to_interval("garbage") is None
+        assert nt_suffix_to_interval("-MINUTE") is None
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
