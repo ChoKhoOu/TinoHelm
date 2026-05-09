@@ -408,6 +408,7 @@ class TestIngestEarlyFailClosed:
             record_count=1,
             size_bytes=9,
             pre_update_row=None,
+            ingest_run_id="run-committed",
         )
         manifest = next((tmp_path / ".ingest-rollback").rglob("manifest.json"))
         assert json.loads(manifest.read_text())["resolved"] is False
@@ -481,6 +482,64 @@ class TestIngestEarlyFailClosed:
             "size_bytes": row.size_bytes,
             "pre_update_row": pre_update_row,
         }) is False
+
+    def test_catalog_commit_proof_accepts_same_metadata_with_matching_ingest_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        row = SimpleNamespace(
+            symbol="BTCUSDT-PERP",
+            data_type="trade_tick",
+            interval="tick",
+            source_type="aggTrades",
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 1, 1),
+            file_path="/catalog/aggTrades",
+            record_count=100,
+            size_bytes=4096,
+            last_ingest_id="run-new",
+        )
+        pre_update_row = {
+            "symbol": row.symbol,
+            "data_type": row.data_type,
+            "interval": row.interval,
+            "source_type": row.source_type,
+            "start_date": row.start_date.isoformat(),
+            "end_date": row.end_date.isoformat(),
+            "file_path": row.file_path,
+            "record_count": row.record_count,
+            "size_bytes": row.size_bytes,
+            "last_ingest_id": "run-old",
+        }
+
+        class Result:
+            def scalar_one_or_none(self):
+                return row
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, _stmt):
+                return Result()
+
+        monkeypatch.setattr("tinohelm.db.session.get_session_factory", lambda: Session)
+
+        assert _catalog_commit_is_persisted({
+            "symbol": row.symbol,
+            "data_type": row.data_type,
+            "interval": row.interval,
+            "source_type": row.source_type,
+            "start_date": row.start_date.isoformat(),
+            "end_date": row.end_date.isoformat(),
+            "file_path": row.file_path,
+            "record_count": row.record_count,
+            "size_bytes": row.size_bytes,
+            "pre_update_row": pre_update_row,
+            "ingest_run_id": "run-new",
+        }) is True
 
     def test_recover_pending_ingest_rollbacks_restores_crash_stranded_backup(self, tmp_path: Path):
         from tinohelm.data.catalog import resolve_catalog_path
@@ -772,10 +831,12 @@ class TestIngestEarlyFailClosed:
         mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
         written_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "current.parquet"
         events: list[str] = []
+        ingest_ids: list[str] = []
 
         class Guard:
             def record_catalog_commit(self, **kwargs):
                 events.append("record_catalog_commit")
+                ingest_ids.append(kwargs["ingest_run_id"])
                 assert kwargs["symbol"] == "BTCUSDT-PERP"
                 assert kwargs["data_type"] == "trade_tick"
                 assert kwargs["source_type"] == "aggTrades"
@@ -809,8 +870,9 @@ class TestIngestEarlyFailClosed:
             written_path.write_bytes(b"parquet-placeholder")
             return [str(written_path)]
 
-        async def update_catalog(*_args, **_kwargs):
+        async def update_catalog(*_args, **kwargs):
             events.append("db_update")
+            ingest_ids.append(kwargs["ingest_run_id"])
             assert events[:1] == ["record_catalog_commit"]
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
@@ -833,6 +895,81 @@ class TestIngestEarlyFailClosed:
 
         assert result.objects_count == 1
         assert events == ["record_catalog_commit", "db_update", "discard:True"]
+        assert len(ingest_ids) == 2
+        assert ingest_ids[0] == ingest_ids[1]
+        assert written_path.exists()
+
+    def test_cancelled_before_catalog_commit_intent_rolls_back_outputs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        written_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "current.parquet"
+        events: list[str] = []
+
+        class Guard:
+            def record_catalog_commit(self, **_kwargs):
+                events.append("record_catalog_commit")
+
+            def discard(self, *, best_effort: bool = False):
+                events.append(f"discard:{best_effort}")
+
+            def delete_current_outputs(self, *_args, **_kwargs):
+                events.append("delete_current_outputs")
+
+            def restore(self, *, discard: bool = True):
+                events.append(f"restore:{discard}")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        def write_objects(*_args, **_kwargs):
+            written_path.parent.mkdir(parents=True, exist_ok=True)
+            written_path.write_bytes(b"parquet-placeholder")
+            return [str(written_path)]
+
+        async def run_and_cancel():
+            snapshot_entered = asyncio.Event()
+
+            async def read_snapshot(*_args, **_kwargs):
+                snapshot_entered.set()
+                await asyncio.sleep(3600)
+
+            p = BinanceVisionPipeline(catalog_path=tmp_path)
+            p.downloader = mock_dl
+            p._convert_workers = 1
+            p._clean_overlapping_parquet = MagicMock(return_value=Guard())
+            p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+            p._write_objects = MagicMock(side_effect=write_objects)
+            p._written_file_size = MagicMock(return_value=123)
+            p._read_db_catalog_snapshot = AsyncMock(side_effect=read_snapshot)
+            p._update_db_catalog = AsyncMock()
+            monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
+
+            ingest_task = asyncio.create_task(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 1),
+            ))
+            await asyncio.wait_for(snapshot_entered.wait(), timeout=1)
+            ingest_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await ingest_task
+            p._update_db_catalog.assert_not_awaited()
+
+        asyncio.run(run_and_cancel())
+
+        assert events == ["delete_current_outputs", "restore:True"]
         assert written_path.exists()
 
     def test_final_progress_cancellation_after_db_commit_recancels(
@@ -2437,6 +2574,130 @@ class TestIngestFailClosed:
                 end=date(2025, 1, 2),
             ))
 
+        p._update_db_catalog.assert_not_awaited()
+
+    def test_tail_vision_download_error_uses_rest_fallback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        tasks = [
+            SimpleNamespace(
+                url="https://data.binance.vision/BTCUSDT-aggTrades-2025-01-01.zip",
+                granularity="daily",
+                dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"),
+            ),
+            SimpleNamespace(
+                url="https://data.binance.vision/BTCUSDT-aggTrades-2025-01-02.zip",
+                granularity="daily",
+                dest_path=Path("BTCUSDT-aggTrades-2025-01-02.csv"),
+            ),
+        ]
+        vision_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "vision.parquet"
+        fallback_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "rest.parquet"
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return tasks
+
+            async def execute_task(self, task):
+                if task is tasks[1]:
+                    raise FileNotFoundError("vision tail 404")
+                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        def write_objects(*_args, **_kwargs):
+            vision_path.parent.mkdir(parents=True, exist_ok=True)
+            vision_path.write_bytes(b"vision")
+            return [str(vision_path)]
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr(p, "_clean_overlapping_parquet", lambda *_args: None)
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        p._write_objects = MagicMock(side_effect=write_objects)
+        p._written_file_size = MagicMock(return_value=123)
+        p._rest_fallback = AsyncMock(return_value=(2, [str(fallback_path)]))
+        p._update_db_catalog = AsyncMock()
+
+        result = asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="aggTrades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 2),
+        ))
+
+        assert result.rest_fallback_used is True
+        assert result.rest_fallback_range == (date(2025, 1, 2), date(2025, 1, 2))
+        assert result.objects_count == 3
+        assert p._rest_fallback.await_args.args[3:5] == (date(2025, 1, 2), date(2025, 1, 2))
+        p._update_db_catalog.assert_awaited_once()
+
+    def test_middle_vision_download_error_still_fails_closed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        tasks = [
+            SimpleNamespace(
+                url=f"https://data.binance.vision/BTCUSDT-aggTrades-2025-01-0{day}.zip",
+                granularity="daily",
+                dest_path=Path(f"BTCUSDT-aggTrades-2025-01-0{day}.csv"),
+            )
+            for day in (1, 2, 3)
+        ]
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return tasks
+
+            async def execute_task(self, task):
+                if task is tasks[1]:
+                    raise FileNotFoundError("vision middle 404")
+                return _csv_payload(task.dest_path.name, b"a,b\n1,2\n")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr(p, "_clean_overlapping_parquet", lambda *_args: None)
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        p._write_objects = MagicMock(return_value=["/catalog/ticks/aggTrades/day.parquet"])
+        p._rest_fallback = AsyncMock()
+        p._update_db_catalog = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="download failed"):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 3),
+            ))
+
+        p._rest_fallback.assert_not_awaited()
         p._update_db_catalog.assert_not_awaited()
 
 

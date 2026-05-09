@@ -192,6 +192,7 @@ class _ParquetCleanupGuard:
         record_count: int | None,
         size_bytes: int | None,
         pre_update_row: dict[str, Any] | None,
+        ingest_run_id: str,
     ) -> None:
         """Persist the intended DB catalog commit without resolving rollback.
 
@@ -212,6 +213,7 @@ class _ParquetCleanupGuard:
             "record_count": record_count,
             "size_bytes": size_bytes,
             "pre_update_row": pre_update_row,
+            "ingest_run_id": ingest_run_id,
         }
         self._write_manifest(self._manifest_payload(resolved=False))
 
@@ -334,6 +336,7 @@ def _catalog_row_to_snapshot(row: Any | None) -> dict[str, Any] | None:
         "file_path": row.file_path,
         "record_count": row.record_count,
         "size_bytes": row.size_bytes,
+        "last_ingest_id": getattr(row, "last_ingest_id", None),
     }
 
 
@@ -342,7 +345,7 @@ def _catalog_snapshot_matches(current: dict[str, Any] | None, expected: Any) -> 
         return expected is None
     if expected is None or not isinstance(expected, dict):
         return False
-    return current == {
+    expected_snapshot = {
         "symbol": expected.get("symbol"),
         "data_type": expected.get("data_type"),
         "interval": expected.get("interval"),
@@ -353,10 +356,15 @@ def _catalog_snapshot_matches(current: dict[str, Any] | None, expected: Any) -> 
         "record_count": expected.get("record_count"),
         "size_bytes": expected.get("size_bytes"),
     }
+    if "last_ingest_id" in expected:
+        expected_snapshot["last_ingest_id"] = expected.get("last_ingest_id")
+    else:
+        current = {key: value for key, value in current.items() if key != "last_ingest_id"}
+    return current == expected_snapshot
 
 
 def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
-    """Return True only when DB row changed from the manifest's pre-update row."""
+    """Return True only when the DB row carries this ingest's commit witness."""
     if not isinstance(commit_payload, dict):
         return False
     if "pre_update_row" not in commit_payload:
@@ -372,6 +380,9 @@ def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
         end = date.fromisoformat(str(commit_payload["end_date"]))
         file_path = str(commit_payload["file_path"])
         pre_update_row = commit_payload["pre_update_row"]
+        ingest_run_id = commit_payload.get("ingest_run_id")
+        if ingest_run_id is not None:
+            ingest_run_id = str(ingest_run_id)
     except Exception:
         return False
 
@@ -395,7 +406,10 @@ def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
         current = _catalog_row_to_snapshot(row)
         if current is None:
             return False
-        if _catalog_snapshot_matches(current, pre_update_row):
+        if ingest_run_id is not None:
+            if current.get("last_ingest_id") != ingest_run_id:
+                return False
+        elif _catalog_snapshot_matches(current, pre_update_row):
             return False
         if current["file_path"] != file_path:
             return False
@@ -642,6 +656,8 @@ class BinanceVisionPipeline:
         preexisting_output_paths = self._catalog_current_paths(symbol, data_type, interval, data_type)
         rollback_done = False
         download_errors: list[tuple[str, Exception]] = []
+        download_success_indices: set[int] = set()
+        download_failed_indices: dict[int, Exception] = {}
         convert_errors: list[tuple[str, Exception]] = []
         import threading
 
@@ -759,19 +775,23 @@ class BinanceVisionPipeline:
             _rollback_once()
             raise
 
-        async def _download_one(task):
+        async def _download_one(index: int, task):
             nonlocal download_done
             async with sem:
                 try:
                     csv_path = await self.downloader.execute_task(task)
                     if csv_path:
+                        download_success_indices.add(index)
                         await csv_queue.put(csv_path)
                     else:
-                        download_errors.append((task.url, RuntimeError("downloader returned no CSV payload")))
+                        exc = RuntimeError("downloader returned no CSV payload")
+                        download_failed_indices[index] = exc
+                        download_errors.append((task.url, exc))
                 except Exception as exc:
                     logger.warning(
                         "Download failed for %s: %s", task.url, exc,
                     )
+                    download_failed_indices[index] = exc
                     download_errors.append((task.url, exc))
                 download_done += 1
                 await _progress(
@@ -780,7 +800,7 @@ class BinanceVisionPipeline:
                 )
 
         async def _download_all():
-            await asyncio.gather(*[_download_one(t) for t in tasks])
+            await asyncio.gather(*[_download_one(idx, t) for idx, t in enumerate(tasks)])
             # Send one sentinel per converter worker
             for _ in range(n_converters):
                 await csv_queue.put(None)
@@ -872,7 +892,30 @@ class BinanceVisionPipeline:
             _rollback_once()
             raise
 
-        if download_errors or convert_errors:
+        def _rest_fallback_start_for_tail_download_errors() -> date | None:
+            if not download_failed_indices or not is_rest_fallback_supported(data_type):
+                return None
+            if not download_success_indices:
+                return None
+            first_failed = min(download_failed_indices)
+            expected_tail = set(range(first_failed, len(tasks)))
+            if set(download_failed_indices) != expected_tail:
+                return None
+            last_success = first_failed - 1
+            if last_success not in download_success_indices:
+                return None
+            last_success_task = tasks[last_success]
+            vision_end = parse_vision_coverage_end(
+                last_success_task.granularity,
+                last_success_task.dest_path.stem,
+            )
+            if not vision_end or vision_end >= end:
+                return None
+            return vision_end + timedelta(days=1)
+
+        tail_rest_start = _rest_fallback_start_for_tail_download_errors()
+        blocking_download_errors = bool(download_errors) and tail_rest_start is None
+        if blocking_download_errors or convert_errors:
             _rollback_once()
             parts: list[str] = []
             first_exc: Exception | None = None
@@ -898,9 +941,12 @@ class BinanceVisionPipeline:
         rest_fallback_range = None
 
         if is_rest_fallback_supported(data_type):
-            vision_end = self._detect_vision_coverage_end(tasks)
-            if vision_end and vision_end < end:
-                rest_start = vision_end + timedelta(days=1)
+            rest_start = tail_rest_start
+            if rest_start is None:
+                vision_end = self._detect_vision_coverage_end(tasks)
+                if vision_end and vision_end < end:
+                    rest_start = vision_end + timedelta(days=1)
+            if rest_start is not None:
                 try:
                     await _progress(92, f"REST fallback: {rest_start} → {end}")
                 except asyncio.CancelledError:
@@ -953,6 +999,7 @@ class BinanceVisionPipeline:
                 _rollback_once()
                 raise asyncio.CancelledError
         record_count = total_objects if total_objects > 0 else None
+        ingest_run_id = uuid4().hex
         if cleanup_guard is not None:
             try:
                 from tinohelm.data.catalog import resolve_catalog_path
@@ -974,7 +1021,11 @@ class BinanceVisionPipeline:
                     record_count=record_count,
                     size_bytes=written_size,
                     pre_update_row=pre_update_row,
+                    ingest_run_id=ingest_run_id,
                 )
+            except asyncio.CancelledError:
+                _rollback_once()
+                raise
             except Exception:
                 _rollback_once()
                 await _progress(100, "Failed")
@@ -986,6 +1037,7 @@ class BinanceVisionPipeline:
             record_count=record_count,
             size_bytes=written_size,
             source_type=data_type,
+            ingest_run_id=ingest_run_id,
         ))
         try:
             await asyncio.shield(update_task)
@@ -2043,6 +2095,7 @@ class BinanceVisionPipeline:
         record_count: int | None = None,
         size_bytes: int | None = None,
         source_type: str | None = None,
+        ingest_run_id: str | None = None,
     ) -> None:
         """Upsert a DataCatalog row for the ingested data."""
         from sqlalchemy import select, text
@@ -2132,6 +2185,7 @@ class BinanceVisionPipeline:
                                 existing.size_bytes = (existing.size_bytes or 0) + size_bytes
                 if source_type is not None:
                     existing.source_type = source_type
+                existing.last_ingest_id = ingest_run_id
             else:
                 session.add(DataCatalog(
                     symbol=symbol,
@@ -2143,6 +2197,7 @@ class BinanceVisionPipeline:
                     size_bytes=size_bytes or 0,
                     record_count=record_count,
                     source_type=source_type,
+                    last_ingest_id=ingest_run_id,
                 ))
 
             await session.commit()

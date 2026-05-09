@@ -477,3 +477,26 @@ def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
 def stop_data_worker() -> None:
     """Cancel the data-fetch worker task."""
     _handle.stop()
+
+
+async def stop_data_worker_and_wait(timeout: float = 30.0) -> None:
+    """Cancel the data-fetch worker and wait for bounded shutdown cleanup."""
+    task = _handle.task
+    stop_data_worker()
+    if task is None:
+        return
+    if task.done():
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.CancelledError:
+        if task.done():
+            return
+        raise
+    except TimeoutError:
+        logger.warning(
+            "Timed out waiting %.1fs for data-fetch worker shutdown; startup recovery will requeue leftovers",
+            timeout,
+        )
+    except Exception:
+        logger.exception("Data-fetch worker failed during shutdown")

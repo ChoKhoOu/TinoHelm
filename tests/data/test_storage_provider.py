@@ -115,6 +115,14 @@ def test_tos_default_endpoint_uses_s3_specific_same_region_domain() -> None:
     assert _default_tos_endpoint("cn-beijing", use_internal_endpoint=False) == "https://tos-s3-cn-beijing.volces.com"
 
 
+def test_docker_compose_tos_default_endpoint_matches_public_flag() -> None:
+    compose = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
+
+    assert "TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT: \"${TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT:-false}\"" in compose
+    assert "https://tos-s3-ap-southeast-3.volces.com" in compose
+    assert "https://tos-s3-ap-southeast-3.ivolces.com}" not in compose
+
+
 def test_tos_provider_exposes_s3_catalog_uri_and_nt_options(tmp_path: Path) -> None:
     storage = TosCatalogStorage(_settings(), filesystem=_FakeS3FileSystem({}), catalog_root=tmp_path / "catalog")
 

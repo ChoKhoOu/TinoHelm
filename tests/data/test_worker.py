@@ -38,6 +38,7 @@ class TestModuleSurface:
         assert callable(dw.recover_interrupted_jobs)
         assert callable(dw.start_data_worker)
         assert callable(dw.stop_data_worker)
+        assert callable(dw.stop_data_worker_and_wait)
 
 
 # ---------------------------------------------------------------------------
@@ -945,6 +946,33 @@ class TestWorkerLifecycle:
         dw.stop_data_worker()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert dw._handle.is_running() is False
+
+    async def test_stop_and_wait_awaits_consumer_cancellation_cleanup(self, monkeypatch):
+        cleanup_done: list[bool] = []
+
+        async def _fake_consumer(*_a, **_k):
+            try:
+                await asyncio.sleep(5)
+            finally:
+                await asyncio.sleep(0.01)
+                cleanup_done.append(True)
+
+        monkeypatch.setattr(dw, "consumer_loop", _fake_consumer)
+        monkeypatch.setattr(
+            dw,
+            "get_settings",
+            lambda: SimpleNamespace(data=SimpleNamespace(job_concurrency=1)),
+            raising=False,
+        )
+        dw._handle.stop()
+
+        task = dw.start_data_worker(redis_url="redis://x", catalog_path="/cat")
+        await asyncio.sleep(0.01)
+        await dw.stop_data_worker_and_wait(timeout=1.0)
+
+        assert task.done() is True
+        assert cleanup_done == [True]
         assert dw._handle.is_running() is False
 
     async def test_stop_idempotent_when_never_started(self, monkeypatch):
