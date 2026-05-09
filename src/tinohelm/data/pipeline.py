@@ -383,17 +383,13 @@ def _parse_catalog_commit_payload(commit_payload: Any) -> dict[str, Any] | None:
             "end": date.fromisoformat(str(commit_payload["end_date"])),
             "file_path": str(commit_payload["file_path"]),
             "ingest_run_id": str(ingest_run_id),
+            "pre_update_row": commit_payload.get("pre_update_row"),
         }
     except Exception:
         return None
 
 
-async def _catalog_commit_is_persisted_async(commit_payload: Any) -> bool:
-    """Return True only when the DB row carries this ingest's exact commit token."""
-    parsed = _parse_catalog_commit_payload(commit_payload)
-    if parsed is None:
-        return False
-
+async def _catalog_commit_current_snapshot(parsed: dict[str, Any]) -> dict[str, Any] | None:
     from sqlalchemy import select
     from tinohelm.db.models import DataCatalog
     from tinohelm.db.session import get_session_factory
@@ -410,7 +406,13 @@ async def _catalog_commit_is_persisted_async(commit_payload: Any) -> bool:
         else:
             stmt = stmt.where(DataCatalog.source_type == parsed["source_type"])
         row = (await session.execute(stmt)).scalar_one_or_none()
-    current = _catalog_row_to_snapshot(row)
+    return _catalog_row_to_snapshot(row)
+
+
+def _catalog_commit_matches_current_snapshot(
+    current: dict[str, Any] | None,
+    parsed: dict[str, Any],
+) -> bool:
     if current is None:
         return False
     if current.get("last_ingest_id") != parsed["ingest_run_id"]:
@@ -424,9 +426,50 @@ async def _catalog_commit_is_persisted_async(commit_payload: Any) -> bool:
     return True
 
 
+def _catalog_commit_supersedes_manifest(
+    current: dict[str, Any] | None,
+    parsed: dict[str, Any],
+) -> bool:
+    if current is None:
+        return False
+    current_token = current.get("last_ingest_id")
+    if not current_token or current_token == parsed["ingest_run_id"]:
+        return False
+    return not _catalog_snapshot_matches(current, parsed.get("pre_update_row"))
+
+
+async def _catalog_commit_is_persisted_async(commit_payload: Any) -> bool:
+    """Return True only when the DB row carries this ingest's exact commit token."""
+    parsed = _parse_catalog_commit_payload(commit_payload)
+    if parsed is None:
+        return False
+    current = await _catalog_commit_current_snapshot(parsed)
+    return _catalog_commit_matches_current_snapshot(current, parsed)
+
+
 def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
     """Synchronous wrapper for non-startup recovery callers and tests."""
     return asyncio.run(_catalog_commit_is_persisted_async(commit_payload))
+
+
+async def _catalog_commit_is_superseded_async(commit_payload: Any) -> bool:
+    parsed = _parse_catalog_commit_payload(commit_payload)
+    if parsed is None:
+        return False
+    current = await _catalog_commit_current_snapshot(parsed)
+    return _catalog_commit_supersedes_manifest(current, parsed)
+
+
+async def _catalog_commit_should_discard_rollback_async(commit_payload: Any) -> bool:
+    if await _catalog_commit_is_persisted_async(commit_payload):
+        return True
+    return await _catalog_commit_is_superseded_async(commit_payload)
+
+
+def _catalog_commit_should_discard_rollback(commit_payload: Any) -> bool:
+    if _catalog_commit_is_persisted(commit_payload):
+        return True
+    return asyncio.run(_catalog_commit_is_superseded_async(commit_payload))
 
 
 def _rollback_manifest_objects(active_storage: Any, rollback_root: Path) -> list[Any]:
@@ -523,7 +566,7 @@ def recover_pending_ingest_rollbacks(
             continue
 
         catalog_commit = payload.get("catalog_commit")
-        if catalog_commit and _catalog_commit_is_persisted(catalog_commit):
+        if catalog_commit and _catalog_commit_should_discard_rollback(catalog_commit):
             try:
                 _discard_rollback_prefix(active_storage, rollback_prefix)
             except Exception:
@@ -570,7 +613,7 @@ async def recover_pending_ingest_rollbacks_async(
             continue
 
         catalog_commit = payload.get("catalog_commit")
-        if catalog_commit and await _catalog_commit_is_persisted_async(catalog_commit):
+        if catalog_commit and await _catalog_commit_should_discard_rollback_async(catalog_commit):
             try:
                 await asyncio.to_thread(_discard_rollback_prefix, active_storage, rollback_prefix)
             except Exception:

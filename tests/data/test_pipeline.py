@@ -428,6 +428,80 @@ class TestIngestEarlyFailClosed:
         assert committed_path.exists()
         assert not (tmp_path / ".ingest-rollback").exists()
 
+    def test_recover_discards_stale_manifest_after_newer_catalog_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from tinohelm.data.catalog import resolve_catalog_path
+
+        symbol = "BTCUSDT-PERP"
+        nt_symbol = "BTCUSDT-PERP.BINANCE"
+        catalog_root = resolve_catalog_path(tmp_path, "aggTrades")
+        trade_dir = catalog_root / "data" / "trade_tick" / nt_symbol
+        trade_dir.mkdir(parents=True)
+        old_path = trade_dir / "old-overlap.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="aggTrades",
+            interval=None,
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+        assert guard is not None
+        current_path = trade_dir / "newer-current-run.parquet"
+        current_path.write_bytes(b"newer")
+        guard.record_catalog_commit(
+            symbol=symbol,
+            data_type="trade_tick",
+            interval="tick",
+            source_type="aggTrades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+            file_path=str(catalog_root),
+            record_count=1,
+            size_bytes=9,
+            pre_update_row=None,
+            ingest_run_id="run-a",
+        )
+        row = SimpleNamespace(
+            symbol=symbol,
+            data_type="trade_tick",
+            interval="tick",
+            source_type="aggTrades",
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 1, 1),
+            file_path=str(catalog_root),
+            record_count=2,
+            size_bytes=5,
+            last_ingest_id="run-b",
+        )
+
+        class Result:
+            def scalar_one_or_none(self):
+                return row
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, _stmt):
+                return Result()
+
+        monkeypatch.setattr("tinohelm.db.session.get_session_factory", lambda: Session)
+
+        restored = recover_pending_ingest_rollbacks(tmp_path)
+
+        assert restored == 0
+        assert not old_path.exists()
+        assert current_path.exists()
+        assert not (tmp_path / ".ingest-rollback").exists()
+
     def test_catalog_commit_proof_rejects_unchanged_pre_update_row(
         self, monkeypatch: pytest.MonkeyPatch
     ):
