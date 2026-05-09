@@ -33,3 +33,7 @@ tino/
 
 # Oh My Codex local state
 .omx/
+
+# Local pip / user-site caches (created by sandboxed tool runs)
+.cache/
+.local/
