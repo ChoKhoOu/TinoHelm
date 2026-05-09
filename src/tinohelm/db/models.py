@@ -241,6 +241,7 @@ class DataCatalog(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     record_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     source_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    last_ingest_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     __table_args__ = (

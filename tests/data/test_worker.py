@@ -38,6 +38,7 @@ class TestModuleSurface:
         assert callable(dw.recover_interrupted_jobs)
         assert callable(dw.start_data_worker)
         assert callable(dw.stop_data_worker)
+        assert callable(dw.stop_data_worker_and_wait)
 
 
 # ---------------------------------------------------------------------------
@@ -78,17 +79,54 @@ class TestRecoverInterruptedJobs:
 
         monkeypatch.setattr(dw, "requeue_running_jobs", _fake_requeue)
         monkeypatch.setattr(dw, "get_session_factory", lambda: "FAKE_FACTORY")
+        recover = AsyncMock(return_value=0)
+        monkeypatch.setattr(dw, "_recover_pending_ingest_rollbacks_on_startup", recover)
 
         rds = AsyncMock()
         count = await dw.recover_interrupted_jobs(rds)
 
         assert count == 7
+        recover.assert_awaited_once()
         assert called["model"] is dw.DataFetchJob
         assert called["rds"] is rds
         assert called["key"] == "tino:data:queue"
         assert called["reset_queue"] is True
         # factory is resolved at call time
         assert called["factory"] == "FAKE_FACTORY"
+
+    async def test_startup_rollback_recovery_keeps_db_check_on_current_event_loop(
+        self, monkeypatch, tmp_path
+    ):
+        storage = SimpleNamespace(catalog_root=tmp_path / "catalog")
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=storage.catalog_root))
+        calls: dict = {}
+
+        async def fake_recover(catalog_path, *, storage):
+            calls["loop"] = asyncio.get_running_loop()
+            calls["catalog_path"] = catalog_path
+            calls["storage"] = storage
+            return 3
+
+        async def fail_to_thread(*_args, **_kwargs):
+            raise AssertionError("startup rollback recovery must not run inside asyncio.to_thread")
+
+        monkeypatch.setattr(dw, "get_settings", lambda: settings)
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **_kwargs: storage)
+        monkeypatch.setattr(
+            "tinohelm.data.pipeline.recover_pending_ingest_rollbacks_async",
+            fake_recover,
+            raising=False,
+        )
+        monkeypatch.setattr(dw.asyncio, "to_thread", fail_to_thread)
+
+        restored = await dw._recover_pending_ingest_rollbacks_on_startup()
+
+        assert restored == 3
+        assert calls == {
+            "loop": asyncio.get_running_loop(),
+            "catalog_path": storage.catalog_root,
+            "storage": storage,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -109,24 +147,38 @@ class _FakeSessionCtx:
 def _make_session_factory(*, initial_job, commit_spy=None):
     """Build a factory that yields a fresh AsyncMock db each time.
 
-    - First enter: returns the job (select → scalar_one_or_none).
-    - Subsequent enters (progress-write or completion): benign execute/commit.
+    - First enter: queued-job lookup before acquiring the catalog lock.
+    - Second enter after a successful lookup: atomic queued->running claim update.
+    - Third enter after a successful claim: load job params.
+    - Subsequent enters: guarded progress/terminal updates.
     """
     calls = {"count": 0}
+    claim_rowcount = 1 if initial_job is not None and initial_job.status == "queued" else 0
 
     def factory():
         calls["count"] += 1
         db = AsyncMock()
-        if calls["count"] == 1 and initial_job is not None:
+        if calls["count"] == 1:
+            result = MagicMock()
+            result.scalar_one_or_none = MagicMock(return_value=initial_job if claim_rowcount == 1 else None)
+            db.execute = AsyncMock(return_value=result)
+        elif calls["count"] == 2 and claim_rowcount == 1:
+            result = MagicMock()
+            result.rowcount = claim_rowcount
+            db.execute = AsyncMock(return_value=result)
+        elif calls["count"] == 3 and claim_rowcount == 1:
             result = MagicMock()
             result.scalar_one_or_none = MagicMock(return_value=initial_job)
             db.execute = AsyncMock(return_value=result)
-        elif calls["count"] == 1 and initial_job is None:
-            result = MagicMock()
-            result.scalar_one_or_none = MagicMock(return_value=None)
-            db.execute = AsyncMock(return_value=result)
         else:
-            db.execute = AsyncMock(return_value=MagicMock())
+            async def _execute(stmt):
+                result = MagicMock()
+                if "SELECT data_fetch_jobs.status" in str(stmt):
+                    result.scalar_one_or_none = MagicMock(return_value="running")
+                else:
+                    result.rowcount = 1
+                return result
+            db.execute = AsyncMock(side_effect=_execute)
         if commit_spy is not None:
             async def _commit():
                 commit_spy.append(calls["count"])
@@ -208,6 +260,303 @@ class TestProcessJob:
         assert pipeline_constructed == []
         fake_rds.publish.assert_not_called()
 
+    async def test_running_duplicate_queue_entry_returns_without_work(self, monkeypatch):
+        job = SimpleNamespace(
+            status="running",
+            symbol="BTC", data_type="aggTrades", interval=None,
+            start_date="2025-01-01", end_date="2025-01-01", asset_class="futures",
+        )
+        factory, _ = _make_session_factory(initial_job=job)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        pipeline_constructed = []
+        import tinohelm.data.pipeline as pkg_pipeline
+
+        class _Boom(pkg_pipeline.BinanceVisionPipeline):
+            def __init__(self, *a, **k):
+                pipeline_constructed.append(True)
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _Boom)
+
+        await dw._process_job("jid", "redis://x", "/cat")
+
+        assert pipeline_constructed == []
+        fake_rds.publish.assert_not_called()
+
+    async def test_cancelled_after_claim_before_lock_skips_ingest(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        calls = {"count": 0}
+
+        def factory():
+            calls["count"] += 1
+            db = AsyncMock()
+            if calls["count"] == 1:
+                result = MagicMock()
+                result.rowcount = 1
+                db.execute = AsyncMock(return_value=result)
+            elif calls["count"] == 2:
+                result = MagicMock()
+                result.scalar_one_or_none = MagicMock(return_value=job)
+                db.execute = AsyncMock(return_value=result)
+            else:
+                result = MagicMock()
+                result.scalar_one_or_none = MagicMock(return_value="cancelled")
+                db.execute = AsyncMock(return_value=result)
+            return _FakeSessionCtx(db)
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        pipeline_constructed = []
+        import tinohelm.data.pipeline as pkg_pipeline
+
+        class _Boom(pkg_pipeline.BinanceVisionPipeline):
+            def __init__(self, *a, **k):
+                pipeline_constructed.append(True)
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _Boom)
+
+        await dw._process_job("job-cancelled-before-lock", "redis://x", "/cat")
+
+        assert pipeline_constructed == []
+        fake_rds.publish.assert_not_called()
+
+    async def test_requeues_same_catalog_job_when_lock_busy_without_claiming_running(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        events: list[str] = []
+        busy_lock = asyncio.Lock()
+        await busy_lock.acquire()
+        monkeypatch.setattr(dw, "_get_catalog_lock", lambda _key: busy_lock)
+        monkeypatch.setattr(dw, "LOCK_BUSY_REQUEUE_DELAY", 0)
+
+        def factory():
+            db = AsyncMock()
+
+            async def _execute(stmt):
+                text = str(stmt)
+                result = MagicMock()
+                if "UPDATE data_fetch_jobs" in text:
+                    events.append("update")
+                    result.rowcount = 1
+                else:
+                    result.scalar_one_or_none = MagicMock(return_value=job)
+                return result
+
+            db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+
+        pipeline_constructed = []
+        import tinohelm.data.pipeline as pkg_pipeline
+
+        class _Boom(pkg_pipeline.BinanceVisionPipeline):
+            def __init__(self, *a, **k):
+                pipeline_constructed.append(True)
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _Boom)
+
+        try:
+            await dw._process_job("job-lock-busy", "redis://x", "/cat")
+        finally:
+            busy_lock.release()
+
+        assert "update" not in events
+        assert pipeline_constructed == []
+        fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-lock-busy")
+        fake_rds.publish.assert_not_called()
+
+    async def test_deferred_locked_job_uses_backoff_before_requeue(self, monkeypatch):
+        fake_rds = AsyncMock()
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float):
+            sleeps.append(delay)
+
+        monkeypatch.setattr(dw, "LOCK_BUSY_REQUEUE_DELAY", 0.75)
+        monkeypatch.setattr(dw.asyncio, "sleep", fake_sleep)
+
+        await dw._defer_locked_queued_job(fake_rds, "job-delay")
+
+        assert sleeps == [0.75]
+        fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-delay")
+
+    async def test_preclaim_cancellation_requeues_queued_job(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "_load_queued_job", AsyncMock(return_value=job))
+        claim = AsyncMock()
+        monkeypatch.setattr(dw, "_claim_queued_job", claim)
+
+        acquire_started = asyncio.Event()
+
+        async def acquire_never_finishes(_lock_key):
+            acquire_started.set()
+            await asyncio.sleep(10)
+
+        monkeypatch.setattr(dw, "_try_acquire_catalog_lock", acquire_never_finishes)
+
+        task = asyncio.create_task(dw._process_job("job-preclaim-cancel", "redis://x", "/cat"))
+        await acquire_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-preclaim-cancel")
+        claim.assert_not_awaited()
+        fake_rds.close.assert_awaited()
+
+    async def test_preclaim_exception_marks_queued_job_failed(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "_load_queued_job", AsyncMock(return_value=job))
+
+        async def acquire_raises(_lock_key):
+            raise RuntimeError("catalog lock unavailable")
+
+        monkeypatch.setattr(dw, "_try_acquire_catalog_lock", acquire_raises)
+        claim = AsyncMock()
+        mark_failed = AsyncMock(return_value=True)
+        monkeypatch.setattr(dw, "_claim_queued_job", claim)
+        monkeypatch.setattr(dw, "_guarded_queued_failure_update", mark_failed)
+
+        await dw._process_job("job-preclaim-error", "redis://x", "/cat")
+
+        claim.assert_not_awaited()
+        mark_failed.assert_awaited_once()
+        values = mark_failed.await_args.args[2]
+        assert values["status"] == "failed"
+        assert "catalog lock unavailable" in values["error"]
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-preclaim-error"
+        fake_rds.close.assert_awaited()
+
+    async def test_claim_error_after_running_update_uses_running_failure_path(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "_load_queued_job", AsyncMock(return_value=job))
+        lock = MagicMock()
+        monkeypatch.setattr(dw, "_try_acquire_catalog_lock", AsyncMock(return_value=lock))
+        monkeypatch.setattr(dw, "_claim_queued_job", AsyncMock(side_effect=RuntimeError("post-claim read failed")))
+        monkeypatch.setattr(dw, "_job_is_still_running", AsyncMock(return_value=True))
+        running_failed = AsyncMock(return_value=True)
+        queued_failed = AsyncMock(return_value=True)
+        monkeypatch.setattr(dw, "_guarded_terminal_update", running_failed)
+        monkeypatch.setattr(dw, "_guarded_queued_failure_update", queued_failed)
+
+        await dw._process_job("job-claim-error", "redis://x", "/cat")
+
+        lock.release.assert_called_once()
+        queued_failed.assert_not_awaited()
+        running_failed.assert_awaited_once()
+        values = running_failed.await_args.args[2]
+        assert values["status"] == "failed"
+        assert "post-claim read failed" in values["error"]
+        fake_rds.lpush.assert_not_called()
+        final = fake_rds.publish.await_args_list[-1]
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-claim-error"
+        fake_rds.close.assert_awaited()
+
+    async def test_cancelled_during_processing_is_not_overwritten_completed(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        calls = {"count": 0}
+        terminal_statements = []
+
+        def factory():
+            calls["count"] += 1
+            db = AsyncMock()
+            if calls["count"] == 1:
+                result = MagicMock()
+                result.scalar_one_or_none = MagicMock(return_value=job)
+                db.execute = AsyncMock(return_value=result)
+            elif calls["count"] == 2:
+                result = MagicMock()
+                result.rowcount = 1
+                db.execute = AsyncMock(return_value=result)
+            elif calls["count"] == 3:
+                result = MagicMock()
+                result.scalar_one_or_none = MagicMock(return_value=job)
+                db.execute = AsyncMock(return_value=result)
+            else:
+                async def _execute(stmt):
+                    result = MagicMock()
+                    result.rowcount = 0
+                    terminal_statements.append(stmt)
+                    return result
+
+                db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _NoProgressPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                return _fake_pipeline_result(objects_count=7)
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _NoProgressPipeline)
+
+        await dw._process_job("job-cancelled-mid-flight", "redis://x", "/cat")
+
+        assert terminal_statements, "worker should attempt a guarded terminal update"
+        assert all(
+            "WHERE data_fetch_jobs.job_id =" in str(stmt)
+            and "AND data_fetch_jobs.status =" in str(stmt)
+            for stmt in terminal_statements
+        )
+        fake_rds.publish.assert_not_called()
+
     async def test_happy_path_runs_pipeline_and_publishes_completion(self, monkeypatch):
         job = SimpleNamespace(
             status="queued",
@@ -252,6 +601,188 @@ class TestProcessJob:
 
         # rds is closed in finally
         fake_rds.close.assert_awaited()
+
+    async def test_cancellation_during_completed_terminal_update_still_marks_completed(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        factory, _ = _make_session_factory(initial_job=job)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _NoProgressPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                return _fake_pipeline_result(objects_count=11)
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _NoProgressPipeline)
+
+        terminal_started = asyncio.Event()
+
+        async def terminal_update(_factory, _job_id, _values):
+            terminal_started.set()
+            await asyncio.sleep(0.01)
+            return True
+
+        monkeypatch.setattr(dw, "_guarded_terminal_update", terminal_update)
+
+        task = asyncio.create_task(dw._process_job("job-terminal-cancel", "redis://x", "/cat"))
+        await terminal_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.completed"
+        assert payload["job_id"] == "job-terminal-cancel"
+
+    async def test_terminal_failure_after_shutdown_cancellation_preserves_cancellation(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        factory, _ = _make_session_factory(initial_job=job)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+
+        fake_rds = AsyncMock()
+        fake_rds.publish.side_effect = RuntimeError("redis publish down")
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _NoProgressPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                return _fake_pipeline_result(objects_count=5)
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _NoProgressPipeline)
+
+        terminal_started = asyncio.Event()
+        release_terminal = asyncio.Event()
+        cancellation_cleared = asyncio.Event()
+        original_clear = dw._clear_current_task_cancellation
+
+        def clear_and_signal():
+            cancellation_cleared.set()
+            return original_clear()
+
+        monkeypatch.setattr(dw, "_clear_current_task_cancellation", clear_and_signal)
+
+        async def terminal_update(_factory, _job_id, _values):
+            terminal_started.set()
+            await release_terminal.wait()
+            return True
+
+        monkeypatch.setattr(dw, "_guarded_terminal_update", terminal_update)
+
+        task = asyncio.create_task(dw._process_job("job-terminal-publish-fails-after-cancel", "redis://x", "/cat"))
+        await terminal_started.wait()
+        task.cancel()
+        await asyncio.wait_for(cancellation_cleared.wait(), timeout=1)
+        release_terminal.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        fake_rds.publish.assert_awaited_once()
+        fake_rds.close.assert_awaited()
+
+    async def test_pipeline_post_commit_cancellation_still_marks_completed_then_exits(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        factory, _ = _make_session_factory(initial_job=job)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _CommittedThenRecancelPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                current = asyncio.current_task()
+                assert current is not None
+                current.cancel()
+                return _fake_pipeline_result(objects_count=13)
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _CommittedThenRecancelPipeline)
+
+        with pytest.raises(asyncio.CancelledError):
+            await dw._process_job("job-pipeline-recanceled", "redis://x", "/cat")
+
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.completed"
+        assert payload["job_id"] == "job-pipeline-recanceled"
+        assert payload["objects_count"] == 13
+
+    async def test_cancellation_during_failed_terminal_update_still_marks_failed_then_exits(self, monkeypatch):
+        job = SimpleNamespace(
+            status="queued",
+            symbol="BTCUSDT", data_type="klines", interval="1m",
+            start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
+        )
+        factory, _ = _make_session_factory(initial_job=job)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+
+        fake_rds = AsyncMock()
+        monkeypatch.setattr(
+            dw.aioredis, "from_url", lambda *_a, **_k: fake_rds,
+        )
+
+        class _BoomPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                raise RuntimeError("network down")
+
+        import tinohelm.data.pipeline as pkg_pipeline
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _BoomPipeline)
+
+        terminal_started = asyncio.Event()
+
+        async def terminal_update(_factory, _job_id, _values):
+            terminal_started.set()
+            await asyncio.sleep(0.01)
+            return True
+
+        monkeypatch.setattr(dw, "_guarded_terminal_update", terminal_update)
+
+        task = asyncio.create_task(dw._process_job("job-failed-terminal-cancel", "redis://x", "/cat"))
+        await terminal_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-failed-terminal-cancel"
+        assert "network down" in payload["error"]
 
     async def test_pipeline_exception_marks_failed_and_publishes_failure(self, monkeypatch):
         job = SimpleNamespace(
@@ -373,6 +904,40 @@ class TestProcessJob:
 # ---------------------------------------------------------------------------
 
 class TestWorkerLifecycle:
+    async def test_start_launches_configured_parallel_consumers(self, monkeypatch):
+        started: list[dict] = []
+
+        async def _fake_consumer(redis_url, queue_key, process_job, *,
+                                  pop_timeout=5.0, worker_label="queue-worker"):
+            started.append({
+                "redis_url": redis_url,
+                "queue_key": queue_key,
+                "worker_label": worker_label,
+            })
+            await asyncio.sleep(5)
+
+        monkeypatch.setattr(dw, "consumer_loop", _fake_consumer)
+        monkeypatch.setattr(
+            dw,
+            "get_settings",
+            lambda: SimpleNamespace(data=SimpleNamespace(job_concurrency=3)),
+            raising=False,
+        )
+        dw._handle.stop()
+
+        task = dw.start_data_worker(redis_url="redis://x", catalog_path="/cat")
+        try:
+            await asyncio.sleep(0.02)
+            assert len(started) == 3
+            assert {call["redis_url"] for call in started} == {"redis://x"}
+            assert {call["queue_key"] for call in started} == {"tino:data:queue"}
+        finally:
+            dw.stop_data_worker()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
     async def test_start_creates_task_via_handle(self, monkeypatch):
         # Replace consumer_loop with a coroutine that sleeps briefly
         started: dict = {}
@@ -417,11 +982,89 @@ class TestWorkerLifecycle:
             await task
         assert dw._handle.is_running() is False
 
+    async def test_stop_and_wait_awaits_consumer_cancellation_cleanup(self, monkeypatch):
+        cleanup_done: list[bool] = []
+
+        async def _fake_consumer(*_a, **_k):
+            try:
+                await asyncio.sleep(5)
+            finally:
+                await asyncio.sleep(0.01)
+                cleanup_done.append(True)
+
+        monkeypatch.setattr(dw, "consumer_loop", _fake_consumer)
+        monkeypatch.setattr(
+            dw,
+            "get_settings",
+            lambda: SimpleNamespace(data=SimpleNamespace(job_concurrency=1)),
+            raising=False,
+        )
+        dw._handle.stop()
+
+        task = dw.start_data_worker(redis_url="redis://x", catalog_path="/cat")
+        await asyncio.sleep(0.01)
+        await dw.stop_data_worker_and_wait(timeout=1.0)
+
+        assert task.done() is True
+        assert cleanup_done == [True]
+        assert dw._handle.is_running() is False
+
     async def test_stop_idempotent_when_never_started(self, monkeypatch):
         dw._handle.stop()
         dw.stop_data_worker()  # No-op
         dw.stop_data_worker()  # Still no-op
         assert dw._handle.is_running() is False
+
+    async def test_same_catalog_key_jobs_are_serialized(self):
+        dw._catalog_locks.clear()
+        order: list[str] = []
+        lock_key = dw._catalog_lock_key("BTCUSDT-PERP", "aggTrades", None)
+
+        async def _job(name: str):
+            async with dw._get_catalog_lock(lock_key):
+                order.append(f"{name}:start")
+                await asyncio.sleep(0.02)
+                order.append(f"{name}:end")
+
+        await asyncio.gather(_job("a"), _job("b"))
+
+        assert order in (
+            ["a:start", "a:end", "b:start", "b:end"],
+            ["b:start", "b:end", "a:start", "a:end"],
+        )
+
+    async def test_consumer_supervisor_restarts_failed_consumer(self, monkeypatch):
+        attempts = 0
+        restarted = asyncio.Event()
+
+        async def _fake_consumer(*_a, **_k):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("transient redis error")
+            restarted.set()
+            await asyncio.sleep(5)
+
+        monkeypatch.setattr(dw, "consumer_loop", _fake_consumer)
+        monkeypatch.setattr(
+            dw,
+            "get_settings",
+            lambda: SimpleNamespace(data=SimpleNamespace(job_concurrency=1)),
+            raising=False,
+        )
+        dw._handle.stop()
+
+        task = dw.start_data_worker(redis_url="redis://x", catalog_path="/cat")
+        try:
+            await asyncio.wait_for(restarted.wait(), timeout=1)
+            assert attempts == 2
+            assert task.done() is False
+        finally:
+            dw.stop_data_worker()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def test_process_callback_gets_job_id(self, monkeypatch):
         """The coroutine factory passed into consumer_loop unwraps the job_id correctly."""

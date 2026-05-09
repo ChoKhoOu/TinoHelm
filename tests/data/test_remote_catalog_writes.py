@@ -213,7 +213,158 @@ def test_remote_single_file_metrics_raises_on_existing_object_read_error(tmp_pat
         pipeline._write_objects([record], symbol, "metrics", None)
 
 
-def test_write_bars_remote_storage_uses_nt_from_uri_without_local_catalog(tmp_path: Path, monkeypatch) -> None:
+def test_write_trade_ticks_remote_storage_constructs_catalog_without_from_uri_host_leak(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tinohelm.data.catalog import write_trade_ticks
+
+    symbol = "BTCUSDT-PERP"
+    source_type = "aggTrades"
+    instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+    resolved_root = tmp_path / "ticks" / source_type
+    tick_dir = resolved_root / "data" / "trade_tick" / str(instrument.id)
+    written_path = tick_dir / "part-0.parquet"
+
+    class RemoteStorage:
+        provider = "s3"
+        catalog_root = tmp_path
+        fs_storage_options = {
+            "endpoint_url": "https://tos-cn-beijing.volces.com",
+            "client_kwargs": {"endpoint_url": "https://tos-cn-beijing.volces.com"},
+        }
+        fs_rust_storage_options = {"endpoint_url": "https://tos-cn-beijing.volces.com"}
+
+        def __init__(self):
+            self.iter_calls = 0
+
+        def uri_for_catalog_root(self, logical_root):
+            assert Path(logical_root) == resolved_root
+            return "s3://bucket/catalog/ticks/aggTrades"
+
+        def iter_files(self, prefix, *, suffix="", recursive=True):
+            assert Path(prefix) == tick_dir
+            assert suffix == ".parquet"
+            assert recursive is False
+            self.iter_calls += 1
+            if self.iter_calls == 1:
+                return iter([])
+            return iter([SimpleNamespace(path=written_path, size=7)])
+
+    class FakeCatalog:
+        init_calls: list[tuple[str, str | None, dict | None, dict | None]] = []
+        from_uri_calls: list = []
+        write_data_calls: list[tuple[list, bool]] = []
+
+        def __init__(
+            self,
+            path,
+            fs_protocol=None,
+            fs_storage_options=None,
+            fs_rust_storage_options=None,
+        ):
+            if str(path).startswith("s3://"):
+                raise AssertionError("remote writer must pass bucket/key path, not an s3 URI")
+            if fs_storage_options and "host" in fs_storage_options:
+                raise AssertionError("s3fs options must not include fsspec's parsed host key")
+            self.init_calls.append((path, fs_protocol, fs_storage_options, fs_rust_storage_options))
+
+        @classmethod
+        def from_uri(cls, *args, **kwargs):
+            cls.from_uri_calls.append((args, kwargs))
+            raise AssertionError("from_uri would merge fsspec's host into s3fs options")
+
+        def write_data(self, data, skip_disjoint_check=False):
+            self.write_data_calls.append((list(data), skip_disjoint_check))
+
+    monkeypatch.setattr("tinohelm.data.instruments.make_instrument", lambda _symbol: instrument)
+    nt_mod = types.ModuleType("nautilus_trader")
+    persistence_mod = types.ModuleType("nautilus_trader.persistence")
+    catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+    catalog_mod.ParquetDataCatalog = FakeCatalog
+    monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+    monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+    monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+    tick = SimpleNamespace(ts_init=1)
+    paths = write_trade_ticks(
+        [tick],
+        symbol,
+        tmp_path,
+        source_type=source_type,
+        storage=RemoteStorage(),
+    )
+
+    assert paths == [str(written_path)]
+    assert FakeCatalog.from_uri_calls == []
+    assert FakeCatalog.init_calls == [
+        (
+            "bucket/catalog/ticks/aggTrades",
+            "s3",
+            RemoteStorage.fs_storage_options,
+            RemoteStorage.fs_rust_storage_options,
+        )
+    ]
+    assert FakeCatalog.write_data_calls == [([tick], True)]
+    assert not resolved_root.exists()
+
+
+def test_write_trade_ticks_remote_storage_raises_when_write_produces_no_parquet(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tinohelm.data.catalog import write_trade_ticks
+
+    symbol = "BTCUSDT-PERP"
+    source_type = "aggTrades"
+    instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+    resolved_root = tmp_path / "ticks" / source_type
+    tick_dir = resolved_root / "data" / "trade_tick" / str(instrument.id)
+
+    class RemoteStorage:
+        provider = "s3"
+        catalog_root = tmp_path
+        fs_storage_options = {"endpoint_url": "https://tos-cn-beijing.volces.com"}
+        fs_rust_storage_options = {"endpoint_url": "https://tos-cn-beijing.volces.com"}
+
+        def uri_for_catalog_root(self, logical_root):
+            assert Path(logical_root) == resolved_root
+            return "s3://bucket/catalog/ticks/aggTrades"
+
+        def iter_files(self, prefix, *, suffix="", recursive=True):
+            assert Path(prefix) == tick_dir
+            assert suffix == ".parquet"
+            assert recursive is False
+            return iter([])
+
+    class FakeCatalog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def write_data(self, data, skip_disjoint_check=False):
+            pass
+
+    monkeypatch.setattr("tinohelm.data.instruments.make_instrument", lambda _symbol: instrument)
+    nt_mod = types.ModuleType("nautilus_trader")
+    persistence_mod = types.ModuleType("nautilus_trader.persistence")
+    catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+    catalog_mod.ParquetDataCatalog = FakeCatalog
+    monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+    monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+    monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+    with pytest.raises(RuntimeError, match="produced no parquet files"):
+        write_trade_ticks(
+            [SimpleNamespace(ts_init=1)],
+            symbol,
+            tmp_path,
+            source_type=source_type,
+            storage=RemoteStorage(),
+        )
+
+
+
+def test_write_bars_remote_storage_uses_nt_constructor_without_local_catalog(tmp_path: Path, monkeypatch) -> None:
     from tinohelm.data.catalog import write_bars
 
     symbol = "BTCUSDT-PERP"
@@ -240,16 +391,17 @@ def test_write_bars_remote_storage_uses_nt_from_uri_without_local_catalog(tmp_pa
             return iter([SimpleNamespace(path=written_path, size=7)])
 
     class FakeCatalog:
-        from_uri_calls: list[tuple[str, dict, dict]] = []
+        init_calls: list[tuple[str, str | None, dict | None, dict | None]] = []
+        from_uri_calls: list = []
         write_data_calls: list[tuple[list, bool]] = []
 
-        def __init__(self, catalog_path=None):
-            raise AssertionError(f"local ParquetDataCatalog must not be used for remote storage: {catalog_path}")
+        def __init__(self, path, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
+            self.init_calls.append((path, fs_protocol, fs_storage_options, fs_rust_storage_options))
 
         @classmethod
-        def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-            cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
-            return cls.__new__(cls)
+        def from_uri(cls, *args, **kwargs):
+            cls.from_uri_calls.append((args, kwargs))
+            raise AssertionError("remote writer must not use from_uri")
 
         def write_data(self, data, skip_disjoint_check=False):
             self.write_data_calls.append((list(data), skip_disjoint_check))
@@ -281,9 +433,11 @@ def test_write_bars_remote_storage_uses_nt_from_uri_without_local_catalog(tmp_pa
     )
 
     assert paths == [written_path]
-    assert FakeCatalog.from_uri_calls == [
+    assert FakeCatalog.from_uri_calls == []
+    assert FakeCatalog.init_calls == [
         (
-            "s3://bucket/catalog/bar/klines",
+            "bucket/catalog/bar/klines",
+            "s3",
             {"endpoint_url": "https://example.com"},
             {"endpoint_url": "https://example.com"},
         )
@@ -357,7 +511,7 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
     class FakeCatalog:
         from_uri_calls: list[tuple[str, dict, dict]] = []
 
-        def __init__(self, catalog_path=None):
+        def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
             self.catalog_path = catalog_path
 
         @classmethod
@@ -371,7 +525,12 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
 
         def write_data(self, data, skip_disjoint_check=False):
             if data and hasattr(data[0], "ts_event"):
-                rel = Path(str(self.catalog_path).removeprefix("s3://bucket/catalog/"))
+                raw_catalog_path = str(self.catalog_path)
+                rel = Path(
+                    raw_catalog_path
+                    .removeprefix("s3://bucket/catalog/")
+                    .removeprefix("bucket/catalog/")
+                )
                 dest = tmp_path / rel / "data" / "bar" / bar_type_str / same_name_file.name
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(b"new")
@@ -453,7 +612,7 @@ def test_write_bars_remote_merge_fails_closed_when_existing_catalog_read_fails(t
             raise AssertionError("remote merge must not delete after catalog read failure")
 
     class FakeCatalog:
-        def __init__(self, catalog_path=None):
+        def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
             self.catalog_path = catalog_path
 
         @classmethod

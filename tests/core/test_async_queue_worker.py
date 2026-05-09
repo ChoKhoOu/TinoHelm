@@ -445,11 +445,15 @@ class TestWorkerHandle:
         assert h.is_running() is True
         h.stop()
 
-        # After stop(), the reference is dropped immediately
-        assert h.task is None
+        # After stop(), ownership is retained until cancellation cleanup settles,
+        # so a quick restart cannot create a second worker pool.
+        assert h.task is task
+        with pytest.raises(RuntimeError, match="already running"):
+            h.start(lambda: _run())
         # The underlying asyncio task is cancelled
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert h.task is None
 
     async def test_stop_when_never_started_noop(self):
         h = WorkerHandle(name="w")

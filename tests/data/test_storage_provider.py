@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import SecretStr
 
 from tinohelm.core.config import Settings, StorageSettings, TosStorageSettings
@@ -113,6 +114,17 @@ def _settings(**overrides) -> TosStorageSettings:
 def test_tos_default_endpoint_uses_s3_specific_same_region_domain() -> None:
     assert _default_tos_endpoint("cn-beijing", use_internal_endpoint=True) == "https://tos-s3-cn-beijing.ivolces.com"
     assert _default_tos_endpoint("cn-beijing", use_internal_endpoint=False) == "https://tos-s3-cn-beijing.volces.com"
+
+
+def test_docker_compose_tos_default_endpoint_matches_public_flag() -> None:
+    compose = yaml.safe_load((Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text())
+
+    for service_name in ("api", "node-sandbox", "node-live"):
+        env = compose["services"][service_name]["environment"]
+        assert env["TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT"] == "${TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT:-false}"
+        assert env["TINO_STORAGE__TOS__ENDPOINT"] == (
+            "${TINO_STORAGE__TOS__ENDPOINT:-https://tos-s3-ap-southeast-3.volces.com}"
+        )
 
 
 def test_tos_provider_exposes_s3_catalog_uri_and_nt_options(tmp_path: Path) -> None:
@@ -280,6 +292,22 @@ def test_delete_prefix_treats_dotted_bar_type_path_as_prefix(tmp_path: Path) -> 
     assert not (storage.catalog_root / "data").exists()
 
 
+def test_exact_remote_delete_propagates_uncertain_head_errors(tmp_path: Path) -> None:
+    key_path = "bucket-a/dataset/root/catalog/data/bar/BTC/a.parquet"
+    fs = _FakeS3FileSystem({key_path: b"payload"})
+
+    def timeout_info(_path: str) -> dict:
+        raise OSError("timed out while checking object")
+
+    fs.info = timeout_info
+    storage = TosCatalogStorage(_settings(), filesystem=fs, catalog_root=tmp_path / "catalog")
+
+    with pytest.raises(OSError, match="timed out"):
+        delete_prefix(storage, storage.catalog_root / "data" / "bar" / "BTC" / "a.parquet")
+
+    assert fs.objects[key_path] == b"payload"
+
+
 def test_promote_objects_with_rollback_keeps_backup_prefix_when_restore_fails(tmp_path: Path) -> None:
     final_key = "bucket-a/dataset/root/catalog/data/bar/BTC/final.parquet"
     other_key = "bucket-a/dataset/root/catalog/data/bar/BTC/old-b.parquet"
@@ -333,6 +361,57 @@ def test_promote_objects_with_rollback_keeps_backup_prefix_when_restore_fails(tm
     assert fs.objects[rollback_other_key] == b"old-b"
     assert rollback_final_key not in fs.rm_calls
     assert rollback_other_key not in fs.rm_calls
+
+
+def test_promote_objects_with_rollback_keeps_backup_prefix_when_promoted_delete_fails(tmp_path: Path) -> None:
+    final_key = "bucket-a/dataset/root/catalog/data/bar/BTC/final.parquet"
+    temp_final_key = "bucket-a/dataset/root/catalog/.merge/BTC/tmp/data/bar/BTC/final.parquet"
+    temp_extra_key = "bucket-a/dataset/root/catalog/.merge/BTC/tmp/data/bar/BTC/extra.parquet"
+    rollback_final_key = "bucket-a/dataset/root/catalog/.merge-rollback/BTC/final.parquet"
+    fs = _FakeS3FileSystem({
+        final_key: b"old-final",
+        temp_final_key: b"new-final",
+        temp_extra_key: b"new-extra",
+    })
+    storage = TosCatalogStorage(_settings(), filesystem=fs, catalog_root=tmp_path / "catalog")
+    original_copy = fs.copy
+
+    def failing_second_promote_copy(source: str, dest: str) -> None:
+        if source == temp_extra_key:
+            fs.copy_calls.append((source, dest))
+            raise RuntimeError("promote failed")
+        original_copy(source, dest)
+
+    def failing_promoted_delete(path: str) -> None:
+        fs.rm_calls.append(path)
+        if path == final_key:
+            raise RuntimeError("promoted delete failed")
+        if path not in fs.objects:
+            raise FileNotFoundError(path)
+        del fs.objects[path]
+
+    fs.copy = failing_second_promote_copy
+    fs.rm = failing_promoted_delete
+    final_path = storage.catalog_root / "data" / "bar" / "BTC" / "final.parquet"
+    temp_final_path = storage.catalog_root / ".merge" / "BTC" / "tmp" / "data" / "bar" / "BTC" / "final.parquet"
+    temp_extra_path = storage.catalog_root / ".merge" / "BTC" / "tmp" / "data" / "bar" / "BTC" / "extra.parquet"
+    rollback_prefix = storage.catalog_root / ".merge-rollback" / "BTC"
+
+    with pytest.raises(RuntimeError, match="promote failed"):
+        promote_objects_with_rollback(
+            storage,
+            [
+                StorageObject(key=temp_final_key, path=temp_final_path, size=len(b"new-final")),
+                StorageObject(key=temp_extra_key, path=temp_extra_path, size=len(b"new-extra")),
+            ],
+            final_path.parent,
+            [StorageObject(key=final_key, path=final_path, size=len(b"old-final"))],
+            rollback_prefix=rollback_prefix,
+        )
+
+    assert fs.objects[rollback_final_key] == b"old-final"
+    assert final_key in fs.rm_calls
+    assert rollback_final_key not in fs.rm_calls
 
 
 def test_get_catalog_storage_local_uses_configured_catalog_path(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Tests for alembic migration 012.
+"""Tests for alembic migrations 012 and 013.
 
 Verifies upgrade/downgrade roundtrip, index existence, nullable new columns,
 and that pre-existing factor_runs rows are unaffected.
@@ -14,7 +14,6 @@ import uuid
 from pathlib import Path
 
 import pytest
-import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection
 
@@ -62,7 +61,9 @@ FACTOR_RUNS_NEW_COLS = {
 
 def _run_alembic(*args: str) -> None:
     """Run alembic CLI via subprocess (isolates from the test process state)."""
-    import subprocess, sys
+    import subprocess
+    import sys
+
     assert DB_URL is not None
     result = subprocess.run(
         [sys.executable, "-m", "alembic"] + list(args),
@@ -82,10 +83,10 @@ def _reset_database_to_pre_012() -> None:
     The project started Alembic after the original base tables already existed
     (see migration ``add_watchlist``).  A clean PostgreSQL database therefore
     cannot run the full Alembic chain from scratch: migration 002 expects
-    ``strategies`` and ``backtest_runs`` to be present already.  For this 012
-    migration test we create the current ORM schema, remove exactly the objects
-    introduced by 012, and stamp the DB at revision 011.  The test then runs
-    the real 012 upgrade/downgrade against the same database URL used by the
+    ``strategies`` and ``backtest_runs`` to be present already.  For these
+    migration tests we create the current ORM schema, remove exactly the objects
+    introduced by 012/013, and stamp the DB at revision 011.  The tests then run
+    the real upgrades/downgrades against the same database URL used by the
     assertion engine.
     """
     assert DB_URL is not None
@@ -100,8 +101,8 @@ def _reset_database_to_pre_012() -> None:
                 await conn.execute(text("CREATE SCHEMA public"))
                 await conn.run_sync(Base.metadata.create_all)
 
-                # Remove 012-created tables / constraints from the current ORM
-                # schema so Alembic 012 can add them for real.
+                # Remove 012/013-created tables / constraints / columns from the
+                # current ORM schema so Alembic can add them for real.
                 await conn.execute(text("DROP TABLE IF EXISTS signal_runs CASCADE"))
                 await conn.execute(text("DROP TABLE IF EXISTS exposures_cache CASCADE"))
                 await conn.execute(text("DROP TABLE IF EXISTS universes CASCADE"))
@@ -109,6 +110,7 @@ def _reset_database_to_pre_012() -> None:
                 await conn.execute(text("DROP INDEX IF EXISTS ix_factor_runs_universe"))
                 for col in FACTOR_RUNS_NEW_COLS:
                     await conn.execute(text(f"ALTER TABLE factor_runs DROP COLUMN IF EXISTS {col}"))
+                await conn.execute(text("ALTER TABLE data_catalog DROP COLUMN IF EXISTS last_ingest_id"))
 
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
@@ -142,10 +144,14 @@ async def _get_indexes(conn: AsyncConnection) -> set[str]:
 
 
 async def _get_factor_runs_columns(conn: AsyncConnection) -> set[str]:
+    return await _get_table_columns(conn, "factor_runs")
+
+
+async def _get_table_columns(conn: AsyncConnection, table: str) -> set[str]:
     row = await conn.execute(text(
         "SELECT column_name FROM information_schema.columns "
-        "WHERE table_name = 'factor_runs'"
-    ))
+        "WHERE table_name = :tbl"
+    ), {"tbl": table})
     return {r[0] for r in row}
 
 
@@ -176,8 +182,8 @@ async def engine():
 
 
 @pytest.fixture(scope="module")
-def ensure_at_012():
-    """Guarantee DB is at 012 before any test in this module runs."""
+def ensure_at_head():
+    """Guarantee DB is at Alembic head before any test in this module runs."""
     _reset_database_to_pre_012()
     _run_alembic("upgrade", "head")
 
@@ -185,15 +191,15 @@ def ensure_at_012():
 # ── tests ──
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_upgrade_version_is_012(engine, ensure_at_012):
-    """After upgrade head, alembic_version must be '012'."""
+async def test_upgrade_version_is_head(engine, ensure_at_head):
+    """After upgrade head, alembic_version must be '013'."""
     async with engine.connect() as conn:
         ver = await _get_version(conn)
-    assert ver == "012", f"Expected version 012, got {ver}"
+    assert ver == "013", f"Expected version 013, got {ver}"
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_new_tables_exist(engine, ensure_at_012):
+async def test_new_tables_exist(engine, ensure_at_head):
     """universes, signal_runs, exposures_cache must exist after upgrade."""
     async with engine.connect() as conn:
         tables = await _get_tables(conn)
@@ -202,7 +208,7 @@ async def test_new_tables_exist(engine, ensure_at_012):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_seven_indexes_present(engine, ensure_at_012):
+async def test_seven_indexes_present(engine, ensure_at_head):
     """AC-3: exactly 7 required indexes must exist after upgrade."""
     async with engine.connect() as conn:
         found = await _get_indexes(conn)
@@ -212,7 +218,7 @@ async def test_seven_indexes_present(engine, ensure_at_012):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_factor_runs_seven_new_columns(engine, ensure_at_012):
+async def test_factor_runs_seven_new_columns(engine, ensure_at_head):
     """factor_runs must have all 7 new columns after upgrade."""
     async with engine.connect() as conn:
         cols = await _get_factor_runs_columns(conn)
@@ -221,7 +227,7 @@ async def test_factor_runs_seven_new_columns(engine, ensure_at_012):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_new_columns_nullable(engine, ensure_at_012):
+async def test_new_columns_nullable(engine, ensure_at_head):
     """All 7 new factor_runs columns must be nullable (AC-2)."""
     async with engine.connect() as conn:
         nullable_map = await _get_nullable_cols(conn, "factor_runs")
@@ -233,7 +239,18 @@ async def test_new_columns_nullable(engine, ensure_at_012):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_progress_stage_nullable_signal_runs(engine, ensure_at_012):
+async def test_data_catalog_commit_witness_column_nullable(engine, ensure_at_head):
+    """013 adds nullable last_ingest_id as durable catalog commit witness."""
+    async with engine.connect() as conn:
+        cols = await _get_table_columns(conn, "data_catalog")
+        nullable_map = await _get_nullable_cols(conn, "data_catalog")
+
+    assert "last_ingest_id" in cols
+    assert nullable_map.get("last_ingest_id") is True
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_progress_stage_nullable_signal_runs(engine, ensure_at_head):
     """signal_runs.progress_stage must be nullable."""
     async with engine.connect() as conn:
         nullable_map = await _get_nullable_cols(conn, "signal_runs")
@@ -241,7 +258,7 @@ async def test_progress_stage_nullable_signal_runs(engine, ensure_at_012):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_existing_factor_run_new_cols_null(engine, ensure_at_012):
+async def test_existing_factor_run_new_cols_null(engine, ensure_at_head):
     """Pre-existing factor_runs rows have NULL in all 7 new columns (AC-2)."""
     run_id = str(uuid.uuid4())
     async with engine.begin() as conn:
@@ -270,31 +287,46 @@ async def test_existing_factor_run_new_cols_null(engine, ensure_at_012):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_downgrade_removes_tables_and_columns(engine, ensure_at_012):
-    """Downgrade -1: new tables dropped, factor_runs new columns removed, version = 011."""
-    _run_alembic("downgrade", "-1")
+async def test_downgrade_removes_tables_and_columns(engine, ensure_at_head):
+    """Downgrade 013 then 012 removes commit witness, then 012 objects."""
+    _run_alembic("downgrade", "012")
 
     async with engine.connect() as conn:
         ver = await _get_version(conn)
         tables = await _get_tables(conn)
-        cols = await _get_factor_runs_columns(conn)
+        factor_cols = await _get_factor_runs_columns(conn)
+        catalog_cols = await _get_table_columns(conn, "data_catalog")
 
-    assert ver == "011", f"After downgrade expected 011, got {ver}"
+    assert ver == "012", f"After downgrade to 012 expected 012, got {ver}"
+    assert "last_ingest_id" not in catalog_cols
+    assert TABLES_012 <= tables
+    assert FACTOR_RUNS_NEW_COLS <= factor_cols
+
+    _run_alembic("downgrade", "011")
+
+    async with engine.connect() as conn:
+        ver = await _get_version(conn)
+        tables = await _get_tables(conn)
+        factor_cols = await _get_factor_runs_columns(conn)
+
+    assert ver == "011", f"After downgrade to 011 expected 011, got {ver}"
     remaining_new_tables = TABLES_012 & tables
     assert not remaining_new_tables, f"Tables not dropped on downgrade: {remaining_new_tables}"
-    remaining_new_cols = FACTOR_RUNS_NEW_COLS & cols
+    remaining_new_cols = FACTOR_RUNS_NEW_COLS & factor_cols
     assert not remaining_new_cols, f"Columns not dropped on downgrade: {remaining_new_cols}"
 
-    # Restore to 012 so other tests / subsequent runs are clean
+    # Restore to Alembic head so other tests / subsequent runs are clean.
     _run_alembic("upgrade", "head")
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_upgrade_after_downgrade_idempotent(engine, ensure_at_012):
-    """After downgrade+upgrade roundtrip DB is back at 012 with all indexes."""
+async def test_upgrade_after_downgrade_idempotent(engine, ensure_at_head):
+    """After downgrade+upgrade roundtrip DB is back at head with all indexes."""
     async with engine.connect() as conn:
         ver = await _get_version(conn)
         found = await _get_indexes(conn)
+        catalog_cols = await _get_table_columns(conn, "data_catalog")
 
-    assert ver == "012"
+    assert ver == "013"
     assert found == EXPECTED_INDEXES
+    assert "last_ingest_id" in catalog_cols

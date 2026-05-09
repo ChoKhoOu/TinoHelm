@@ -544,10 +544,11 @@ class TestVerifyChecksum:
         assert not zip_path.exists()
 
     @pytest.mark.asyncio
-    async def test_404_checksum_warns_and_continues(self, tmp_path):
-        """404 on checksum file → log warning, no exception."""
+    async def test_404_checksum_raises_for_all_verification_paths(self, tmp_path):
+        """Missing checksum sidecar fails closed for file, bytes, and stream paths."""
         zip_path = tmp_path / "data.zip"
-        zip_path.write_bytes(b"any content")
+        content = b"any content"
+        zip_path.write_bytes(content)
 
         mock_response = MagicMock()
         mock_response.status_code = 404
@@ -559,12 +560,40 @@ class TestVerifyChecksum:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         dl = _make_dl(tmp_path)
+        checksum_url = "https://example.com/data.zip.CHECKSUM"
         with patch("httpx.AsyncClient", return_value=mock_client):
-            # Should NOT raise
-            await dl.verify_checksum(zip_path, "https://example.com/data.zip.CHECKSUM")
+            with pytest.raises(ChecksumError, match="checksum unavailable"):
+                await dl.verify_checksum(zip_path, checksum_url)
+            with pytest.raises(ChecksumError, match="checksum unavailable"):
+                await dl.verify_checksum_bytes(content, "data.zip", checksum_url)
+            with pytest.raises(ChecksumError, match="checksum unavailable"):
+                await dl.verify_checksum_stream(BytesIO(content), "data.zip", checksum_url)
 
-        # ZIP is preserved
-        assert zip_path.exists()
+    @pytest.mark.asyncio
+    async def test_empty_checksum_raises_for_all_verification_paths(self, tmp_path):
+        """Empty checksum sidecar fails closed for file, bytes, and stream paths."""
+        zip_path = tmp_path / "data.zip"
+        content = b"any content"
+        zip_path.write_bytes(content)
+
+        mock_response = MagicMock()
+        mock_response.text = " \n"
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        dl = _make_dl(tmp_path)
+        checksum_url = "https://example.com/data.zip.CHECKSUM"
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(ChecksumError, match="empty checksum"):
+                await dl.verify_checksum(zip_path, checksum_url)
+            with pytest.raises(ChecksumError, match="empty checksum"):
+                await dl.verify_checksum_bytes(content, "data.zip", checksum_url)
+            with pytest.raises(ChecksumError, match="empty checksum"):
+                await dl.verify_checksum_stream(BytesIO(content), "data.zip", checksum_url)
 
 
 # ---------------------------------------------------------------------------

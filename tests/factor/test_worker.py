@@ -438,10 +438,11 @@ async def test_start_stop_worker_lifecycle():
     assert _handle.is_running()
 
     stop_factor_worker()
-    assert not _handle.is_running()
+    assert _handle.is_running()
 
     # Let the event loop process the cancellation.
     await asyncio.sleep(0)
+    assert not _handle.is_running()
 
 
 @pytest.mark.asyncio

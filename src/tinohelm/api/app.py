@@ -20,7 +20,7 @@ from tinohelm.core.bridge import EventBridge
 from tinohelm.core.config import get_settings
 from tinohelm.core.node_controller import NodeController
 from tinohelm.backtest import consumer as bt_consumer
-from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker
+from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker_and_wait
 from tinohelm.factor.worker import recover_interrupted_jobs as recover_factor_jobs, start_factor_worker, stop_factor_worker
 from tinohelm.signal.worker import recover_interrupted_jobs as recover_signal_jobs, start_signal_worker, stop_signal_worker
 from tinohelm.db.session import get_session_factory
@@ -108,7 +108,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ---- shutdown ----
     logger.info("TinoHelm API shutting down")
-    stop_data_worker()
+    await stop_data_worker_and_wait(timeout=30.0)
     stop_factor_worker()
     stop_signal_worker()
 

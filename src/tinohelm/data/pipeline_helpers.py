@@ -73,7 +73,6 @@ INTERVAL_CONVENTION: Mapping[str, str] = MappingProxyType({
 # gap that Binance Vision does not yet have.
 KLINES_REST_FETCH_FN: Mapping[str, str] = MappingProxyType({
     "klines": "fetch_klines",
-    "premiumIndexKlines": "fetch_klines",
     "markPriceKlines": "fetch_mark_price_klines",
     "indexPriceKlines": "fetch_index_price_klines",
 })
@@ -81,7 +80,7 @@ KLINES_REST_FETCH_FN: Mapping[str, str] = MappingProxyType({
 # Data types that support REST API fallback for recent data.
 REST_FALLBACK_TYPES: frozenset[str] = frozenset({
     "klines", "markPriceKlines", "indexPriceKlines",
-    "premiumIndexKlines", "aggTrades", "trades",
+    "aggTrades",
 })
 
 # Default progress band for the download → convert phase. A small head room

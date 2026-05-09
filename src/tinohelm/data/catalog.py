@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from tinohelm.data.catalog_helpers import (
     CATEGORY_DIR,
@@ -91,17 +92,30 @@ def _is_remote_storage(storage: Any | None) -> bool:
     return storage is not None and getattr(storage, "provider", "local") != "local"
 
 
+def _remote_catalog_constructor_args(catalog_root: Path, storage: Any) -> tuple[str, str]:
+    """Return ``(path, protocol)`` for NT's constructor without URI-parsed host leakage."""
+    uri_for_root = getattr(storage, "uri_for_catalog_root", None)
+    if not callable(uri_for_root):
+        raise ValueError("Remote catalog storage must expose uri_for_catalog_root()")
+    uri = str(uri_for_root(catalog_root))
+    parsed = urlparse(uri)
+    if not parsed.scheme:
+        return uri, getattr(storage, "fs_protocol", "file")
+    if parsed.scheme == "file":
+        return parsed.path, "file"
+    return f"{parsed.netloc}{parsed.path}".lstrip("/"), parsed.scheme
+
+
 def _catalog_for_root(catalog_root: str | Path, storage: Any | None = None):
     """Create an NT catalog for a logical root, using object storage directly when active."""
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     root = Path(catalog_root)
     if _is_remote_storage(storage):
-        uri_for_root = getattr(storage, "uri_for_catalog_root", None)
-        if not callable(uri_for_root):
-            raise ValueError("Remote catalog storage must expose uri_for_catalog_root()")
-        return ParquetDataCatalog.from_uri(
-            uri_for_root(root),
+        remote_path, fs_protocol = _remote_catalog_constructor_args(root, storage)
+        return ParquetDataCatalog(
+            remote_path,
+            fs_protocol=fs_protocol,
             fs_storage_options=getattr(storage, "fs_storage_options", None),
             fs_rust_storage_options=getattr(storage, "fs_rust_storage_options", None),
         )
@@ -147,8 +161,6 @@ def validate_bars(
     - status: "ok" | "warnings" | "errors"
     - issues: list[str] - human-readable issue descriptions
     """
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
     # Validates the interval and reuses the same error message shape the
     # helper exposes to every caller that does interval-string lookup.
     expected_step_ns = interval_to_nanoseconds(interval)
@@ -162,11 +174,8 @@ def validate_bars(
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)
     if storage_provider is not None:
         parquet_files = list(storage_provider.iter_files(bar_dir, suffix=".parquet", recursive=False))
-        catalog_uri_for_root = getattr(storage_provider, "uri_for_catalog_root", None)
-        catalog_uri = catalog_uri_for_root(catalog_path) if callable(catalog_uri_for_root) else str(catalog_path)
     else:
         parquet_files = list(bar_dir.glob("*.parquet")) if bar_dir.exists() else []
-        catalog_uri = str(catalog_path)
     file_count = len(parquet_files)
     size_bytes = sum(
         int(obj.size) if getattr(obj, "size", None) is not None else Path(obj.path if hasattr(obj, "path") else obj).stat().st_size
@@ -174,18 +183,21 @@ def validate_bars(
     )
 
     # Read bars from catalog
-    if storage_provider is not None and getattr(storage_provider, "provider", "local") != "local":
-        catalog = ParquetDataCatalog.from_uri(
-            catalog_uri,
-            fs_storage_options=getattr(storage_provider, "fs_storage_options", None),
-            fs_rust_storage_options=getattr(storage_provider, "fs_rust_storage_options", None),
-        )
-    else:
-        catalog = ParquetDataCatalog(str(catalog_path))
+    catalog = _catalog_for_root(catalog_path, storage_provider)
     try:
         bars = catalog.bars(bar_types=[str(bar_type)])
-    except Exception:
-        bars = []
+    except Exception as exc:
+        return {
+            "total_bars": 0,
+            "date_range": {"start": "", "end": ""},
+            "duplicates": 0,
+            "gaps": [],
+            "file_count": file_count,
+            "size_bytes": size_bytes,
+            "status": "errors",
+            "read_error": True,
+            "issues": [f"Failed to read bars from catalog: {exc}"],
+        }
 
     if not bars:
         return {
@@ -593,6 +605,10 @@ def write_trade_ticks(
     # Return only newly created files
     current = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
     written = sorted(current - existing)
+    if ticks and not written:
+        raise RuntimeError(
+            f"TradeTick write for {symbol} produced no parquet files under {tick_dir}"
+        )
     logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
 
@@ -618,6 +634,10 @@ def write_quote_ticks(
     catalog.write_data(ticks, skip_disjoint_check=True)
     current = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
     written = sorted(current - existing)
+    if ticks and not written:
+        raise RuntimeError(
+            f"QuoteTick write for {symbol} produced no parquet files under {tick_dir}"
+        )
     logger.info("Wrote %d QuoteTick to %d file(s) for %s", len(ticks), len(written), symbol)
     return written
 
@@ -680,8 +700,8 @@ def _write_raw_records_parquet(
             if out_path.exists():
                 try:
                     frame = pl.concat([pl.read_parquet(out_path), frame], how="diagonal_relaxed")
-                except Exception:
-                    logger.warning("Failed to merge existing raw parquet at %s", out_path, exc_info=True)
+                except Exception as exc:
+                    raise RuntimeError(f"failed to read existing raw parquet at {out_path}") from exc
             frame = frame.sort(dedupe_subset).unique(
                 subset=dedupe_subset,
                 keep="last",

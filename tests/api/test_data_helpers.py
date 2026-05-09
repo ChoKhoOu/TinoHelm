@@ -5,6 +5,7 @@ storage-file deletion helper used by DELETE /api/data/catalog/{id}.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -28,6 +29,8 @@ from tinohelm.api.routes.data import (
     _parquet_size_for,
     _run_compact,
     _compact_bars_with_storage,
+    cancel_data_fetch_job,
+    delete_catalog_entry,
     scan_data_catalog,
     trigger_compact,
     trigger_data_fetch_batch,
@@ -463,6 +466,41 @@ class TestFetchBatchSplitting:
         enqueue.assert_awaited_once_with(rds, "job-1")
 
 
+class TestCancelDataFetchJob:
+    def test_cancel_queued_job_updates_to_cancelled(self):
+        import asyncio
+
+        db = AsyncMock()
+        update_result = MagicMock()
+        update_result.rowcount = 1
+        db.execute = AsyncMock(return_value=update_result)
+        db.commit = AsyncMock()
+
+        result = asyncio.run(cancel_data_fetch_job("job-queued", db))
+
+        assert result == {"status": "cancelled", "job_id": "job-queued"}
+        db.commit.assert_awaited_once()
+        assert db.execute.await_count == 1
+        assert "data_fetch_jobs.status =" in str(db.execute.await_args.args[0])
+
+    def test_cancel_running_job_returns_conflict_without_status_update(self):
+        import asyncio
+
+        db = AsyncMock()
+        update_result = MagicMock()
+        update_result.rowcount = 0
+        select_result = MagicMock()
+        select_result.scalar_one_or_none.return_value = SimpleNamespace(status="running")
+        db.execute = AsyncMock(side_effect=[update_result, select_result])
+        db.commit = AsyncMock()
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(cancel_data_fetch_job("job-running", db))
+
+        assert exc.value.status_code == 409
+        assert "cannot be cancelled safely" in exc.value.detail
+        db.commit.assert_awaited_once()
+
 
 class TestSourceAwareBarMaintenance:
     def test_validate_data_resolves_source_aware_bar_root(self, tmp_path: Path, monkeypatch):
@@ -577,12 +615,18 @@ class TestSourceAwareBarMaintenance:
                 return bar_type_str
 
         class FakeCatalog:
+            init_calls = []
             from_uri_calls = []
 
+            def __init__(self, catalog_path, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
+                if str(catalog_path).startswith("s3://"):
+                    raise AssertionError("remote validator must pass bucket/key path, not an s3 URI")
+                self.init_calls.append((catalog_path, fs_protocol, fs_storage_options, fs_rust_storage_options))
+
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
-                return cls()
+            def from_uri(cls, *args, **kwargs):
+                cls.from_uri_calls.append((args, kwargs))
+                raise AssertionError("from_uri would merge fsspec's host into s3fs options")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -600,8 +644,9 @@ class TestSourceAwareBarMaintenance:
 
         result = validate_bars("BTCUSDT-PERP", "1m", tmp_path, storage=storage)
 
-        assert FakeCatalog.from_uri_calls == [
-            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options)
+        assert FakeCatalog.from_uri_calls == []
+        assert FakeCatalog.init_calls == [
+            ("bucket/catalog", "s3", storage.fs_storage_options, storage.fs_rust_storage_options)
         ]
         assert result["total_bars"] == 2
         assert result["file_count"] == 1
@@ -651,6 +696,50 @@ class TestSourceAwareBarMaintenance:
         assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path))]
         assert statements
         assert "data_catalog.source_type = :source_type_1" in str(statements[0])
+
+    def test_run_compact_waits_on_shared_catalog_lock(self, tmp_path: Path, monkeypatch):
+        import asyncio
+        from tinohelm.data.catalog_locks import _catalog_locks, catalog_lock_key, get_catalog_lock
+
+        _catalog_locks.clear()
+        calls = []
+
+        def fake_compact(storage, symbol, interval, catalog_path):
+            calls.append((symbol, interval, catalog_path))
+            return {"bars_count": 1, "size_before": 6, "size_after": 6}
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return None
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def execute(self, stmt):
+                return FakeResult()
+
+        monkeypatch.setattr("tinohelm.api.routes.data._compact_bars_with_storage", fake_compact)
+        monkeypatch.setattr("tinohelm.db.session.get_session_factory", lambda: FakeSession)
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        async def scenario():
+            lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "klines", "1m"))
+            await lock.acquire()
+            try:
+                task = asyncio.create_task(_run_compact("BTCUSDT-PERP", "1m", settings, "klines", "klines"))
+                await asyncio.sleep(0.02)
+                assert calls == []
+            finally:
+                lock.release()
+            await task
+
+        asyncio.run(scenario())
+
+        assert calls == [("BTCUSDT-PERP", "1m", str(tmp_path / "bar" / "klines"))]
 
     def test_run_compact_updates_legacy_null_source_row_for_default_klines(self, tmp_path: Path, monkeypatch):
         import asyncio
@@ -758,15 +847,19 @@ class TestSourceAwareBarMaintenance:
         compacted_name = "2024-01-01T00-00-00-000000000Z_2024-01-01T00-01-00-000000000Z.parquet"
 
         class FakeCatalog:
+            init_calls = []
             from_uri_calls = []
 
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
+                if str(catalog_path).startswith("s3://"):
+                    raise AssertionError("remote compaction must pass bucket/key path, not an s3 URI")
                 self.catalog_path = catalog_path
+                self.init_calls.append((catalog_path, fs_protocol, fs_storage_options, fs_rust_storage_options))
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                cls.from_uri_calls.append((uri, fs_storage_options, fs_rust_storage_options))
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                cls.from_uri_calls.append((args, kwargs))
+                raise AssertionError("from_uri would merge fsspec's host into s3fs options")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -774,7 +867,7 @@ class TestSourceAwareBarMaintenance:
 
             def write_data(self, data, skip_disjoint_check=False):
                 if data and hasattr(data[0], "ts_event"):
-                    base = str(self.catalog_path).removeprefix("s3://")
+                    base = str(self.catalog_path)
                     fs.objects[f"{base}/data/bar/{bar_type_str}/{compacted_name}"] = b"new"
 
         import sys
@@ -804,9 +897,10 @@ class TestSourceAwareBarMaintenance:
             "size_before": len(b"old-a") + len(b"old-b"),
             "size_after": len(b"new"),
         }
-        assert FakeCatalog.from_uri_calls == [
-            ("s3://bucket/catalog", storage.fs_storage_options, storage.fs_rust_storage_options),
-            (f"s3://bucket/catalog/.compaction/{bar_type_str}-abc123", storage.fs_storage_options, storage.fs_rust_storage_options),
+        assert FakeCatalog.from_uri_calls == []
+        assert FakeCatalog.init_calls == [
+            ("bucket/catalog", "s3", storage.fs_storage_options, storage.fs_rust_storage_options),
+            (f"bucket/catalog/.compaction/{bar_type_str}-abc123", "s3", storage.fs_storage_options, storage.fs_rust_storage_options),
         ]
         assert fs.rm_calls == old_keys + [backup_a_key, backup_b_key, temp_key]
         assert fs.put_calls == []
@@ -832,12 +926,12 @@ class TestSourceAwareBarMaintenance:
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
 
         class FakeCatalog:
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
                 self.catalog_path = catalog_path
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                raise AssertionError("remote compaction must not use from_uri")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -898,12 +992,12 @@ class TestSourceAwareBarMaintenance:
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
 
         class FakeCatalog:
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
                 self.catalog_path = catalog_path
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                raise AssertionError("remote compaction must not use from_uri")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -966,12 +1060,12 @@ class TestSourceAwareBarMaintenance:
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
 
         class FakeCatalog:
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
                 self.catalog_path = catalog_path
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                raise AssertionError("remote compaction must not use from_uri")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -1020,12 +1114,12 @@ class TestSourceAwareBarMaintenance:
         bars = [SimpleNamespace(ts_event=2), SimpleNamespace(ts_event=1)]
 
         class FakeCatalog:
-            def __init__(self, catalog_path=None):
+            def __init__(self, catalog_path=None, fs_protocol=None, fs_storage_options=None, fs_rust_storage_options=None):
                 self.catalog_path = catalog_path
 
             @classmethod
-            def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-                return cls(uri)
+            def from_uri(cls, *args, **kwargs):
+                raise AssertionError("remote compaction must not use from_uri")
 
             def bars(self, bar_types):
                 assert bar_types == [bar_type_str]
@@ -1449,6 +1543,163 @@ class TestDeleteStorageFiles:
         assert freed == 5
         assert bar_dir.exists()
         assert (bar_dir / "meta.txt").exists()
+
+
+class TestDeleteCatalogEntry:
+    async def test_delete_waits_on_legacy_default_catalog_lock(self, tmp_path: Path, monkeypatch):
+        from tinohelm.data.catalog_locks import _catalog_locks, catalog_lock_key, get_catalog_lock
+
+        _catalog_locks.clear()
+        row = SimpleNamespace(
+            id=123,
+            symbol="BTCUSDT-PERP",
+            data_type="bar",
+            interval="1m",
+            source_type=None,
+        )
+        calls = []
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return row
+
+        db = SimpleNamespace(
+            execute=AsyncMock(return_value=FakeResult()),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        def fake_delete_storage_files(*args):
+            calls.append(args)
+            return (2, 17)
+
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data._delete_storage_files",
+            fake_delete_storage_files,
+        )
+
+        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "klines", "1m"))
+        await lock.acquire()
+        try:
+            task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+            await asyncio.sleep(0.02)
+            assert calls == []
+            db.delete.assert_not_awaited()
+        finally:
+            lock.release()
+
+        result = await task
+
+        assert result["status"] == "deleted"
+        assert result["deleted_files"] == 2
+        assert calls == [("BTCUSDT-PERP", "bar", "1m", str(tmp_path), None)]
+        db.delete.assert_awaited_once_with(row)
+        db.commit.assert_awaited_once()
+
+    async def test_delete_finishes_storage_and_db_after_request_cancellation(self, tmp_path: Path, monkeypatch):
+        import threading
+
+        row = SimpleNamespace(
+            id=123,
+            symbol="BTCUSDT-PERP",
+            data_type="bar",
+            interval="1m",
+            source_type="klines",
+        )
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return row
+
+        db = SimpleNamespace(
+            execute=AsyncMock(return_value=FakeResult()),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        def fake_delete_storage_files(*args):
+            calls.append(args)
+            started.set()
+            assert release.wait(timeout=1)
+            return (2, 17)
+
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data._delete_storage_files",
+            fake_delete_storage_files,
+        )
+
+        task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert calls == [("BTCUSDT-PERP", "bar", "1m", str(tmp_path), "klines")]
+        db.delete.assert_awaited_once_with(row)
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("row_data_type", "row_interval", "worker_data_type"),
+        [
+            ("funding_rate", "8h", "fundingRate"),
+            ("order_book_delta", "tick", "bookDepth"),
+        ],
+    )
+    async def test_delete_waits_on_non_bar_legacy_default_source_lock(
+        self,
+        row_data_type: str,
+        row_interval: str,
+        worker_data_type: str,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        from tinohelm.data.catalog_locks import _catalog_locks, catalog_lock_key, get_catalog_lock
+
+        _catalog_locks.clear()
+        row = SimpleNamespace(
+            id=123,
+            symbol="BTCUSDT-PERP",
+            data_type=row_data_type,
+            interval=row_interval,
+            source_type=None,
+        )
+        calls = []
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return row
+
+        db = SimpleNamespace(
+            execute=AsyncMock(return_value=FakeResult()),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data._delete_storage_files",
+            lambda *args: calls.append(args) or (1, 3),
+        )
+
+        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", worker_data_type, None))
+        await lock.acquire()
+        try:
+            task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+            await asyncio.sleep(0.02)
+            assert calls == []
+        finally:
+            lock.release()
+
+        await task
+
+        assert calls == [("BTCUSDT-PERP", row_data_type, row_interval, str(tmp_path), None)]
 
 
 class TestScanDataCatalog:

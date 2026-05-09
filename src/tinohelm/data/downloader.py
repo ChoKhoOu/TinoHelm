@@ -472,6 +472,23 @@ class VisionDownloader:
                 stream.close()
                 raise
 
+    async def _fetch_expected_checksum(self, zip_name: str, checksum_url: str) -> str:
+        """Return Binance Vision's expected SHA-256 hash or fail closed."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                resp = await client.get(checksum_url, follow_redirects=True)
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise ChecksumError(
+                    f"checksum unavailable for {zip_name}: {checksum_url}"
+                ) from exc
+
+        checksum_text = resp.text.strip()
+        parts = checksum_text.split(None, 1)
+        if not parts:
+            raise ChecksumError(f"empty checksum file for {zip_name}: {checksum_url}")
+        return parts[0].lower()
+
     async def verify_checksum_bytes(
         self,
         zip_payload: bytes,
@@ -479,22 +496,7 @@ class VisionDownloader:
         checksum_url: str,
     ) -> None:
         """Verify a ZIP payload against Binance Vision's SHA-256 checksum."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                resp = await client.get(checksum_url, follow_redirects=True)
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    logger.warning("Checksum file not found (404): %s — skipping", checksum_url)
-                    return
-                raise
-
-        checksum_text = resp.text.strip()
-        parts = checksum_text.split(None, 1)
-        if not parts:
-            logger.warning("Empty checksum file at %s — skipping", checksum_url)
-            return
-        expected_hash = parts[0].lower()
+        expected_hash = await self._fetch_expected_checksum(zip_name, checksum_url)
 
         digest = hashlib.sha256()
         view = memoryview(zip_payload)
@@ -518,24 +520,7 @@ class VisionDownloader:
         checksum_url: str,
     ) -> None:
         """Verify a seekable ZIP stream against Binance Vision's SHA-256 checksum."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                resp = await client.get(checksum_url, follow_redirects=True)
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    logger.warning("Checksum file not found (404): %s — skipping", checksum_url)
-                    zip_file.seek(0)
-                    return
-                raise
-
-        checksum_text = resp.text.strip()
-        parts = checksum_text.split(None, 1)
-        if not parts:
-            logger.warning("Empty checksum file at %s — skipping", checksum_url)
-            zip_file.seek(0)
-            return
-        expected_hash = parts[0].lower()
+        expected_hash = await self._fetch_expected_checksum(zip_name, checksum_url)
 
         digest = hashlib.sha256()
         zip_file.seek(0)
@@ -556,10 +541,9 @@ class VisionDownloader:
         """Verify the SHA-256 checksum of a downloaded ZIP.
 
         Downloads the ``.CHECKSUM`` file, parses the expected hash, computes
-        the actual hash of ``zip_path``, and raises ``ChecksumError`` on
-        mismatch (deleting the corrupt ZIP first).
-
-        A 404 for the checksum file is treated as a non-fatal warning.
+        the actual hash of ``zip_path``, and raises ``ChecksumError`` when the
+        checksum sidecar is unavailable, empty, or mismatched. A mismatched ZIP
+        is deleted before raising.
 
         Parameters
         ----------
@@ -568,23 +552,7 @@ class VisionDownloader:
         checksum_url:
             URL of the ``.CHECKSUM`` file.
         """
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                resp = await client.get(checksum_url, follow_redirects=True)
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    logger.warning("Checksum file not found (404): %s — skipping", checksum_url)
-                    return
-                raise
-
-        # Format: "{sha256hash}  {filename}\n"
-        checksum_text = resp.text.strip()
-        parts = checksum_text.split(None, 1)
-        if not parts:
-            logger.warning("Empty checksum file at %s — skipping", checksum_url)
-            return
-        expected_hash = parts[0].lower()
+        expected_hash = await self._fetch_expected_checksum(zip_path.name, checksum_url)
 
         with zip_path.open("rb") as fh:
             if hasattr(hashlib, "file_digest"):

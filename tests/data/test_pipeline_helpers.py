@@ -128,16 +128,17 @@ class TestCanonicalMappings:
 
     def test_klines_fetch_map_canonical_pairs(self):
         assert KLINES_REST_FETCH_FN["klines"] == "fetch_klines"
-        assert KLINES_REST_FETCH_FN["premiumIndexKlines"] == "fetch_klines"
         assert KLINES_REST_FETCH_FN["markPriceKlines"] == "fetch_mark_price_klines"
         assert KLINES_REST_FETCH_FN["indexPriceKlines"] == "fetch_index_price_klines"
-        assert len(KLINES_REST_FETCH_FN) == 4
+        assert "premiumIndexKlines" not in KLINES_REST_FETCH_FN
+        assert len(KLINES_REST_FETCH_FN) == 3
 
     def test_rest_fallback_types_pin(self):
         assert REST_FALLBACK_TYPES == frozenset({
             "klines", "markPriceKlines", "indexPriceKlines",
-            "premiumIndexKlines", "aggTrades", "trades",
+            "aggTrades",
         })
+        assert is_rest_fallback_supported("premiumIndexKlines") is False
 
     def test_progress_band_constants(self):
         assert DOWNLOAD_PROGRESS_BASE == 5
@@ -239,14 +240,14 @@ class TestResolveDbInterval:
 class TestRestFallbackSupport:
     @pytest.mark.parametrize("dt", [
         "klines", "markPriceKlines", "indexPriceKlines",
-        "premiumIndexKlines", "aggTrades", "trades",
+        "aggTrades",
     ])
     def test_supported_types(self, dt: str):
         assert is_rest_fallback_supported(dt) is True
 
     @pytest.mark.parametrize("dt", [
         "fundingRate", "bookTicker", "bookDepth",
-        "liquidationSnapshot", "metrics", "unknown", "",
+        "liquidationSnapshot", "metrics", "trades", "premiumIndexKlines", "unknown", "",
     ])
     def test_unsupported_types(self, dt: str):
         assert is_rest_fallback_supported(dt) is False
