@@ -1002,23 +1002,21 @@ class BacktestRunner:
         """Load historical funding rates for all symbols via data catalog queue.
 
         Submits DataFetchJobs for fundingRate data, waits for completion,
-        then loads from the local JSON cache.
+        then loads from the local JSON cache via CatalogSession.
 
-        Symbols whose JSON cache already covers ``[self.start, self.end]``
-        are skipped entirely — no DataFetchJob row is created. Symbols with
-        only a partial tail gap get a job whose ``start_date`` is the first
-        uncovered timestamp, keeping incremental fetches narrow and making
-        the second run of an identical backtest a no-op.
+        Symbols whose cache already covers ``[self.start, self.end]``
+        are skipped entirely — no DataFetchJob row is created.
 
         Returns a list of funding events sorted by timestamp_ns, ready for the
         FundingCostTracker actor.
         """
-        from tinohelm.data.funding_cache import _load_cache, load_funding_rates
+        from tinohelm.data.catalog import CatalogSession
         from tinohelm.data.funding_cache_helpers import compute_fetch_start
+        from tinohelm.data.funding_cache import _load_cache
         from tinohelm.data.instruments import fetch_funding_info, strip_to_binance_api_symbol
 
-        # Fetch funding rate data via job queue, but only for symbols whose
-        # local JSON cache does not already span [self.start, self.end].
+        session = CatalogSession(self.catalog_path, storage=self._storage)
+
         if self._redis_client and self.start and self.end:
             for sym in self.symbols:
                 cached = _load_cache(sym)
@@ -1043,11 +1041,8 @@ class BacktestRunner:
                     start_override=fetch_start,
                 )
 
-        # Load per-symbol funding interval (hours) from Binance
         funding_info = fetch_funding_info()
 
-        # Gather raw rates + per-symbol interval into primitive dicts, then
-        # hand off to the pure assembler helper.
         rates_by_symbol: dict[str, list[dict]] = {}
         nt_symbols_by_symbol: dict[str, str] = dict(zip(self.symbols, nt_symbols))
         interval_minutes_by_symbol: dict[str, int] = {}
@@ -1055,7 +1050,7 @@ class BacktestRunner:
             api_sym = strip_to_binance_api_symbol(sym)
             interval_minutes_by_symbol[sym] = funding_info.get(api_sym, 8) * 60
             try:
-                rates_by_symbol[sym] = load_funding_rates(
+                rates_by_symbol[sym] = session.load_funding_rates(
                     symbol=sym, start=self.start, end=self.end,
                 )
                 logger.info(

@@ -1132,3 +1132,189 @@ class TestFundingParquetCovers:
         assert session.funding_parquet_covers(
             "BTCUSDT-PERP", date(2024, 1, 1), date(2024, 1, 2)
         ) is True
+
+
+# ---------------------------------------------------------------------------
+# 9. compact_bars — remote provider
+# ---------------------------------------------------------------------------
+
+
+class _FakeRemoteFS:
+    """In-memory filesystem for remote storage tests."""
+
+    def __init__(self, objects: dict[str, bytes] | None = None):
+        self.objects: dict[str, bytes] = dict(objects or {})
+        self.rm_calls: list[str] = []
+
+    def open(self, path: str, mode: str = "rb"):
+        import io
+
+        assert mode == "rb"
+        return io.BytesIO(self.objects[path])
+
+    def put_file(self, local_path: str, remote_path: str) -> None:
+        self.objects[remote_path] = Path(local_path).read_bytes()
+
+    def rm(self, path: str) -> None:
+        self.rm_calls.append(path)
+        if path in self.objects:
+            del self.objects[path]
+
+
+class _FakeRemoteStorage:
+    """Minimal remote CatalogStorageProvider backed by _FakeRemoteFS.
+
+    Keys stored in the FS use the pattern ``bucket/catalog/{rel_path}`` where
+    ``rel_path`` is relative to ``self.catalog_root``.
+    """
+
+    provider = "s3"
+
+    def __init__(self, root: Path, fs: _FakeRemoteFS):
+        self.catalog_root = root
+        self._fs = fs
+        self.fs_storage_options = {"endpoint_url": "https://example.com"}
+        self.fs_rust_storage_options = {"endpoint_url": "https://example.com"}
+
+    def _to_key(self, path: Path | str) -> str:
+        try:
+            rel = Path(path).relative_to(self.catalog_root).as_posix()
+        except ValueError:
+            rel = Path(path).as_posix().lstrip("/")
+        return f"bucket/catalog/{rel}" if rel != "." else "bucket/catalog"
+
+    def uri_for_catalog_root(self, catalog_root: Path | str | None = None) -> str:
+        if catalog_root is None:
+            return "s3://bucket/catalog"
+        try:
+            rel = Path(catalog_root).relative_to(self.catalog_root).as_posix()
+        except ValueError:
+            rel = ""
+        return f"s3://bucket/catalog/{rel}" if rel and rel != "." else "s3://bucket/catalog"
+
+    def iter_files(self, prefix: Path | str, suffix: str = "", recursive: bool = True):
+        prefix_key = self._to_key(prefix)
+        for key, payload in sorted(self._fs.objects.items()):
+            if not key.startswith(prefix_key + "/"):
+                continue
+            remainder = key[len(prefix_key) + 1:]
+            if not recursive and "/" in remainder:
+                continue
+            if suffix and not key.endswith(suffix):
+                continue
+            obj = type("Obj", (), {})()
+            obj.key = key
+            obj.path = self.catalog_root / key.removeprefix("bucket/catalog/")
+            obj.size = len(payload)
+            obj.last_modified = None
+            yield obj
+
+    def exists(self, path: Path | str) -> bool:
+        key = self._to_key(path)
+        return any(k == key or k.startswith(key + "/") for k in self._fs.objects)
+
+    def open_input_file(self, path_or_object):
+        import io
+
+        key = getattr(path_or_object, "key", None)
+        if key is None:
+            key = self._to_key(getattr(path_or_object, "path", path_or_object))
+        return io.BytesIO(self._fs.objects[key])
+
+    def copy_path(self, source: Path | str, dest: Path | str) -> str:
+        src_key = getattr(source, "key", None) or self._to_key(source)
+        dst_key = self._to_key(dest)
+        self._fs.objects[dst_key] = self._fs.objects[src_key]
+        return f"s3://{dst_key}"
+
+    def delete_path(self, path: Path | str) -> None:
+        key = getattr(path, "key", None) or self._to_key(path)
+        self._fs.rm(key)
+
+
+class TestCompactBarsRemote:
+    def test_remote_compact_multi_file_merges(self, tmp_path: Path, monkeypatch):
+        from types import SimpleNamespace
+
+        from tinohelm.data.catalog import CatalogSession
+
+        bar_type_str = "BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-EXTERNAL"
+        catalog_root = tmp_path
+
+        old_keys = [
+            f"bucket/catalog/data/bar/{bar_type_str}/a.parquet",
+            f"bucket/catalog/data/bar/{bar_type_str}/b.parquet",
+            f"bucket/catalog/data/bar/{bar_type_str}/c.parquet",
+        ]
+        fs = _FakeRemoteFS({k: b"old" for k in old_keys})
+        storage = _FakeRemoteStorage(catalog_root, fs)
+
+        instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+
+        class FakeBarType:
+            def __str__(self):
+                return bar_type_str
+
+        bar_type = FakeBarType()
+        bars = [SimpleNamespace(ts_event=i) for i in range(9)]
+        compacted_name = "merged.parquet"
+
+        class FakeCatalog:
+            def __init__(self, catalog_path=None, **kwargs):
+                self.catalog_path = catalog_path
+
+            def bars(self, bar_types):
+                return list(bars)
+
+            def write_data(self, data, **kwargs):
+                if data and hasattr(data[0], "ts_event"):
+                    rel = Path(str(self.catalog_path)).relative_to(catalog_root).as_posix()
+                    key = f"bucket/catalog/{rel}/data/bar/{bar_type_str}/{compacted_name}"
+                    fs.objects[key] = b"compacted"
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda symbol: instrument)
+        monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda inst_id, interval: bar_type)
+        monkeypatch.setattr(
+            "tinohelm.data.catalog._catalog_for_root",
+            lambda root, storage=None: FakeCatalog(catalog_path=root),
+        )
+
+        session = CatalogSession(catalog_root, storage=storage)
+        result = session.compact_bars("BTCUSDT-PERP", "5m")
+
+        assert result["files_before"] == 3
+        assert result["files_after"] == 1
+        assert result["bars_count"] == 9
+        assert result["size_before"] == len(b"old") * 3
+        assert result["size_after"] == len(b"compacted")
+        assert set(result) == {"files_before", "files_after", "bars_count", "size_before", "size_after"}
+
+    def test_remote_compact_single_file_noop(self, tmp_path: Path, monkeypatch):
+        from types import SimpleNamespace
+
+        from tinohelm.data.catalog import CatalogSession
+
+        bar_type_str = "BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-EXTERNAL"
+        catalog_root = tmp_path
+
+        fs = _FakeRemoteFS({
+            f"bucket/catalog/data/bar/{bar_type_str}/only.parquet": b"single",
+        })
+        storage = _FakeRemoteStorage(catalog_root, fs)
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_instrument", lambda s: SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+
+        class FakeBarType:
+            def __str__(self):
+                return bar_type_str
+
+        monkeypatch.setattr("tinohelm.data.catalog._make_bar_type", lambda inst_id, interval: FakeBarType())
+
+        session = CatalogSession(catalog_root, storage=storage)
+        result = session.compact_bars("BTCUSDT-PERP", "5m")
+
+        assert result["files_before"] == 1
+        assert result["files_after"] == 1
+        assert result["bars_count"] == 0
+        assert result["size_before"] == len(b"single")
+        assert result["size_after"] == len(b"single")

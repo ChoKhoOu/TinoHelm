@@ -96,7 +96,9 @@ class TestIngestResult:
 
 
 class TestFundingRateWrites:
-    def test_legacy_json_cache_merges_incremental_records(self, tmp_path: Path, paths_override, monkeypatch):
+    def test_funding_txn_write_and_flush_merges_incremental_records(self, tmp_path: Path, paths_override, monkeypatch):
+        """Pipeline funding writes use FundingRateTxn — verify write + flush semantics."""
+        from tinohelm.data.catalog import CatalogSession, FundingRateTxn
         from tinohelm.data.funding_cache import _load_cache, _save_cache
 
         paths_override("funding_rates", tmp_path / "funding_rates")
@@ -108,17 +110,18 @@ class TestFundingRateWrites:
             return tmp_path / "catalog" / "funding_rates" / "BTCUSDT-PERP.parquet"
 
         monkeypatch.setattr("tinohelm.data.catalog.write_funding_rate_parquet", _write_parquet)
-        pipeline = BinanceVisionPipeline(catalog_path=tmp_path / "catalog")
-        records = [
-            SimpleNamespace(funding_time_ms=2_000, funding_rate=0.02),
-        ]
 
-        pipeline._write_funding_rates(records, "BTCUSDT-PERP")
-        assert _load_cache("BTCUSDT-PERP") == [
-            {"funding_time_ms": 1_000, "funding_rate": 0.01, "mark_price": 100.0},
-        ]
-
-        pipeline._flush_pending_funding_cache("BTCUSDT-PERP")
+        session = CatalogSession(tmp_path / "catalog")
+        with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
+            records = [
+                SimpleNamespace(funding_time_ms=2_000, funding_rate=0.02),
+            ]
+            txn.write_parquet(records)
+            # Before flush, JSON cache is unchanged
+            assert _load_cache("BTCUSDT-PERP") == [
+                {"funding_time_ms": 1_000, "funding_rate": 0.01, "mark_price": 100.0},
+            ]
+            txn.flush_json()
 
         cached = _load_cache("BTCUSDT-PERP")
         assert [row["funding_time_ms"] for row in cached] == [1_000, 2_000]
@@ -1395,15 +1398,25 @@ class TestIngestEarlyFailClosed:
     def test_funding_cache_restore_removes_new_cache_when_none_existed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        from tinohelm.data.catalog import CatalogSession
+
         symbol = "BTCUSDT-PERP"
         cache_path = tmp_path / "funding-cache" / "btcusdt-perp.json"
         monkeypatch.setattr("tinohelm.data.funding_cache._cache_path", lambda _symbol: cache_path)
 
-        snapshot = BinanceVisionPipeline._snapshot_funding_cache(symbol)
+        snapshot = CatalogSession._take_funding_snapshot(symbol)
         cache_path.parent.mkdir(parents=True)
         cache_path.write_bytes(b"mutated-cache")
 
-        BinanceVisionPipeline._restore_funding_cache(snapshot)
+        snapshot.path = cache_path
+        from tinohelm.data.catalog import FundingRateTxn
+
+        txn = FundingRateTxn(
+            catalog_path=tmp_path,
+            symbol=symbol,
+            snapshot=snapshot,
+        )
+        txn.restore()
 
         assert not cache_path.exists()
 
@@ -1634,9 +1647,13 @@ class TestIngestEarlyFailClosed:
             BinanceVisionPipeline._parquet_time_range(tmp_path / "broken.parquet", storage=Storage())
 
     def test_funding_rate_parquet_failure_does_not_commit_json_cache(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths_override
     ):
+        """FundingRateTxn: if write_parquet raises, flush_json is never reached."""
+        from tinohelm.data.catalog import CatalogSession, FundingRateTxn
+
         saved: list[list[dict]] = []
+        paths_override("funding_rates", tmp_path / "funding_rates")
 
         def boom(**_kwargs):
             raise RuntimeError("parquet write failed")
@@ -1646,11 +1663,12 @@ class TestIngestEarlyFailClosed:
             "tinohelm.data.funding_cache._save_cache",
             lambda _symbol, records: saved.append(records),
         )
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        session = CatalogSession(tmp_path)
         records = [SimpleNamespace(funding_time_ms=1_704_067_200_000, funding_rate=0.01)]
 
         with pytest.raises(RuntimeError, match="parquet write failed"):
-            p._write_funding_rates(records, "BTCUSDT-PERP")
+            with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
+                txn.write_parquet(records)
 
         assert saved == []
 
@@ -2845,19 +2863,18 @@ class TestFundingRateCacheShortCircuit:
         self, monkeypatch: pytest.MonkeyPatch,
     ):
         import tinohelm.data.funding_cache as fc
-        # Seed a cache spanning 2024-01-01 → 2024-02-01 (UTC ms).
-        # 1704067200000 = 2024-01-01 00:00:00 UTC
-        # 1706745600000 = 2024-02-01 00:00:00 UTC
         monkeypatch.setattr(fc, "_load_cache", lambda sym: [
             {"funding_time_ms": 1_704_067_200_000, "funding_rate": 0.01},
             {"funding_time_ms": 1_705_276_800_000, "funding_rate": 0.02},
             {"funding_time_ms": 1_706_745_600_000, "funding_rate": 0.03},
         ])
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.funding_parquet_covers",
+            lambda self, symbol, start, end: True,
+        )
 
         p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
-        p._funding_parquet_covers = MagicMock(return_value=True)
 
-        # plan_downloads must NOT be called because JSON + primary Parquet cover the range.
         mock_dl = MagicMock()
         mock_dl.plan_downloads.side_effect = AssertionError(
             "plan_downloads must not run when cache covers range"

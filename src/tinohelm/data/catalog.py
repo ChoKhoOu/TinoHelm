@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from tinohelm.data.catalog_helpers import (
     CATEGORY_DIR,
@@ -1169,6 +1170,10 @@ class CatalogSession:
         end_dt = _dt.combine(end, _time.max, tzinfo=_tz.utc)
         return compute_fetch_start(cached_times, start=start_dt, end=end_dt) is None
 
+    def funding_rate_parquet_path(self, symbol: str) -> Path:
+        """Return the primary funding-rate Parquet path for ``symbol``."""
+        return funding_rate_parquet_path(symbol, self.catalog_path)
+
     def funding_parquet_covers(self, symbol: str, start, end) -> bool:
         """Return ``True`` iff the primary funding-rate Parquet spans ``[start, end]``."""
         from datetime import UTC, datetime
@@ -1202,18 +1207,104 @@ class CatalogSession:
 
         Local and remote providers return the same dict shape:
         ``{files_before, files_after, bars_count, size_before, size_after}``.
-        Remote implementation is deferred to PR3 — calling ``compact_bars``
-        against a remote storage provider here raises ``NotImplementedError``.
         """
         storage = self.storage
         if getattr(storage, "provider", "local") == "local":
             return compact_bars(
                 symbol=symbol, interval=interval, catalog_path=self.catalog_path
             )
-        raise NotImplementedError(
-            "CatalogSession.compact_bars does not yet support remote storage; "
-            "remote compaction will land in Issue #156 PR3."
+        return self._compact_bars_remote(symbol, interval)
+
+    def _compact_bars_remote(self, symbol: str, interval: str) -> dict:
+        """Remote storage compaction: read bars → dedupe → write to temp → promote."""
+        from tinohelm.data.catalog_helpers import dedupe_by_ts
+        from tinohelm.data.storage import delete_prefix, promote_objects_with_rollback
+
+        storage = self.storage
+        instrument = _make_instrument(symbol)
+        bar_type = _make_bar_type(instrument.id, interval)
+        bar_dir = self.catalog_path / "data" / "bar" / str(bar_type)
+        existing_objects = list(
+            storage.iter_files(bar_dir, suffix=".parquet", recursive=False)
         )
+        files_before = len(existing_objects)
+        size_before = sum(int(obj.size or 0) for obj in existing_objects)
+
+        if files_before <= 1:
+            return {
+                "files_before": files_before,
+                "files_after": files_before,
+                "bars_count": 0,
+                "size_before": size_before,
+                "size_after": size_before,
+            }
+
+        catalog = _catalog_for_root(self.catalog_path, storage)
+        bars = catalog.bars(bar_types=[str(bar_type)])
+        if not bars:
+            return {
+                "files_before": files_before,
+                "files_after": files_before,
+                "bars_count": 0,
+                "size_before": size_before,
+                "size_after": size_before,
+            }
+
+        bars = dedupe_by_ts(bars)
+        logger.info(
+            "Compacting remote %s %s: %d files -> %d bars",
+            symbol, interval, files_before, len(bars),
+        )
+
+        temp_catalog_path = self.catalog_path / ".compaction" / f"{bar_type}-{uuid4().hex}"
+        rollback_prefix = self.catalog_path / ".compaction-rollback" / f"{bar_type}-{uuid4().hex}"
+        try:
+            temp_catalog = _catalog_for_root(temp_catalog_path, storage)
+            temp_catalog.write_data([instrument])
+            temp_catalog.write_data(bars)
+
+            temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
+            temp_objects = list(
+                storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False)
+            )
+            if not temp_objects:
+                raise RuntimeError(
+                    f"Remote compaction produced no parquet files for {symbol} {interval}"
+                )
+
+            promote_objects_with_rollback(
+                storage,
+                temp_objects,
+                bar_dir,
+                existing_objects,
+                rollback_prefix=rollback_prefix,
+            )
+        finally:
+            try:
+                delete_prefix(storage, temp_catalog_path)
+            except Exception:
+                logger.warning(
+                    "Failed to clean temporary remote compaction prefix %s",
+                    temp_catalog_path,
+                    exc_info=True,
+                )
+
+        new_objects = list(
+            storage.iter_files(bar_dir, suffix=".parquet", recursive=False)
+        )
+        if not new_objects:
+            raise RuntimeError(
+                f"Remote compaction produced no parquet files for {symbol} {interval}"
+            )
+        size_after = sum(int(obj.size or 0) for obj in new_objects)
+
+        return {
+            "files_before": files_before,
+            "files_after": len(new_objects),
+            "bars_count": len(bars),
+            "size_before": size_before,
+            "size_after": size_after,
+        }
 
     def _delete_funding_rate(self, symbol: str) -> tuple[int, int]:
         from tinohelm.core.paths import paths
