@@ -483,6 +483,63 @@ class TestIngestEarlyFailClosed:
             "pre_update_row": pre_update_row,
         }) is False
 
+    def test_catalog_commit_proof_rejects_tokenless_changed_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        row = SimpleNamespace(
+            symbol="BTCUSDT-PERP",
+            data_type="trade_tick",
+            interval="tick",
+            source_type="aggTrades",
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 1, 1),
+            file_path="/catalog/aggTrades",
+            record_count=101,
+            size_bytes=4097,
+            last_ingest_id=None,
+        )
+        pre_update_row = {
+            "symbol": row.symbol,
+            "data_type": row.data_type,
+            "interval": row.interval,
+            "source_type": row.source_type,
+            "start_date": row.start_date.isoformat(),
+            "end_date": row.end_date.isoformat(),
+            "file_path": row.file_path,
+            "record_count": 100,
+            "size_bytes": 4096,
+            "last_ingest_id": None,
+        }
+
+        class Result:
+            def scalar_one_or_none(self):
+                return row
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, _stmt):
+                return Result()
+
+        monkeypatch.setattr("tinohelm.db.session.get_session_factory", lambda: Session)
+
+        assert _catalog_commit_is_persisted({
+            "symbol": row.symbol,
+            "data_type": row.data_type,
+            "interval": row.interval,
+            "source_type": row.source_type,
+            "start_date": row.start_date.isoformat(),
+            "end_date": row.end_date.isoformat(),
+            "file_path": row.file_path,
+            "record_count": row.record_count,
+            "size_bytes": row.size_bytes,
+            "pre_update_row": pre_update_row,
+        }) is False
+
     def test_catalog_commit_proof_accepts_same_metadata_with_matching_ingest_id(
         self, monkeypatch: pytest.MonkeyPatch
     ):

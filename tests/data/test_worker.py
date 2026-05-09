@@ -94,6 +94,40 @@ class TestRecoverInterruptedJobs:
         # factory is resolved at call time
         assert called["factory"] == "FAKE_FACTORY"
 
+    async def test_startup_rollback_recovery_keeps_db_check_on_current_event_loop(
+        self, monkeypatch, tmp_path
+    ):
+        storage = SimpleNamespace(catalog_root=tmp_path / "catalog")
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=storage.catalog_root))
+        calls: dict = {}
+
+        async def fake_recover(catalog_path, *, storage):
+            calls["loop"] = asyncio.get_running_loop()
+            calls["catalog_path"] = catalog_path
+            calls["storage"] = storage
+            return 3
+
+        async def fail_to_thread(*_args, **_kwargs):
+            raise AssertionError("startup rollback recovery must not run inside asyncio.to_thread")
+
+        monkeypatch.setattr(dw, "get_settings", lambda: settings)
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **_kwargs: storage)
+        monkeypatch.setattr(
+            "tinohelm.data.pipeline.recover_pending_ingest_rollbacks_async",
+            fake_recover,
+            raising=False,
+        )
+        monkeypatch.setattr(dw.asyncio, "to_thread", fail_to_thread)
+
+        restored = await dw._recover_pending_ingest_rollbacks_on_startup()
+
+        assert restored == 3
+        assert calls == {
+            "loop": asyncio.get_running_loop(),
+            "catalog_path": storage.catalog_root,
+            "storage": storage,
+        }
+
 
 # ---------------------------------------------------------------------------
 # _process_job — DB + Redis + pipeline integration

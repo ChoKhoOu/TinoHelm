@@ -75,16 +75,12 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
 
 async def _recover_pending_ingest_rollbacks_on_startup() -> int:
     """Restore crash-stranded ingest rollback objects before consumers start."""
-    from tinohelm.data.pipeline import recover_pending_ingest_rollbacks
+    from tinohelm.data.pipeline import recover_pending_ingest_rollbacks_async
     from tinohelm.data.storage import get_catalog_storage
 
     settings = get_settings()
     storage = get_catalog_storage(settings=settings, catalog_root=settings.paths.catalog)
-    return await asyncio.to_thread(
-        recover_pending_ingest_rollbacks,
-        storage.catalog_root,
-        storage=storage,
-    )
+    return await recover_pending_ingest_rollbacks_async(storage.catalog_root, storage=storage)
 
 
 def _rowcount(result) -> int:

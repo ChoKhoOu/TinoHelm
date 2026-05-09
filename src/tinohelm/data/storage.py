@@ -9,6 +9,7 @@ fsspec URI host leakage into storage options.
 """
 from __future__ import annotations
 
+import errno
 import logging
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,17 @@ from urllib.parse import urlparse
 from tinohelm.core.config import Settings, TosStorageSettings, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _is_not_found_error(exc: BaseException) -> bool:
+    if isinstance(exc, FileNotFoundError):
+        return True
+    if isinstance(exc, KeyError):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOENT:
+        return True
+    text = str(exc).lower()
+    return any(token in text for token in ("404", "not found", "no such key", "nosuchkey"))
 
 
 @dataclass(frozen=True)
@@ -417,8 +429,12 @@ class S3CatalogStorage:
         fs_path = self._fs_path_for_key(key)
         try:
             info = self.fs.info(fs_path)
-        except (FileNotFoundError, OSError, KeyError) as exc:
+        except (FileNotFoundError, KeyError) as exc:
             raise FileNotFoundError(fs_path) from exc
+        except OSError as exc:
+            if _is_not_found_error(exc):
+                raise FileNotFoundError(fs_path) from exc
+            raise
         return self._object_for_key(key, info)
 
     def _object_for_key(self, key: str, info: dict[str, Any] | Any | None = None) -> StorageObject:
@@ -649,6 +665,7 @@ def promote_objects_with_rollback(
             try:
                 provider.delete_path(promoted_path)
             except Exception:
+                cleanup_rollback = False
                 logger.warning("Failed to rollback promoted object %s", promoted_path, exc_info=True)
         for old_path, backup_path in backup_paths.items():
             try:

@@ -363,63 +363,135 @@ def _catalog_snapshot_matches(current: dict[str, Any] | None, expected: Any) -> 
     return current == expected_snapshot
 
 
-def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
-    """Return True only when the DB row carries this ingest's commit witness."""
+def _parse_catalog_commit_payload(commit_payload: Any) -> dict[str, Any] | None:
+    """Validate rollback manifest DB commit witness payload."""
     if not isinstance(commit_payload, dict):
-        return False
+        return None
     if "pre_update_row" not in commit_payload:
-        return False
+        return None
     try:
-        symbol = str(commit_payload["symbol"])
-        data_type = str(commit_payload["data_type"])
-        interval = str(commit_payload["interval"])
-        source_type = commit_payload.get("source_type")
-        if source_type is not None:
-            source_type = str(source_type)
-        start = date.fromisoformat(str(commit_payload["start_date"]))
-        end = date.fromisoformat(str(commit_payload["end_date"]))
-        file_path = str(commit_payload["file_path"])
-        pre_update_row = commit_payload["pre_update_row"]
         ingest_run_id = commit_payload.get("ingest_run_id")
-        if ingest_run_id is not None:
-            ingest_run_id = str(ingest_run_id)
+        if not ingest_run_id:
+            return None
+        source_type = commit_payload.get("source_type")
+        return {
+            "symbol": str(commit_payload["symbol"]),
+            "data_type": str(commit_payload["data_type"]),
+            "interval": str(commit_payload["interval"]),
+            "source_type": str(source_type) if source_type is not None else None,
+            "start": date.fromisoformat(str(commit_payload["start_date"])),
+            "end": date.fromisoformat(str(commit_payload["end_date"])),
+            "file_path": str(commit_payload["file_path"]),
+            "ingest_run_id": str(ingest_run_id),
+        }
     except Exception:
+        return None
+
+
+async def _catalog_commit_is_persisted_async(commit_payload: Any) -> bool:
+    """Return True only when the DB row carries this ingest's exact commit token."""
+    parsed = _parse_catalog_commit_payload(commit_payload)
+    if parsed is None:
         return False
 
-    async def _check() -> bool:
-        from sqlalchemy import select
-        from tinohelm.db.models import DataCatalog
-        from tinohelm.db.session import get_session_factory
+    from sqlalchemy import select
+    from tinohelm.db.models import DataCatalog
+    from tinohelm.db.session import get_session_factory
 
-        factory = get_session_factory()
-        async with factory() as session:
-            stmt = select(DataCatalog).where(
-                DataCatalog.symbol == symbol,
-                DataCatalog.data_type == data_type,
-                DataCatalog.interval == interval,
-            )
-            if source_type is None:
-                stmt = stmt.where(DataCatalog.source_type.is_(None))
-            else:
-                stmt = stmt.where(DataCatalog.source_type == source_type)
-            row = (await session.execute(stmt)).scalar_one_or_none()
-        current = _catalog_row_to_snapshot(row)
-        if current is None:
-            return False
-        if ingest_run_id is not None:
-            if current.get("last_ingest_id") != ingest_run_id:
-                return False
-        elif _catalog_snapshot_matches(current, pre_update_row):
-            return False
-        if current["file_path"] != file_path:
-            return False
-        if date.fromisoformat(current["start_date"]) > start:
-            return False
-        if date.fromisoformat(current["end_date"]) < end:
-            return False
-        return True
+    factory = get_session_factory()
+    async with factory() as session:
+        stmt = select(DataCatalog).where(
+            DataCatalog.symbol == parsed["symbol"],
+            DataCatalog.data_type == parsed["data_type"],
+            DataCatalog.interval == parsed["interval"],
+        )
+        if parsed["source_type"] is None:
+            stmt = stmt.where(DataCatalog.source_type.is_(None))
+        else:
+            stmt = stmt.where(DataCatalog.source_type == parsed["source_type"])
+        row = (await session.execute(stmt)).scalar_one_or_none()
+    current = _catalog_row_to_snapshot(row)
+    if current is None:
+        return False
+    if current.get("last_ingest_id") != parsed["ingest_run_id"]:
+        return False
+    if current["file_path"] != parsed["file_path"]:
+        return False
+    if date.fromisoformat(current["start_date"]) > parsed["start"]:
+        return False
+    if date.fromisoformat(current["end_date"]) < parsed["end"]:
+        return False
+    return True
 
-    return asyncio.run(_check())
+
+def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
+    """Synchronous wrapper for non-startup recovery callers and tests."""
+    return asyncio.run(_catalog_commit_is_persisted_async(commit_payload))
+
+
+def _rollback_manifest_objects(active_storage: Any, rollback_root: Path) -> list[Any]:
+    return [
+        obj for obj in active_storage.iter_files(rollback_root, suffix=".json", recursive=True)
+        if Path(obj.path).name == _ROLLBACK_MANIFEST
+    ]
+
+
+def _read_rollback_manifest(active_storage: Any, manifest_obj: Any) -> dict[str, Any]:
+    try:
+        payload = json.loads(active_storage.read_bytes(manifest_obj).decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"failed to read ingest rollback manifest {manifest_obj.path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"failed to read ingest rollback manifest {manifest_obj.path}")
+    return payload
+
+
+def _discard_rollback_prefix(active_storage: Any, rollback_prefix: Path) -> None:
+    from tinohelm.data.storage import delete_prefix
+
+    if getattr(active_storage, "provider", "local") != "local":
+        delete_prefix(active_storage, rollback_prefix)
+        return
+    shutil.rmtree(rollback_prefix, ignore_errors=True)
+    try:
+        rollback_prefix.parent.rmdir()
+    except OSError:
+        pass
+
+
+def _restore_rollback_payload(active_storage: Any, manifest_obj: Any, payload: dict[str, Any]) -> int:
+    from tinohelm.data.storage import delete_prefix
+
+    try:
+        backups = payload.get("backups") or []
+        rollback_prefix = Path(payload.get("rollback_prefix") or Path(manifest_obj.path).parent)
+        target_dir_raw = payload.get("target_dir")
+        target_dir = Path(target_dir_raw) if target_dir_raw else None
+        preserved_paths = {Path(path) for path in payload.get("preserved_paths") or []}
+        original_paths = {Path(path) for path in payload.get("original_paths") or []}
+    except Exception as exc:
+        raise RuntimeError(f"failed to read ingest rollback manifest {manifest_obj.path}") from exc
+
+    restored_paths = {Path(entry["original_path"]) for entry in backups}
+    restored = 0
+    try:
+        for entry in reversed(backups):
+            active_storage.copy_path(Path(entry["backup_path"]), Path(entry["original_path"]))
+            restored += 1
+        if target_dir is not None and payload.get("complete") is True:
+            keep_paths = restored_paths | preserved_paths | original_paths
+            for obj in list(active_storage.iter_files(target_dir, suffix=".parquet", recursive=False)):
+                active_path = Path(obj.path)
+                if active_path in keep_paths:
+                    continue
+                delete_prefix(active_storage, active_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"failed to restore ingest rollback backups from {manifest_obj.path}"
+        ) from exc
+
+    _discard_rollback_prefix(active_storage, rollback_prefix)
+    return restored
 
 
 def recover_pending_ingest_rollbacks(
@@ -428,38 +500,20 @@ def recover_pending_ingest_rollbacks(
     storage: Any | None = None,
 ) -> int:
     """Restore crash-stranded ingest rollback backups before new mutations."""
-    from tinohelm.data.storage import delete_prefix, get_catalog_storage
+    from tinohelm.data.storage import get_catalog_storage
 
     catalog_root = Path(catalog_path)
     active_storage = storage or get_catalog_storage(catalog_root=catalog_root)
     rollback_root = catalog_root / ".ingest-rollback"
-    manifests = [
-        obj for obj in active_storage.iter_files(rollback_root, suffix=".json", recursive=True)
-        if Path(obj.path).name == _ROLLBACK_MANIFEST
-    ]
+    manifests = _rollback_manifest_objects(active_storage, rollback_root)
     restored = 0
     for manifest_obj in manifests:
-        try:
-            payload = json.loads(active_storage.read_bytes(manifest_obj).decode("utf-8"))
-            backups = payload.get("backups") or []
-            rollback_prefix = Path(payload.get("rollback_prefix") or Path(manifest_obj.path).parent)
-            target_dir_raw = payload.get("target_dir")
-            target_dir = Path(target_dir_raw) if target_dir_raw else None
-            preserved_paths = {Path(path) for path in payload.get("preserved_paths") or []}
-            original_paths = {Path(path) for path in payload.get("original_paths") or []}
-        except Exception as exc:
-            raise RuntimeError(f"failed to read ingest rollback manifest {manifest_obj.path}") from exc
+        payload = _read_rollback_manifest(active_storage, manifest_obj)
+        rollback_prefix = Path(payload.get("rollback_prefix") or Path(manifest_obj.path).parent)
 
         if payload.get("resolved") is True:
             try:
-                if getattr(active_storage, "provider", "local") != "local":
-                    delete_prefix(active_storage, rollback_prefix)
-                else:
-                    shutil.rmtree(rollback_prefix, ignore_errors=True)
-                    try:
-                        rollback_prefix.parent.rmdir()
-                    except OSError:
-                        pass
+                _discard_rollback_prefix(active_storage, rollback_prefix)
             except Exception:
                 logger.warning(
                     "Failed to discard resolved ingest rollback prefix %s",
@@ -471,14 +525,7 @@ def recover_pending_ingest_rollbacks(
         catalog_commit = payload.get("catalog_commit")
         if catalog_commit and _catalog_commit_is_persisted(catalog_commit):
             try:
-                if getattr(active_storage, "provider", "local") != "local":
-                    delete_prefix(active_storage, rollback_prefix)
-                else:
-                    shutil.rmtree(rollback_prefix, ignore_errors=True)
-                    try:
-                        rollback_prefix.parent.rmdir()
-                    except OSError:
-                        pass
+                _discard_rollback_prefix(active_storage, rollback_prefix)
             except Exception:
                 logger.warning(
                     "Failed to discard committed ingest rollback prefix %s",
@@ -487,31 +534,54 @@ def recover_pending_ingest_rollbacks(
                 )
             continue
 
-        restored_paths = {Path(entry["original_path"]) for entry in backups}
-        try:
-            for entry in reversed(backups):
-                active_storage.copy_path(Path(entry["backup_path"]), Path(entry["original_path"]))
-                restored += 1
-            if target_dir is not None and payload.get("complete") is True:
-                keep_paths = restored_paths | preserved_paths | original_paths
-                for obj in list(active_storage.iter_files(target_dir, suffix=".parquet", recursive=False)):
-                    active_path = Path(obj.path)
-                    if active_path in keep_paths:
-                        continue
-                    delete_prefix(active_storage, active_path)
-        except Exception as exc:
-            raise RuntimeError(
-                f"failed to restore ingest rollback backups from {manifest_obj.path}"
-            ) from exc
+        restored += _restore_rollback_payload(active_storage, manifest_obj, payload)
 
-        if getattr(active_storage, "provider", "local") != "local":
-            delete_prefix(active_storage, rollback_prefix)
-        else:
-            shutil.rmtree(rollback_prefix, ignore_errors=True)
+    if restored:
+        logger.warning("Restored %d parquet object(s) from pending ingest rollback", restored)
+    return restored
+
+
+async def recover_pending_ingest_rollbacks_async(
+    catalog_path: str | Path,
+    *,
+    storage: Any | None = None,
+) -> int:
+    """Async startup recovery; DB witness checks stay on the current event loop."""
+    from tinohelm.data.storage import get_catalog_storage
+
+    catalog_root = Path(catalog_path)
+    active_storage = storage or await asyncio.to_thread(get_catalog_storage, catalog_root=catalog_root)
+    rollback_root = catalog_root / ".ingest-rollback"
+    manifests = await asyncio.to_thread(_rollback_manifest_objects, active_storage, rollback_root)
+    restored = 0
+    for manifest_obj in manifests:
+        payload = await asyncio.to_thread(_read_rollback_manifest, active_storage, manifest_obj)
+        rollback_prefix = Path(payload.get("rollback_prefix") or Path(manifest_obj.path).parent)
+
+        if payload.get("resolved") is True:
             try:
-                rollback_prefix.parent.rmdir()
-            except OSError:
-                pass
+                await asyncio.to_thread(_discard_rollback_prefix, active_storage, rollback_prefix)
+            except Exception:
+                logger.warning(
+                    "Failed to discard resolved ingest rollback prefix %s",
+                    rollback_prefix,
+                    exc_info=True,
+                )
+            continue
+
+        catalog_commit = payload.get("catalog_commit")
+        if catalog_commit and await _catalog_commit_is_persisted_async(catalog_commit):
+            try:
+                await asyncio.to_thread(_discard_rollback_prefix, active_storage, rollback_prefix)
+            except Exception:
+                logger.warning(
+                    "Failed to discard committed ingest rollback prefix %s",
+                    rollback_prefix,
+                    exc_info=True,
+                )
+            continue
+
+        restored += await asyncio.to_thread(_restore_rollback_payload, active_storage, manifest_obj, payload)
 
     if restored:
         logger.warning("Restored %d parquet object(s) from pending ingest rollback", restored)
