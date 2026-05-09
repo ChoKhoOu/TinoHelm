@@ -687,9 +687,11 @@ class TestAggregateParquetStats:
         assert stats["size_bytes"] == 10  # not 109
 
     def test_matches_routes_helper_for_local_bars(self, tmp_path: Path):
-        """Session aggregate_parquet_stats must equal the route-level helper."""
-        from tinohelm.api.routes.data import _aggregate_parquet_object_stats
-        from tinohelm.data.catalog import CatalogSession
+        """Session aggregate_parquet_stats must equal the module-level helper."""
+        from tinohelm.data.catalog import (
+            CatalogSession,
+            _aggregate_parquet_object_stats,
+        )
         from tinohelm.data.storage import get_catalog_storage
         from tinohelm.strategy.loader_helpers import make_bar_type_str
 
@@ -715,6 +717,380 @@ class TestAggregateParquetStats:
             source_type="klines",
         )
         assert got == expected
+
+
+class TestParquetSizeFor:
+    """Covers the bar-only ``session.parquet_size_for`` added for PR2 —
+    replaces the route-level ``_parquet_size_for`` helper.
+    """
+
+    def test_returns_zero_when_dir_missing(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession
+
+        session = CatalogSession(tmp_path)
+        assert session.parquet_size_for("BTCUSDT-PERP", "5m") == 0
+
+    def test_sums_parquet_files(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession
+        from tinohelm.strategy.loader_helpers import make_bar_type_str
+
+        bar_dir = tmp_path / "data" / "bar" / make_bar_type_str("BTCUSDT-PERP", "5m")
+        bar_dir.mkdir(parents=True)
+        (bar_dir / "a.parquet").write_bytes(b"x" * 100)
+        (bar_dir / "b.parquet").write_bytes(b"y" * 200)
+        # Non-parquet files must be ignored.
+        (bar_dir / "ignore.txt").write_bytes(b"z" * 1000)
+
+        session = CatalogSession(tmp_path)
+        assert session.parquet_size_for("BTCUSDT-PERP", "5m") == 300
+
+    def test_invalid_interval_propagates_value_error(self, tmp_path: Path):
+        import pytest
+
+        from tinohelm.data.catalog import CatalogSession
+
+        session = CatalogSession(tmp_path)
+        with pytest.raises(ValueError):
+            session.parquet_size_for("BTCUSDT-PERP", "5x")
+
+
+class TestScanBars:
+    """Covers ``session.scan_bars`` (PR2) — replaces the in-route aggregation
+    over ``data/bar/<bar_type>`` dirs. The DB upsert lives in the route."""
+
+    def test_empty_catalog_returns_no_entries(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_bars()
+        assert result.entries == []
+        assert result.scanned == 0
+
+    def test_source_aware_layout_produces_one_entry_per_symbol_interval_source(
+        self, tmp_path: Path
+    ):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader import normalize_symbol
+
+        symbol = "BTCUSDT-PERP"
+        nt_sym = normalize_symbol(symbol)
+        source_root = resolve_catalog_path(tmp_path, "klines")
+        bar_dir = source_root / "data" / "bar" / f"{nt_sym}-5-MINUTE-LAST-EXTERNAL"
+        bar_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(
+            bar_dir / "a.parquet"
+        )
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_bars()
+
+        assert result.scanned == 1
+        assert len(result.entries) == 1
+        entry = result.entries[0]
+        assert entry.symbol == symbol
+        assert entry.data_type == "bar"
+        assert entry.interval == "5m"
+        assert entry.source_type == "klines"
+        assert entry.record_count == 1
+        assert entry.file_path == str(source_root)
+
+    def test_legacy_flat_layout_attributes_to_klines(self, tmp_path: Path):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession
+        from tinohelm.strategy.loader import normalize_symbol
+
+        nt_sym = normalize_symbol("BTCUSDT-PERP")
+        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        legacy_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(
+            legacy_dir / "legacy.parquet"
+        )
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_bars()
+
+        assert result.scanned == 1
+        assert len(result.entries) == 1
+        entry = result.entries[0]
+        assert entry.source_type == "klines"
+        assert entry.file_path == str(tmp_path)
+
+    def test_source_aware_plus_legacy_merges_size_and_record_count(
+        self, tmp_path: Path
+    ):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader import normalize_symbol
+
+        nt_sym = normalize_symbol("BTCUSDT-PERP")
+        source_root = resolve_catalog_path(tmp_path, "klines")
+        source_dir = source_root / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        source_dir.mkdir(parents=True)
+        legacy_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}
+        ).write_parquet(source_dir / "source.parquet")
+        pl.DataFrame(
+            {
+                "ts_event": [
+                    1_735_862_400_000_000_000,
+                    1_735_948_800_000_000_000,
+                    1_736_035_200_000_000_000,
+                ]
+            }
+        ).write_parquet(legacy_dir / "legacy.parquet")
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_bars()
+
+        assert len(result.entries) == 1
+        entry = result.entries[0]
+        assert entry.record_count == 5
+        # Source-aware wins as the reported file_path once present.
+        assert entry.file_path == str(source_root)
+
+
+class TestScanTicks:
+    def test_empty_catalog_returns_no_entries(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_ticks()
+        assert result.entries == []
+        assert result.scanned == 0
+
+    def test_book_ticker_produces_quote_tick_entry(self, tmp_path: Path):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader import normalize_symbol
+
+        nt_sym = normalize_symbol("BTCUSDT-PERP")
+        source_root = resolve_catalog_path(tmp_path, "bookTicker")
+        quote_dir = source_root / "data" / "quote_tick" / nt_sym
+        quote_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(
+            quote_dir / "quotes.parquet"
+        )
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_ticks()
+
+        assert result.scanned == 1
+        assert len(result.entries) == 1
+        entry = result.entries[0]
+        assert entry.symbol == "BTCUSDT-PERP"
+        assert entry.data_type == "quote_tick"
+        assert entry.interval == "tick"
+        assert entry.source_type == "bookTicker"
+        assert entry.file_path == str(source_root)
+
+    def test_source_aware_trades_and_legacy_agg_trades_stay_separate(
+        self, tmp_path: Path
+    ):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader import normalize_symbol
+
+        nt_sym = normalize_symbol("BTCUSDT-PERP")
+        trades_root = resolve_catalog_path(tmp_path, "trades")
+        trades_dir = trades_root / "data" / "trade_tick" / nt_sym
+        legacy_dir = tmp_path / "data" / "trade_tick" / nt_sym
+        trades_dir.mkdir(parents=True)
+        legacy_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}
+        ).write_parquet(trades_dir / "trades.parquet")
+        pl.DataFrame(
+            {
+                "ts_event": [
+                    1_735_862_400_000_000_000,
+                    1_735_948_800_000_000_000,
+                    1_736_035_200_000_000_000,
+                ]
+            }
+        ).write_parquet(legacy_dir / "legacy.parquet")
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_ticks()
+
+        entries = {entry.source_type: entry for entry in result.entries}
+        assert set(entries) == {"trades", "aggTrades"}
+        assert entries["trades"].record_count == 2
+        assert entries["aggTrades"].record_count == 3
+        assert entries["trades"].file_path == str(trades_root)
+        assert entries["aggTrades"].file_path == str(tmp_path)
+
+
+class TestMergedBarStats:
+    """``merged_bar_stats`` merges source-aware + legacy flat layouts for the
+    same ``(symbol, interval, source_type)``. Mirrors what ``scan_bars`` does
+    internally — needed by the compact background task so it doesn't overwrite
+    the DB row's ``size_bytes`` / ``record_count`` when only one layout was
+    compacted.
+    """
+
+    def test_returns_none_when_no_parquet_anywhere(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession
+
+        session = CatalogSession(tmp_path)
+        assert (
+            session.merged_bar_stats("BTCUSDT-PERP", "5m", source_type="klines")
+            is None
+        )
+
+    def test_merges_source_aware_and_legacy_counts(self, tmp_path: Path):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader_helpers import make_bar_type_str
+
+        nt_sub = make_bar_type_str("BTCUSDT-PERP", "5m")
+        source_root = resolve_catalog_path(tmp_path, "klines")
+        source_dir = source_root / "data" / "bar" / nt_sub
+        legacy_dir = tmp_path / "data" / "bar" / nt_sub
+        source_dir.mkdir(parents=True)
+        legacy_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}
+        ).write_parquet(source_dir / "source.parquet")
+        pl.DataFrame(
+            {
+                "ts_event": [
+                    1_735_862_400_000_000_000,
+                    1_735_948_800_000_000_000,
+                    1_736_035_200_000_000_000,
+                ]
+            }
+        ).write_parquet(legacy_dir / "legacy.parquet")
+
+        session = CatalogSession(tmp_path)
+        stats = session.merged_bar_stats("BTCUSDT-PERP", "5m", source_type="klines")
+        assert stats is not None
+        assert stats["record_count"] == 5
+        expected_size = (source_dir / "source.parquet").stat().st_size + (
+            legacy_dir / "legacy.parquet"
+        ).stat().st_size
+        assert stats["size_bytes"] == expected_size
+
+    def test_non_default_source_does_not_fold_legacy(self, tmp_path: Path):
+        """Only the legacy default (``klines``) owns the flat fallback —
+        ``markPriceKlines`` and friends must stay scoped to their own root.
+        """
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader_helpers import make_bar_type_str
+
+        nt_sub = make_bar_type_str("BTCUSDT-PERP", "5m")
+        mark_root = resolve_catalog_path(tmp_path, "markPriceKlines")
+        mark_dir = mark_root / "data" / "bar" / nt_sub
+        legacy_dir = tmp_path / "data" / "bar" / nt_sub
+        mark_dir.mkdir(parents=True)
+        legacy_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(
+            mark_dir / "mark.parquet"
+        )
+        pl.DataFrame({"ts_event": [1_735_862_400_000_000_000]}).write_parquet(
+            legacy_dir / "legacy.parquet"
+        )
+
+        session = CatalogSession(tmp_path)
+        stats = session.merged_bar_stats(
+            "BTCUSDT-PERP", "5m", source_type="markPriceKlines"
+        )
+        assert stats is not None
+        assert stats["record_count"] == 1  # Only the markPriceKlines parquet.
+        assert stats["size_bytes"] == (mark_dir / "mark.parquet").stat().st_size
+
+
+class TestScanSingleFiles:
+    """``scan_single_files`` covers the per-symbol Parquet categories that share
+    a parent dir: funding_rate, metrics, order_book_delta. These never got
+    scanned by the pre-PR2 route loop either, but the session is the right
+    place to add the missing discovery — single source of scan truth.
+    """
+
+    def test_empty_catalog_returns_no_entries(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_single_files()
+        assert result.entries == []
+        assert result.scanned == 0
+
+    def test_funding_rate_parquet_produces_entry_per_symbol(self, tmp_path: Path):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession, funding_rate_parquet_path
+
+        for symbol in ("BTCUSDT-PERP", "ETHUSDT-PERP"):
+            path = funding_rate_parquet_path(symbol, tmp_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(path)
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_single_files()
+
+        assert result.scanned == 2
+        entries = {entry.symbol: entry for entry in result.entries}
+        assert set(entries) == {"BTCUSDT-PERP", "ETHUSDT-PERP"}
+        for entry in entries.values():
+            assert entry.data_type == "funding_rate"
+            assert entry.interval == "8h"
+            assert entry.source_type == "fundingRate"
+            assert entry.record_count == 1
+
+    def test_metrics_parquet_produces_entry(self, tmp_path: Path):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession, metrics_parquet_path
+
+        path = metrics_parquet_path("BTCUSDT-PERP", tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(path)
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_single_files()
+
+        metrics_entries = [e for e in result.entries if e.data_type == "metrics"]
+        assert len(metrics_entries) == 1
+        entry = metrics_entries[0]
+        assert entry.symbol == "BTCUSDT-PERP"
+        assert entry.source_type == "metrics"
+        assert entry.interval == "tick"
+        assert entry.record_count == 1
+
+    def test_order_book_delta_parquet_produces_entry(self, tmp_path: Path):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession, book_depth_parquet_path
+
+        path = book_depth_parquet_path("BTCUSDT-PERP", tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(path)
+
+        session = CatalogSession(tmp_path)
+        result = session.scan_single_files()
+
+        obd_entries = [e for e in result.entries if e.data_type == "order_book_delta"]
+        assert len(obd_entries) == 1
+        entry = obd_entries[0]
+        assert entry.symbol == "BTCUSDT-PERP"
+        assert entry.source_type == "bookDepth"
+        assert entry.interval == "tick"
 
 
 class TestFundingParquetCovers:
