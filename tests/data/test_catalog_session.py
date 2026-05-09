@@ -565,6 +565,62 @@ class TestFundingRateTxn:
 
         assert not (funding_dir / "solusdt-perp.json").exists()
 
+    def test_snapshot_read_failure_preserves_existing_file(
+        self, tmp_path: Path, paths_override, monkeypatch
+    ):
+        """If ``read_bytes`` fails on an existing JSON file, the snapshot must
+        NOT record ``existed=False`` — otherwise ``restore()`` would unlink the
+        real file when the transaction rolls back."""
+        import json
+
+        from tinohelm.data.catalog import CatalogSession
+
+        funding_dir = tmp_path / "funding_rates"
+        funding_dir.mkdir()
+        paths_override("funding_rates", funding_dir)
+        original = [{"funding_time_ms": 1_699_000_000_000, "funding_rate": 0.00005, "mark_price": 0}]
+        json_file = funding_dir / "btcusdt-perp.json"
+        json_file.write_text(json.dumps(original))
+
+        # Make every read_bytes call on THIS path fail — simulates a transient
+        # I/O issue that could otherwise mask the file's existence.
+        original_read_bytes = Path.read_bytes
+
+        def _fail_read(self):
+            if self == json_file:
+                raise OSError("simulated transient read failure")
+            return original_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", _fail_read)
+
+        session = CatalogSession(tmp_path)
+        with pytest.raises(Exception):
+            with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
+                # force the txn to believe it wrote parquet so restore() would
+                # reach unlink/write logic on rollback
+                txn._written_parquet = True
+                raise RuntimeError("force rollback")
+
+        # The real file must still exist after rollback.
+        monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
+        assert json_file.exists()
+        assert json.loads(json_file.read_text()) == original
+
+    def test_transaction_uses_resolved_storage(self, tmp_path: Path, paths_override):
+        """Session constructed without explicit storage must still hand the
+        resolved provider to the txn — otherwise funding parquet writes go to a
+        ``None`` backend on remote-configured sessions."""
+        from tinohelm.data.catalog import CatalogSession
+
+        funding_dir = tmp_path / "funding_rates"
+        funding_dir.mkdir()
+        paths_override("funding_rates", funding_dir)
+
+        session = CatalogSession(tmp_path)
+        assert session._storage is None  # sanity: explicit storage not injected
+        with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
+            assert txn._storage is not None
+
     def test_unflushed_normal_exit_leaves_json_untouched(
         self, tmp_path: Path, paths_override, caplog
     ):
@@ -608,6 +664,27 @@ class TestAggregateParquetStats:
             source_type="klines",
         )
         assert stats is None
+
+    def test_funding_rate_scoped_to_single_symbol(self, tmp_path: Path):
+        """metrics / order_book_delta / funding_rate share a parent dir — the session
+        must only count the requested symbol's parquet.
+        """
+        from tinohelm.data.catalog import CatalogSession, funding_rate_parquet_path
+
+        btc = funding_rate_parquet_path("BTCUSDT-PERP", tmp_path)
+        eth = funding_rate_parquet_path("ETHUSDT-PERP", tmp_path)
+        btc.parent.mkdir(parents=True, exist_ok=True)
+        btc.write_bytes(b"b" * 10)
+        eth.write_bytes(b"e" * 99)  # should not leak into BTC stats
+
+        session = CatalogSession(tmp_path)
+        stats = session.aggregate_parquet_stats(
+            symbol="BTCUSDT-PERP",
+            data_type="funding_rate",
+            interval="8h",
+        )
+        assert stats is not None
+        assert stats["size_bytes"] == 10  # not 109
 
     def test_matches_routes_helper_for_local_bars(self, tmp_path: Path):
         """Session aggregate_parquet_stats must equal the route-level helper."""

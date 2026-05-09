@@ -13,11 +13,11 @@ _Avoid_: data store, parquet store, datalake.
 **Catalog path**:
 The root directory that contains a **Catalog**. Passed as a string or Path; resolved by `catalog_helpers.resolve_catalog_path(base, source_type)`.
 
-**CatalogSession** _(introduced by candidate 1)_:
+**CatalogSession**:
 A single module that owns **Catalog** CRUD — read (parquet stats, coverage), write (bars/ticks/quotes/funding), delete (per-symbol × data_type × source_type), and compact (local + remote unified). Constructed with `(catalog_path, storage=None)`; all methods are sync.
 _Avoid_: CatalogService, CatalogManager, DataCatalogService.
 
-**FundingRateTxn** _(introduced by candidate 1)_:
+**FundingRateTxn**:
 A context manager obtained via `CatalogSession.funding_rate_transaction(symbol)`. Owns the snapshot → write Parquet → flush JSON → restore-on-failure lifecycle for funding_rate, which is the only **Catalog** datum persisted to two backends simultaneously.
 _Avoid_: FundingWriter, FundingCommitter.
 

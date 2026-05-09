@@ -374,12 +374,24 @@ class FundingRateTxn:
         self._flushed = True
 
     def restore(self) -> None:
-        """Write the JSON snapshot back, or remove the file if it didn't exist."""
+        """Write the JSON snapshot back, or remove the file if it didn't exist.
+
+        If the snapshot recorded ``existed=True`` but its payload could not be
+        captured at snapshot time, leave whatever is currently on disk alone
+        rather than overwriting with empty bytes — a best-effort recovery that
+        refuses to destroy data it couldn't read.
+        """
         snapshot = self._snapshot
         try:
             if snapshot.existed:
+                if snapshot.payload is None:
+                    logger.warning(
+                        "Skipping funding cache restore for %s — snapshot payload was unavailable",
+                        snapshot.path,
+                    )
+                    return
                 snapshot.path.parent.mkdir(parents=True, exist_ok=True)
-                snapshot.path.write_bytes(snapshot.payload or b"")
+                snapshot.path.write_bytes(snapshot.payload)
             else:
                 snapshot.path.unlink(missing_ok=True)
         except Exception:
@@ -576,12 +588,33 @@ class CatalogSession:
         interval: str,
         source_type: str | None,
     ):
-        """Yield storage objects for the directory that backs one catalog row."""
+        """Yield storage objects for one catalog row's parquet files.
+
+        For directory-backed categories (bar/trade_tick/quote_tick) this walks
+        the target dir. For single-file categories (metrics / order_book_delta /
+        funding_rate) the target is already a concrete parquet path shared
+        between symbols in its parent dir, so we only return that one object.
+        """
         storage = self.storage
-        target_dir = self._parquet_dir_for(symbol, data_type, interval, source_type)
-        if target_dir is None:
+        target = self._parquet_dir_for(symbol, data_type, interval, source_type)
+        if target is None:
             return []
-        return list(storage.iter_files(target_dir, suffix=".parquet", recursive=False))
+        if str(target).endswith(".parquet"):
+            try:
+                if not storage.exists(target):
+                    return []
+            except Exception:
+                return []
+            size = None
+            if getattr(storage, "provider", "local") == "local":
+                try:
+                    size = Path(target).stat().st_size
+                except OSError:
+                    size = None
+            from tinohelm.data.storage import StorageObject
+
+            return [StorageObject(key=str(target), path=Path(target), size=size)]
+        return list(storage.iter_files(target, suffix=".parquet", recursive=False))
 
     def _parquet_dir_for(
         self,
@@ -590,6 +623,12 @@ class CatalogSession:
         interval: str,
         source_type: str | None,
     ) -> Path | None:
+        """Return the directory (dir-backed) OR concrete file (single-file) path.
+
+        Single-file categories return the parquet path itself so callers can
+        scope stats/iteration to a specific symbol rather than bleeding across
+        every symbol that shares the parent directory.
+        """
         from tinohelm.strategy.loader_helpers import make_bar_type_str, normalize_symbol
 
         if data_type == "bar":
@@ -599,11 +638,11 @@ class CatalogSession:
             resolved = self.resolve_catalog_path(source_type)
             return resolved / "data" / data_type / normalize_symbol(symbol)
         if data_type == "metrics":
-            return metrics_parquet_path(symbol, self.catalog_path).parent
+            return metrics_parquet_path(symbol, self.catalog_path)
         if data_type == "order_book_delta":
-            return book_depth_parquet_path(symbol, self.catalog_path).parent
+            return book_depth_parquet_path(symbol, self.catalog_path)
         if data_type == "funding_rate":
-            return funding_rate_parquet_path(symbol, self.catalog_path).parent
+            return funding_rate_parquet_path(symbol, self.catalog_path)
         return None
 
     @contextmanager
@@ -619,11 +658,14 @@ class CatalogSession:
           their own DB commit or skip writing entirely.
         """
         snapshot = self._take_funding_snapshot(symbol)
+        # Resolve lazily here so remote-configured sessions built without an
+        # explicit storage argument still route the parquet write through
+        # their backend, not a silent ``None`` that defaults to local.
         txn = FundingRateTxn(
             catalog_path=self.catalog_path,
             symbol=symbol,
             snapshot=snapshot,
-            storage=self._storage,
+            storage=self.storage,
         )
         try:
             yield txn
@@ -643,13 +685,19 @@ class CatalogSession:
         from tinohelm.core.paths import paths
 
         path = paths.get("funding_rates") / f"{symbol.lower()}.json"
+        if not path.exists():
+            return _FundingCacheSnapshot(path=path, existed=False, payload=None)
+        # Preserve ``existed=True`` even if the body cannot be read: rollback
+        # must NOT unlink a real file it simply failed to snapshot. Leaving
+        # ``payload=None`` means restore will rewrite the file with an empty
+        # body, which matches the fail-safe bias (a best-effort recovery
+        # beats silent data loss).
         try:
-            if path.exists():
-                return _FundingCacheSnapshot(path=path, existed=True, payload=path.read_bytes())
-            return _FundingCacheSnapshot(path=path, existed=False, payload=None)
-        except Exception:
-            logger.warning("Failed to snapshot funding cache %s", path, exc_info=True)
-            return _FundingCacheSnapshot(path=path, existed=False, payload=None)
+            payload = path.read_bytes()
+        except OSError:
+            logger.warning("Failed to read funding cache %s; snapshot payload unavailable", path, exc_info=True)
+            return _FundingCacheSnapshot(path=path, existed=True, payload=None)
+        return _FundingCacheSnapshot(path=path, existed=True, payload=payload)
 
     def load_funding_rates(
         self,
