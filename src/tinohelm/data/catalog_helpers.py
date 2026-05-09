@@ -24,12 +24,27 @@ that only has ``pytest``, ``httpx``, and the std-lib available.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Sequence
 
 from tinohelm.data.pipeline_helpers import WRITE_CATEGORY
+
+# Short-form (user-facing) vs NT-catalog-directory aggregation names.
+# Intentionally narrower than :data:`INTERVAL_MAP` because NT's on-disk bar
+# directory suffixes only use the three time units below.
+_INTERVAL_UNIT_MAP: Mapping[str, str] = MappingProxyType({
+    "m": "MINUTE",
+    "h": "HOUR",
+    "d": "DAY",
+})
+_INTERVAL_UNIT_REVERSE: Mapping[str, str] = MappingProxyType({
+    v: k for k, v in _INTERVAL_UNIT_MAP.items()
+})
+_INTERVAL_PATTERN = re.compile(r"(\d+)([mhd])")
+_NT_SUFFIX_PATTERN = re.compile(r"(\d+)-(\w+)")
 
 # ---------------------------------------------------------------------------
 # Canonical mappings
@@ -95,6 +110,35 @@ def interval_to_step_unit(interval: str) -> tuple[int, str]:
             f"Unsupported interval {interval!r}. Supported: {list(INTERVAL_MAP.keys())}"
         )
     return pair
+
+
+def interval_to_nt_suffix(interval: str) -> str:
+    """Convert an interval token like ``"7m"`` to an NT directory suffix ``"7-MINUTE"``.
+
+    Raises
+    ------
+    ValueError
+        If ``interval`` does not match ``<digits><m|h|d>``.
+    """
+    match = _INTERVAL_PATTERN.fullmatch(interval)
+    if not match:
+        raise ValueError(
+            f"Invalid interval {interval!r}: expected <number><m|h|d> (e.g. 5m, 4h, 1d)"
+        )
+    step, unit = match.group(1), match.group(2)
+    return f"{step}-{_INTERVAL_UNIT_MAP[unit]}"
+
+
+def nt_suffix_to_interval(nt_suffix: str) -> str | None:
+    """Invert :func:`interval_to_nt_suffix`; return ``None`` on unknown shapes."""
+    match = _NT_SUFFIX_PATTERN.fullmatch(nt_suffix)
+    if not match:
+        return None
+    step, agg = match.group(1), match.group(2)
+    unit = _INTERVAL_UNIT_REVERSE.get(agg)
+    if unit is None:
+        return None
+    return f"{step}{unit}"
 
 
 def interval_to_nanoseconds(interval: str) -> int:

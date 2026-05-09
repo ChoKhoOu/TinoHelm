@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 from urllib.parse import urlparse
 
 from tinohelm.data.catalog_helpers import (
@@ -50,6 +52,22 @@ _SOURCE_TO_CATEGORY: dict[str, str] = {
     if cat in WRITABLE_CATEGORIES
 }
 
+# Default source-types carried by legacy (pre-source-aware) catalog rows.
+# Used by ``CatalogSession`` to replicate the double-delete / fallback semantics
+# that ``api/routes/data.py`` implements via its own ``_LEGACY_DEFAULT_SOURCE``
+# table. Keep the two in sync — candidate 2 (``DataTypeRegistry``) will
+# eventually collapse them.
+_LEGACY_DEFAULT_SOURCE: dict[str, str] = {
+    "bar": "klines",
+    "trade_tick": "aggTrades",
+    "quote_tick": "bookTicker",
+    "funding_rate": "fundingRate",
+    "order_book_delta": "bookDepth",
+    "liquidation": "liquidationSnapshot",
+    "metrics": "metrics",
+}
+_LEGACY_DEFAULT_SOURCE_FOR_BAR = _LEGACY_DEFAULT_SOURCE["bar"]
+
 
 def _interval_to_nanoseconds(interval: str) -> int:
     """Backward-compatible wrapper around :func:`interval_to_nanoseconds`."""
@@ -81,11 +99,681 @@ def _make_bar_type(instrument_id, interval: str):
     )
 
 
+def _parquet_stat_value_to_ns(value: Any) -> int:
+    """Normalise a Parquet ``min``/``max`` statistic to epoch nanoseconds."""
+    from datetime import datetime, timezone
+
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1_000_000_000)
+    return int(value)
+
+
+def _parquet_object_stats(path_or_object: Any, storage: Any | None = None) -> dict[str, Any] | None:
+    """Return row count / timestamp range / size stats for one parquet object."""
+    try:
+        import pyarrow.parquet as pq
+
+        if storage is not None and getattr(storage, "provider", "local") != "local":
+            with storage.open_input_file(path_or_object) as fh:
+                metadata = pq.ParquetFile(fh).metadata
+        else:
+            path = path_or_object.path if hasattr(path_or_object, "path") else path_or_object
+            metadata = pq.read_metadata(Path(path))
+    except Exception:
+        return None
+
+    total_rows = int(metadata.num_rows)
+    ts_min: int | None = None
+    ts_max: int | None = None
+    for rg_idx in range(metadata.num_row_groups):
+        rg = metadata.row_group(rg_idx)
+        for col_idx in range(rg.num_columns):
+            col = rg.column(col_idx)
+            if col.path_in_schema not in {"ts_event", "ts_init"}:
+                continue
+            if col.statistics and col.statistics.has_min_max:
+                stat_min = _parquet_stat_value_to_ns(col.statistics.min)
+                stat_max = _parquet_stat_value_to_ns(col.statistics.max)
+                ts_min = stat_min if ts_min is None else min(ts_min, stat_min)
+                ts_max = stat_max if ts_max is None else max(ts_max, stat_max)
+    size = getattr(path_or_object, "size", None)
+    if size is None:
+        path = getattr(path_or_object, "path", path_or_object)
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            size = 0
+    return {"rows": total_rows, "ts_min": ts_min, "ts_max": ts_max, "size": int(size or 0)}
+
+
+def _last_modified_date(obj: Any) -> Any:
+    """Extract a last-modified calendar date from a storage object or path."""
+    from datetime import date, datetime, timezone
+
+    value = getattr(obj, "last_modified", None)
+    if value is None:
+        path = getattr(obj, "path", None)
+        if path is not None:
+            try:
+                return datetime.fromtimestamp(Path(path).stat().st_mtime, tz=timezone.utc).date()
+            except OSError:
+                return None
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return dt.date()
+    if isinstance(value, (int, float)):
+        if value > 10_000_000_000_000_000:  # nanoseconds
+            scale = 1_000_000_000
+        elif value > 10_000_000_000_000:  # microseconds
+            scale = 1_000_000
+        elif value > 10_000_000_000:  # milliseconds
+            scale = 1_000
+        else:
+            scale = 1
+        return datetime.fromtimestamp(value / scale, tz=timezone.utc).date()
+    return None
+
+
+def _aggregate_parquet_object_stats(objects: list, storage: Any) -> dict[str, Any] | None:
+    """Aggregate size, row count, and date coverage over a list of parquet objects.
+
+    Returns ``None`` when no object yields either timestamp statistics or a
+    last-modified fallback. ``record_count`` is ``None`` when any file's row
+    count was unavailable (the caller must not treat the partial sum as exact).
+    """
+    from datetime import datetime, timezone
+
+    total_size = 0
+    total_rows = 0
+    all_rows_known = True
+    min_ts: int | None = None
+    max_ts: int | None = None
+    fallback_dates: list = []
+
+    for obj in objects:
+        stats = _parquet_object_stats(obj, storage=storage)
+        if stats is None:
+            all_rows_known = False
+            if getattr(obj, "size", None) is not None:
+                total_size += int(obj.size)
+            fallback = _last_modified_date(obj)
+            if fallback is not None:
+                fallback_dates.append(fallback)
+            continue
+
+        total_size += int(stats["size"])
+        rows = stats.get("rows")
+        if rows is None:
+            all_rows_known = False
+        elif all_rows_known:
+            total_rows += int(rows)
+        obj_min = stats.get("ts_min")
+        obj_max = stats.get("ts_max")
+        if obj_min is None or obj_max is None:
+            fallback = _last_modified_date(obj)
+            if fallback is not None:
+                fallback_dates.append(fallback)
+        else:
+            min_ts = int(obj_min) if min_ts is None else min(min_ts, int(obj_min))
+            max_ts = int(obj_max) if max_ts is None else max(max_ts, int(obj_max))
+
+    if min_ts is not None and max_ts is not None:
+        start_dt = datetime.fromtimestamp(min_ts // 1_000_000_000, tz=timezone.utc).date()
+        end_dt = datetime.fromtimestamp(max_ts // 1_000_000_000, tz=timezone.utc).date()
+    elif fallback_dates:
+        start_dt = min(fallback_dates)
+        end_dt = max(fallback_dates)
+    else:
+        return None
+
+    return {
+        "start_date": start_dt,
+        "end_date": end_dt,
+        "size_bytes": total_size,
+        "record_count": total_rows if all_rows_known else None,
+        "all_record_counts_known": all_rows_known,
+    }
+
+
+def _funding_parquet_time_range(path: Path, storage: Any) -> tuple[int, int] | None:
+    """Read min/max ``ts_event`` from a funding-rate parquet.
+
+    Funding-rate parquets carry ``ts_event`` as the row-level funding time
+    in nanoseconds (see :func:`write_funding_rate_parquet`). This helper
+    returns ``None`` when statistics are missing; I/O errors propagate.
+    """
+    import pyarrow.parquet as pq
+
+    if getattr(storage, "provider", "local") != "local":
+        with storage.open_input_file(path) as fh:
+            pf = pq.ParquetFile(fh)
+            return _parquet_file_ts_event_range(pf)
+    pf = pq.ParquetFile(str(Path(path)))
+    return _parquet_file_ts_event_range(pf)
+
+
+def _parquet_file_ts_event_range(pf) -> tuple[int, int] | None:
+    schema = pf.schema_arrow
+    idx = schema.get_field_index("ts_event")
+    if idx < 0:
+        return None
+    min_ts: int | None = None
+    max_ts: int | None = None
+    for i in range(pf.metadata.num_row_groups):
+        stats = pf.metadata.row_group(i).column(idx).statistics
+        if stats is None or not stats.has_min_max:
+            return None
+        stat_min = int(stats.min)
+        stat_max = int(stats.max)
+        if min_ts is None or stat_min < min_ts:
+            min_ts = stat_min
+        if max_ts is None or stat_max > max_ts:
+            max_ts = stat_max
+    if min_ts is None:
+        return None
+    return (min_ts, max_ts)
+
+
 def ensure_catalog_dirs(catalog_path: str | Path) -> Path:
     """Ensure catalog directory exists."""
     path = Path(catalog_path)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@dataclass
+class _FundingCacheSnapshot:
+    path: Path
+    existed: bool
+    payload: bytes | None
+
+
+class FundingRateTxn:
+    """Context manager owning the funding-rate dual-store transaction.
+
+    Responsibilities
+    ----------------
+    * ``write_parquet(records)`` writes the Parquet primary and stages records
+      to be merged into the JSON cache after the DB commit succeeds.
+    * ``flush_json()`` merges the staged records into the legacy JSON cache.
+      Callers must invoke it explicitly after a successful DB commit — the
+      session will not auto-flush so that cancelled/half-committed ingests
+      leave the JSON read-side stale rather than lying ahead of the DB.
+    * Exit with exception rolls the JSON read-side back to the pre-write
+      snapshot. Parquet rollback is the caller's responsibility (the pipeline
+      handles it via ``_ParquetCleanupGuard``).
+
+    Normal exit without ``flush_json`` logs a warning — indicates a caller
+    bug (forgot to flush) but leaves the JSON untouched.
+    """
+
+    def __init__(
+        self,
+        catalog_path: Path,
+        symbol: str,
+        snapshot: _FundingCacheSnapshot,
+        storage: Any | None = None,
+    ) -> None:
+        self._catalog_path = catalog_path
+        self.symbol = symbol
+        self._storage = storage
+        self._snapshot = snapshot
+        self._pending: list[dict[str, Any]] = []
+        self._flushed = False
+        self._written_parquet = False
+
+    @property
+    def flushed(self) -> bool:
+        return self._flushed
+
+    @property
+    def wrote_parquet(self) -> bool:
+        return self._written_parquet
+
+    def write_parquet(self, records: list) -> Path:
+        """Write funding-rate records to the primary Parquet and stage JSON updates."""
+        cache_records = [
+            {
+                "funding_time_ms": r.funding_time_ms,
+                "funding_rate": r.funding_rate,
+                "mark_price": 0,
+            }
+            for r in records
+        ]
+        parquet_path = write_funding_rate_parquet(
+            records=records,
+            symbol=self.symbol,
+            catalog_root=self._catalog_path,
+            storage=self._storage,
+        )
+        self._pending.extend(cache_records)
+        self._written_parquet = True
+        logger.info(
+            "Wrote %d funding rate records for %s (Parquet primary; JSON pending)",
+            len(records),
+            self.symbol,
+        )
+        return parquet_path
+
+    def flush_json(self) -> None:
+        """Merge staged records into the JSON cache. Call after a successful DB commit."""
+        from tinohelm.data.funding_cache import _load_cache, _save_cache
+
+        if not self._pending:
+            self._flushed = True
+            return
+        by_time: dict[int, dict[str, Any]] = {}
+        for row in _load_cache(self.symbol):
+            if isinstance(row, dict) and isinstance(row.get("funding_time_ms"), (int, float)):
+                by_time[int(row["funding_time_ms"])] = row
+        for row in self._pending:
+            by_time[int(row["funding_time_ms"])] = row
+        _save_cache(self.symbol, [by_time[key] for key in sorted(by_time)])
+        self._flushed = True
+
+    def restore(self) -> None:
+        """Write the JSON snapshot back, or remove the file if it didn't exist."""
+        snapshot = self._snapshot
+        try:
+            if snapshot.existed:
+                snapshot.path.parent.mkdir(parents=True, exist_ok=True)
+                snapshot.path.write_bytes(snapshot.payload or b"")
+            else:
+                snapshot.path.unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Failed to restore funding cache %s", snapshot.path, exc_info=True)
+
+
+class CatalogSession:
+    """Entry point for Catalog CRUD (see Issue #156).
+
+    Wraps a ``catalog_path`` plus an optional ``CatalogStorageProvider`` so
+    callers do not need to thread both values through every Catalog operation.
+    All methods are sync — async/await lives at the route/pipeline layer and
+    bridges via :func:`asyncio.to_thread`.
+    """
+
+    def __init__(
+        self,
+        catalog_path: str | Path,
+        storage: Any | None = None,
+    ) -> None:
+        self.catalog_path = Path(catalog_path)
+        self._storage = storage
+
+    @property
+    def storage(self) -> Any:
+        """Return the backing storage provider, lazily resolving a local default."""
+        if self._storage is None:
+            from tinohelm.data.storage import get_catalog_storage
+
+            self._storage = get_catalog_storage(catalog_root=self.catalog_path)
+        return self._storage
+
+    def resolve_catalog_path(self, source_type: str | None) -> Path:
+        """Resolve a source-aware catalog root (see :func:`resolve_catalog_path`)."""
+        return resolve_catalog_path(self.catalog_path, source_type)
+
+    def delete_storage(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str,
+        *,
+        source_type: str | None = None,
+    ) -> tuple[int, int]:
+        """Delete storage files for a catalog entry.
+
+        Returns ``(deleted_files, freed_bytes)``. Unknown ``data_type`` values
+        return ``(0, 0)`` and emit a warning — the DB row is the caller's
+        responsibility to remove regardless.
+
+        Semantics:
+
+        - ``bar`` / ``trade_tick`` / ``quote_tick``: remove every parquet file in
+          the resolved directory. When ``source_type`` is the legacy default for
+          the category (e.g. ``klines`` for ``bar``), the base path (flat layout)
+          is also scanned and removed — this preserves the double-delete behaviour
+          introduced when we migrated from flat to source-aware layouts.
+        - ``metrics`` / ``order_book_delta``: single parquet file at the canonical
+          per-symbol path.
+        - ``funding_rate``: both the primary parquet and the read-side JSON cache
+          at ``~/.tino/data/funding_rates/{symbol}.json``.
+        """
+        storage = self.storage
+        if data_type == "bar":
+            return self._delete_parquet_dirs(
+                self._bar_target_dirs(symbol, interval, source_type)
+            )
+        if data_type == "trade_tick":
+            return self._delete_parquet_dirs(
+                self._tick_target_dirs(symbol, "trade_tick", source_type)
+            )
+        if data_type == "quote_tick":
+            return self._delete_parquet_dirs(
+                self._tick_target_dirs(symbol, "quote_tick", source_type)
+            )
+        if data_type == "metrics":
+            return self._delete_parquet_files([metrics_parquet_path(symbol, self.catalog_path)])
+        if data_type == "order_book_delta":
+            return self._delete_parquet_files([book_depth_parquet_path(symbol, self.catalog_path)])
+        if data_type == "funding_rate":
+            return self._delete_funding_rate(symbol)
+        logger.warning("No storage handler for data_type=%r, removing DB row only", data_type)
+        _ = storage  # touch to keep lazy-init semantics consistent across branches
+        return (0, 0)
+
+    def _target_roots(self, category: str, source_type: str | None) -> list[Path]:
+        base = self.catalog_path
+        if not source_type:
+            return [base]
+        resolved = self.resolve_catalog_path(source_type)
+        if source_type == _LEGACY_DEFAULT_SOURCE.get(category):
+            return [resolved, base]
+        if resolved == base:
+            return []
+        return [resolved]
+
+    def _bar_target_dirs(
+        self,
+        symbol: str,
+        interval: str,
+        source_type: str | None,
+    ) -> list[Path]:
+        from tinohelm.strategy.loader_helpers import make_bar_type_str
+
+        dir_name = make_bar_type_str(symbol, interval)
+        return [root / "data" / "bar" / dir_name for root in self._target_roots("bar", source_type)]
+
+    def _tick_target_dirs(
+        self,
+        symbol: str,
+        category: str,
+        source_type: str | None,
+    ) -> list[Path]:
+        from tinohelm.strategy.loader_helpers import normalize_symbol
+
+        nt_sym = normalize_symbol(symbol)
+        return [root / "data" / category / nt_sym for root in self._target_roots(category, source_type)]
+
+    def _delete_parquet_dirs(self, target_dirs: list[Path]) -> tuple[int, int]:
+        from tinohelm.data.storage import delete_prefix, stage_prefix_for_local_consumer
+
+        storage = self.storage
+        deleted_files = 0
+        freed_bytes = 0
+        seen: set[Path] = set()
+        for target_dir in target_dirs:
+            if target_dir in seen:
+                continue
+            seen.add(target_dir)
+            if getattr(storage, "provider", "local") != "local":
+                remote_deleted, remote_freed = delete_prefix(storage, target_dir)
+                deleted_files += remote_deleted
+                freed_bytes += remote_freed
+                continue
+            stage_prefix_for_local_consumer(storage, target_dir)
+            if not target_dir.exists():
+                continue
+            files = list(target_dir.glob("*.parquet"))
+            freed_bytes += sum(f.stat().st_size for f in files)
+            for f in files:
+                f.unlink(missing_ok=True)
+            if target_dir.exists() and not list(target_dir.iterdir()):
+                target_dir.rmdir()
+            deleted_files += len(files)
+        return deleted_files, freed_bytes
+
+    def _delete_parquet_files(self, target_files: list[Path]) -> tuple[int, int]:
+        from tinohelm.data.storage import delete_prefix
+
+        storage = self.storage
+        deleted_files = 0
+        freed_bytes = 0
+        seen: set[Path] = set()
+        for target_file in target_files:
+            if target_file in seen:
+                continue
+            seen.add(target_file)
+            if getattr(storage, "provider", "local") != "local":
+                remote_deleted, remote_freed = delete_prefix(storage, target_file)
+                deleted_files += remote_deleted
+                freed_bytes += remote_freed
+                continue
+            storage.materialize_path(target_file)
+            if not target_file.exists():
+                continue
+            size = target_file.stat().st_size
+            target_file.unlink()
+            deleted_files += 1
+            freed_bytes += size
+        return deleted_files, freed_bytes
+
+    def aggregate_parquet_stats(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str,
+        *,
+        source_type: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Aggregate row count, date coverage, and size over a catalog item's parquet files.
+
+        Output matches the route-level ``_aggregate_parquet_object_stats``
+        exactly, so callers can switch without regenerating snapshots.
+        """
+        objects = list(self._parquet_objects_for(symbol, data_type, interval, source_type))
+        if not objects:
+            return None
+        return _aggregate_parquet_object_stats(objects, self.storage)
+
+    def _parquet_objects_for(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str,
+        source_type: str | None,
+    ):
+        """Yield storage objects for the directory that backs one catalog row."""
+        storage = self.storage
+        target_dir = self._parquet_dir_for(symbol, data_type, interval, source_type)
+        if target_dir is None:
+            return []
+        return list(storage.iter_files(target_dir, suffix=".parquet", recursive=False))
+
+    def _parquet_dir_for(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str,
+        source_type: str | None,
+    ) -> Path | None:
+        from tinohelm.strategy.loader_helpers import make_bar_type_str, normalize_symbol
+
+        if data_type == "bar":
+            resolved = self.resolve_bar_catalog_path(source_type or _LEGACY_DEFAULT_SOURCE_FOR_BAR, symbol, interval)
+            return resolved / "data" / "bar" / make_bar_type_str(symbol, interval)
+        if data_type in {"trade_tick", "quote_tick"}:
+            resolved = self.resolve_catalog_path(source_type)
+            return resolved / "data" / data_type / normalize_symbol(symbol)
+        if data_type == "metrics":
+            return metrics_parquet_path(symbol, self.catalog_path).parent
+        if data_type == "order_book_delta":
+            return book_depth_parquet_path(symbol, self.catalog_path).parent
+        if data_type == "funding_rate":
+            return funding_rate_parquet_path(symbol, self.catalog_path).parent
+        return None
+
+    @contextmanager
+    def funding_rate_transaction(self, symbol: str) -> Iterator[FundingRateTxn]:
+        """Yield a :class:`FundingRateTxn` for ``symbol``.
+
+        Behaviour:
+
+        * The JSON snapshot is captured on entry.
+        * Exit with an exception restores the snapshot and re-raises.
+        * Normal exit without ``flush_json`` logs a warning — the Parquet is
+          already written and the JSON is stale; callers must flush after
+          their own DB commit or skip writing entirely.
+        """
+        snapshot = self._take_funding_snapshot(symbol)
+        txn = FundingRateTxn(
+            catalog_path=self.catalog_path,
+            symbol=symbol,
+            snapshot=snapshot,
+            storage=self._storage,
+        )
+        try:
+            yield txn
+        except BaseException:
+            txn.restore()
+            raise
+        else:
+            if txn.wrote_parquet and not txn.flushed:
+                logger.warning(
+                    "FundingRateTxn for %s left the JSON cache unflushed — "
+                    "Parquet was written but legacy JSON readers will be stale",
+                    symbol,
+                )
+
+    @staticmethod
+    def _take_funding_snapshot(symbol: str) -> _FundingCacheSnapshot:
+        from tinohelm.core.paths import paths
+
+        path = paths.get("funding_rates") / f"{symbol.lower()}.json"
+        try:
+            if path.exists():
+                return _FundingCacheSnapshot(path=path, existed=True, payload=path.read_bytes())
+            return _FundingCacheSnapshot(path=path, existed=False, payload=None)
+        except Exception:
+            logger.warning("Failed to snapshot funding cache %s", path, exc_info=True)
+            return _FundingCacheSnapshot(path=path, existed=False, payload=None)
+
+    def load_funding_rates(
+        self,
+        symbol: str,
+        start,
+        end,
+    ) -> list[dict[str, Any]]:
+        """Return cached funding-rate records intersecting ``[start, end]``.
+
+        Thin delegate over :func:`tinohelm.data.funding_cache.load_funding_rates`;
+        exists so callers never need to know whether the read-side is JSON or
+        Parquet.
+        """
+        from tinohelm.data.funding_cache import load_funding_rates
+
+        return load_funding_rates(symbol, start, end)
+
+    def funding_cache_covers(self, symbol: str, start, end) -> bool:
+        """Return ``True`` iff the JSON funding cache fully spans ``[start, end]``."""
+        from datetime import datetime as _dt, time as _time, timezone as _tz
+
+        from tinohelm.data.funding_cache import _load_cache
+        from tinohelm.data.funding_cache_helpers import compute_fetch_start
+
+        cached = _load_cache(symbol)
+        cached_times = [
+            int(r["funding_time_ms"])
+            for r in cached
+            if isinstance(r, dict) and isinstance(r.get("funding_time_ms"), (int, float))
+        ]
+        if not cached_times:
+            return False
+        start_dt = _dt.combine(start, _time.min, tzinfo=_tz.utc)
+        end_dt = _dt.combine(end, _time.max, tzinfo=_tz.utc)
+        return compute_fetch_start(cached_times, start=start_dt, end=end_dt) is None
+
+    def funding_parquet_covers(self, symbol: str, start, end) -> bool:
+        """Return ``True`` iff the primary funding-rate Parquet spans ``[start, end]``."""
+        from datetime import UTC, datetime
+
+        path = funding_rate_parquet_path(symbol, self.catalog_path)
+        storage = self.storage
+        try:
+            if not storage.exists(path):
+                return False
+        except Exception:
+            logger.warning(
+                "Funding-rate primary parquet is not readable for %s", symbol, exc_info=True
+            )
+            return False
+        try:
+            time_range = _funding_parquet_time_range(path, storage)
+        except Exception:
+            logger.warning(
+                "Funding-rate primary parquet is not readable for %s", symbol, exc_info=True
+            )
+            return False
+        if time_range is None:
+            return False
+        min_ts, max_ts = time_range
+        min_date = datetime.fromtimestamp(min_ts // 1_000_000_000, UTC).date()
+        max_date = datetime.fromtimestamp(max_ts // 1_000_000_000, UTC).date()
+        return min_date <= start and max_date >= end
+
+    def compact_bars(self, symbol: str, interval: str) -> dict:
+        """Compact multiple bar parquet files into one for ``(symbol, interval)``.
+
+        Local and remote providers return the same dict shape:
+        ``{files_before, files_after, bars_count, size_before, size_after}``.
+        Remote implementation is deferred to PR3 — calling ``compact_bars``
+        against a remote storage provider here raises ``NotImplementedError``.
+        """
+        storage = self.storage
+        if getattr(storage, "provider", "local") == "local":
+            return compact_bars(
+                symbol=symbol, interval=interval, catalog_path=self.catalog_path
+            )
+        raise NotImplementedError(
+            "CatalogSession.compact_bars does not yet support remote storage; "
+            "remote compaction will land in Issue #156 PR3."
+        )
+
+    def _delete_funding_rate(self, symbol: str) -> tuple[int, int]:
+        from tinohelm.core.paths import paths
+
+        deleted_files, freed_bytes = self._delete_parquet_files(
+            [funding_rate_parquet_path(symbol, self.catalog_path)]
+        )
+        json_path = paths.get("funding_rates") / f"{symbol.lower()}.json"
+        if json_path.exists():
+            freed_bytes += json_path.stat().st_size
+            json_path.unlink()
+            deleted_files += 1
+        return deleted_files, freed_bytes
+
+    def resolve_bar_catalog_path(
+        self,
+        source_type: str,
+        symbol: str,
+        interval: str,
+    ) -> Path:
+        """Resolve the bar catalog root, falling back to legacy flat-layout files.
+
+        Before source-aware layouts existed, bars were written directly under
+        ``{base}/data/bar/<bar_type>/``. The migration to ``{base}/bar/<source_type>``
+        kept the old files readable by falling back to the base path only when:
+        (a) the requested source is the legacy default for bars (``klines``); and
+        (b) the new layout contains no parquet files but the legacy layout does.
+        """
+        from tinohelm.strategy.loader_helpers import make_bar_type_str
+
+        resolved = self.resolve_catalog_path(source_type)
+        if source_type != _LEGACY_DEFAULT_SOURCE_FOR_BAR:
+            return resolved
+        bar_type_dir_name = make_bar_type_str(symbol, interval)
+        new_layout_dir = resolved / "data" / "bar" / bar_type_dir_name
+        legacy_layout_dir = self.catalog_path / "data" / "bar" / bar_type_dir_name
+        new_has_files = bool(_iter_catalog_files(self.storage, new_layout_dir, recursive=False))
+        if new_has_files:
+            return resolved
+        legacy_has_files = bool(_iter_catalog_files(self.storage, legacy_layout_dir, recursive=False))
+        if legacy_has_files:
+            return self.catalog_path
+        return resolved
 
 
 def _is_remote_storage(storage: Any | None) -> bool:
