@@ -2520,8 +2520,8 @@ class DataLayer:
         """Read funding-rate JSON for a symbol (legacy fallback path).
 
         Reads from ``{funding_dir}/{symbol.lower()}.json`` (configured at
-        DataLayer construction time). Time-range filtering applied when both
-        start and end are provided.
+        DataLayer construction time). Time-range filtering applied when start
+        or end is provided (when any time boundary exists).
         """
         path = self._funding_dir / f"{symbol.lower()}.json"
         if not path.exists():
