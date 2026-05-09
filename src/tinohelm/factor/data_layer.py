@@ -2487,10 +2487,12 @@ class DataLayer:
         end: datetime | None,
     ) -> "pl.DataFrame | None":
         """Try to load funding rate from Parquet; return None if not available."""
-        from tinohelm.data.catalog import funding_rate_parquet_path
+        from tinohelm.data.catalog import CatalogSession
 
+        session = CatalogSession(self._catalog_root, storage=self._storage)
+        parquet_path = session.funding_rate_parquet_path(symbol)
         try:
-            files = list(self._storage.iter_files(funding_rate_parquet_path(symbol, self._catalog_root), suffix=".parquet"))
+            files = list(self._storage.iter_files(parquet_path, suffix=".parquet"))
             if not files:
                 return None
             frame = _read_parquet_frame(self._storage, files[0], columns=["ts_event", "funding_rate"])
@@ -2517,8 +2519,9 @@ class DataLayer:
     ) -> pl.DataFrame:
         """Read funding-rate JSON for a symbol (legacy fallback path).
 
-        Format of each JSON record: ``{"funding_time_ms": int, "funding_rate": float}``.
-        Path: ``{funding_dir}/{symbol.lower()}.json``.
+        Reads from ``{funding_dir}/{symbol.lower()}.json`` (configured at
+        DataLayer construction time). Time-range filtering applied when start
+        or end is provided (when any time boundary exists).
         """
         path = self._funding_dir / f"{symbol.lower()}.json"
         if not path.exists():

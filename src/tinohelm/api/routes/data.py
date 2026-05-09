@@ -6,7 +6,6 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -182,87 +181,6 @@ def _fetch_batch_job_intervals(data_type: str, intervals: list[str]) -> list[str
     return intervals if _is_bar_data_type(data_type) else [None]
 
 
-def _compact_bars_with_storage(storage, symbol: str, interval: str, catalog_path: str | Path) -> dict:
-    """Compact bars for local or remote catalog storage."""
-    if getattr(storage, "provider", "local") == "local":
-        from tinohelm.data.catalog import compact_bars
-
-        return compact_bars(symbol=symbol, interval=interval, catalog_path=catalog_path)
-
-    from tinohelm.data.catalog import _catalog_for_root, _make_bar_type, _make_instrument
-    from tinohelm.data.catalog_helpers import dedupe_by_ts
-    from tinohelm.data.storage import delete_prefix, promote_objects_with_rollback
-
-    catalog_path = Path(catalog_path)
-    instrument = _make_instrument(symbol)
-    bar_type = _make_bar_type(instrument.id, interval)
-    bar_dir = catalog_path / "data" / "bar" / str(bar_type)
-    existing_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
-    files_before = len(existing_objects)
-    size_before = sum(int(obj.size or 0) for obj in existing_objects)
-
-    if files_before <= 1:
-        logger.info("Compaction skipped for %s %s — only %d file(s)", symbol, interval, files_before)
-        return {
-            "files_before": files_before,
-            "files_after": files_before,
-            "bars_count": 0,
-            "size_before": size_before,
-            "size_after": size_before,
-        }
-
-    catalog = _catalog_for_root(catalog_path, storage)
-    bars = catalog.bars(bar_types=[str(bar_type)])
-    if not bars:
-        logger.warning("No bars found for %s %s during compaction", symbol, interval)
-        return {
-            "files_before": files_before,
-            "files_after": files_before,
-            "bars_count": 0,
-            "size_before": size_before,
-            "size_after": size_before,
-        }
-
-    bars = dedupe_by_ts(bars)
-    logger.info("Compacting remote %s %s: %d files -> %d bars", symbol, interval, files_before, len(bars))
-
-    temp_catalog_path = catalog_path / ".compaction" / f"{bar_type}-{uuid4().hex}"
-    rollback_prefix = catalog_path / ".compaction-rollback" / f"{bar_type}-{uuid4().hex}"
-    try:
-        temp_catalog = _catalog_for_root(temp_catalog_path, storage)
-        temp_catalog.write_data([instrument])
-        temp_catalog.write_data(bars)
-
-        temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
-        temp_objects = list(storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False))
-        if not temp_objects:
-            raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
-
-        promote_objects_with_rollback(
-            storage,
-            temp_objects,
-            bar_dir,
-            existing_objects,
-            rollback_prefix=rollback_prefix,
-        )
-    finally:
-        try:
-            delete_prefix(storage, temp_catalog_path)
-        except Exception:
-            logger.warning("Failed to clean temporary remote compaction prefix %s", temp_catalog_path, exc_info=True)
-
-    new_objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
-    if not new_objects:
-        raise RuntimeError(f"Remote compaction produced no parquet files for {symbol} {interval}")
-    size_after = sum(int(obj.size or 0) for obj in new_objects)
-
-    return {
-        "files_before": files_before,
-        "files_after": len(new_objects),
-        "bars_count": len(bars),
-        "size_before": size_before,
-        "size_after": size_after,
-    }
 
 # ---- routes ----
 
@@ -399,9 +317,10 @@ async def _run_compact(
         )
         lock_key = catalog_lock_key(symbol, effective_source, interval)
         was_cancelled = False
+        compact_session = CatalogSession(catalog_path, storage=storage)
         async with get_catalog_lock(lock_key):
             result, cancelled = await _await_critical_mutation(
-                asyncio.to_thread(_compact_bars_with_storage, storage, symbol, interval, catalog_path)
+                asyncio.to_thread(compact_session.compact_bars, symbol, interval)
             )
             was_cancelled = was_cancelled or cancelled
 
