@@ -1374,7 +1374,6 @@ class TestIngestEarlyFailClosed:
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         p.downloader = mock_dl
         p._convert_workers = 1
-        p._funding_cache_covers = MagicMock(return_value=False)
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
         p._read_db_catalog_snapshot = AsyncMock(return_value=None)
         monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
@@ -1396,26 +1395,19 @@ class TestIngestEarlyFailClosed:
         assert not (tmp_path / ".ingest-rollback").exists()
 
     def test_funding_cache_restore_removes_new_cache_when_none_existed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths_override
     ):
         from tinohelm.data.catalog import CatalogSession
 
         symbol = "BTCUSDT-PERP"
-        cache_path = tmp_path / "funding-cache" / "btcusdt-perp.json"
-        monkeypatch.setattr("tinohelm.data.funding_cache._cache_path", lambda _symbol: cache_path)
+        funding_dir = tmp_path / "funding-cache"
+        paths_override("funding_rates", funding_dir)
+        cache_path = funding_dir / "btcusdt-perp.json"
 
-        snapshot = CatalogSession._take_funding_snapshot(symbol)
+        session = CatalogSession(tmp_path)
+        txn = session.create_funding_txn(symbol)
         cache_path.parent.mkdir(parents=True)
         cache_path.write_bytes(b"mutated-cache")
-
-        snapshot.path = cache_path
-        from tinohelm.data.catalog import FundingRateTxn
-
-        txn = FundingRateTxn(
-            catalog_path=tmp_path,
-            symbol=symbol,
-            snapshot=snapshot,
-        )
         txn.restore()
 
         assert not cache_path.exists()
@@ -2906,9 +2898,12 @@ class TestFundingRateCacheShortCircuit:
             {"funding_time_ms": 1_705_276_800_000, "funding_rate": 0.02},
             {"funding_time_ms": 1_706_745_600_000, "funding_rate": 0.03},
         ])
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.funding_parquet_covers",
+            lambda self, symbol, start, end: False,
+        )
 
         p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
-        p._funding_parquet_covers = MagicMock(return_value=False)
         mock_dl = MagicMock()
         mock_dl.plan_downloads.return_value = []
         p.downloader = mock_dl

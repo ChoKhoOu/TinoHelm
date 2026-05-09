@@ -753,15 +753,10 @@ class BinanceVisionPipeline:
         cleanup_guard = self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
         funding_txn = None
         if data_type == "fundingRate":
-            from tinohelm.data.catalog import CatalogSession, FundingRateTxn
+            from tinohelm.data.catalog import CatalogSession
 
             _fs = CatalogSession(self.catalog_path, storage=self._storage)
-            funding_txn = FundingRateTxn(
-                catalog_path=_fs.catalog_path,
-                symbol=symbol,
-                snapshot=_fs._take_funding_snapshot(symbol),
-                storage=self._storage,
-            )
+            funding_txn = _fs.create_funding_txn(symbol)
             self._active_funding_txn = funding_txn
 
         # 3. Pipelined download → convert (overlap via asyncio.Queue)

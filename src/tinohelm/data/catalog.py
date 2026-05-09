@@ -1116,6 +1116,22 @@ class CatalogSession:
                     symbol,
                 )
 
+    def create_funding_txn(self, symbol: str) -> FundingRateTxn:
+        """Create an unmanaged :class:`FundingRateTxn` for callers that need
+        to control flush/restore timing across async boundaries (e.g. pipeline
+        ingest where DB commit happens between write and flush).
+
+        The caller is responsible for calling ``txn.flush_json()`` on success
+        and ``txn.restore()`` on failure.
+        """
+        snapshot = self._take_funding_snapshot(symbol)
+        return FundingRateTxn(
+            catalog_path=self.catalog_path,
+            symbol=symbol,
+            snapshot=snapshot,
+            storage=self.storage,
+        )
+
     @staticmethod
     def _take_funding_snapshot(symbol: str) -> _FundingCacheSnapshot:
         from tinohelm.core.paths import paths
