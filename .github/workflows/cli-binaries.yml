@@ -6,7 +6,21 @@ on:
       - main
     tags:
       - 'v*'
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'CONTEXT.md'
+      - 'LICENSE*'
+      - '.gitignore'
+      - '.claude/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'CONTEXT.md'
+      - 'LICENSE*'
+      - '.gitignore'
+      - '.claude/**'
   workflow_dispatch:
 
 permissions:
