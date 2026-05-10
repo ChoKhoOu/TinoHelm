@@ -13,15 +13,21 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from tinohelm.db.models import Base
 
 logger = logging.getLogger(__name__)
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_MIGRATIONS_DIR = Path(__file__).resolve().with_name("migrations")
 _ORM_TABLE_NAMES = frozenset(Base.metadata.tables)
+
+
+def build_alembic_config(db_url: str) -> Config:
+    alembic_cfg = Config()
+    alembic_cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
+    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+    return alembic_cfg
 
 
 async def bootstrap_database_schema(db_url: str) -> None:
     """Initialize the database schema before the API starts serving."""
     engine = create_async_engine(db_url, echo=False)
-    alembic_cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
-    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+    alembic_cfg = build_alembic_config(db_url)
 
     has_tinohelm_tables = False
     table_count = 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from tinohelm.db import bootstrap as bootstrap_module
@@ -56,6 +57,15 @@ class FakeSyncConnection:
         self.table_names = table_names
 
 
+def test_build_alembic_config_uses_package_migrations_dir():
+    db_url = "postgresql+asyncpg://user:pass@localhost/db"
+
+    cfg = bootstrap_module.build_alembic_config(db_url)
+
+    assert cfg.get_main_option("sqlalchemy.url") == db_url
+    assert Path(cfg.get_main_option("script_location")) == bootstrap_module._MIGRATIONS_DIR
+
+
 def test_bootstrap_creates_all_and_stamps_head_when_no_orm_tables(monkeypatch):
     stamp = MagicMock()
     upgrade = MagicMock()
@@ -77,6 +87,7 @@ def test_bootstrap_creates_all_and_stamps_head_when_no_orm_tables(monkeypatch):
     stamp.assert_called_once()
     assert stamp.call_args.args[1] == "head"
     assert stamp.call_args.args[0].get_main_option("sqlalchemy.url") == db_url
+    assert Path(stamp.call_args.args[0].get_main_option("script_location")) == bootstrap_module._MIGRATIONS_DIR
 
 
 def test_bootstrap_creates_all_when_only_unrelated_tables_exist(monkeypatch):
@@ -116,3 +127,4 @@ def test_bootstrap_upgrades_head_when_orm_tables_exist(monkeypatch):
     upgrade.assert_called_once()
     assert upgrade.call_args.args[1] == "head"
     assert upgrade.call_args.args[0].get_main_option("sqlalchemy.url") == db_url
+    assert Path(upgrade.call_args.args[0].get_main_option("script_location")) == bootstrap_module._MIGRATIONS_DIR
