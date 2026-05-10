@@ -82,4 +82,4 @@ RUN groupadd -g ${GID} tino && useradd --uid ${UID} --gid ${GID} -d /app -s /usr
     && chown -R tino:tino /app
 USER tino
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn tinohelm.api.app:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "uvicorn tinohelm.api.app:app --host 0.0.0.0 --port 8000"]
