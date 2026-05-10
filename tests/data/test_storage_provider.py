@@ -111,17 +111,16 @@ def _settings(**overrides) -> TosStorageSettings:
     return TosStorageSettings(**values)
 
 
-def test_tos_default_endpoint_uses_s3_specific_same_region_domain() -> None:
-    assert _default_tos_endpoint("cn-beijing", use_internal_endpoint=True) == "https://tos-s3-cn-beijing.ivolces.com"
-    assert _default_tos_endpoint("cn-beijing", use_internal_endpoint=False) == "https://tos-s3-cn-beijing.volces.com"
+def test_tos_default_endpoint_uses_public_s3_domain() -> None:
+    assert _default_tos_endpoint("cn-beijing") == "https://tos-s3-cn-beijing.volces.com"
 
 
-def test_docker_compose_tos_default_endpoint_matches_public_flag() -> None:
+def test_docker_compose_tos_default_endpoint_matches_public_domain() -> None:
     compose = yaml.safe_load((Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text())
 
     for service_name in ("api", "node-sandbox", "node-live"):
         env = compose["services"][service_name]["environment"]
-        assert env["TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT"] == "${TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT:-false}"
+        assert "TINO_STORAGE__TOS__USE_INTERNAL_ENDPOINT" not in env
         assert env["TINO_STORAGE__TOS__ENDPOINT"] == (
             "${TINO_STORAGE__TOS__ENDPOINT:-https://tos-s3-ap-southeast-3.volces.com}"
         )
@@ -135,12 +134,12 @@ def test_tos_provider_exposes_s3_catalog_uri_and_nt_options(tmp_path: Path) -> N
     assert storage.catalog_uri == "s3://bucket-a/dataset/root/catalog"
     assert storage.nt_catalog_path == "bucket-a/dataset/root/catalog"
     assert storage.fs_protocol == "s3"
-    assert storage.fs_storage_options["endpoint_url"] == "https://tos-s3-cn-beijing.ivolces.com"
+    assert storage.fs_storage_options["endpoint_url"] == "https://tos-s3-cn-beijing.volces.com"
     assert storage.fs_storage_options["key"] == "ak"
     assert storage.fs_storage_options["secret"] == "sk"
     assert storage.fs_storage_options["config_kwargs"]["signature_version"] == "s3v4"
     assert storage.fs_storage_options["config_kwargs"]["s3"]["addressing_style"] == "virtual"
-    assert storage.fs_rust_storage_options["endpoint_url"] == "https://tos-s3-cn-beijing.ivolces.com"
+    assert storage.fs_rust_storage_options["endpoint_url"] == "https://tos-s3-cn-beijing.volces.com"
     assert storage.fs_rust_storage_options["region"] == "cn-beijing"
     assert storage.fs_rust_storage_options["access_key_id"] == "ak"
     assert storage.fs_rust_storage_options["secret_access_key"] == "sk"

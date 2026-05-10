@@ -85,7 +85,6 @@ class TosStorageSettings(BaseModel):
     bucket: str = ""
     prefix: str = ""
     endpoint: str = ""
-    use_internal_endpoint: bool = True
     access_key: SecretStr = SecretStr("")
     secret_key: SecretStr = SecretStr("")
     security_token: SecretStr = SecretStr("")

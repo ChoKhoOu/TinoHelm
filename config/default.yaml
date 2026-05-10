@@ -46,9 +46,7 @@ storage:
     region: "cn-beijing"
     bucket: ""
     prefix: ""
-    # Empty endpoint derives the TOS S3 endpoint:
-    # https://tos-s3-{region}.ivolces.com for internal network,
-    # https://tos-s3-{region}.volces.com for public network.
+    # Empty endpoint derives the public TOS S3 endpoint:
+    # https://tos-s3-{region}.volces.com
     endpoint: ""
-    use_internal_endpoint: true
     max_keys: 1000

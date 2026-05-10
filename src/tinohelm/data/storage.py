@@ -213,10 +213,7 @@ class S3CatalogStorage:
         endpoint = self.settings.endpoint.strip()
         if endpoint:
             return _ensure_url_scheme(endpoint)
-        return _default_tos_endpoint(
-            self.settings.region,
-            use_internal_endpoint=self.settings.use_internal_endpoint,
-        )
+        return _default_tos_endpoint(self.settings.region)
 
     @property
     def catalog_key_prefix(self) -> str:
@@ -722,9 +719,8 @@ def delete_prefix(provider: CatalogStorageProvider, local_prefix: Path | str) ->
     return (deleted, freed)
 
 
-def _default_tos_endpoint(region: str, *, use_internal_endpoint: bool = True) -> str:
-    suffix = "ivolces.com" if use_internal_endpoint else "volces.com"
-    return f"https://tos-s3-{region}.{suffix}"
+def _default_tos_endpoint(region: str) -> str:
+    return f"https://tos-s3-{region}.volces.com"
 
 
 def _normalise_prefix(prefix: str) -> str:
