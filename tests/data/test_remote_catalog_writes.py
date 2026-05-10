@@ -309,6 +309,70 @@ def test_write_trade_ticks_remote_storage_constructs_catalog_without_from_uri_ho
     assert not resolved_root.exists()
 
 
+def test_write_trade_ticks_remote_storage_allows_overwrite_without_new_key(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tinohelm.data.catalog import write_trade_ticks
+
+    symbol = "BTCUSDT-PERP"
+    source_type = "aggTrades"
+    instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
+    resolved_root = tmp_path / "ticks" / source_type
+    tick_dir = resolved_root / "data" / "trade_tick" / str(instrument.id)
+    written_path = tick_dir / "part-0.parquet"
+
+    class RemoteStorage:
+        provider = "s3"
+        catalog_root = tmp_path
+        fs_storage_options = {"endpoint_url": "https://tos-cn-beijing.volces.com"}
+        fs_rust_storage_options = {"endpoint_url": "https://tos-cn-beijing.volces.com"}
+
+        def __init__(self):
+            self.iter_calls = 0
+
+        def uri_for_catalog_root(self, logical_root):
+            assert Path(logical_root) == resolved_root
+            return "s3://bucket/catalog/ticks/aggTrades"
+
+        def iter_files(self, prefix, *, suffix="", recursive=True):
+            assert Path(prefix) == tick_dir
+            assert suffix == ".parquet"
+            assert recursive is False
+            self.iter_calls += 1
+            return iter([SimpleNamespace(path=written_path, size=7)])
+
+    class FakeCatalog:
+        write_data_calls: list[tuple[list, bool]] = []
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def write_data(self, data, skip_disjoint_check=False):
+            self.write_data_calls.append((list(data), skip_disjoint_check))
+
+    monkeypatch.setattr("tinohelm.data.instruments.make_instrument", lambda _symbol: instrument)
+    nt_mod = types.ModuleType("nautilus_trader")
+    persistence_mod = types.ModuleType("nautilus_trader.persistence")
+    catalog_mod = types.ModuleType("nautilus_trader.persistence.catalog")
+    catalog_mod.ParquetDataCatalog = FakeCatalog
+    monkeypatch.setitem(sys.modules, "nautilus_trader", nt_mod)
+    monkeypatch.setitem(sys.modules, "nautilus_trader.persistence", persistence_mod)
+    monkeypatch.setitem(sys.modules, "nautilus_trader.persistence.catalog", catalog_mod)
+
+    paths = write_trade_ticks(
+        [SimpleNamespace(ts_init=1)],
+        symbol,
+        tmp_path,
+        source_type=source_type,
+        storage=RemoteStorage(),
+    )
+
+    assert paths == [str(written_path)]
+    assert FakeCatalog.write_data_calls == [([SimpleNamespace(ts_init=1)], True)]
+
+
+
 def test_write_trade_ticks_remote_storage_raises_when_write_produces_no_parquet(
     tmp_path: Path,
     monkeypatch,

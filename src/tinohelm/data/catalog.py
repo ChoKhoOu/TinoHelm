@@ -1880,15 +1880,18 @@ def write_trade_ticks(
 
     catalog.write_data(ticks, skip_disjoint_check=True)
 
-    # Return only newly created files
-    current = {str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)}
-    written = sorted(current - existing)
-    if ticks and not written:
+    # Return newly created files when possible. Remote/object-store writes may
+    # replace an existing key in place, so fall back to the current directory
+    # contents as the success signal instead of requiring a path delta.
+    current = sorted({str(p) for p in _iter_catalog_files(storage, tick_dir, recursive=False)})
+    written = sorted(set(current) - existing)
+    if ticks and not current:
         raise RuntimeError(
             f"TradeTick write for {symbol} produced no parquet files under {tick_dir}"
         )
-    logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(written), symbol)
-    return written
+    result = written or current
+    logger.info("Wrote %d TradeTick to %d file(s) for %s", len(ticks), len(result), symbol)
+    return result
 
 
 def write_quote_ticks(
