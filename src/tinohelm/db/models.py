@@ -89,6 +89,10 @@ class BacktestRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    __table_args__ = (
+        Index("ix_backtest_runs_strategy_name", "strategy_name"),
+    )
+
 
 class OptimizationStatus(str, enum.Enum):
     running = "running"
@@ -380,6 +384,33 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     details_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ResearchJob(Base):
+    __tablename__ = "research_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, default=lambda: str(uuid4()))
+    factor_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    data_type: Mapped[str] = mapped_column(String(30), nullable=False, server_default="bar")
+    interval: Mapped[str] = mapped_column(String(10), nullable=False, server_default="1m")
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    parameters_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="queued")
+    progress: Mapped[int] = mapped_column(Integer, server_default="0")
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    verdict_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_research_jobs_status", "status"),
+    )
 
 
 class WatchlistItem(Base):

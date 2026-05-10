@@ -23,6 +23,7 @@ from tinohelm.backtest import consumer as bt_consumer
 from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker_and_wait
 from tinohelm.factor.worker import recover_interrupted_jobs as recover_factor_jobs, start_factor_worker, stop_factor_worker
 from tinohelm.signal.worker import recover_interrupted_jobs as recover_signal_jobs, start_signal_worker, stop_signal_worker
+from tinohelm.db.bootstrap import bootstrap_database_schema
 from tinohelm.db.session import get_session_factory
 from tinohelm.strategy.registry import persist_strategies, scan_strategies
 
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ---- startup ----
     logger.info("TinoHelm API starting up")
     deps.set_startup_time(time.time())
+    await bootstrap_database_schema(cfg.database.url)
 
     # Redis (async)
     redis_client = aioredis.from_url(cfg.redis.url)
