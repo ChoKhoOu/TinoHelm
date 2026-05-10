@@ -109,11 +109,33 @@ def test_bootstrap_creates_all_when_only_unrelated_tables_exist(monkeypatch):
     stamp.assert_called_once()
 
 
-def test_bootstrap_upgrades_head_when_orm_tables_exist(monkeypatch):
+def test_bootstrap_stamps_head_when_orm_tables_exist_without_alembic_version(monkeypatch):
     stamp = MagicMock()
     upgrade = MagicMock()
     db_url = "postgresql+asyncpg://user:pass@localhost/db"
     engine = FakeAsyncEngine({"strategies", "research_jobs"})
+
+    monkeypatch.setattr(bootstrap_module, "create_async_engine", lambda *_args, **_kwargs: engine)
+    monkeypatch.setattr(bootstrap_module, "inspect", lambda conn: FakeInspector(conn.table_names))
+    monkeypatch.setattr(bootstrap_module.command, "stamp", stamp)
+    monkeypatch.setattr(bootstrap_module.command, "upgrade", upgrade)
+
+    asyncio.run(bootstrap_module.bootstrap_database_schema(db_url))
+
+    assert engine.connection.create_all_calls == 0
+    upgrade.assert_not_called()
+    stamp.assert_called_once()
+    assert stamp.call_args.args[1] == "head"
+    assert stamp.call_args.args[0].get_main_option("sqlalchemy.url") == db_url
+    assert Path(stamp.call_args.args[0].get_main_option("script_location")) == bootstrap_module._MIGRATIONS_DIR
+
+
+
+def test_bootstrap_upgrades_head_when_alembic_version_exists(monkeypatch):
+    stamp = MagicMock()
+    upgrade = MagicMock()
+    db_url = "postgresql+asyncpg://user:pass@localhost/db"
+    engine = FakeAsyncEngine({"strategies", "research_jobs", "alembic_version"})
 
     monkeypatch.setattr(bootstrap_module, "create_async_engine", lambda *_args, **_kwargs: engine)
     monkeypatch.setattr(bootstrap_module, "inspect", lambda conn: FakeInspector(conn.table_names))
