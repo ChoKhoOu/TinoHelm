@@ -39,6 +39,14 @@ The **Vision type** recorded on a catalog row, used to disambiguate multiple **V
 **DataFetchJob**:
 A persistent record (`data_fetch_jobs` table) representing one ingest request. States: `queued → running → completed | failed | cancelled`. On API restart, `running` is reset to `queued` and re-enqueued.
 
+**FetchBatch**:
+One user-submitted fetch request that expands into many **DataFetchJob** records. Batch-level FIFO means older **FetchBatch** submissions are scheduled before newer ones, while jobs inside one **FetchBatch** may still be interleaved fairly across **FetchBucket** records. Completion is best-effort: one failed job does not stop sibling jobs in the same **FetchBatch**; the batch ends only when every job reaches a terminal state.
+_Avoid_: request group, enqueue wave.
+
+**FetchBucket**:
+The scheduling bucket for data fetch fairness: one `(symbol, data_type, interval)` stream inside a **FetchBatch**. Jobs inside a **FetchBucket** keep chronological order by date range; fairness rotates across **FetchBucket** records, not across individual jobs. Bucket progress is counted by jobs that have already started (`running + completed + failed + cancelled`), so long-running buckets are not repeatedly treated as untouched.
+_Avoid_: lane, shard, partition.
+
 ### Runtime
 
 **Node**:
