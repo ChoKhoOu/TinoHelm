@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 from sqlalchemy import Integer, and_, func, select, update
@@ -640,7 +640,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     "status": STATUS_COMPLETED,
                     "progress": 100,
                     "message": f"Done: {result.objects_count} objects",
-                    "completed_at": datetime.utcnow(),
+                    "completed_at": datetime.now(timezone.utc),
                 },
             )
             if not updated:
@@ -696,7 +696,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.utcnow(),
+                        "completed_at": datetime.now(timezone.utc),
                     },
                 )
                 if updated:
@@ -716,7 +716,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.utcnow(),
+                        "completed_at": datetime.now(timezone.utc),
                     },
                 )
                 if updated:
@@ -835,7 +835,7 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     "status": STATUS_COMPLETED,
                     "progress": 100,
                     "message": f"Done: {result.objects_count} objects",
-                    "completed_at": datetime.utcnow(),
+                    "completed_at": datetime.now(timezone.utc),
                 },
             )
             if not updated:
@@ -879,7 +879,7 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.utcnow(),
+                        "completed_at": datetime.now(timezone.utc),
                     },
                 )
                 if updated:

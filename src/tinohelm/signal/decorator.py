@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
+import marshal
 from typing import Any, Callable
 
 from tinohelm.signal.types import (
@@ -90,19 +91,17 @@ def _compute_code_hash(func: Callable) -> str:  # type: ignore[type-arg]
 
 def _bytecode_fallback_hash(func: Callable) -> str:  # type: ignore[type-arg]
     code = getattr(func, "__code__", None)
-    if code is None:
-        return ""
     h = hashlib.sha256()
-    h.update(getattr(func, "__qualname__", "").encode("utf-8"))
-    h.update(b"\x00")
-    h.update(code.co_code)
-    h.update(b"\x00")
-    for const in code.co_consts:
-        h.update(repr(const).encode("utf-8"))
+    if code is None:
+        # Deterministic fallback for functions without __code__
+        h.update(getattr(func, "__module__", "").encode("utf-8"))
         h.update(b"\x00")
-    for name in code.co_names:
-        h.update(name.encode("utf-8"))
+        h.update(getattr(func, "__qualname__", "").encode("utf-8"))
         h.update(b"\x00")
+        h.update(getattr(func, "__name__", "").encode("utf-8"))
+        return h.hexdigest()
+    # Serialize entire code object with marshal for stable hash
+    h.update(marshal.dumps(code))
     return h.hexdigest()
 
 

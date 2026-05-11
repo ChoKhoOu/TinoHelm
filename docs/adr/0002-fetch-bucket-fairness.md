@@ -93,11 +93,12 @@ The guarded UPDATE is unchanged; concurrency semantics (at most one
   `started_count` and becomes invisible to `status='queued'` filters — it
   neither blocks nor preempts siblings. `drain_once` already logs-and-continues
   per #164.
-- **Cross-batch soft FIFO is unchanged.** Newer batches remain strictly
-  behind older batches. #166 will relax this into soft FIFO (idle worker
-  may fill from newer batches when the older batch cannot saturate all
-  concurrency); the extension point is another `ORDER BY` tweak, same as
-  this ADR.
+- **Cross-batch soft FIFO is implemented.** #166 has implemented soft FIFO:
+  newer batches may be filled when older batches cannot saturate concurrency,
+  but when an older batch's bucket becomes available again it regains priority.
+  The implementation uses the same ORDER BY mechanism described in this ADR —
+  claim order adjusts based on per-batch bucket availability so older batches
+  retain priority when they have queued jobs that can run.
 - **Legacy backlog (#163 predecessors) still participates.** Rows with NULL
   `batch_id` are scheduled as isolated batches; #166's migration step will
   rebucket them without changing this ADR.
