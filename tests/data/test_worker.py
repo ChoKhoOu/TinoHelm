@@ -508,6 +508,80 @@ class TestDrainOnce:
         assert n == 1
         assert outcomes == [], "drain must exhaust outcomes, not stop on skip"
 
+    async def test_schedules_delayed_wake_on_lock_busy_in_single_consumer_mode(
+        self, monkeypatch
+    ):
+        """Single-consumer livelock guard: when the only consumer defers a
+        lock-busy row, nobody else is around to push the next WAKE_TOKEN.
+        ``drain_once`` must hand off to ``_schedule_delayed_wake`` so the
+        queued row is retried after ``LOCK_BUSY_REQUEUE_DELAY`` — otherwise
+        the job stalls indefinitely.
+        """
+        busy_job = SimpleNamespace(
+            job_id="lock-busy", symbol="BTC", data_type="klines", interval="1m",
+        )
+
+        async def fake_claim(_factory):
+            return busy_job
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            return False  # row reverted to queued
+
+        scheduled_urls: list[str] = []
+
+        async def fake_wake(redis_url: str) -> None:
+            scheduled_urls.append(redis_url)
+
+        settings_stub = SimpleNamespace(data=SimpleNamespace(job_concurrency=1))
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "get_settings", lambda: settings_stub)
+        monkeypatch.setattr(dw, "_schedule_delayed_wake", fake_wake)
+
+        await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        # Let the scheduled self-wake task run.
+        await asyncio.sleep(0)
+
+        assert scheduled_urls == ["redis://x"], (
+            "single-consumer lock-busy must schedule a delayed self-wake"
+        )
+
+    async def test_skips_delayed_wake_when_multiple_consumers(self, monkeypatch):
+        """With ``job_concurrency > 1`` the sibling consumer will re-drain
+        once it finishes its current row — scheduling an extra wake would
+        only spam the queue. The livelock path must stay single-consumer.
+        """
+        busy_job = SimpleNamespace(
+            job_id="lock-busy", symbol="BTC", data_type="klines", interval="1m",
+        )
+
+        async def fake_claim(_factory):
+            return busy_job
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            return False
+
+        scheduled: list[str] = []
+
+        async def fake_wake(redis_url: str) -> None:
+            scheduled.append(redis_url)
+
+        settings_stub = SimpleNamespace(data=SimpleNamespace(job_concurrency=2))
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "get_settings", lambda: settings_stub)
+        monkeypatch.setattr(dw, "_schedule_delayed_wake", fake_wake)
+
+        await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+        await asyncio.sleep(0)
+
+        assert scheduled == [], "multi-consumer mode must not self-wake"
+
 
 # ---------------------------------------------------------------------------
 # recover_interrupted_jobs delegates with reset_queue=True

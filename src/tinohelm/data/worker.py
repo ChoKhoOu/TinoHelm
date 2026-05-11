@@ -29,7 +29,6 @@ from tinohelm.core.async_queue_worker import (
     WorkerHandle,
     consumer_loop,
     enqueue_job as _shared_enqueue_job,
-    requeue_running_jobs,
 )
 from tinohelm.core.config import get_settings
 from tinohelm.data import catalog_locks as _catalog_locking
@@ -62,6 +61,9 @@ _catalog_locks = _catalog_locking._catalog_locks
 _catalog_lock_key = _catalog_locking.catalog_lock_key
 _get_catalog_lock = _catalog_locking.get_catalog_lock
 _catalog_lock_attempt_guard = asyncio.Lock()
+# Strong references to fire-and-forget background tasks. asyncio drops tasks
+# that have no strong reference, so we keep them here until they finish.
+_background_tasks: set[asyncio.Task] = set()
 
 
 async def enqueue_job(rds: aioredis.Redis, job_id: str) -> None:
@@ -915,6 +917,16 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
         await rds.close()
 
 
+async def _schedule_delayed_wake(redis_url: str) -> None:
+    """Schedule a delayed wake token to retry a lock-busy job."""
+    await asyncio.sleep(LOCK_BUSY_REQUEUE_DELAY)
+    rds = aioredis.from_url(redis_url, decode_responses=True)
+    try:
+        await _shared_enqueue_job(rds, QUEUE_KEY, WAKE_TOKEN)
+    finally:
+        await rds.close()
+
+
 async def drain_once(*, redis_url: str, catalog_path: str) -> int:
     """Drain all currently-runnable DataFetchJob rows from the DB.
 
@@ -927,6 +939,7 @@ async def drain_once(*, redis_url: str, catalog_path: str) -> int:
     (PRD #162 best-effort batch semantics).
     """
     factory = get_session_factory()
+    settings = get_settings()
     processed = 0
     while True:
         try:
@@ -960,6 +973,14 @@ async def drain_once(*, redis_url: str, catalog_path: str) -> int:
             # drain pass so the next wake signal — or a sibling consumer —
             # retries. Continuing would just re-claim the same row and
             # defer it again, burning CPU.
+            if settings.data.job_concurrency == 1:
+                # Livelock guard: in single-consumer mode, schedule a
+                # self-wake after LOCK_BUSY_REQUEUE_DELAY so the reverted
+                # row gets retried. Without this, the job stays queued but
+                # nobody ever drains again.
+                _t = asyncio.create_task(_schedule_delayed_wake(redis_url))
+                _background_tasks.add(_t)
+                _t.add_done_callback(_background_tasks.discard)
             return processed
 
 
