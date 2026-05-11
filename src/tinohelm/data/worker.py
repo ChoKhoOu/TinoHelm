@@ -972,7 +972,7 @@ async def drain_once(*, redis_url: str, catalog_path: str) -> int:
 def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
     """Start the data-fetch consumer as a background asyncio task."""
     async def _process(_wake_token: str) -> None:
-
+        # The payload popped off Redis is always a wake sentinel (see
         # WAKE_TOKEN); actual scheduling happens from the DB.
         await drain_once(redis_url=redis_url, catalog_path=catalog_path)
 
