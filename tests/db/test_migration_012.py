@@ -101,7 +101,7 @@ def _reset_database_to_pre_012() -> None:
                 await conn.execute(text("CREATE SCHEMA public"))
                 await conn.run_sync(Base.metadata.create_all)
 
-                # Remove 012/013-created tables / constraints / columns from the
+                # Remove 012/013/014-created tables / constraints / columns from the
                 # current ORM schema so Alembic can add them for real.
                 await conn.execute(text("DROP TABLE IF EXISTS signal_runs CASCADE"))
                 await conn.execute(text("DROP TABLE IF EXISTS exposures_cache CASCADE"))
@@ -111,6 +111,8 @@ def _reset_database_to_pre_012() -> None:
                 for col in FACTOR_RUNS_NEW_COLS:
                     await conn.execute(text(f"ALTER TABLE factor_runs DROP COLUMN IF EXISTS {col}"))
                 await conn.execute(text("ALTER TABLE data_catalog DROP COLUMN IF EXISTS last_ingest_id"))
+                await conn.execute(text("DROP INDEX IF EXISTS ix_data_fetch_jobs_batch_id"))
+                await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS batch_id"))
 
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
@@ -192,10 +194,10 @@ def ensure_at_head():
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_upgrade_version_is_head(engine, ensure_at_head):
-    """After upgrade head, alembic_version must be '013'."""
+    """After upgrade head, alembic_version must be '014'."""
     async with engine.connect() as conn:
         ver = await _get_version(conn)
-    assert ver == "013", f"Expected version 013, got {ver}"
+    assert ver == "014", f"Expected version 014, got {ver}"
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -327,6 +329,6 @@ async def test_upgrade_after_downgrade_idempotent(engine, ensure_at_head):
         found = await _get_indexes(conn)
         catalog_cols = await _get_table_columns(conn, "data_catalog")
 
-    assert ver == "013"
+    assert ver == "014"
     assert found == EXPECTED_INDEXES
     assert "last_ingest_id" in catalog_cols
