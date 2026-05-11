@@ -264,6 +264,41 @@ class TestCodeHashSemantics:
         h3 = m3.k.__signal_spec__.code_hash
         assert h3 != h1
 
+    def test_code_hash_falls_back_when_source_unavailable(self, monkeypatch):
+        """When ``inspect.getsource`` cannot retrieve the function body —
+        e.g. a stale ``.pyc`` whose ``co_filename`` points at a path that
+        no longer exists on disk (Docker-built bytecode mounted into a
+        local checkout) — ``_compute_code_hash`` must still return a
+        non-empty deterministic hash so ``SignalSpec.code_hash`` stays
+        populated. Otherwise a misconfigured runtime silently erases
+        every signal's identity and downstream caches collide.
+        """
+        import tinohelm.signal.decorator as sig_dec
+
+        def raising_getsource(_obj):
+            raise OSError("could not get source code")
+
+        monkeypatch.setattr(sig_dec.inspect, "getsource", raising_getsource)
+
+        @sig_dec.signal(
+            name="fallback",
+            factor_ref="ret_N@1.0.0",
+            method="top_k_long_short",
+            rebalance_freq="1D",
+            universe_ref="u",
+        )
+        def kernel(factor_panel):
+            return factor_panel
+
+        h = kernel.__signal_spec__.code_hash
+        assert h != "", (
+            "source-missing fallback must produce a non-empty hash — "
+            "otherwise every signal gets the same empty code_hash when "
+            "source is unreachable (e.g. stale pyc paths)"
+        )
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
 
 # ---------------------------------------------------------------------------
 # extra_warmup_bars + numeric guards

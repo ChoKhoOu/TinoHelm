@@ -289,6 +289,29 @@ class TestCodeHash:
 
         assert f.__factor_spec__.code_hash != ""
 
+    def test_code_hash_falls_back_when_source_unavailable(self, monkeypatch):
+        """Same contract as signal decorator: when ``inspect.getsource``
+        cannot retrieve the body (stale pyc with ``co_filename`` pointing
+        at a path that no longer exists, C extensions, etc.), the factor
+        decorator must still return a non-empty deterministic hash. An
+        empty hash would collapse every factor's identity and break
+        caches keyed on ``code_hash``.
+        """
+        import tinohelm.factor.decorator as fac_dec
+
+        def raising_getsource(_obj):
+            raise OSError("could not get source code")
+
+        monkeypatch.setattr(fac_dec.inspect, "getsource", raising_getsource)
+
+        @fac_dec.factor(category="X")
+        def f(close: Panel) -> Panel:
+            return close
+
+        h = f.__factor_spec__.code_hash
+        assert h != "", "source-missing fallback must produce a non-empty hash"
+        assert len(h) == 64
+
 
 # ---------------------------------------------------------------------------
 # ShiftDetector unit tests

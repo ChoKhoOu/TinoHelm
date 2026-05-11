@@ -131,20 +131,43 @@ def _build_input_specs(func: Callable) -> tuple[InputSpec, ...]:  # type: ignore
 
 
 def _compute_code_hash(func: Callable) -> str:  # type: ignore[type-arg]
-    """Compute SHA-256 hex digest of the function's source code.
+    """SHA-256 hex digest identifying the factor body.
 
-    Falls back to an empty string if source cannot be retrieved (e.g. built-in
-    functions or C extensions).
+    Prefers textual source (stable, human-auditable). When
+    ``inspect.getsource`` fails — stale ``.pyc`` whose ``co_filename``
+    references a path not on disk (Docker pyc mounted into a local
+    checkout), C extensions, REPL-defined functions — falls back to
+    hashing the compiled bytecode + qualname + constants. Returning
+    ``""`` in that case would collapse every factor's identity and
+    break downstream caches keyed on ``code_hash``.
     """
     try:
         source = inspect.getsource(func)
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
     except (OSError, TypeError):
         logger.warning(
-            "_compute_code_hash: cannot retrieve source for %r",
-            getattr(func, "__name__", func),
+            "_compute_code_hash: source unavailable for %r — using bytecode fallback",
+            getattr(func, "__qualname__", getattr(func, "__name__", func)),
         )
+        return _bytecode_fallback_hash(func)
+
+
+def _bytecode_fallback_hash(func: Callable) -> str:  # type: ignore[type-arg]
+    code = getattr(func, "__code__", None)
+    if code is None:
         return ""
-    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+    h = hashlib.sha256()
+    h.update(getattr(func, "__qualname__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(code.co_code)
+    h.update(b"\x00")
+    for const in code.co_consts:
+        h.update(repr(const).encode("utf-8"))
+        h.update(b"\x00")
+    for name in code.co_names:
+        h.update(name.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
