@@ -18,7 +18,7 @@ persisted in the DB.
 This caused two recurring pains in production:
 
 1. **One symbol saturates the queue.** A large multi-symbol `fetch-batch`
-   submission fan-outs into hundreds of jobs that all share a catalog-level
+   submission fans out into hundreds of jobs that all share a catalog-level
    serialization lock per `(symbol, data_type, interval)` bucket. Because
    Redis picks the most-recently-pushed job (LPUSH + BRPOP ≈ LIFO), one
    hot symbol can dominate the head of the queue while other symbols wait

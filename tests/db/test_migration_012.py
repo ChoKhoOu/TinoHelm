@@ -252,6 +252,35 @@ async def test_data_catalog_commit_witness_column_nullable(engine, ensure_at_hea
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_data_fetch_jobs_batch_id_column_and_index(engine, ensure_at_head):
+    """014 adds nullable ``batch_id`` to data_fetch_jobs plus a supporting
+    btree index. This pins those guarantees so the FetchBatch scheduler
+    (#164/#165/#166) can rely on both the column and an index-backed lookup
+    by batch_id after upgrade to head.
+
+    Legacy pre-#163 rows arrive with ``batch_id IS NULL``; the application
+    layer always populates it for new jobs.
+    """
+    async with engine.connect() as conn:
+        cols = await _get_table_columns(conn, "data_fetch_jobs")
+        nullable_map = await _get_nullable_cols(conn, "data_fetch_jobs")
+        indexes = await conn.execute(text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE tablename = 'data_fetch_jobs' "
+            "  AND indexname = 'ix_data_fetch_jobs_batch_id'"
+        ))
+        found_indexes = {r[0] for r in indexes}
+
+    assert "batch_id" in cols, "014 must add batch_id column to data_fetch_jobs"
+    assert nullable_map.get("batch_id") is True, (
+        "batch_id must be nullable so legacy pre-#163 rows stay valid"
+    )
+    assert "ix_data_fetch_jobs_batch_id" in found_indexes, (
+        "014 must create ix_data_fetch_jobs_batch_id for FetchBatch lookups"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_progress_stage_nullable_signal_runs(engine, ensure_at_head):
     """signal_runs.progress_stage must be nullable."""
     async with engine.connect() as conn:

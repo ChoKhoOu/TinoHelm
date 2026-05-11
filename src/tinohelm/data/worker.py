@@ -89,12 +89,13 @@ async def _flip_running_to_queued(factory, model_cls) -> int:
 
 async def _count_queued_jobs(factory, model_cls) -> int:
     async with factory() as db:
-        rows = (
-            await db.execute(
-                select(model_cls.job_id).where(model_cls.status == STATUS_QUEUED)
-            )
-        ).scalars().all()
-    return len(rows)
+        result = await db.execute(
+            select(func.count())
+            .select_from(model_cls)
+            .where(model_cls.status == STATUS_QUEUED)
+        )
+        count = result.scalar_one()
+    return int(count or 0)
 
 
 async def backfill_legacy_batch_ids(factory) -> int:
@@ -121,32 +122,31 @@ async def backfill_legacy_batch_ids(factory) -> int:
 
     async with factory() as db:
         result = await db.execute(
-            select(DataFetchJob.id, DataFetchJob.created_at)
+            select(DataFetchJob.created_at, func.count(DataFetchJob.id))
             .where(DataFetchJob.batch_id.is_(None))
-            .order_by(DataFetchJob.created_at.asc(), DataFetchJob.id.asc())
+            .group_by(DataFetchJob.created_at)
+            .order_by(DataFetchJob.created_at.asc())
         )
-        rows = result.all()
-        if not rows:
+        groups = result.all()
+        if not groups:
             return 0
 
-        assignments: dict[int, str] = {}
-        group_batch: dict[datetime, str] = {}
-        for row_id, created_at in rows:
-            batch_id = group_batch.get(created_at)
-            if batch_id is None:
-                batch_id = str(_uuid4())
-                group_batch[created_at] = batch_id
-            assignments[row_id] = batch_id
-
-        for row_id, batch_id in assignments.items():
+        # One UPDATE per distinct created_at — typically G ≪ N for legacy
+        # backlog, since a fetch-batch submission shares one server-side
+        # ``now()``. The ``batch_id IS NULL`` guard keeps the rewrite
+        # idempotent and leaves any post-#163 row untouched.
+        touched = 0
+        for created_at, group_size in groups:
+            batch_id = str(_uuid4())
             await db.execute(
                 update(DataFetchJob)
-                .where(DataFetchJob.id == row_id)
                 .where(DataFetchJob.batch_id.is_(None))
+                .where(DataFetchJob.created_at == created_at)
                 .values(batch_id=batch_id)
             )
+            touched += int(group_size or 0)
         await db.commit()
-    return len(assignments)
+    return touched
 
 
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:

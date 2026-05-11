@@ -173,3 +173,54 @@ class TestBackfillLegacyBatchIds:
         assert rows[0].batch_id is not None
         assert isinstance(rows[0].batch_id, str)
         assert len(rows[0].batch_id) == 36  # UUID
+
+    async def test_update_count_scales_with_groups_not_rows(self, factory):
+        """Guard against a per-row UPDATE regression: the backfill must
+        scale its DB round-trips with the number of distinct ``created_at``
+        groups, not the number of legacy rows. A large fetch-batch
+        submission writes hundreds of rows under one ``now()`` — a
+        per-row UPDATE would hold row locks open for the full scan
+        duration under heavy legacy backlogs."""
+        # 50 rows across 2 submission groups (25 each).
+        t1 = datetime(2025, 6, 1, 10, 0, 0)
+        t2 = datetime(2025, 6, 1, 10, 5, 0)
+        rows = []
+        for idx in range(25):
+            rows.append(_job(batch_id=None, symbol=f"SYM{idx}A", created=t1))
+            rows.append(_job(batch_id=None, symbol=f"SYM{idx}B", created=t2))
+        await _seed(factory, rows)
+
+        update_stmts: list[str] = []
+
+        class _ExecuteSpy:
+            def __init__(self, inner_sessionmaker):
+                self._inner_sessionmaker = inner_sessionmaker
+
+            async def __aenter__(self):
+                self._ctx = self._inner_sessionmaker()
+                self._db = await self._ctx.__aenter__()
+                real_execute = self._db.execute
+
+                async def _spy_execute(stmt, *args, **kwargs):
+                    if str(stmt).strip().upper().startswith("UPDATE"):
+                        update_stmts.append(str(stmt))
+                    return await real_execute(stmt, *args, **kwargs)
+
+                self._db.execute = _spy_execute
+                return self._db
+
+            async def __aexit__(self, *exc):
+                return await self._ctx.__aexit__(*exc)
+
+        def spy_factory():
+            return _ExecuteSpy(factory)
+
+        touched = await dw.backfill_legacy_batch_ids(spy_factory)
+
+        assert touched == 50
+        # Exactly 2 UPDATEs — one per distinct ``created_at`` group.
+        # A per-row UPDATE regression would emit 50.
+        assert len(update_stmts) == 2, (
+            f"expected 2 grouped UPDATEs, got {len(update_stmts)}; "
+            "backfill must issue one UPDATE per distinct created_at"
+        )

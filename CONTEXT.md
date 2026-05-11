@@ -40,7 +40,7 @@ The **Vision type** recorded on a catalog row, used to disambiguate multiple **V
 A persistent record (`data_fetch_jobs` table) representing one ingest request. States: `queued → running → completed | failed | cancelled`. On API restart, `running` is reset to `queued` and re-enqueued.
 
 **FetchBatch**:
-One user-submitted fetch boundary. Every `POST /api/data/fetch-batch` call yields one FetchBatch whose fan-out of `DataFetchJob` rows share the same `batch_id`. A backtest-triggered standalone fetch is a single-job FetchBatch. Pre-#163 rows arrive with `batch_id IS NULL`; startup recovery backfills them by grouping rows that share `created_at` (see ADR 0003). Not persisted as its own table — `batch_id` on `data_fetch_jobs` is the only durable representation.
+One user-submitted fetch boundary. Every `POST /api/data/fetch-batch` call yields one FetchBatch whose fan-out of `DataFetchJob` rows shares the same `batch_id`. A backtest-triggered standalone fetch is a single-job FetchBatch. Pre-#163 rows arrive with `batch_id IS NULL`; startup recovery backfills them by grouping rows that share `created_at` (see ADR 0003). Not persisted as its own table — `batch_id` on `data_fetch_jobs` is the only durable representation.
 _Avoid_: fetch request, batch job.
 
 **FetchBucket**:

@@ -42,6 +42,125 @@ class TestModuleSurface:
 
 
 # ---------------------------------------------------------------------------
+# _count_queued_jobs — cheap COUNT query, never load-then-len
+# ---------------------------------------------------------------------------
+
+
+class TestCountQueuedJobs:
+    """The counter runs during startup recovery where backlog can be large;
+    it must never load every queued row into Python just to size the list.
+    """
+
+    async def _build_factory(self):
+        import uuid
+        from datetime import date, datetime
+
+        import pytest_asyncio  # noqa: F401  (ensures plugin is loaded)
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
+
+        from tinohelm.db.models import Base, DataFetchJob
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def _seed(rows):
+            async with factory() as db:
+                for r in rows:
+                    db.add(r)
+                await db.commit()
+
+        def _row(status: str):
+            return DataFetchJob(
+                job_id=str(uuid.uuid4()),
+                batch_id=None,
+                symbol="BTCUSDT",
+                data_type="klines",
+                interval="1m",
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 1, 1),
+                asset_class="um",
+                status=status,
+                created_at=datetime(2026, 1, 1, 12, 0, 0),
+            )
+
+        return factory, _seed, _row, engine, DataFetchJob
+
+    async def test_returns_zero_when_no_queued_rows(self):
+        factory, _seed, _row, engine, model = await self._build_factory()
+        try:
+            # Seed a few non-queued rows to prove the filter works.
+            await _seed([_row("running"), _row("completed"), _row("failed")])
+            count = await dw._count_queued_jobs(factory, model)
+            assert count == 0
+        finally:
+            await engine.dispose()
+
+    async def test_counts_only_queued_rows(self):
+        factory, _seed, _row, engine, model = await self._build_factory()
+        try:
+            await _seed([
+                _row("queued"),
+                _row("queued"),
+                _row("queued"),
+                _row("running"),
+                _row("completed"),
+                _row("failed"),
+                _row("cancelled"),
+            ])
+            count = await dw._count_queued_jobs(factory, model)
+            assert count == 3
+        finally:
+            await engine.dispose()
+
+    async def test_uses_count_query_not_row_materialization(self, monkeypatch):
+        """On large backlogs we must not pull every queued row into Python to
+        ``len()`` them. The underlying statement must be a COUNT aggregation
+        so the DB returns a single scalar — emitting one row's worth of
+        traffic instead of scaling with the queue depth.
+        """
+        from tinohelm.db.models import DataFetchJob
+
+        captured_stmts: list[str] = []
+
+        def factory():
+            db = AsyncMock()
+
+            async def _execute(stmt):
+                captured_stmts.append(str(stmt))
+                result = MagicMock()
+                # COUNT path: scalar_one() returns the aggregated count.
+                result.scalar_one = MagicMock(return_value=7)
+                # Legacy row-materialize path would instead call
+                # ``.scalars().all()`` and ``len()`` the list; wire a large
+                # value so a regression is obviously wrong, not silent.
+                scalars = MagicMock()
+                scalars.all = MagicMock(return_value=["leak"] * 9999)
+                result.scalars = MagicMock(return_value=scalars)
+                return result
+
+            db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        count = await dw._count_queued_jobs(factory, DataFetchJob)
+
+        assert count == 7, (
+            "impl must read the scalar count; a materialize-then-len bug "
+            "would return 9999 here"
+        )
+        assert captured_stmts, "expected exactly one COUNT query to be executed"
+        first = captured_stmts[0].upper()
+        assert "COUNT" in first, (
+            f"must use a SQL aggregate; got: {captured_stmts[0]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # enqueue_job delegates to shared helper
 # ---------------------------------------------------------------------------
 
@@ -154,6 +273,48 @@ class TestClaimNextQueuedJob:
 
         assert await dw.claim_next_queued_job(factory) is None
 
+    async def test_returns_none_when_row_cancelled_between_claim_and_load(self, monkeypatch):
+        """Cancellation can land after the atomic UPDATE but before the
+        follow-up SELECT loads the row. The worker must surface ``None``
+        so the consumer does not run pipeline work for a cancelled job.
+
+        This pins the existing guard: the SELECT path checks
+        ``job.status == STATUS_CANCELLED`` because a racing cancel API
+        call may have flipped ``running`` → ``cancelled`` between the
+        two sessions used by claim.
+        """
+        picked_job_id = "cancelled-between"
+        cancelled_job = SimpleNamespace(
+            job_id=picked_job_id,
+            status=dw.STATUS_CANCELLED,
+            symbol="BTCUSDT",
+            data_type="klines",
+            interval="1m",
+            start_date="2025-01-01",
+            end_date="2025-01-02",
+            asset_class="um",
+        )
+
+        def factory():
+            db = AsyncMock()
+
+            async def _execute(stmt):
+                result = MagicMock()
+                if "UPDATE" in str(stmt).upper():
+                    # Atomic claim succeeded — row flipped queued → running.
+                    result.rowcount = 1
+                    result.scalar_one_or_none = MagicMock(return_value=picked_job_id)
+                else:
+                    # Between the two sessions another actor flipped the
+                    # row to cancelled (e.g. the cancel API route).
+                    result.scalar_one_or_none = MagicMock(return_value=cancelled_job)
+                return result
+
+            db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        assert await dw.claim_next_queued_job(factory) is None
+
 
 # ---------------------------------------------------------------------------
 # drain_once — one wake token makes the worker keep claiming jobs until empty
@@ -243,6 +404,43 @@ class TestDrainOnce:
         # Both jobs were attempted; the "good" one processed successfully.
         assert n == 2
         assert processed == ["good"]
+
+    async def test_stops_when_process_returns_false_without_reclaiming(self, monkeypatch):
+        """When ``_process_claimed_job`` returns ``False`` (catalog lock busy,
+        row reverted to queued), ``drain_once`` must stop this tick instead
+        of re-claiming the same row in a tight loop.
+
+        Without this guard two consumers contending on the same
+        ``(symbol, data_type, interval)`` bucket could hot-spin: each claim
+        would pick the reverted row, fail the lock acquisition, revert, and
+        immediately re-claim — burning CPU until the other consumer releases.
+        """
+        claim_calls = 0
+        busy_job = SimpleNamespace(
+            job_id="lock-busy", symbol="BTC", data_type="klines", interval="1m",
+        )
+
+        async def fake_claim(_factory):
+            nonlocal claim_calls
+            claim_calls += 1
+            return busy_job
+
+        process_calls: list[str] = []
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            process_calls.append(job.job_id)
+            return False  # row was reverted queued → catalog lock busy
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+
+        n = await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        # One row was claimed and deferred; drain must exit without looping.
+        assert n == 1
+        assert claim_calls == 1, "lock-busy return must terminate the drain"
+        assert process_calls == ["lock-busy"]
 
 
 # ---------------------------------------------------------------------------
