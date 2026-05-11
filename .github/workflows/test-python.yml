@@ -7,6 +7,8 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - 'Dockerfile'
+      - 'Dockerfile.web'
       - '.github/workflows/test-python.yml'
   pull_request:
     paths:
@@ -14,6 +16,9 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - 'Dockerfile'
+      - 'Dockerfile.web'
+      - '.github/workflows/test-python.yml'
 
 jobs:
   unit:

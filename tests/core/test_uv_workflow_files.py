@@ -19,6 +19,12 @@ def test_python_test_workflow_runs_with_uv_and_tracks_lockfile() -> None:
     pr_paths = trigger["pull_request"]["paths"]
     assert "uv.lock" in push_paths
     assert "uv.lock" in pr_paths
+    assert "Dockerfile" in push_paths
+    assert "Dockerfile" in pr_paths
+    assert "Dockerfile.web" in push_paths
+    assert "Dockerfile.web" in pr_paths
+    assert ".github/workflows/test-python.yml" in push_paths
+    assert ".github/workflows/test-python.yml" in pr_paths
 
     unit_steps = workflow["jobs"]["unit"]["steps"]
     integration_steps = workflow["jobs"]["integration"]["steps"]
