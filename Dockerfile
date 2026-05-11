@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # TinoHelm API Server
 # Optimizations:
 #   P0: No Rust toolchain — nautilus_trader 1.225.0 ships manylinux wheels for aarch64 + x86_64
@@ -13,10 +13,7 @@ FROM python:3.12-slim AS deps
 # Build tools needed by some transitive C-extension deps (e.g. cryptography, psutil)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    curl \
     && rm -rf /var/lib/apt/lists/*
-
-COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /uvx /bin/
 
 WORKDIR /build
 ENV UV_LINK_MODE=copy
@@ -27,7 +24,9 @@ COPY pyproject.toml ./
 COPY uv.lock ./
 
 # P3: BuildKit cache mount keeps uv's cache across rebuilds
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=from=ghcr.io/astral-sh/uv:0.9.5,source=/uv,target=/bin/uv \
+    --mount=from=ghcr.io/astral-sh/uv:0.9.5,source=/uvx,target=/bin/uvx \
+    --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --extra optimize
 
 # ─── Stage 2: runtime ─────────────────────────────────────────────────────────
@@ -53,8 +52,9 @@ COPY alembic.ini ./
 COPY src/ ./src/
 
 # P1: Install the local package into the synced environment without re-resolving dependencies.
-COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /uvx /bin/
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=from=ghcr.io/astral-sh/uv:0.9.5,source=/uv,target=/bin/uv \
+    --mount=from=ghcr.io/astral-sh/uv:0.9.5,source=/uvx,target=/bin/uvx \
+    --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-editable --extra optimize
 
 # Runtime directories

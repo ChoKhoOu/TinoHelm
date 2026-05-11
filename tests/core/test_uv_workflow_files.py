@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -38,6 +39,14 @@ def test_dockerfile_syncs_from_uv_lock_and_runtime_venv() -> None:
     assert "UV_PROJECT_ENVIRONMENT=/opt/venv" in dockerfile
     assert "uv sync --frozen --no-install-project --extra optimize" in dockerfile
     assert "uv sync --frozen --no-editable --extra optimize" in dockerfile
-    assert "COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /uvx /bin/" in dockerfile
+    assert re.search(
+        r"ghcr\.io/astral-sh/uv:[^\s]+,source=/uv,target=/bin/uv",
+        dockerfile,
+    )
+    assert re.search(
+        r"ghcr\.io/astral-sh/uv:[^\s]+,source=/uvx,target=/bin/uvx",
+        dockerfile,
+    )
+    assert "COPY --from=ghcr.io/astral-sh/uv:" not in dockerfile
     assert "pip wheel --wheel-dir=/wheels" not in dockerfile
     assert "pip install --no-cache-dir --no-index /wheels/*" not in dockerfile
