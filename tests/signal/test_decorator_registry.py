@@ -299,6 +299,52 @@ class TestCodeHashSemantics:
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
 
+    def test_bytecode_fallback_distinguishes_by_qualname(self, monkeypatch):
+        """Two signal kernels sharing identical bytecode but exposed under
+        different qualnames must receive distinct ``code_hash``es when the
+        fallback path is taken. Hashing only the marshaled code object
+        loses the function's identity — two kernels with the same body
+        (e.g. a code object shared across names) would silently collide
+        in the spec registry and downstream caches keyed on ``code_hash``.
+        """
+        import types
+
+        import tinohelm.signal.decorator as sig_dec
+
+        def raising_getsource(_obj):
+            raise OSError("could not get source code")
+
+        monkeypatch.setattr(sig_dec.inspect, "getsource", raising_getsource)
+
+        def _template(factor_panel):
+            return factor_panel
+
+        shared_code = _template.__code__
+
+        twin_a = types.FunctionType(shared_code, _template.__globals__, name="twin_a")
+        twin_a.__qualname__ = "module_a.twin_a"
+        twin_b = types.FunctionType(shared_code, _template.__globals__, name="twin_b")
+        twin_b.__qualname__ = "module_b.twin_b"
+
+        decorate = sig_dec.signal(
+            name="fallback-qualname",
+            factor_ref="ret_N@1.0.0",
+            method="top_k_long_short",
+            rebalance_freq="1D",
+            universe_ref="u",
+        )
+        decorated_a = decorate(twin_a)
+        decorated_b = decorate(twin_b)
+
+        assert (
+            decorated_a.__signal_spec__.code_hash
+            != decorated_b.__signal_spec__.code_hash
+        ), (
+            "bytecode fallback must mix qualname/name into the hash so "
+            "kernels with identical __code__ but different identities "
+            "do not collide"
+        )
+
 
 # ---------------------------------------------------------------------------
 # extra_warmup_bars + numeric guards

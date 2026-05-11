@@ -138,9 +138,10 @@ def _compute_code_hash(func: Callable) -> str:  # type: ignore[type-arg]
     ``inspect.getsource`` fails — stale ``.pyc`` whose ``co_filename``
     references a path not on disk (Docker pyc mounted into a local
     checkout), C extensions, REPL-defined functions — falls back to
-    hashing the compiled bytecode + qualname + constants. Returning
-    ``""`` in that case would collapse every factor's identity and
-    break downstream caches keyed on ``code_hash``.
+    hashing the function's module + qualname + name together with the
+    marshaled compiled bytecode (see :func:`_bytecode_fallback_hash`).
+    Returning ``""`` in that case would collapse every factor's identity
+    and break downstream caches keyed on ``code_hash``.
     """
     try:
         source = inspect.getsource(func)
@@ -154,18 +155,25 @@ def _compute_code_hash(func: Callable) -> str:  # type: ignore[type-arg]
 
 
 def _bytecode_fallback_hash(func: Callable) -> str:  # type: ignore[type-arg]
-    code = getattr(func, "__code__", None)
+    """Hash identity = ``module`` + ``qualname`` + ``name`` + marshaled bytecode.
+
+    Mixing the function's identifying names in *before* the marshaled code
+    object keeps two kernels with identical bytecode but different
+    qualnames from collapsing to the same hash. That matters when a code
+    object is shared across names (``types.FunctionType(shared_code, …)``,
+    ``func.__code__ = other.__code__``) or when trivial wrappers compile to
+    byte-identical bodies across modules.
+    """
     h = hashlib.sha256()
-    if code is None:
-        # Deterministic fallback for functions without __code__
-        h.update(getattr(func, "__module__", "").encode("utf-8"))
-        h.update(b"\x00")
-        h.update(getattr(func, "__qualname__", "").encode("utf-8"))
-        h.update(b"\x00")
-        h.update(getattr(func, "__name__", "").encode("utf-8"))
-        return h.hexdigest()
-    # Serialize entire code object with marshal for stable hash
-    h.update(marshal.dumps(code))
+    h.update(getattr(func, "__module__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(getattr(func, "__qualname__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(getattr(func, "__name__", "").encode("utf-8"))
+    h.update(b"\x00")
+    code = getattr(func, "__code__", None)
+    if code is not None:
+        h.update(marshal.dumps(code))
     return h.hexdigest()
 
 

@@ -67,11 +67,13 @@ def _compute_code_hash(func: Callable) -> str:  # type: ignore[type-arg]
     ``inspect.getsource`` fails — typically because the bytecode cache
     (``.pyc``) carries a ``co_filename`` that no longer exists on disk
     (Docker-built pyc mounted into a local checkout) or for C-extension
-    functions — we fall back to hashing the compiled bytecode plus
-    qualname + constants. That still buys:
+    functions — we fall back to hashing the function's module + qualname
+    + name together with the marshaled compiled bytecode (see
+    :func:`_bytecode_fallback_hash`). That still buys:
 
     - non-empty, deterministic, per-function identity (two distinct
-      bodies compile to distinct bytecode sequences), and
+      bodies compile to distinct bytecode sequences, and two kernels
+      sharing bytecode are still separated by their qualnames), and
     - stability across re-imports of the same source (same bytecode).
 
     Returning ``""`` in this situation would collapse every signal's
@@ -90,18 +92,25 @@ def _compute_code_hash(func: Callable) -> str:  # type: ignore[type-arg]
 
 
 def _bytecode_fallback_hash(func: Callable) -> str:  # type: ignore[type-arg]
-    code = getattr(func, "__code__", None)
+    """Hash identity = ``module`` + ``qualname`` + ``name`` + marshaled bytecode.
+
+    Mixing the function's identifying names in *before* the marshaled code
+    object keeps two kernels with identical bytecode but different
+    qualnames from collapsing to the same hash. That matters when a code
+    object is shared across names (``types.FunctionType(shared_code, …)``,
+    ``func.__code__ = other.__code__``) or when trivial wrappers compile
+    to byte-identical bodies across modules.
+    """
     h = hashlib.sha256()
-    if code is None:
-        # Deterministic fallback for functions without __code__
-        h.update(getattr(func, "__module__", "").encode("utf-8"))
-        h.update(b"\x00")
-        h.update(getattr(func, "__qualname__", "").encode("utf-8"))
-        h.update(b"\x00")
-        h.update(getattr(func, "__name__", "").encode("utf-8"))
-        return h.hexdigest()
-    # Serialize entire code object with marshal for stable hash
-    h.update(marshal.dumps(code))
+    h.update(getattr(func, "__module__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(getattr(func, "__qualname__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(getattr(func, "__name__", "").encode("utf-8"))
+    h.update(b"\x00")
+    code = getattr(func, "__code__", None)
+    if code is not None:
+        h.update(marshal.dumps(code))
     return h.hexdigest()
 
 
