@@ -908,6 +908,16 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
         await rds.close()
 
 
+async def _schedule_delayed_wake(redis_url: str) -> None:
+    """Schedule a delayed wake token to retry a lock-busy job."""
+    await asyncio.sleep(LOCK_BUSY_REQUEUE_DELAY)
+    rds = aioredis.from_url(redis_url, decode_responses=True)
+    try:
+        await _shared_enqueue_job(rds, QUEUE_KEY, WAKE_TOKEN)
+    finally:
+        await rds.close()
+
+
 async def drain_once(*, redis_url: str, catalog_path: str) -> int:
     """Drain all currently-runnable DataFetchJob rows from the DB.
 
@@ -959,20 +969,10 @@ async def drain_once(*, redis_url: str, catalog_path: str) -> int:
             return processed
 
 
-
-    """Schedule a delayed wake token to retry a lock-busy job."""
-    await asyncio.sleep(LOCK_BUSY_REQUEUE_DELAY)
-    rds = aioredis.from_url(redis_url, decode_responses=True)
-    try:
-        await _shared_enqueue_job(rds, QUEUE_KEY, WAKE_TOKEN)
-    finally:
-        await rds.close()
-
-
 def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
     """Start the data-fetch consumer as a background asyncio task."""
     async def _process(_wake_token: str) -> None:
-        # The payload popped off Redis is always a wake sentinel (see
+
         # WAKE_TOKEN); actual scheduling happens from the DB.
         await drain_once(redis_url=redis_url, catalog_path=catalog_path)
 
