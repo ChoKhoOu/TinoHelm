@@ -48,6 +48,15 @@ WAKE_TOKEN = "wake"
 PROGRESS_THROTTLE_INTERVAL = 2.0
 LOCK_BUSY_REQUEUE_DELAY = 1.0
 
+# Returned by ``claim_next_queued_job`` to distinguish "row was claimed but
+# is no longer runnable" (e.g. cancelled between the atomic UPDATE and the
+# follow-up SELECT) from "the queued table is genuinely empty". Without this
+# split, ``drain_once`` would treat a cancellation race as "queue exhausted"
+# and leave sibling queued rows stranded until the next WAKE_TOKEN — and
+# ``_requeue_queued_job_best_effort`` / ``cancel_data_fetch_job`` don't push
+# one, so those siblings could stall indefinitely.
+CLAIM_SKIP: object = object()
+
 _handle: WorkerHandle = WorkerHandle(name="data-fetch-worker")
 _catalog_locks = _catalog_locking._catalog_locks
 _catalog_lock_key = _catalog_locking.catalog_lock_key
@@ -445,9 +454,9 @@ async def claim_next_queued_job(factory):
             )
         ).scalar_one_or_none()
     if job is None:
-        return None
+        return CLAIM_SKIP
     if getattr(job, "status", STATUS_RUNNING) == STATUS_CANCELLED:
-        return None
+        return CLAIM_SKIP
     return job
 
 
@@ -929,6 +938,12 @@ async def drain_once(*, redis_url: str, catalog_path: str) -> int:
             return processed
         if job is None:
             return processed
+        if job is CLAIM_SKIP:
+            # Atomic UPDATE ... RETURNING committed, but the follow-up SELECT
+            # saw the row as cancelled or gone. That's a single-row loss, not
+            # "queue empty" — keep draining sibling queued rows instead of
+            # waiting for the next wake signal.
+            continue
         processed += 1
         try:
             advanced = await _process_claimed_job(job, redis_url, catalog_path)

@@ -273,15 +273,15 @@ class TestClaimNextQueuedJob:
 
         assert await dw.claim_next_queued_job(factory) is None
 
-    async def test_returns_none_when_row_cancelled_between_claim_and_load(self, monkeypatch):
+    async def test_returns_skip_sentinel_when_row_cancelled_between_claim_and_load(self, monkeypatch):
         """Cancellation can land after the atomic UPDATE but before the
-        follow-up SELECT loads the row. The worker must surface ``None``
-        so the consumer does not run pipeline work for a cancelled job.
+        follow-up SELECT loads the row. The worker must surface
+        ``CLAIM_SKIP`` — not ``None`` — so the caller can tell "one row
+        raced with cancellation" apart from "queue is empty".
 
-        This pins the existing guard: the SELECT path checks
-        ``job.status == STATUS_CANCELLED`` because a racing cancel API
-        call may have flipped ``running`` → ``cancelled`` between the
-        two sessions used by claim.
+        Returning ``None`` here would make ``drain_once`` exit early and
+        strand every sibling queued row behind this one until the next
+        wake signal (which ``cancel_data_fetch_job`` does not push).
         """
         picked_job_id = "cancelled-between"
         cancelled_job = SimpleNamespace(
@@ -313,7 +313,34 @@ class TestClaimNextQueuedJob:
             db.execute = AsyncMock(side_effect=_execute)
             return _FakeSessionCtx(db)
 
-        assert await dw.claim_next_queued_job(factory) is None
+        assert await dw.claim_next_queued_job(factory) is dw.CLAIM_SKIP
+
+    async def test_returns_skip_sentinel_when_row_missing_after_claim(self, monkeypatch):
+        """Same concern as the cancellation race but on a different
+        pathway: the follow-up SELECT may find the row has been deleted
+        (rare, but possible if a concurrent admin wipe lands between the
+        two sessions). Surface ``CLAIM_SKIP`` so the drain keeps going
+        rather than mistaking a single missing row for queue exhaustion.
+        """
+        picked_job_id = "vanished-between"
+
+        def factory():
+            db = AsyncMock()
+
+            async def _execute(stmt):
+                result = MagicMock()
+                if "UPDATE" in str(stmt).upper():
+                    result.rowcount = 1
+                    result.scalar_one_or_none = MagicMock(return_value=picked_job_id)
+                else:
+                    # Row was deleted between the UPDATE commit and the SELECT.
+                    result.scalar_one_or_none = MagicMock(return_value=None)
+                return result
+
+            db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        assert await dw.claim_next_queued_job(factory) is dw.CLAIM_SKIP
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +468,45 @@ class TestDrainOnce:
         assert n == 1
         assert claim_calls == 1, "lock-busy return must terminate the drain"
         assert process_calls == ["lock-busy"]
+
+    async def test_skip_sentinel_does_not_halt_drain(self, monkeypatch):
+        """A mid-claim cancellation (UPDATE commits, but the follow-up SELECT
+        sees ``status='cancelled'``) must not be conflated with "queue empty".
+
+        ``claim_next_queued_job`` signals this via the ``CLAIM_SKIP`` sentinel
+        so ``drain_once`` continues with the next runnable row. Without this,
+        a single cancelled row would strand every sibling behind it until the
+        next wake token — and ``_requeue_queued_job_best_effort`` /
+        ``cancel_data_fetch_job`` don't currently push one.
+        """
+        good = SimpleNamespace(
+            job_id="good", symbol="ETH", data_type="klines", interval="1m",
+        )
+        # Sequence: first claim picks a row that raced with cancellation
+        # (CLAIM_SKIP), then the next claim produces a healthy row, then
+        # the queue drains.
+        outcomes: list = [dw.CLAIM_SKIP, good, None]
+
+        async def fake_claim(_factory):
+            return outcomes.pop(0)
+
+        processed: list[str] = []
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            processed.append(job.job_id)
+            return True
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+
+        n = await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        # The skip is not counted as "processed", but the drain kept going
+        # and picked up the runnable sibling.
+        assert processed == ["good"]
+        assert n == 1
+        assert outcomes == [], "drain must exhaust outcomes, not stop on skip"
 
 
 # ---------------------------------------------------------------------------
