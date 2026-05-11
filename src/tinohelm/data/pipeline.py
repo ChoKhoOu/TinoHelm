@@ -745,6 +745,9 @@ class BinanceVisionPipeline:
             )
 
         # 2. Prepare converter (before downloads so conversion can start immediately)
+        ingest_run_id = uuid4().hex
+        stage_root = self._stage_catalog_root(ingest_run_id)
+        self._active_write_catalog_path = stage_root
         instrument = self._get_instrument(symbol)
         converter = get_converter(data_type)
         kwargs = self._build_converter_kwargs(
@@ -755,7 +758,7 @@ class BinanceVisionPipeline:
         if data_type == "fundingRate":
             from tinohelm.data.catalog import CatalogSession
 
-            _fs = CatalogSession(self.catalog_path, storage=self._storage)
+            _fs = CatalogSession(stage_root, storage=self._storage)
             funding_txn = _fs.create_funding_txn(symbol)
             self._active_funding_txn = funding_txn
 
@@ -880,9 +883,14 @@ class BinanceVisionPipeline:
                     preexisting_output_paths,
                 )
             finally:
+                try:
+                    self._delete_stage_outputs(ingest_run_id)
+                except Exception:
+                    logger.warning("Failed to clean ingest staging during rollback for %s", ingest_run_id, exc_info=True)
                 if funding_txn is not None:
                     funding_txn.restore()
                 self._active_funding_txn = None
+                self._active_write_catalog_path = self.catalog_path
 
         try:
             await _progress(
@@ -1097,13 +1105,27 @@ class BinanceVisionPipeline:
                         f"REST fallback failed for {symbol} {data_type} [{rest_start}..{end}]: {exc}"
                     ) from exc
 
-        # 5. Update DB catalog
+        # 5. Commit staged outputs into the live catalog, then update DB catalog
         try:
             await _progress(96, "Updating catalog database...")
         except asyncio.CancelledError:
             _rollback_once()
             raise
-        # Compute size_bytes from written files
+        record_count = total_objects if total_objects > 0 else None
+        try:
+            committed_paths = self._commit_staged_outputs(
+                symbol=symbol,
+                data_type=data_type,
+                interval=interval,
+                ingest_run_id=ingest_run_id,
+            )
+            if committed_paths:
+                all_file_paths = committed_paths
+        except Exception:
+            _rollback_once()
+            await _progress(100, "Failed")
+            logger.exception("Failed to commit staged catalog outputs")
+            raise
         unique_paths = set(all_file_paths)
         try:
             written_size = self._written_file_size(unique_paths) if unique_paths else None
@@ -1116,8 +1138,6 @@ class BinanceVisionPipeline:
             if task_cancelled.cancelling():
                 _rollback_once()
                 raise asyncio.CancelledError
-        record_count = total_objects if total_objects > 0 else None
-        ingest_run_id = uuid4().hex
         if cleanup_guard is not None:
             try:
                 from tinohelm.data.catalog import resolve_catalog_path
@@ -1220,6 +1240,7 @@ class BinanceVisionPipeline:
             rest_fallback_used=rest_fallback_used,
             rest_fallback_range=rest_fallback_range,
         )
+        self._active_write_catalog_path = self.catalog_path
         if post_commit_was_cancelled:
             _recancel_current_task()
         return result
@@ -1302,6 +1323,110 @@ class BinanceVisionPipeline:
         except Exception:
             logger.warning("Failed to snapshot catalog paths under %s", target_dir, exc_info=True)
             return set()
+
+    def _stage_catalog_root(self, ingest_run_id: str) -> str:
+        return str(Path(self.catalog_path) / ".ingest-staging" / ingest_run_id)
+
+    def _active_catalog_root(self) -> str:
+        return getattr(self, "_active_write_catalog_path", self.catalog_path)
+
+    def _delete_stage_outputs(self, ingest_run_id: str) -> None:
+        from tinohelm.data.storage import delete_prefix
+
+        delete_prefix(self._storage, Path(self._stage_catalog_root(ingest_run_id)))
+
+    def _commit_staged_outputs(
+        self,
+        *,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        ingest_run_id: str,
+    ) -> list[str]:
+        from tinohelm.data.catalog import (
+            book_depth_parquet_path,
+            funding_rate_parquet_path,
+            metrics_parquet_path,
+            resolve_catalog_path,
+        )
+        from tinohelm.data.storage import promote_objects_with_rollback
+
+        category = resolve_write_category(data_type)
+        stage_root = Path(self._stage_catalog_root(ingest_run_id))
+        live_root = Path(self.catalog_path)
+        rollback_prefix = live_root / ".ingest-stage-rollback" / ingest_run_id
+
+        try:
+            if category == "bar":
+                if not interval:
+                    raise ValueError(f"Cannot commit bars without interval for data_type={data_type!r}")
+                stage_dir = self._catalog_item_dir(
+                    symbol, data_type, interval, data_type, catalog_root=stage_root
+                )
+                live_dir = self._catalog_item_dir(
+                    symbol, data_type, interval, data_type, catalog_root=str(live_root)
+                )
+                if stage_dir is None or live_dir is None:
+                    return []
+                temp_objects = list(self._storage.iter_files(stage_dir, suffix=".parquet", recursive=False))
+                old_objects = list(self._storage.iter_files(live_dir, suffix=".parquet", recursive=False))
+                if not temp_objects:
+                    return []
+                promote_objects_with_rollback(
+                    self._storage,
+                    temp_objects,
+                    live_dir,
+                    old_objects,
+                    rollback_prefix=rollback_prefix,
+                )
+                return [str(obj.path) for obj in self._storage.iter_files(live_dir, suffix=".parquet", recursive=False)]
+
+            if category in {"trade_tick", "quote_tick"}:
+                live_dir = self._catalog_item_dir(
+                    symbol, data_type, interval, data_type, catalog_root=str(live_root)
+                )
+                stage_dir = self._catalog_item_dir(
+                    symbol, data_type, interval, data_type, catalog_root=stage_root
+                )
+                if live_dir is None or stage_dir is None:
+                    return []
+                temp_objects = list(self._storage.iter_files(stage_dir, suffix=".parquet", recursive=False))
+                old_objects = list(self._storage.iter_files(live_dir, suffix=".parquet", recursive=False))
+                if not temp_objects:
+                    return []
+                promote_objects_with_rollback(
+                    self._storage,
+                    temp_objects,
+                    live_dir,
+                    old_objects,
+                    rollback_prefix=rollback_prefix,
+                )
+                return [str(obj.path) for obj in self._storage.iter_files(live_dir, suffix=".parquet", recursive=False)]
+
+            if category == "funding_rate":
+                stage_path = funding_rate_parquet_path(symbol, stage_root)
+                live_path = funding_rate_parquet_path(symbol, live_root)
+            elif category == "metrics":
+                stage_path = metrics_parquet_path(symbol, stage_root)
+                live_path = metrics_parquet_path(symbol, live_root)
+            elif category == "order_book_delta":
+                stage_path = book_depth_parquet_path(symbol, stage_root)
+                live_path = book_depth_parquet_path(symbol, live_root)
+            else:
+                raise RuntimeError(
+                    f"No staged catalog commit path for data_type={data_type!r} (category={category!r})"
+                )
+
+            if not self._storage.exists(stage_path):
+                return []
+            live_path.parent.mkdir(parents=True, exist_ok=True)
+            self._storage.copy_path(stage_path, live_path)
+            return [str(live_path)]
+        finally:
+            try:
+                self._delete_stage_outputs(ingest_run_id)
+            except Exception:
+                logger.warning("Failed to clean ingest staging for %s", ingest_run_id, exc_info=True)
 
 
     def ingest_sync(self, **kwargs) -> IngestResult:
@@ -1542,6 +1667,7 @@ class BinanceVisionPipeline:
             return []
 
         category = resolve_write_category(data_type)
+        active_catalog_path = self._active_catalog_root()
 
         if category == "bar":
             from tinohelm.data.catalog import write_bars
@@ -1549,7 +1675,7 @@ class BinanceVisionPipeline:
                 raise ValueError(f"Cannot write bars without interval for data_type={data_type!r}")
             paths = write_bars(
                 bars=objects, symbol=symbol,
-                interval=interval, catalog_path=self.catalog_path,
+                interval=interval, catalog_path=active_catalog_path,
                 merge=merge, source_type=data_type,
                 storage=self._storage,
             )
@@ -1559,7 +1685,7 @@ class BinanceVisionPipeline:
             from tinohelm.data.catalog import write_trade_ticks
             paths = write_trade_ticks(
                 ticks=objects, symbol=symbol,
-                catalog_path=self.catalog_path,
+                catalog_path=active_catalog_path,
                 source_type=data_type,
                 storage=self._storage,
             )
@@ -1569,7 +1695,7 @@ class BinanceVisionPipeline:
             from tinohelm.data.catalog import write_quote_ticks
             paths = write_quote_ticks(
                 ticks=objects, symbol=symbol,
-                catalog_path=self.catalog_path,
+                catalog_path=active_catalog_path,
                 source_type=data_type,
                 storage=self._storage,
             )
@@ -1586,12 +1712,12 @@ class BinanceVisionPipeline:
 
         elif category == "metrics":
             from tinohelm.data.catalog import write_metrics_parquet
-            path = write_metrics_parquet(objects, symbol, self.catalog_path, storage=self._storage)
+            path = write_metrics_parquet(objects, symbol, active_catalog_path, storage=self._storage)
             return [str(path)]
 
         elif category == "order_book_delta":
             from tinohelm.data.catalog import write_book_depth_parquet
-            path = write_book_depth_parquet(objects, symbol, self.catalog_path, storage=self._storage)
+            path = write_book_depth_parquet(objects, symbol, active_catalog_path, storage=self._storage)
             return [str(path)]
 
         else:
@@ -1686,7 +1812,7 @@ class BinanceVisionPipeline:
                 bars,
                 symbol,
                 interval,
-                self.catalog_path,
+                self._active_catalog_root(),
                 merge=False,
                 source_type=data_type,
                 storage=self._storage,
@@ -1715,7 +1841,7 @@ class BinanceVisionPipeline:
             paths = write_trade_ticks(
                 ticks,
                 symbol,
-                self.catalog_path,
+                self._active_catalog_root(),
                 source_type="aggTrades",
                 storage=self._storage,
             )
@@ -1966,9 +2092,11 @@ class BinanceVisionPipeline:
         data_type: str,
         interval: str | None,
         source_type: str | None,
+        *,
+        catalog_root: str | None = None,
     ) -> tuple[int | None, int]:
         """Return full-scan row and byte counts for a catalog storage path."""
-        target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
+        target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type, catalog_root=catalog_root)
         if target_dir is None:
             return None, 0
         parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=True))
@@ -2002,9 +2130,11 @@ class BinanceVisionPipeline:
         data_type: str,
         interval: str | None,
         source_type: str | None,
+        *,
+        catalog_root: str | None = None,
     ) -> tuple[date, date] | None:
         """Return stored min/max event dates for a catalog storage path."""
-        target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
+        target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type, catalog_root=catalog_root)
         if target_dir is None:
             return None
         paths = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=True))
@@ -2033,27 +2163,30 @@ class BinanceVisionPipeline:
         data_type: str,
         interval: str | None,
         source_type: str | None,
+        *,
+        catalog_root: str | None = None,
     ) -> Path | None:
         """Resolve the concrete on-disk directory represented by one DB row."""
         from tinohelm.data.catalog import resolve_catalog_path
         from tinohelm.strategy.loader_helpers import make_bar_type_str, normalize_symbol
 
+        root = catalog_root or self.catalog_path
         category = resolve_write_category(data_type)
         if category == "metrics":
             from tinohelm.data.catalog import metrics_parquet_path
 
-            return metrics_parquet_path(symbol, self.catalog_path)
+            return metrics_parquet_path(symbol, root)
         if category == "order_book_delta":
             from tinohelm.data.catalog import book_depth_parquet_path
 
-            return book_depth_parquet_path(symbol, self.catalog_path)
+            return book_depth_parquet_path(symbol, root)
         if category == "funding_rate":
             from tinohelm.data.catalog import funding_rate_parquet_path
 
-            return funding_rate_parquet_path(symbol, self.catalog_path)
+            return funding_rate_parquet_path(symbol, root)
 
         effective_source = source_type or data_type
-        resolved = resolve_catalog_path(self.catalog_path, effective_source)
+        resolved = resolve_catalog_path(root, effective_source)
         nt_symbol = normalize_symbol(symbol)
         if category == "bar":
             if not interval:

@@ -1,9 +1,8 @@
 """Async data-fetch worker — consumes jobs from Redis queue.
 
-Runs inside the API process (data fetching is I/O-bound, no need for
-subprocess isolation like backtest workers). On API startup the lifespan
-handler calls ``start_data_worker()`` which spawns the consumer loop and
-recovers any interrupted jobs from the DB.
+Runs in a dedicated worker process. The standalone entry point
+``tinohelm.data.worker_main`` recovers interrupted jobs, then calls
+``start_data_worker()`` to spawn the consumer loop.
 
 The generic queue-worker primitives live in
 ``tinohelm.core.async_queue_worker``; this module is only the data-fetch
@@ -496,6 +495,11 @@ async def _try_acquire_catalog_lock(lock_key: str):
     """Acquire a catalog lock only if immediately available."""
     async with _catalog_lock_attempt_guard:
         lock = _get_catalog_lock(lock_key)
+        if hasattr(lock, "try_acquire"):
+            acquired = await lock.try_acquire()
+            if not acquired:
+                return None
+            return lock
         if lock.locked():
             return None
         await lock.acquire()

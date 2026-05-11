@@ -20,7 +20,6 @@ from tinohelm.core.bridge import EventBridge
 from tinohelm.core.config import get_settings
 from tinohelm.core.node_controller import NodeController
 from tinohelm.backtest import consumer as bt_consumer
-from tinohelm.data.worker import recover_interrupted_jobs, start_data_worker, stop_data_worker_and_wait
 from tinohelm.factor.worker import recover_interrupted_jobs as recover_factor_jobs, start_factor_worker, stop_factor_worker
 from tinohelm.signal.worker import recover_interrupted_jobs as recover_signal_jobs, start_signal_worker, stop_signal_worker
 from tinohelm.db.bootstrap import bootstrap_database_schema
@@ -82,10 +81,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Recover stuck backtest runs (re-queue to Redis / legacy → failed)
     await bt_consumer.recover_interrupted_runs(redis_client)
 
-    # Data-fetch worker (async, in-process)
-    await recover_interrupted_jobs(redis_client)
-    start_data_worker(redis_url=cfg.redis.url, catalog_path=str(catalog_root))
-
     # Factor worker (async, in-process)
     await recover_factor_jobs(redis_client)
     start_factor_worker(redis_url=cfg.redis.url)
@@ -110,7 +105,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ---- shutdown ----
     logger.info("TinoHelm API shutting down")
-    await stop_data_worker_and_wait(timeout=30.0)
     stop_factor_worker()
     stop_signal_worker()
 

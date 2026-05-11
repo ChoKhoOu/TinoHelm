@@ -98,6 +98,52 @@ services:
     depends_on:
       - api
 
+  data-worker:
+    image: ${TINO_API_IMAGE:-ghcr.io/chokhoou/tinohelm-api:latest}
+    pull_policy: missing
+    restart: unless-stopped
+    command: ["python", "-m", "tinohelm.data.worker_main"]
+    volumes:
+      - ~/.tino/strategies:/app/tino/strategies
+      - ~/.tino/actors:/app/tino/actors
+      - ~/.tino/data:/app/tino/data
+      - ~/.tino/factor_cache:/app/tino/factor_cache
+      - ~/.tino/logs:/app/tino/logs
+      - ~/.tino/research:/app/tino/research
+      - ~/.tino/config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TINO_DATABASE__URL: "postgresql+asyncpg://${POSTGRES_USER:-tinohelm}:${POSTGRES_PASSWORD:-tinohelm_secret}@postgres:5432/${POSTGRES_DB:-tinohelm}"
+      TINO_REDIS__URL: "redis://:${REDIS_PASSWORD:-changeme}@redis:6379"
+      TINO_PATHS__STRATEGIES: "/app/tino/strategies"
+      TINO_PATHS__ACTORS: "/app/tino/actors"
+      TINO_PATHS__CATALOG: "/app/tino/data/catalog"
+      TINO_PATHS__ARTIFACTS: "/app/tino/data/artifacts"
+      TINO_PATHS__FUNDING_RATES: "/app/tino/data/funding_rates"
+      TINO_PATHS__DATA_CACHE: "/app/tino/data"
+      TINO_STORAGE__PROVIDER: "${TINO_STORAGE__PROVIDER:-tos}"
+      TINO_STORAGE__TOS__REGION: "${TINO_STORAGE__TOS__REGION:-ap-southeast-3}"
+      TINO_STORAGE__TOS__BUCKET: "${TINO_STORAGE__TOS__BUCKET:-trade-data}"
+      TINO_STORAGE__TOS__PREFIX: "${TINO_STORAGE__TOS__PREFIX:-}"
+      TINO_STORAGE__TOS__ENDPOINT: "${TINO_STORAGE__TOS__ENDPOINT:-https://tos-s3-ap-southeast-3.volces.com}"
+      TINO_STORAGE__TOS__ACCESS_KEY: "${TINO_STORAGE__TOS__ACCESS_KEY:-}"
+      TINO_STORAGE__TOS__SECRET_KEY: "${TINO_STORAGE__TOS__SECRET_KEY:-}"
+      TINO_STORAGE__TOS__SECURITY_TOKEN: "${TINO_STORAGE__TOS__SECURITY_TOKEN:-}"
+      TINO_STORAGE__TOS__STAGING_DIR: "/app/tino/data/tos_staging"
+      TINO_PATHS__FACTOR_CACHE: "/app/tino/factor_cache"
+      TINO_PATHS__LOGS: "/app/tino/logs"
+      TINO_PATHS__RESEARCH: "/app/tino/research"
+      BINANCE_API_KEY: "${BINANCE_API_KEY:-}"
+      BINANCE_API_SECRET: "${BINANCE_API_SECRET:-}"
+      HOST_HOME: "${HOME}"
+
   node-sandbox:
     image: ${TINO_API_IMAGE:-ghcr.io/chokhoou/tinohelm-api:latest}
     pull_policy: missing
