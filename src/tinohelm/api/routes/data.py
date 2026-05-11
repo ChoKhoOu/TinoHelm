@@ -6,6 +6,7 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -390,6 +391,9 @@ async def trigger_data_fetch_batch(
 
     job_ids: list[str] = []
     jobs: list[dict[str, str | None]] = []
+    # One fetch-batch submission = one FetchBatch. All fanned-out DataFetchJob
+    # rows share this batch_id so the scheduler can treat them as a unit.
+    batch_id = str(uuid4())
     ranges = _split_fetch_date_ranges(
         data_type=body.data_type,
         start=body.start,
@@ -408,6 +412,7 @@ async def trigger_data_fetch_batch(
                     end_date=end_date,
                     asset_class=body.asset_class,
                     status="queued",
+                    batch_id=batch_id,
                 )
                 db.add(job)
                 await db.flush()

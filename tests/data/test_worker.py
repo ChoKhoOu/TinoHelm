@@ -42,20 +42,545 @@ class TestModuleSurface:
 
 
 # ---------------------------------------------------------------------------
+# _count_queued_jobs — cheap COUNT query, never load-then-len
+# ---------------------------------------------------------------------------
+
+
+class TestCountQueuedJobs:
+    """The counter runs during startup recovery where backlog can be large;
+    it must never load every queued row into Python just to size the list.
+    """
+
+    async def _build_factory(self):
+        import uuid
+        from datetime import date, datetime
+
+        import pytest_asyncio  # noqa: F401  (ensures plugin is loaded)
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
+
+        from tinohelm.db.models import Base, DataFetchJob
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def _seed(rows):
+            async with factory() as db:
+                for r in rows:
+                    db.add(r)
+                await db.commit()
+
+        def _row(status: str):
+            return DataFetchJob(
+                job_id=str(uuid.uuid4()),
+                batch_id=None,
+                symbol="BTCUSDT",
+                data_type="klines",
+                interval="1m",
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 1, 1),
+                asset_class="um",
+                status=status,
+                created_at=datetime(2026, 1, 1, 12, 0, 0),
+            )
+
+        return factory, _seed, _row, engine, DataFetchJob
+
+    async def test_returns_zero_when_no_queued_rows(self):
+        factory, _seed, _row, engine, model = await self._build_factory()
+        try:
+            # Seed a few non-queued rows to prove the filter works.
+            await _seed([_row("running"), _row("completed"), _row("failed")])
+            count = await dw._count_queued_jobs(factory, model)
+            assert count == 0
+        finally:
+            await engine.dispose()
+
+    async def test_counts_only_queued_rows(self):
+        factory, _seed, _row, engine, model = await self._build_factory()
+        try:
+            await _seed([
+                _row("queued"),
+                _row("queued"),
+                _row("queued"),
+                _row("running"),
+                _row("completed"),
+                _row("failed"),
+                _row("cancelled"),
+            ])
+            count = await dw._count_queued_jobs(factory, model)
+            assert count == 3
+        finally:
+            await engine.dispose()
+
+    async def test_uses_count_query_not_row_materialization(self, monkeypatch):
+        """On large backlogs we must not pull every queued row into Python to
+        ``len()`` them. The underlying statement must be a COUNT aggregation
+        so the DB returns a single scalar — emitting one row's worth of
+        traffic instead of scaling with the queue depth.
+        """
+        from tinohelm.db.models import DataFetchJob
+
+        captured_stmts: list[str] = []
+
+        def factory():
+            db = AsyncMock()
+
+            async def _execute(stmt):
+                captured_stmts.append(str(stmt))
+                result = MagicMock()
+                # COUNT path: scalar_one() returns the aggregated count.
+                result.scalar_one = MagicMock(return_value=7)
+                # Legacy row-materialize path would instead call
+                # ``.scalars().all()`` and ``len()`` the list; wire a large
+                # value so a regression is obviously wrong, not silent.
+                scalars = MagicMock()
+                scalars.all = MagicMock(return_value=["leak"] * 9999)
+                result.scalars = MagicMock(return_value=scalars)
+                return result
+
+            db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        count = await dw._count_queued_jobs(factory, DataFetchJob)
+
+        assert count == 7, (
+            "impl must read the scalar count; a materialize-then-len bug "
+            "would return 9999 here"
+        )
+        assert captured_stmts, "expected exactly one COUNT query to be executed"
+        first = captured_stmts[0].upper()
+        assert "COUNT" in first, (
+            f"must use a SQL aggregate; got: {captured_stmts[0]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # enqueue_job delegates to shared helper
 # ---------------------------------------------------------------------------
 
 class TestEnqueueJob:
-    async def test_lpushes_to_data_queue(self):
+    async def test_lpushes_wake_token_not_job_id(self):
+        # Issue #164: scheduling truth lives in the DB, not Redis list order.
+        # enqueue_job must emit a wake sentinel so the worker drains from DB —
+        # it must NOT include the job_id as queue payload.
         rds = AsyncMock()
         await dw.enqueue_job(rds, "job-42")
-        rds.lpush.assert_awaited_once_with("tino:data:queue", "job-42")
+        rds.lpush.assert_awaited_once()
+        args = rds.lpush.await_args.args
+        assert args[0] == "tino:data:queue"
+        assert args[1] != "job-42", (
+            "wake signal must not carry the job_id — drain picks it from the DB"
+        )
+        assert args[1] == dw.WAKE_TOKEN
 
-    async def test_handles_multiple_calls(self):
+    async def test_multiple_enqueues_each_push_wake_token(self):
         rds = AsyncMock()
         await dw.enqueue_job(rds, "a")
         await dw.enqueue_job(rds, "b")
         assert rds.lpush.await_count == 2
+        assert all(call.args[1] == dw.WAKE_TOKEN for call in rds.lpush.await_args_list)
+
+
+# ---------------------------------------------------------------------------
+# claim_next_queued_job — DB picks next job, not Redis list
+# ---------------------------------------------------------------------------
+
+class TestClaimNextQueuedJob:
+    """Issue #164 tracer: DB is the scheduling source of truth.
+
+    ``claim_next_queued_job(factory)`` must atomically:
+      - Pick the oldest ``status='queued'`` row (ORDER BY created_at, id)
+      - Flip it to ``status='running'``
+      - Return the claimed row, or ``None`` if no queued rows remain.
+    """
+
+    async def test_returns_none_when_no_queued_rows(self, monkeypatch):
+        def factory():
+            db = AsyncMock()
+            # UPDATE ... RETURNING matches nothing
+            result = MagicMock()
+            result.rowcount = 0
+            result.scalar_one_or_none = MagicMock(return_value=None)
+            db.execute = AsyncMock(return_value=result)
+            return _FakeSessionCtx(db)
+
+        assert await dw.claim_next_queued_job(factory) is None
+
+    async def test_claims_oldest_queued_job_and_returns_it(self, monkeypatch):
+        picked_job_id = "old-job-1"
+        claimed_job = SimpleNamespace(
+            job_id=picked_job_id,
+            status="running",
+            symbol="BTCUSDT",
+            data_type="klines",
+            interval="1m",
+            start_date="2025-01-01",
+            end_date="2025-01-02",
+            asset_class="um",
+        )
+
+        executed_statements: list[str] = []
+
+        def factory():
+            db = AsyncMock()
+
+            async def _execute(stmt):
+                text = str(stmt)
+                executed_statements.append(text)
+                result = MagicMock()
+                # The first statement is the atomic claim (UPDATE); the second
+                # reads the claimed row so the worker can process it.
+                if "UPDATE" in text.upper():
+                    result.rowcount = 1
+                    result.scalar_one_or_none = MagicMock(return_value=picked_job_id)
+                else:
+                    result.scalar_one_or_none = MagicMock(return_value=claimed_job)
+                return result
+
+            db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        got = await dw.claim_next_queued_job(factory)
+
+        assert got is claimed_job
+        # The claim statement must atomically flip queued → running — i.e. the
+        # WHERE clause must be gated on status='queued' so two racing consumers
+        # can't both claim the same row.
+        claim_stmt = executed_statements[0]
+        assert "UPDATE" in claim_stmt.upper()
+        assert "status" in claim_stmt.lower()
+        # And it must select the oldest queued row as its target.
+        assert "ORDER BY" in claim_stmt.upper()
+        # SQLAlchemy parameterizes the limit (``LIMIT :param_1``), so just
+        # require a LIMIT clause, not the literal "LIMIT 1".
+        assert " LIMIT " in claim_stmt.upper() or "fetch_first_rows_only" in claim_stmt.lower()
+
+    async def test_update_rowcount_zero_means_race_lost(self, monkeypatch):
+        def factory():
+            db = AsyncMock()
+            # Guarded UPDATE returns rowcount=0 — another consumer won the race.
+            result = MagicMock()
+            result.rowcount = 0
+            result.scalar_one_or_none = MagicMock(return_value=None)
+            db.execute = AsyncMock(return_value=result)
+            return _FakeSessionCtx(db)
+
+        assert await dw.claim_next_queued_job(factory) is None
+
+    async def test_returns_skip_sentinel_when_row_cancelled_between_claim_and_load(self, monkeypatch):
+        """Cancellation can land after the atomic UPDATE but before the
+        follow-up SELECT loads the row. The worker must surface
+        ``CLAIM_SKIP`` — not ``None`` — so the caller can tell "one row
+        raced with cancellation" apart from "queue is empty".
+
+        Returning ``None`` here would make ``drain_once`` exit early and
+        strand every sibling queued row behind this one until the next
+        wake signal (which ``cancel_data_fetch_job`` does not push).
+        """
+        picked_job_id = "cancelled-between"
+        cancelled_job = SimpleNamespace(
+            job_id=picked_job_id,
+            status=dw.STATUS_CANCELLED,
+            symbol="BTCUSDT",
+            data_type="klines",
+            interval="1m",
+            start_date="2025-01-01",
+            end_date="2025-01-02",
+            asset_class="um",
+        )
+
+        def factory():
+            db = AsyncMock()
+
+            async def _execute(stmt):
+                result = MagicMock()
+                if "UPDATE" in str(stmt).upper():
+                    # Atomic claim succeeded — row flipped queued → running.
+                    result.rowcount = 1
+                    result.scalar_one_or_none = MagicMock(return_value=picked_job_id)
+                else:
+                    # Between the two sessions another actor flipped the
+                    # row to cancelled (e.g. the cancel API route).
+                    result.scalar_one_or_none = MagicMock(return_value=cancelled_job)
+                return result
+
+            db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        assert await dw.claim_next_queued_job(factory) is dw.CLAIM_SKIP
+
+    async def test_returns_skip_sentinel_when_row_missing_after_claim(self, monkeypatch):
+        """Same concern as the cancellation race but on a different
+        pathway: the follow-up SELECT may find the row has been deleted
+        (rare, but possible if a concurrent admin wipe lands between the
+        two sessions). Surface ``CLAIM_SKIP`` so the drain keeps going
+        rather than mistaking a single missing row for queue exhaustion.
+        """
+        picked_job_id = "vanished-between"
+
+        def factory():
+            db = AsyncMock()
+
+            async def _execute(stmt):
+                result = MagicMock()
+                if "UPDATE" in str(stmt).upper():
+                    result.rowcount = 1
+                    result.scalar_one_or_none = MagicMock(return_value=picked_job_id)
+                else:
+                    # Row was deleted between the UPDATE commit and the SELECT.
+                    result.scalar_one_or_none = MagicMock(return_value=None)
+                return result
+
+            db.execute = AsyncMock(side_effect=_execute)
+            return _FakeSessionCtx(db)
+
+        assert await dw.claim_next_queued_job(factory) is dw.CLAIM_SKIP
+
+
+# ---------------------------------------------------------------------------
+# drain_once — one wake token makes the worker keep claiming jobs until empty
+# ---------------------------------------------------------------------------
+
+class TestDrainOnce:
+    """Issue #164 acceptance: one wake signal ⇒ many jobs processed.
+
+    ``drain_once(process_job, redis_url, catalog_path)`` is the coroutine
+    a consumer runs after BRPOP returns. It must loop, asking
+    ``claim_next_queued_job`` for work, until the DB reports none.
+    That makes one wake token sufficient to drain an arbitrarily deep
+    backlog — the old "one LPUSH per job" contract no longer holds.
+    """
+
+    async def test_drains_until_no_more_queued_jobs(self, monkeypatch):
+        jobs = [
+            SimpleNamespace(job_id="j1", symbol="BTC", data_type="klines", interval="1m"),
+            SimpleNamespace(job_id="j2", symbol="ETH", data_type="klines", interval="1m"),
+            SimpleNamespace(job_id="j3", symbol="SOL", data_type="klines", interval="1m"),
+        ]
+        pending: list = list(jobs)
+
+        async def fake_claim(_factory):
+            return pending.pop(0) if pending else None
+
+        processed: list[str] = []
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            processed.append(job.job_id)
+            return True  # row reached terminal; drain continues
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+
+        n = await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        assert n == 3
+        assert processed == ["j1", "j2", "j3"]
+
+    async def test_returns_zero_when_nothing_queued(self, monkeypatch):
+        async def fake_claim(_factory):
+            return None
+
+        processed: list = []
+
+        async def fake_process(*_args, **_kwargs):
+            processed.append(True)
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+
+        n = await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        assert n == 0
+        assert processed == []
+
+    async def test_process_exception_does_not_stop_drain(self, monkeypatch):
+        """Best-effort batch semantics: one job failing in-pipeline must not
+        break sibling claims. (The job body itself already writes failed
+        status — see TestProcessJob — so drain's job is just to keep going.)
+        """
+        jobs = [
+            SimpleNamespace(job_id="bad"),
+            SimpleNamespace(job_id="good"),
+        ]
+        pending = list(jobs)
+
+        async def fake_claim(_factory):
+            return pending.pop(0) if pending else None
+
+        processed: list[str] = []
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> None:
+            if job.job_id == "bad":
+                raise RuntimeError("pipeline exploded")
+            processed.append(job.job_id)
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+
+        n = await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        # Both jobs were attempted; the "good" one processed successfully.
+        assert n == 2
+        assert processed == ["good"]
+
+    async def test_stops_when_process_returns_false_without_reclaiming(self, monkeypatch):
+        """When ``_process_claimed_job`` returns ``False`` (catalog lock busy,
+        row reverted to queued), ``drain_once`` must stop this tick instead
+        of re-claiming the same row in a tight loop.
+
+        Without this guard two consumers contending on the same
+        ``(symbol, data_type, interval)`` bucket could hot-spin: each claim
+        would pick the reverted row, fail the lock acquisition, revert, and
+        immediately re-claim — burning CPU until the other consumer releases.
+        """
+        claim_calls = 0
+        busy_job = SimpleNamespace(
+            job_id="lock-busy", symbol="BTC", data_type="klines", interval="1m",
+        )
+
+        async def fake_claim(_factory):
+            nonlocal claim_calls
+            claim_calls += 1
+            return busy_job
+
+        process_calls: list[str] = []
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            process_calls.append(job.job_id)
+            return False  # row was reverted queued → catalog lock busy
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+
+        n = await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        # One row was claimed and deferred; drain must exit without looping.
+        assert n == 1
+        assert claim_calls == 1, "lock-busy return must terminate the drain"
+        assert process_calls == ["lock-busy"]
+
+    async def test_skip_sentinel_does_not_halt_drain(self, monkeypatch):
+        """A mid-claim cancellation (UPDATE commits, but the follow-up SELECT
+        sees ``status='cancelled'``) must not be conflated with "queue empty".
+
+        ``claim_next_queued_job`` signals this via the ``CLAIM_SKIP`` sentinel
+        so ``drain_once`` continues with the next runnable row. Without this,
+        a single cancelled row would strand every sibling behind it until the
+        next wake token — and ``_requeue_queued_job_best_effort`` /
+        ``cancel_data_fetch_job`` don't currently push one.
+        """
+        good = SimpleNamespace(
+            job_id="good", symbol="ETH", data_type="klines", interval="1m",
+        )
+        # Sequence: first claim picks a row that raced with cancellation
+        # (CLAIM_SKIP), then the next claim produces a healthy row, then
+        # the queue drains.
+        outcomes: list = [dw.CLAIM_SKIP, good, None]
+
+        async def fake_claim(_factory):
+            return outcomes.pop(0)
+
+        processed: list[str] = []
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            processed.append(job.job_id)
+            return True
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+
+        n = await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        # The skip is not counted as "processed", but the drain kept going
+        # and picked up the runnable sibling.
+        assert processed == ["good"]
+        assert n == 1
+        assert outcomes == [], "drain must exhaust outcomes, not stop on skip"
+
+    async def test_schedules_delayed_wake_on_lock_busy_in_single_consumer_mode(
+        self, monkeypatch
+    ):
+        """Single-consumer livelock guard: when the only consumer defers a
+        lock-busy row, nobody else is around to push the next WAKE_TOKEN.
+        ``drain_once`` must hand off to ``_schedule_delayed_wake`` so the
+        queued row is retried after ``LOCK_BUSY_REQUEUE_DELAY`` — otherwise
+        the job stalls indefinitely.
+        """
+        busy_job = SimpleNamespace(
+            job_id="lock-busy", symbol="BTC", data_type="klines", interval="1m",
+        )
+
+        async def fake_claim(_factory):
+            return busy_job
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            return False  # row reverted to queued
+
+        scheduled_urls: list[str] = []
+
+        async def fake_wake(redis_url: str) -> None:
+            scheduled_urls.append(redis_url)
+
+        settings_stub = SimpleNamespace(data=SimpleNamespace(job_concurrency=1))
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "get_settings", lambda: settings_stub)
+        monkeypatch.setattr(dw, "_schedule_delayed_wake", fake_wake)
+
+        await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        # Let the scheduled self-wake task run.
+        await asyncio.sleep(0)
+
+        assert scheduled_urls == ["redis://x"], (
+            "single-consumer lock-busy must schedule a delayed self-wake"
+        )
+
+    async def test_skips_delayed_wake_when_multiple_consumers(self, monkeypatch):
+        """With ``job_concurrency > 1`` the sibling consumer will re-drain
+        once it finishes its current row — scheduling an extra wake would
+        only spam the queue. The livelock path must stay single-consumer.
+        """
+        busy_job = SimpleNamespace(
+            job_id="lock-busy", symbol="BTC", data_type="klines", interval="1m",
+        )
+
+        async def fake_claim(_factory):
+            return busy_job
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            return False
+
+        scheduled: list[str] = []
+
+        async def fake_wake(redis_url: str) -> None:
+            scheduled.append(redis_url)
+
+        settings_stub = SimpleNamespace(data=SimpleNamespace(job_concurrency=2))
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "get_settings", lambda: settings_stub)
+        monkeypatch.setattr(dw, "_schedule_delayed_wake", fake_wake)
+
+        await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+        await asyncio.sleep(0)
+
+        assert scheduled == [], "multi-consumer mode must not self-wake"
 
 
 # ---------------------------------------------------------------------------
@@ -63,36 +588,140 @@ class TestEnqueueJob:
 # ---------------------------------------------------------------------------
 
 class TestRecoverInterruptedJobs:
-    async def test_invokes_shared_with_reset_queue_true(self, monkeypatch):
-        called: dict = {}
+    async def test_flips_running_to_queued_and_clears_redis_list(self, monkeypatch):
+        """Issue #164: recovery must not repush per-job payloads onto Redis.
 
-        async def _fake_requeue(
-            factory, model, rds, key, *, reset_queue=False, recovery_message=""
-        ):
-            called["factory"] = factory
-            called["model"] = model
-            called["rds"] = rds
-            called["key"] = key
-            called["reset_queue"] = reset_queue
-            called["recovery_message"] = recovery_message
-            return 7
+        After rollout, Redis never stores job_ids — scheduling truth lives
+        in the DB. Startup recovery therefore only needs to:
+          1. flip every ``running`` row back to ``queued``
+          2. clear whatever legacy payload Redis still holds
+          3. nudge a worker awake if and only if queued work exists
+        """
+        flipped: dict = {}
+        factory_marker = object()
 
-        monkeypatch.setattr(dw, "requeue_running_jobs", _fake_requeue)
-        monkeypatch.setattr(dw, "get_session_factory", lambda: "FAKE_FACTORY")
-        recover = AsyncMock(return_value=0)
-        monkeypatch.setattr(dw, "_recover_pending_ingest_rollbacks_on_startup", recover)
+        async def _fake_flip(factory, model):
+            flipped["factory"] = factory
+            flipped["model"] = model
+            return 4  # Pretend 4 running rows flipped back to queued.
+
+        monkeypatch.setattr(dw, "_flip_running_to_queued", _fake_flip)
+        monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=9))
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory_marker)
+        monkeypatch.setattr(
+            dw,
+            "_recover_pending_ingest_rollbacks_on_startup",
+            AsyncMock(return_value=0),
+        )
+        monkeypatch.setattr(
+            dw,
+            "backfill_legacy_batch_ids",
+            AsyncMock(return_value=0),
+        )
 
         rds = AsyncMock()
         count = await dw.recover_interrupted_jobs(rds)
 
-        assert count == 7
-        recover.assert_awaited_once()
-        assert called["model"] is dw.DataFetchJob
-        assert called["rds"] is rds
-        assert called["key"] == "tino:data:queue"
-        assert called["reset_queue"] is True
-        # factory is resolved at call time
-        assert called["factory"] == "FAKE_FACTORY"
+        assert count == 4
+        assert flipped == {"factory": factory_marker, "model": dw.DataFetchJob}
+        # Legacy Redis backlog is cleared, not replayed.
+        rds.delete.assert_awaited_once_with("tino:data:queue")
+
+    async def test_pushes_one_wake_token_when_queued_work_exists(self, monkeypatch):
+        """With queued rows still present, recovery must wake exactly ONE
+        consumer — not one wake token per job (PRD #162 decision #20)."""
+        monkeypatch.setattr(dw, "_flip_running_to_queued", AsyncMock(return_value=3))
+        monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=12))
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(
+            dw,
+            "_recover_pending_ingest_rollbacks_on_startup",
+            AsyncMock(return_value=0),
+        )
+        monkeypatch.setattr(
+            dw,
+            "backfill_legacy_batch_ids",
+            AsyncMock(return_value=0),
+        )
+
+        rds = AsyncMock()
+        await dw.recover_interrupted_jobs(rds)
+
+        # One wake token, regardless of how many queued jobs exist.
+        rds.lpush.assert_awaited_once_with("tino:data:queue", dw.WAKE_TOKEN)
+
+    async def test_no_wake_when_nothing_queued(self, monkeypatch):
+        """Empty DB ⇒ no wake token; the worker will wait on BRPOP until
+        something new arrives, avoiding noise on clean restarts."""
+        monkeypatch.setattr(dw, "_flip_running_to_queued", AsyncMock(return_value=0))
+        monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=0))
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(
+            dw,
+            "_recover_pending_ingest_rollbacks_on_startup",
+            AsyncMock(return_value=0),
+        )
+        monkeypatch.setattr(
+            dw,
+            "backfill_legacy_batch_ids",
+            AsyncMock(return_value=0),
+        )
+
+        rds = AsyncMock()
+        await dw.recover_interrupted_jobs(rds)
+
+        rds.lpush.assert_not_awaited()
+
+    async def test_backfills_legacy_backlog_before_clearing_redis(
+        self, monkeypatch
+    ):
+        """Issue #166: startup recovery must adopt legacy backlog into the
+        new scheduler by backfilling ``batch_id`` before clearing Redis.
+
+        Verifies:
+          - ``backfill_legacy_batch_ids`` is invoked with the session factory.
+          - It runs BEFORE ``rds.delete`` so legacy Redis tokens are only
+            purged once DB-side adoption has succeeded (if the backfill
+            raised, Redis would still carry the old wake signal for retry).
+          - Its touched-row count is logged/returned alongside the flip count.
+        """
+        factory_marker = object()
+        call_order: list[str] = []
+
+        async def _fake_flip(_factory, _model):
+            call_order.append("flip")
+            return 2
+
+        async def _fake_backfill(factory):
+            call_order.append("backfill")
+            assert factory is factory_marker
+            return 5
+
+        monkeypatch.setattr(dw, "_flip_running_to_queued", _fake_flip)
+        monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=7))
+        monkeypatch.setattr(dw, "get_session_factory", lambda: factory_marker)
+        monkeypatch.setattr(
+            dw,
+            "_recover_pending_ingest_rollbacks_on_startup",
+            AsyncMock(return_value=0),
+        )
+        monkeypatch.setattr(dw, "backfill_legacy_batch_ids", _fake_backfill)
+
+        rds = AsyncMock()
+
+        async def _delete(_key):
+            call_order.append("redis-delete")
+            return 1
+
+        rds.delete = _delete
+
+        await dw.recover_interrupted_jobs(rds)
+
+        # Backfill must run before we drop the legacy Redis list — otherwise
+        # a crash mid-backfill could leave both DB legacy rows AND a wake
+        # signal unreachable.
+        assert "backfill" in call_order
+        assert call_order.index("backfill") < call_order.index("redis-delete")
 
     async def test_startup_rollback_recovery_keeps_db_check_on_current_event_loop(
         self, monkeypatch, tmp_path
@@ -380,10 +1009,19 @@ class TestProcessJob:
 
         assert "update" not in events
         assert pipeline_constructed == []
-        fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-lock-busy")
+        # #164: the DB already owns scheduling — we must NOT push the job_id
+        # back onto Redis. The row is still ``status='queued'``, so the next
+        # drain pass will pick it up when the catalog lock clears.
+        for call in fake_rds.lpush.await_args_list:
+            assert call.args[1] != "job-lock-busy", (
+                "lock-busy path must not re-enqueue a job_id under the new scheduler"
+            )
         fake_rds.publish.assert_not_called()
 
-    async def test_deferred_locked_job_uses_backoff_before_requeue(self, monkeypatch):
+    async def test_deferred_locked_job_waits_without_touching_redis(self, monkeypatch):
+        # Under the DB-driven scheduler a lock-busy deferral is a pure
+        # back-off: the row stays ``queued`` so the next drain naturally
+        # retries. We only need a delay, nothing pushed onto Redis.
         fake_rds = AsyncMock()
         sleeps: list[float] = []
 
@@ -396,7 +1034,10 @@ class TestProcessJob:
         await dw._defer_locked_queued_job(fake_rds, "job-delay")
 
         assert sleeps == [0.75]
-        fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-delay")
+        for call in fake_rds.lpush.await_args_list:
+            assert call.args[1] != "job-delay", (
+                "job_id must never be written to Redis under the new scheduler"
+            )
 
     async def test_preclaim_cancellation_requeues_queued_job(self, monkeypatch):
         job = SimpleNamespace(
@@ -425,7 +1066,13 @@ class TestProcessJob:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        fake_rds.lpush.assert_awaited_once_with(dw.QUEUE_KEY, "job-preclaim-cancel")
+        # #164: pre-claim cancellation leaves the row queued; we rely on
+        # the DB-driven drain to pick it up again rather than shoving the
+        # job_id back onto a Redis list.
+        for call in fake_rds.lpush.await_args_list:
+            assert call.args[1] != "job-preclaim-cancel", (
+                "pre-claim cancellation must not re-push the job_id onto Redis"
+            )
         claim.assert_not_awaited()
         fake_rds.close.assert_awaited()
 
@@ -1066,29 +1713,30 @@ class TestWorkerLifecycle:
             except asyncio.CancelledError:
                 pass
 
-    async def test_process_callback_gets_job_id(self, monkeypatch):
-        """The coroutine factory passed into consumer_loop unwraps the job_id correctly."""
+    async def test_wake_token_triggers_drain(self, monkeypatch):
+        """After #164 the consumer callback is a wake signal handler.
+
+        Whatever value pops off Redis (we pass a dummy sentinel here), the
+        worker must ignore it as a scheduling decision and instead call
+        ``drain_once(redis_url=..., catalog_path=...)`` so the DB decides
+        what actually runs next.
+        """
         captured: dict = {}
 
         async def _fake_consumer(redis_url, queue_key, process_job, **_k):
-            # Invoke the process callback with a fake job id
-            await process_job("job-captured")
+            await process_job("any-token")  # content is irrelevant
 
         monkeypatch.setattr(dw, "consumer_loop", _fake_consumer)
 
-        async def _fake_process(job_id, redis_url, catalog_path):
-            captured["job_id"] = job_id
+        async def _fake_drain(*, redis_url: str, catalog_path: str) -> int:
             captured["redis_url"] = redis_url
             captured["catalog_path"] = catalog_path
+            return 0
 
-        monkeypatch.setattr(dw, "_process_job", _fake_process)
+        monkeypatch.setattr(dw, "drain_once", _fake_drain)
         dw._handle.stop()
 
         task = dw.start_data_worker(redis_url="redis://r", catalog_path="/c")
-        await task  # runs _fake_consumer which completes immediately
+        await task
 
-        assert captured == {
-            "job_id": "job-captured",
-            "redis_url": "redis://r",
-            "catalog_path": "/c",
-        }
+        assert captured == {"redis_url": "redis://r", "catalog_path": "/c"}

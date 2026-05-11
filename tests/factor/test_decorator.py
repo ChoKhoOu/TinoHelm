@@ -289,6 +289,66 @@ class TestCodeHash:
 
         assert f.__factor_spec__.code_hash != ""
 
+    def test_code_hash_falls_back_when_source_unavailable(self, monkeypatch):
+        """Same contract as signal decorator: when ``inspect.getsource``
+        cannot retrieve the body (stale pyc with ``co_filename`` pointing
+        at a path that no longer exists, C extensions, etc.), the factor
+        decorator must still return a non-empty deterministic hash. An
+        empty hash would collapse every factor's identity and break
+        caches keyed on ``code_hash``.
+        """
+        import tinohelm.factor.decorator as fac_dec
+
+        def raising_getsource(_obj):
+            raise OSError("could not get source code")
+
+        monkeypatch.setattr(fac_dec.inspect, "getsource", raising_getsource)
+
+        @fac_dec.factor(category="X")
+        def f(close: Panel) -> Panel:
+            return close
+
+        h = f.__factor_spec__.code_hash
+        assert h != "", "source-missing fallback must produce a non-empty hash"
+        assert len(h) == 64
+
+    def test_bytecode_fallback_distinguishes_by_qualname(self, monkeypatch):
+        """Two functions sharing identical bytecode but exposed under
+        different qualnames must receive distinct ``code_hash``es when the
+        fallback path is taken. Hashing only the marshaled code object
+        loses the function's identity — two factor kernels with the same
+        body (e.g. `lambda x: x` reused, or a code object shared across
+        names) would silently collide in the spec registry and downstream
+        caches keyed on ``code_hash``.
+        """
+        import types
+
+        import tinohelm.factor.decorator as fac_dec
+
+        def raising_getsource(_obj):
+            raise OSError("could not get source code")
+
+        monkeypatch.setattr(fac_dec.inspect, "getsource", raising_getsource)
+
+        def _template(close: Panel) -> Panel:
+            return close
+
+        shared_code = _template.__code__
+
+        twin_a = types.FunctionType(shared_code, _template.__globals__, name="twin_a")
+        twin_a.__qualname__ = "module_a.twin_a"
+        twin_b = types.FunctionType(shared_code, _template.__globals__, name="twin_b")
+        twin_b.__qualname__ = "module_b.twin_b"
+
+        decorated_a = fac_dec.factor(category="X")(twin_a)
+        decorated_b = fac_dec.factor(category="X")(twin_b)
+
+        assert decorated_a.__factor_spec__.code_hash != decorated_b.__factor_spec__.code_hash, (
+            "bytecode fallback must mix qualname/name into the hash so "
+            "functions with identical __code__ but different identities "
+            "do not collide"
+        )
+
 
 # ---------------------------------------------------------------------------
 # ShiftDetector unit tests
