@@ -40,12 +40,16 @@ The **Vision type** recorded on a catalog row, used to disambiguate multiple **V
 A persistent record (`data_fetch_jobs` table) representing one ingest request. States: `queued → running → completed | failed | cancelled`. On API restart, `running` is reset to `queued` and re-enqueued.
 
 **FetchBatch**:
-One user-submitted fetch request that expands into many **DataFetchJob** records. Batch-level FIFO means older **FetchBatch** submissions are scheduled before newer ones, while jobs inside one **FetchBatch** may still be interleaved fairly across **FetchBucket** records. Completion is best-effort: one failed job does not stop sibling jobs in the same **FetchBatch**; the batch ends only when every job reaches a terminal state.
-_Avoid_: request group, enqueue wave.
+One user-submitted fetch boundary. Every `POST /api/data/fetch-batch` call yields one FetchBatch whose fan-out of `DataFetchJob` rows shares the same `batch_id`. A backtest-triggered standalone fetch is a single-job FetchBatch. Pre-#163 rows arrive with `batch_id IS NULL`; startup recovery backfills them by grouping rows that share `created_at` (see ADR 0003). Not persisted as its own table — `batch_id` on `data_fetch_jobs` is the only durable representation.
+_Avoid_: fetch request, batch job.
 
 **FetchBucket**:
-The scheduling bucket for data fetch fairness: one `(symbol, data_type, interval)` stream inside a **FetchBatch**. Jobs inside a **FetchBucket** keep chronological order by date range; fairness rotates across **FetchBucket** records, not across individual jobs. Bucket progress is counted by jobs that have already started (`running + completed + failed + cancelled`), so long-running buckets are not repeatedly treated as untouched.
-_Avoid_: lane, shard, partition.
+The fairness unit inside a **FetchBatch**: one `(symbol, data_type, interval)` stream. Same-bucket jobs are processed in `start_date` order under the catalog serialization lock; the scheduler picks across sibling buckets using "least-started bucket first", where started_count = `running + completed + failed + cancelled`. Not persisted — the bucket key is recomputed from `data_fetch_jobs` columns at claim time (see ADR 0002).
+_Avoid_: stream, slot, channel.
+
+**Soft FIFO**:
+The cross-**FetchBatch** ordering rule. An older batch keeps priority while it still has an idle **FetchBucket** (one whose jobs haven't started). The moment every remaining queued row of the older batch sits in a bucket with an in-flight job — i.e. claiming it would just defer on the catalog lock — a newer batch's idle bucket wins the next claim, so worker capacity doesn't go to waste (see ADR 0003).
+_Avoid_: strict FIFO, priority queue.
 
 ### Runtime
 
@@ -76,6 +80,8 @@ Pure-Python tracker of `StrategyBundle` discovery and strategy state machine (`a
 - A **Vision type** maps to exactly one **DB category** (many-to-one).
 - A `data_catalog` row carries `(symbol, data_type=DB category, interval, source_type=Vision type or None)`.
 - A **DataFetchJob** produces zero or more `data_catalog` rows on success; the `ingest_run_id` on each row points back to the job.
+- A **FetchBatch** owns one-or-more **DataFetchJob** rows via a shared `batch_id`; jobs in the same batch are siblings from one user submission.
+- A **FetchBatch** fans out into one-or-more **FetchBuckets** (one per distinct `(symbol, data_type, interval)` in the batch); buckets are the fairness unit, batches are the **Soft FIFO** unit.
 - A **Node** contains exactly 5 **Actors** plus one **LifecycleController** and one **Strategy registry**.
 
 ## Flagged ambiguities

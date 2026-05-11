@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
+import marshal
 from typing import Any, Callable
 
 from tinohelm.signal.types import (
@@ -60,21 +61,57 @@ logger = logging.getLogger(__name__)
 
 
 def _compute_code_hash(func: Callable) -> str:  # type: ignore[type-arg]
-    """Return the SHA-256 hex digest of the function's source.
+    """Return the SHA-256 hex digest identifying the function's body.
 
-    Falls back to ``""`` when source is unavailable (built-in, C extension,
-    or REPL-defined function).  The same fallback semantics that
-    :func:`tinohelm.factor.decorator._compute_code_hash` uses.
+    Prefers the textual source so hashes stay human-auditable. When
+    ``inspect.getsource`` fails — typically because the bytecode cache
+    (``.pyc``) carries a ``co_filename`` that no longer exists on disk
+    (Docker-built pyc mounted into a local checkout) or for C-extension
+    functions — we fall back to hashing the function's module + qualname
+    + name together with the marshaled compiled bytecode (see
+    :func:`_bytecode_fallback_hash`). That still buys:
+
+    - non-empty, deterministic, per-function identity (two distinct
+      bodies compile to distinct bytecode sequences, and two kernels
+      sharing bytecode are still separated by their qualnames), and
+    - stability across re-imports of the same source (same bytecode).
+
+    Returning ``""`` in this situation would collapse every signal's
+    identity into the same empty string and break downstream caches
+    keyed on ``code_hash``.
     """
     try:
         source = inspect.getsource(func)
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
     except (OSError, TypeError):
         logger.warning(
-            "_compute_code_hash: cannot retrieve source for %r",
-            getattr(func, "__name__", func),
+            "_compute_code_hash: source unavailable for %r — using bytecode fallback",
+            getattr(func, "__qualname__", getattr(func, "__name__", func)),
         )
-        return ""
-    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+        return _bytecode_fallback_hash(func)
+
+
+def _bytecode_fallback_hash(func: Callable) -> str:  # type: ignore[type-arg]
+    """Hash identity = ``module`` + ``qualname`` + ``name`` + marshaled bytecode.
+
+    Mixing the function's identifying names in *before* the marshaled code
+    object keeps two kernels with identical bytecode but different
+    qualnames from collapsing to the same hash. That matters when a code
+    object is shared across names (``types.FunctionType(shared_code, …)``,
+    ``func.__code__ = other.__code__``) or when trivial wrappers compile
+    to byte-identical bodies across modules.
+    """
+    h = hashlib.sha256()
+    h.update(getattr(func, "__module__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(getattr(func, "__qualname__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(getattr(func, "__name__", "").encode("utf-8"))
+    h.update(b"\x00")
+    code = getattr(func, "__code__", None)
+    if code is not None:
+        h.update(marshal.dumps(code))
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------

@@ -659,6 +659,9 @@ class BacktestRunner:
 
         effective_data_type = data_type or self.data_type
         job_id = str(uuid.uuid4())
+        # A backtest-triggered fetch is its own single-job FetchBatch, so we
+        # mint a fresh batch_id per call rather than reusing job_id.
+        batch_id = str(uuid.uuid4())
         effective_start = start_override if start_override is not None else self.start
         start_date = effective_start.date() if isinstance(effective_start, datetime) else effective_start
         end_date = self.end.date() if isinstance(self.end, datetime) else self.end
@@ -668,6 +671,7 @@ class BacktestRunner:
             async with factory() as session:
                 session.add(DataFetchJob(
                     job_id=job_id,
+                    batch_id=batch_id,
                     symbol=sym,
                     data_type=effective_data_type,
                     interval=ivl,
@@ -680,12 +684,16 @@ class BacktestRunner:
                 ))
                 await session.commit()
 
-            # Enqueue to Redis
+            # Wake the data-fetch worker. After #164 Redis no longer holds
+            # job_ids — the DB is the scheduling source of truth, so we push
+            # the same opaque wake sentinel every other caller uses.
             rds = self._redis_client
             if rds is None:
                 logger.warning("No Redis client; cannot enqueue data fetch job")
                 return False
-            rds.lpush("tino:data:queue", job_id)
+            from tinohelm.data.worker import QUEUE_KEY, WAKE_TOKEN
+
+            rds.lpush(QUEUE_KEY, WAKE_TOKEN)
 
             logger.info(
                 "Submitted data fetch job %s for %s %s [%s..%s]",

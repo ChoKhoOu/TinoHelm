@@ -254,11 +254,17 @@ class DataCatalog(Base):
 
 
 class DataFetchJob(Base):
-    """Persistent data-fetch job — survives API restarts."""
+    """Persistent data-fetch job — survives API restarts.
+
+    ``batch_id`` identifies the **FetchBatch** this job belongs to — a
+    FetchBatch is one user-submitted ``fetch-batch`` request; backtest-
+    triggered standalone fetches form a single-job FetchBatch.
+    """
     __tablename__ = "data_fetch_jobs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     job_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, default=lambda: str(uuid4()))
+    batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     symbol: Mapped[str] = mapped_column(String(50), nullable=False)
     data_type: Mapped[str] = mapped_column(String(30), nullable=False)
     interval: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -274,6 +280,7 @@ class DataFetchJob(Base):
 
     __table_args__ = (
         Index("ix_data_fetch_jobs_status", "status"),
+        Index("ix_data_fetch_jobs_batch_id", "batch_id"),
     )
 
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
+import marshal
 from typing import Any, Callable
 
 import polars as pl
@@ -131,20 +132,49 @@ def _build_input_specs(func: Callable) -> tuple[InputSpec, ...]:  # type: ignore
 
 
 def _compute_code_hash(func: Callable) -> str:  # type: ignore[type-arg]
-    """Compute SHA-256 hex digest of the function's source code.
+    """SHA-256 hex digest identifying the factor body.
 
-    Falls back to an empty string if source cannot be retrieved (e.g. built-in
-    functions or C extensions).
+    Prefers textual source (stable, human-auditable). When
+    ``inspect.getsource`` fails — stale ``.pyc`` whose ``co_filename``
+    references a path not on disk (Docker pyc mounted into a local
+    checkout), C extensions, REPL-defined functions — falls back to
+    hashing the function's module + qualname + name together with the
+    marshaled compiled bytecode (see :func:`_bytecode_fallback_hash`).
+    Returning ``""`` in that case would collapse every factor's identity
+    and break downstream caches keyed on ``code_hash``.
     """
     try:
         source = inspect.getsource(func)
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
     except (OSError, TypeError):
         logger.warning(
-            "_compute_code_hash: cannot retrieve source for %r",
-            getattr(func, "__name__", func),
+            "_compute_code_hash: source unavailable for %r — using bytecode fallback",
+            getattr(func, "__qualname__", getattr(func, "__name__", func)),
         )
-        return ""
-    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+        return _bytecode_fallback_hash(func)
+
+
+def _bytecode_fallback_hash(func: Callable) -> str:  # type: ignore[type-arg]
+    """Hash identity = ``module`` + ``qualname`` + ``name`` + marshaled bytecode.
+
+    Mixing the function's identifying names in *before* the marshaled code
+    object keeps two kernels with identical bytecode but different
+    qualnames from collapsing to the same hash. That matters when a code
+    object is shared across names (``types.FunctionType(shared_code, …)``,
+    ``func.__code__ = other.__code__``) or when trivial wrappers compile to
+    byte-identical bodies across modules.
+    """
+    h = hashlib.sha256()
+    h.update(getattr(func, "__module__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(getattr(func, "__qualname__", "").encode("utf-8"))
+    h.update(b"\x00")
+    h.update(getattr(func, "__name__", "").encode("utf-8"))
+    h.update(b"\x00")
+    code = getattr(func, "__code__", None)
+    if code is not None:
+        h.update(marshal.dumps(code))
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------

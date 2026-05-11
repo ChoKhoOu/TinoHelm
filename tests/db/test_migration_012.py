@@ -101,7 +101,7 @@ def _reset_database_to_pre_012() -> None:
                 await conn.execute(text("CREATE SCHEMA public"))
                 await conn.run_sync(Base.metadata.create_all)
 
-                # Remove 012/013-created tables / constraints / columns from the
+                # Remove 012/013/014-created tables / constraints / columns from the
                 # current ORM schema so Alembic can add them for real.
                 await conn.execute(text("DROP TABLE IF EXISTS signal_runs CASCADE"))
                 await conn.execute(text("DROP TABLE IF EXISTS exposures_cache CASCADE"))
@@ -111,6 +111,8 @@ def _reset_database_to_pre_012() -> None:
                 for col in FACTOR_RUNS_NEW_COLS:
                     await conn.execute(text(f"ALTER TABLE factor_runs DROP COLUMN IF EXISTS {col}"))
                 await conn.execute(text("ALTER TABLE data_catalog DROP COLUMN IF EXISTS last_ingest_id"))
+                await conn.execute(text("DROP INDEX IF EXISTS ix_data_fetch_jobs_batch_id"))
+                await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS batch_id"))
 
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
@@ -192,10 +194,10 @@ def ensure_at_head():
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_upgrade_version_is_head(engine, ensure_at_head):
-    """After upgrade head, alembic_version must be '013'."""
+    """After upgrade head, alembic_version must be '014'."""
     async with engine.connect() as conn:
         ver = await _get_version(conn)
-    assert ver == "013", f"Expected version 013, got {ver}"
+    assert ver == "014", f"Expected version 014, got {ver}"
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -247,6 +249,35 @@ async def test_data_catalog_commit_witness_column_nullable(engine, ensure_at_hea
 
     assert "last_ingest_id" in cols
     assert nullable_map.get("last_ingest_id") is True
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_data_fetch_jobs_batch_id_column_and_index(engine, ensure_at_head):
+    """014 adds nullable ``batch_id`` to data_fetch_jobs plus a supporting
+    btree index. This pins those guarantees so the FetchBatch scheduler
+    (#164/#165/#166) can rely on both the column and an index-backed lookup
+    by batch_id after upgrade to head.
+
+    Legacy pre-#163 rows arrive with ``batch_id IS NULL``; the application
+    layer always populates it for new jobs.
+    """
+    async with engine.connect() as conn:
+        cols = await _get_table_columns(conn, "data_fetch_jobs")
+        nullable_map = await _get_nullable_cols(conn, "data_fetch_jobs")
+        indexes = await conn.execute(text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE tablename = 'data_fetch_jobs' "
+            "  AND indexname = 'ix_data_fetch_jobs_batch_id'"
+        ))
+        found_indexes = {r[0] for r in indexes}
+
+    assert "batch_id" in cols, "014 must add batch_id column to data_fetch_jobs"
+    assert nullable_map.get("batch_id") is True, (
+        "batch_id must be nullable so legacy pre-#163 rows stay valid"
+    )
+    assert "ix_data_fetch_jobs_batch_id" in found_indexes, (
+        "014 must create ix_data_fetch_jobs_batch_id for FetchBatch lookups"
+    )
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -327,6 +358,6 @@ async def test_upgrade_after_downgrade_idempotent(engine, ensure_at_head):
         found = await _get_indexes(conn)
         catalog_cols = await _get_table_columns(conn, "data_catalog")
 
-    assert ver == "013"
+    assert ver == "014"
     assert found == EXPECTED_INDEXES
     assert "last_ingest_id" in catalog_cols

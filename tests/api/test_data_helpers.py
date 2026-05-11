@@ -376,6 +376,88 @@ class TestFetchBatchSplitting:
         enqueue.assert_awaited_once_with(rds, "job-1")
 
 
+class TestFetchBatchIdentity:
+    """Issue #163: one fetch-batch submission = one FetchBatch (shared batch_id)."""
+
+    def _run_batch(self, body: DataFetchBatchRequest, monkeypatch) -> _FetchBatchDb:
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        db = _FetchBatchDb()
+        asyncio.run(trigger_data_fetch_batch(
+            body,
+            db,
+            AsyncMock(),
+            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=1)),
+        ))
+        return db
+
+    def test_fetch_batch_assigns_one_shared_batch_id_across_fanout(self, monkeypatch):
+        # 2 symbols x 1 interval x 3 days (agg_trades split by 1 day) = 6 jobs,
+        # but they all belong to the same FetchBatch, so share one batch_id.
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP", "ETHUSDT-PERP"],
+            intervals=["1m", "5m"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 3),
+            data_type="aggTrades",
+        )
+
+        db = self._run_batch(body, monkeypatch)
+
+        batch_ids = {job.batch_id for job in db.jobs}
+        assert len(db.jobs) >= 2, "fan-out should produce multiple jobs"
+        assert len(batch_ids) == 1, (
+            f"all jobs from one fetch-batch submission must share batch_id, got {batch_ids}"
+        )
+        only_batch_id = next(iter(batch_ids))
+        assert only_batch_id, "batch_id must be non-empty"
+        # Shape check: UUID-like string (36 chars with hyphens).
+        assert isinstance(only_batch_id, str) and len(only_batch_id) == 36
+
+    def test_fetch_batch_single_job_submission_still_has_batch_id(self, monkeypatch):
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=["1m"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 1),
+            data_type="klines",
+        )
+
+        db = self._run_batch(body, monkeypatch)
+
+        assert len(db.jobs) == 1
+        assert db.jobs[0].batch_id
+        assert isinstance(db.jobs[0].batch_id, str)
+
+    def test_two_fetch_batch_submissions_get_distinct_batch_ids(self, monkeypatch):
+        body1 = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=["1m"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 1),
+            data_type="klines",
+        )
+        body2 = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=["1m"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 1),
+            data_type="klines",
+        )
+
+        db1 = self._run_batch(body1, monkeypatch)
+        db2 = self._run_batch(body2, monkeypatch)
+
+        batch_id_1 = db1.jobs[0].batch_id
+        batch_id_2 = db2.jobs[0].batch_id
+        assert batch_id_1 and batch_id_2
+        assert batch_id_1 != batch_id_2, (
+            "distinct fetch-batch submissions must produce distinct batch_id values"
+        )
+
+
 class TestCancelDataFetchJob:
     def test_cancel_queued_job_updates_to_cancelled(self):
         import asyncio
