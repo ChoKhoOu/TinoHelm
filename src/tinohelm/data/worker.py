@@ -29,7 +29,6 @@ from tinohelm.core.async_queue_worker import (
     WorkerHandle,
     consumer_loop,
     enqueue_job as _shared_enqueue_job,
-    requeue_running_jobs,
 )
 from tinohelm.core.config import get_settings
 from tinohelm.data import catalog_locks as _catalog_locking
@@ -945,7 +944,24 @@ async def drain_once(*, redis_url: str, catalog_path: str) -> int:
             # drain pass so the next wake signal — or a sibling consumer —
             # retries. Continuing would just re-claim the same row and
             # defer it again, burning CPU.
+            settings = get_settings()
+            if settings.data.job_concurrency == 1:
+                # Livelock guard: in single-consumer mode, schedule a
+                # self-wake after LOCK_BUSY_REQUEUE_DELAY so the reverted
+                # row gets retried. Without this, the job stays queued but
+                # nobody ever drains again.
+                asyncio.create_task(_schedule_delayed_wake(redis_url))
             return processed
+
+
+async def _schedule_delayed_wake(redis_url: str) -> None:
+    """Schedule a delayed wake token to retry a lock-busy job."""
+    await asyncio.sleep(LOCK_BUSY_REQUEUE_DELAY)
+    rds = aioredis.from_url(redis_url, decode_responses=True)
+    try:
+        await _shared_enqueue_job(rds, QUEUE_KEY, WAKE_TOKEN)
+    finally:
+        await rds.close()
 
 
 def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
