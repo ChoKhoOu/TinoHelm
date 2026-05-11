@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
-from sqlalchemy import Integer, and_, func, select, update
+from sqlalchemy import Integer, String, and_, bindparam, func, select, update
 
 from tinohelm.core.async_queue_worker import (
     STATUS_CANCELLED,
@@ -330,6 +330,8 @@ def _next_queued_job_id_subquery():
     own ``created_at`` so legacy pre-#163 rows still participate.
     """
     batch_col = func.coalesce(DataFetchJob.batch_id, DataFetchJob.job_id)
+    empty_interval = bindparam("empty_interval", "", type_=String())
+    bucket_interval = func.coalesce(DataFetchJob.interval, empty_interval)
 
     batch_created_subq = (
         select(
@@ -364,7 +366,7 @@ def _next_queued_job_id_subquery():
             batch_col.label("batch_key"),
             DataFetchJob.symbol.label("bucket_symbol"),
             DataFetchJob.data_type.label("bucket_data_type"),
-            func.coalesce(DataFetchJob.interval, "").label("bucket_interval"),
+            bucket_interval.label("bucket_interval"),
             started_case.label("started_count"),
             running_case.label("running_count"),
         )
@@ -372,7 +374,7 @@ def _next_queued_job_id_subquery():
             batch_col,
             DataFetchJob.symbol,
             DataFetchJob.data_type,
-            func.coalesce(DataFetchJob.interval, ""),
+            bucket_interval,
         )
         .subquery()
     )
@@ -395,8 +397,7 @@ def _next_queued_job_id_subquery():
                 bucket_started_subq.c.batch_key == batch_col,
                 bucket_started_subq.c.bucket_symbol == DataFetchJob.symbol,
                 bucket_started_subq.c.bucket_data_type == DataFetchJob.data_type,
-                bucket_started_subq.c.bucket_interval
-                == func.coalesce(DataFetchJob.interval, ""),
+                bucket_started_subq.c.bucket_interval == bucket_interval,
             ),
         )
         .where(DataFetchJob.status == STATUS_QUEUED)
@@ -406,7 +407,7 @@ def _next_queued_job_id_subquery():
             bucket_started_subq.c.started_count.asc(),
             DataFetchJob.symbol.asc(),
             DataFetchJob.data_type.asc(),
-            func.coalesce(DataFetchJob.interval, "").asc(),
+            bucket_interval.asc(),
             DataFetchJob.start_date.asc(),
             DataFetchJob.created_at.asc(),
             DataFetchJob.id.asc(),
