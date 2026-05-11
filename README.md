@@ -28,7 +28,15 @@ Opt into local image builds only when you actually want them:
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-### 2. Install the CLI
+### 2. Sync the Python environment
+
+```bash
+uv sync --extra test --extra optimize --extra ops
+```
+
+Use `uv run ...` for Python entry points so local commands, CI, and Docker all consume the same locked dependency set from `uv.lock`.
+
+### 3. Install the CLI
 
 The Rust CLI is the primary interface: one-shot commands, raw JSON, and stable `llm` envelopes for autonomous callers.
 
@@ -53,7 +61,7 @@ make BINDIR=/path/on/PATH        # explicit alternate install directory
 make uninstall                   # remove the installed binary
 ```
 
-### 3. Usage
+### 4. Usage
 
 ```bash
 tino --help
@@ -138,6 +146,15 @@ scripts/          Utility scripts
 docker-compose.yml
 Dockerfile        API container
 Dockerfile.web    Web frontend container (optional)
+```
+
+## Python development workflow
+
+```bash
+uv run alembic upgrade head
+uv run pytest -q --tb=short -m "not integration and not performance"
+uv run --extra ops python scripts/emergency_flatten.py --help
+uv run python scripts/migrate_funding_json_to_parquet.py --dry-run
 ```
 
 ## Configuration

@@ -11,7 +11,7 @@ Coverage:
 
 All tests are @pytest.mark.integration; run with::
 
-    .venv/bin/python -m pytest tests/integration/test_full_regression.py -m integration -v
+    uv run pytest tests/integration/test_full_regression.py -m integration -v
 
 The BacktestRunner full-E2E is skipped per task spec (requires factor DataLayer wiring).
 """

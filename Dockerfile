@@ -3,38 +3,32 @@
 # Optimizations:
 #   P0: No Rust toolchain — nautilus_trader 1.225.0 ships manylinux wheels for aarch64 + x86_64
 #   P1: Multi-stage build — build-essential stays in deps stage, not in final image
-#   P2: Deps/source layer separation — source changes do NOT invalidate the wheel cache layer
-#   P3: BuildKit cache mounts — pip cache persists across rebuilds even after cache-miss
+#   P2: Deps/source layer separation — source changes do NOT invalidate the lock-driven sync layer
+#   P3: BuildKit cache mounts — uv cache persists across rebuilds even after cache-miss
 
 # ─── Stage 1: deps ────────────────────────────────────────────────────────────
-# Builds all dependency wheels. build-essential stays here; never enters runtime.
+# Sync all Python dependencies into a project-local virtualenv.
 FROM python:3.12-slim AS deps
 
 # Build tools needed by some transitive C-extension deps (e.g. cryptography, psutil)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /uvx /bin/
+
 WORKDIR /build
+ENV UV_LINK_MODE=copy
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 
-# P2: Copy only the manifest — source code changes won't bust this layer
+# P2: Copy only dependency manifests first — source code changes won't bust this layer
 COPY pyproject.toml ./
+COPY uv.lock ./
 
-# Extract dependency list from pyproject.toml with stdlib tomllib (Python 3.11+)
-# Also append psycopg2-binary which is a runtime-only dep not in pyproject.toml
-# Include [optimize] extras (optuna) so the optimizer feature works in container
-RUN python - <<'EOF'
-import tomllib, pathlib
-data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
-deps = data["project"]["dependencies"]
-optimize_deps = data["project"]["optional-dependencies"].get("optimize", [])
-pathlib.Path("requirements.txt").write_text("\n".join(deps + optimize_deps) + "\npsycopg2-binary\n")
-EOF
-
-# P3: BuildKit cache mount keeps the pip HTTP cache across all rebuilds
-# P1: Wheels are collected here; only the .whl files are passed to the runtime stage
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip wheel --wheel-dir=/wheels -r requirements.txt
+# P3: BuildKit cache mount keeps uv's cache across rebuilds
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --extra optimize
 
 # ─── Stage 2: runtime ─────────────────────────────────────────────────────────
 # Lean final image — no compiler, no Rust, no git.
@@ -46,19 +40,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV PATH="/opt/venv/bin:$PATH"
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 
-# P1+P2: Install pre-built wheels (stable layer, bind-mount avoids 224MB COPY waste)
-RUN --mount=type=bind,from=deps,source=/wheels,target=/wheels \
-    pip install --no-cache-dir --no-index /wheels/*
+# P1+P2: Copy the pre-synced virtualenv from the deps stage.
+COPY --from=deps /opt/venv /opt/venv
 
 # P2: Copy source AFTER deps are installed — source edits only invalidate from here down
 COPY pyproject.toml ./
+COPY uv.lock ./
 COPY alembic.ini ./
 COPY src/ ./src/
 
-# P1: Regular (non-editable) install of the local package with no extra dep resolution
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir --no-deps .
+# P1: Install the local package into the synced environment without re-resolving dependencies.
+COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /uvx /bin/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-editable --extra optimize
 
 # Runtime directories
 RUN mkdir -p /app/tino/data/catalog /app/tino/data/artifacts /app/logs /app/strategies

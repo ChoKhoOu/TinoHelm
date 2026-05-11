@@ -7,9 +7,9 @@ each JSON found.
 
 Usage
 -----
-    .venv/bin/python scripts/migrate_funding_json_to_parquet.py
-    .venv/bin/python scripts/migrate_funding_json_to_parquet.py --dry-run
-    .venv/bin/python scripts/migrate_funding_json_to_parquet.py --delete-json
+    uv run python scripts/migrate_funding_json_to_parquet.py
+    uv run python scripts/migrate_funding_json_to_parquet.py --dry-run
+    uv run python scripts/migrate_funding_json_to_parquet.py --delete-json
 
 Arguments
 ---------
