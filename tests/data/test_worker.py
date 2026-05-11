@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from tinohelm.data import worker as dw
 
@@ -199,6 +200,21 @@ class TestClaimNextQueuedJob:
       - Flip it to ``status='running'``
       - Return the claimed row, or ``None`` if no queued rows remain.
     """
+
+    def test_next_job_subquery_reuses_same_bind_for_interval_coalesce_on_postgres(self):
+        """PostgreSQL requires SELECT and GROUP BY to reference the same
+        expression tree. If SQLAlchemy emits two distinct bind params for the
+        ``coalesce(interval, '')`` fallback, PG rejects the query with
+        ``GroupingError`` even though the runtime values are equal.
+        """
+        compiled = dw._next_queued_job_id_subquery().compile(
+            dialect=postgresql.dialect()
+        )
+        sql = str(compiled)
+
+        assert "coalesce(data_fetch_jobs.interval, %(empty_interval)s)" in sql
+        assert compiled.params.get("empty_interval") == ""
+        assert "coalesce(data_fetch_jobs.interval, %(coalesce_" not in sql
 
     async def test_returns_none_when_no_queued_rows(self, monkeypatch):
         def factory():
