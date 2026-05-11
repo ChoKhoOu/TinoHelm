@@ -394,7 +394,7 @@ class TestFetchBatchIdentity:
         return db
 
     def test_fetch_batch_assigns_one_shared_batch_id_across_fanout(self, monkeypatch):
-        # 2 symbols × 2 intervals × 3 days (agg_trades split by 1 day) = 12 jobs,
+        # 2 symbols x 1 interval x 3 days (agg_trades split by 1 day) = 6 jobs,
         # but they all belong to the same FetchBatch, so share one batch_id.
         body = DataFetchBatchRequest(
             symbols=["BTCUSDT-PERP", "ETHUSDT-PERP"],
