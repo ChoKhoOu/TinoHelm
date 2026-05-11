@@ -26,7 +26,15 @@ docker compose up -d
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-### 2. 安装 CLI
+### 2. 同步 Python 环境
+
+```bash
+uv sync --extra test --extra optimize --extra ops
+```
+
+本地 Python 命令统一用 `uv run ...`，这样本地、CI 和 Docker 都吃同一份 `uv.lock`。
+
+### 3. 安装 CLI
 
 Rust CLI 是主要交互界面：单次命令、原始 JSON，以及给 LLM/自动化调用使用的稳定 `llm` envelope。
 
@@ -51,7 +59,7 @@ make BINDIR=/path/on/PATH        # 明确指定其他安装目录
 make uninstall                   # 删除已安装的 tino
 ```
 
-### 3. 使用方式
+### 4. 使用方式
 
 ```bash
 tino --help
@@ -136,6 +144,15 @@ scripts/          工具脚本
 docker-compose.yml
 Dockerfile        API 容器
 Dockerfile.web    前端容器（可选）
+```
+
+## Python 开发工作流
+
+```bash
+uv run alembic upgrade head
+uv run pytest -q --tb=short -m "not integration and not performance"
+uv run --extra ops python scripts/emergency_flatten.py --help
+uv run python scripts/migrate_funding_json_to_parquet.py --dry-run
 ```
 
 ## 配置

@@ -330,7 +330,7 @@ if __name__ == "__main__":
     try:
         import requests  # noqa: F401 — verified here; actual use is deferred into BinanceFuturesClient
     except ImportError:
-        print("[ERROR] 'requests' is not installed. Run: pip install requests")
+        print("[ERROR] 'requests' is not installed. Run: uv sync --extra ops")
         sys.exit(1)
 
     api_key = os.environ.get("BINANCE_API_KEY", "")

@@ -9,8 +9,11 @@ TinoHelm is a single-instance quantitative trading platform built on NautilusTra
 ## Build & Run
 
 ```bash
+# Python env
+uv sync --extra test --extra optimize --extra ops
+
 # Database migrations
-alembic upgrade head
+uv run alembic upgrade head
 
 # Rust CLI
 make                         # Build + install tino binary
