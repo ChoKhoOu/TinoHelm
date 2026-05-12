@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import errno
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Iterable, Iterator, Protocol
@@ -707,15 +708,10 @@ def delete_prefix(provider: CatalogStorageProvider, local_prefix: Path | str) ->
         return (1, size)
     if not prefix_path.exists():
         return (0, 0)
-    deleted = 0
-    freed = 0
-    for file_path in prefix_path.glob("*.parquet"):
-        if not file_path.is_file():
-            continue
-        size = file_path.stat().st_size
-        file_path.unlink()
-        deleted += 1
-        freed += size
+    parquet_files = [path for path in prefix_path.rglob("*.parquet") if path.is_file()]
+    freed = sum(path.stat().st_size for path in parquet_files)
+    deleted = len(parquet_files)
+    shutil.rmtree(prefix_path, ignore_errors=True)
     return (deleted, freed)
 
 

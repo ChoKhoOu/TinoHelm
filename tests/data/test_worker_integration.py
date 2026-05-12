@@ -104,12 +104,22 @@ class TestDrainExecutesClaimedRows:
         leave it stranded in ``running``. Otherwise a consumer that loses
         the lock race permanently parks a pre-claimed row.
         """
-        import asyncio as _aio
-
         # Claim-time already flipped one row to running; now stage a busy
         # catalog lock so the executor cannot acquire it.
-        busy = _aio.Lock()
-        await busy.acquire()
+        class BusyLock:
+            async def try_acquire(self) -> bool:
+                return False
+
+            async def acquire(self) -> bool:
+                return True
+
+            def release(self) -> None:
+                return None
+
+            def locked(self) -> bool:
+                return True
+
+        busy = BusyLock()
         monkeypatch.setattr(dw, "_get_catalog_lock", lambda _key: busy)
         monkeypatch.setattr(dw, "LOCK_BUSY_REQUEUE_DELAY", 0)
 

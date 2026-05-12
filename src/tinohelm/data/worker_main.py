@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 
 import redis.asyncio as aioredis
 
@@ -30,7 +31,18 @@ async def run_worker() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_worker())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def _on_sigterm() -> None:
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+    try:
+        loop.run_until_complete(run_worker())
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":

@@ -753,8 +753,18 @@ class BinanceVisionPipeline:
         kwargs = self._build_converter_kwargs(
             data_type, symbol, interval, instrument,
         )
-        cleanup_guard = self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
         funding_txn = None
+        try:
+            cleanup_guard = self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
+            self._stage_single_file_seed(
+                symbol=symbol,
+                data_type=data_type,
+                interval=interval,
+                stage_root=stage_root,
+            )
+        except Exception:
+            self._active_write_catalog_path = self.catalog_path
+            raise
         if data_type == "fundingRate":
             from tinohelm.data.catalog import CatalogSession
 
@@ -1113,7 +1123,8 @@ class BinanceVisionPipeline:
             raise
         record_count = total_objects if total_objects > 0 else None
         try:
-            committed_paths = self._commit_staged_outputs(
+            committed_paths = await asyncio.to_thread(
+                self._commit_staged_outputs,
                 symbol=symbol,
                 data_type=data_type,
                 interval=interval,
@@ -1333,7 +1344,62 @@ class BinanceVisionPipeline:
     def _delete_stage_outputs(self, ingest_run_id: str) -> None:
         from tinohelm.data.storage import delete_prefix
 
-        delete_prefix(self._storage, Path(self._stage_catalog_root(ingest_run_id)))
+        stage_root = Path(self._stage_catalog_root(ingest_run_id))
+        try:
+            delete_prefix(self._storage, stage_root)
+        except FileNotFoundError:
+            return
+
+    def _stage_single_file_seed(
+        self,
+        *,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        stage_root: str | Path,
+    ) -> None:
+        category = resolve_write_category(data_type)
+        if category not in {"funding_rate", "metrics", "order_book_delta"}:
+            return
+        live_path = self._catalog_item_dir(symbol, data_type, interval, data_type, catalog_root=self.catalog_path)
+        stage_path = self._catalog_item_dir(symbol, data_type, interval, data_type, catalog_root=str(stage_root))
+        if live_path is None or stage_path is None:
+            return
+        if self._storage.exists(live_path) and not self._storage.exists(stage_path):
+            self._storage.copy_path(live_path, stage_path)
+
+    def _promote_dir(
+        self,
+        *,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        stage_root: Path,
+        live_root: Path,
+        rollback_prefix: Path,
+    ) -> list[str]:
+        from tinohelm.data.storage import promote_objects_with_rollback
+
+        live_dir = self._catalog_item_dir(
+            symbol, data_type, interval, data_type, catalog_root=str(live_root)
+        )
+        stage_dir = self._catalog_item_dir(
+            symbol, data_type, interval, data_type, catalog_root=str(stage_root)
+        )
+        if live_dir is None or stage_dir is None:
+            return []
+        temp_objects = list(self._storage.iter_files(stage_dir, suffix=".parquet", recursive=False))
+        old_objects = list(self._storage.iter_files(live_dir, suffix=".parquet", recursive=False))
+        if not temp_objects:
+            return []
+        promote_objects_with_rollback(
+            self._storage,
+            temp_objects,
+            live_dir,
+            old_objects,
+            rollback_prefix=rollback_prefix,
+        )
+        return [str(obj.path) for obj in self._storage.iter_files(live_dir, suffix=".parquet", recursive=False)]
 
     def _commit_staged_outputs(
         self,
@@ -1347,9 +1413,8 @@ class BinanceVisionPipeline:
             book_depth_parquet_path,
             funding_rate_parquet_path,
             metrics_parquet_path,
-            resolve_catalog_path,
         )
-        from tinohelm.data.storage import promote_objects_with_rollback
+        from tinohelm.data.storage import StorageObject, promote_objects_with_rollback
 
         category = resolve_write_category(data_type)
         stage_root = Path(self._stage_catalog_root(ingest_run_id))
@@ -1360,48 +1425,24 @@ class BinanceVisionPipeline:
             if category == "bar":
                 if not interval:
                     raise ValueError(f"Cannot commit bars without interval for data_type={data_type!r}")
-                stage_dir = self._catalog_item_dir(
-                    symbol, data_type, interval, data_type, catalog_root=stage_root
-                )
-                live_dir = self._catalog_item_dir(
-                    symbol, data_type, interval, data_type, catalog_root=str(live_root)
-                )
-                if stage_dir is None or live_dir is None:
-                    return []
-                temp_objects = list(self._storage.iter_files(stage_dir, suffix=".parquet", recursive=False))
-                old_objects = list(self._storage.iter_files(live_dir, suffix=".parquet", recursive=False))
-                if not temp_objects:
-                    return []
-                promote_objects_with_rollback(
-                    self._storage,
-                    temp_objects,
-                    live_dir,
-                    old_objects,
+                return self._promote_dir(
+                    symbol=symbol,
+                    data_type=data_type,
+                    interval=interval,
+                    stage_root=stage_root,
+                    live_root=live_root,
                     rollback_prefix=rollback_prefix,
                 )
-                return [str(obj.path) for obj in self._storage.iter_files(live_dir, suffix=".parquet", recursive=False)]
 
             if category in {"trade_tick", "quote_tick"}:
-                live_dir = self._catalog_item_dir(
-                    symbol, data_type, interval, data_type, catalog_root=str(live_root)
-                )
-                stage_dir = self._catalog_item_dir(
-                    symbol, data_type, interval, data_type, catalog_root=stage_root
-                )
-                if live_dir is None or stage_dir is None:
-                    return []
-                temp_objects = list(self._storage.iter_files(stage_dir, suffix=".parquet", recursive=False))
-                old_objects = list(self._storage.iter_files(live_dir, suffix=".parquet", recursive=False))
-                if not temp_objects:
-                    return []
-                promote_objects_with_rollback(
-                    self._storage,
-                    temp_objects,
-                    live_dir,
-                    old_objects,
+                return self._promote_dir(
+                    symbol=symbol,
+                    data_type=data_type,
+                    interval=interval,
+                    stage_root=stage_root,
+                    live_root=live_root,
                     rollback_prefix=rollback_prefix,
                 )
-                return [str(obj.path) for obj in self._storage.iter_files(live_dir, suffix=".parquet", recursive=False)]
 
             if category == "funding_rate":
                 stage_path = funding_rate_parquet_path(symbol, stage_root)
@@ -1419,8 +1460,17 @@ class BinanceVisionPipeline:
 
             if not self._storage.exists(stage_path):
                 return []
-            live_path.parent.mkdir(parents=True, exist_ok=True)
-            self._storage.copy_path(stage_path, live_path)
+            temp_object = StorageObject(key=str(stage_path), path=Path(stage_path))
+            old_objects = []
+            if self._storage.exists(live_path):
+                old_objects = [StorageObject(key=str(live_path), path=Path(live_path))]
+            promote_objects_with_rollback(
+                self._storage,
+                [temp_object],
+                Path(live_path).parent,
+                old_objects,
+                rollback_prefix=rollback_prefix,
+            )
             return [str(live_path)]
         finally:
             try:

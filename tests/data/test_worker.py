@@ -984,8 +984,26 @@ class TestProcessJob:
             start_date="2025-01-01", end_date="2025-01-02", asset_class="futures",
         )
         events: list[str] = []
-        busy_lock = asyncio.Lock()
-        await busy_lock.acquire()
+
+        class BusyLock:
+            def __init__(self) -> None:
+                self._lock = asyncio.Lock()
+
+            async def try_acquire(self) -> bool:
+                return False
+
+            async def acquire(self) -> bool:
+                await self._lock.acquire()
+                return True
+
+            def release(self) -> None:
+                if self._lock.locked():
+                    self._lock.release()
+
+            def locked(self) -> bool:
+                return True
+
+        busy_lock = BusyLock()
         monkeypatch.setattr(dw, "_get_catalog_lock", lambda _key: busy_lock)
         monkeypatch.setattr(dw, "LOCK_BUSY_REQUEUE_DELAY", 0)
 

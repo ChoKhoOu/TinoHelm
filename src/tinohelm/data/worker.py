@@ -495,14 +495,9 @@ async def _try_acquire_catalog_lock(lock_key: str):
     """Acquire a catalog lock only if immediately available."""
     async with _catalog_lock_attempt_guard:
         lock = _get_catalog_lock(lock_key)
-        if hasattr(lock, "try_acquire"):
-            acquired = await lock.try_acquire()
-            if not acquired:
-                return None
-            return lock
-        if lock.locked():
+        acquired = await lock.try_acquire()
+        if not acquired:
             return None
-        await lock.acquire()
         return lock
 
 

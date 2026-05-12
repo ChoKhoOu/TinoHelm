@@ -1215,6 +1215,62 @@ class TestIngestEarlyFailClosed:
 
         assert not path.exists()
 
+    def test_commit_staged_outputs_promotes_single_file_with_rollback_semantics(self, tmp_path: Path):
+        from tinohelm.data.catalog import metrics_parquet_path, read_metrics_parquet, write_metrics_parquet
+
+        symbol = "BTCUSDT-PERP"
+        ingest_run_id = "job-1"
+        live_path = metrics_parquet_path(symbol, tmp_path)
+        live_path.parent.mkdir(parents=True, exist_ok=True)
+        write_metrics_parquet([
+            SimpleNamespace(
+                symbol=symbol,
+                ts_event=1,
+                ts_init=1,
+                open_interest=10.0,
+                open_interest_value=100.0,
+                toptrader_long_short_ratio_count=0.0,
+                toptrader_long_short_ratio_sum=0.0,
+                global_long_short_ratio=0.0,
+                taker_long_short_vol_ratio=0.0,
+            )
+        ], symbol, tmp_path)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        stage_root = Path(p._stage_catalog_root(ingest_run_id))
+        p._stage_single_file_seed(
+            symbol=symbol,
+            data_type="metrics",
+            interval=None,
+            stage_root=stage_root,
+        )
+        write_metrics_parquet([
+            SimpleNamespace(
+                symbol=symbol,
+                ts_event=2,
+                ts_init=2,
+                open_interest=11.0,
+                open_interest_value=101.0,
+                toptrader_long_short_ratio_count=0.0,
+                toptrader_long_short_ratio_sum=0.0,
+                global_long_short_ratio=0.0,
+                taker_long_short_vol_ratio=0.0,
+            )
+        ], symbol, stage_root)
+
+        committed = p._commit_staged_outputs(
+            symbol=symbol,
+            data_type="metrics",
+            interval=None,
+            ingest_run_id=ingest_run_id,
+        )
+
+        frame = read_metrics_parquet(symbol, tmp_path)
+        assert committed == [str(live_path)]
+        assert frame is not None
+        assert frame["ts_event"].to_list() == [1, 2]
+        assert not stage_root.exists() or not list(stage_root.rglob("*.parquet"))
+
     def test_cleanup_guard_preserves_explicit_preserved_paths(self, tmp_path: Path):
         from tinohelm.data.pipeline import _ParquetCleanupGuard
 
@@ -1663,6 +1719,158 @@ class TestIngestEarlyFailClosed:
                 txn.write_parquet(records)
 
         assert saved == []
+
+    def test_ingest_offloads_commit_staged_outputs_to_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        task = SimpleNamespace(
+            url="memory://one.csv",
+            granularity="daily",
+            dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"),
+        )
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        calls: list[tuple[object, tuple, dict]] = []
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            calls.append((func, args, kwargs))
+            return func(*args, **kwargs)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+        p._clean_overlapping_parquet = MagicMock(return_value=None)
+        p._written_file_size = MagicMock(return_value=123)
+        p._read_db_catalog_snapshot = AsyncMock(return_value=None)
+        p._update_db_catalog = AsyncMock(return_value=None)
+        p._write_objects = MagicMock(return_value=[str(tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "part.parquet")])
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        monkeypatch.setattr("tinohelm.data.pipeline.asyncio.to_thread", fake_to_thread)
+
+        asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="aggTrades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        ))
+
+        assert any(getattr(func, "__func__", None) is BinanceVisionPipeline._commit_staged_outputs for func, _args, _kwargs in calls)
+
+    def test_metrics_ingest_merges_live_history_into_staging_before_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from tinohelm.data.catalog import metrics_parquet_path, read_metrics_parquet
+
+        symbol = "BTCUSDT-PERP"
+        live_path = metrics_parquet_path(symbol, tmp_path)
+        live_path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ts_event": [1], "open_interest": [10.0]}).write_parquet(live_path)
+
+        task = SimpleNamespace(
+            url="memory://metrics.csv",
+            granularity="daily",
+            dest_path=Path("BTCUSDT-metrics-2025-01-02.csv"),
+        )
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-metrics-2025-01-02.csv", b"a,b\n1,2\n"))
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                return [
+                    SimpleNamespace(
+                        symbol=symbol,
+                        ts_event=2,
+                        ts_init=2,
+                        open_interest=11.0,
+                        open_interest_value=101.0,
+                        toptrader_long_short_ratio_count=0.0,
+                        toptrader_long_short_ratio_sum=0.0,
+                        global_long_short_ratio=0.0,
+                        taker_long_short_vol_ratio=0.0,
+                    )
+                ]
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+        p._read_db_catalog_snapshot = AsyncMock(return_value=None)
+        p._update_db_catalog = AsyncMock(return_value=None)
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+
+        asyncio.run(p.ingest(
+            symbol=symbol,
+            data_type="metrics",
+            start=date(2025, 1, 2),
+            end=date(2025, 1, 2),
+        ))
+
+        frame = read_metrics_parquet(symbol, tmp_path)
+        assert frame is not None
+        assert frame["ts_event"].to_list() == [1, 2]
+        stage_root = tmp_path / ".ingest-staging"
+        assert not stage_root.exists() or not list(stage_root.rglob("*.parquet"))
+
+    def test_ingest_resets_active_catalog_root_when_overlap_cleanup_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        task = SimpleNamespace(
+            url="memory://one.csv",
+            granularity="daily",
+            dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"),
+        )
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                return None
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        monkeypatch.setattr(
+            p,
+            "_clean_overlapping_parquet",
+            MagicMock(side_effect=RuntimeError("cleanup failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="aggTrades",
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 1),
+            ))
+
+        assert p._active_catalog_root() == str(tmp_path)
 
 
 class TestCatalogStorageStats:

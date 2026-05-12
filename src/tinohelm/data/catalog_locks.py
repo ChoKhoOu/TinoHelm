@@ -3,12 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import fcntl
 import hashlib
+import logging
+import time
 from pathlib import Path
 from typing import BinaryIO
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
+
 from tinohelm.data.pipeline_helpers import resolve_db_category, resolve_db_interval
+
+logger = logging.getLogger(__name__)
 
 
 class CatalogLock:
@@ -17,22 +25,43 @@ class CatalogLock:
         self._local_lock = asyncio.Lock()
         self._file_handle: BinaryIO | None = None
 
-    async def acquire(self) -> bool:
+    async def acquire(
+        self,
+        *,
+        timeout: float | None = None,
+        warn_after: float | None = 5.0,
+    ) -> bool:
         await self._local_lock.acquire()
+        start = time.monotonic()
+        warned = False
         try:
             while True:
                 handle = self._open_lock_file()
                 try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     self._file_handle = handle
                     return True
                 except OSError as exc:
                     handle.close()
                     if not _is_lock_busy(exc):
                         raise
+                    elapsed = time.monotonic() - start
+                    if warn_after is not None and not warned and elapsed >= warn_after:
+                        logger.warning(
+                            "CatalogLock.acquire: waiting %.2fs for lock_key=%s",
+                            elapsed,
+                            self._lock_key,
+                        )
+                        warned = True
+                    if timeout is not None and elapsed >= timeout:
+                        self._local_lock.release()
+                        raise TimeoutError(
+                            f"Could not acquire catalog lock {self._lock_key!r} within {timeout}s"
+                        )
                     await asyncio.sleep(0.05)
         except BaseException:
-            if self._local_lock.locked():
+            if self._local_lock.locked() and self._file_handle is None:
                 self._local_lock.release()
             raise
 
@@ -43,7 +72,8 @@ class CatalogLock:
         try:
             handle = self._open_lock_file()
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
                 handle.close()
                 if _is_lock_busy(exc):
@@ -62,7 +92,8 @@ class CatalogLock:
         self._file_handle = None
         if handle is not None:
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             finally:
                 handle.close()
         if self._local_lock.locked():
