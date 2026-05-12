@@ -431,6 +431,52 @@ class TestIngestEarlyFailClosed:
         assert committed_path.exists()
         assert not (tmp_path / ".ingest-rollback").exists()
 
+    def test_promote_dir_only_targets_overlapping_live_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from types import SimpleNamespace
+
+        stage_dir = tmp_path / ".ingest-staging" / "run-1" / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE"
+        live_dir = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE"
+        temp_objects = [
+            SimpleNamespace(path=stage_dir / "shared.parquet"),
+            SimpleNamespace(path=stage_dir / "new-only.parquet"),
+        ]
+        live_objects = [
+            SimpleNamespace(path=live_dir / "shared.parquet"),
+            SimpleNamespace(path=live_dir / "old-only.parquet"),
+        ]
+        captured: dict[str, list[str]] = {}
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        monkeypatch.setattr(p, "_catalog_item_dir", lambda *args, **kwargs: stage_dir if kwargs.get("catalog_root") == str(tmp_path / ".ingest-staging" / "run-1") else live_dir)
+        monkeypatch.setattr(
+            p._storage,
+            "iter_files",
+            lambda prefix, **kwargs: iter(temp_objects if Path(prefix) == stage_dir else live_objects),
+        )
+
+        def fake_promote(storage, temp_objects_arg, dest_dir, old_objects_arg, *, rollback_prefix):
+            captured["temp"] = [str(obj.path) for obj in temp_objects_arg]
+            captured["old"] = [str(obj.path) for obj in old_objects_arg]
+            captured["dest"] = [str(dest_dir)]
+            captured["rollback"] = [str(rollback_prefix)]
+            return set()
+
+        monkeypatch.setattr("tinohelm.data.storage.promote_objects_with_rollback", fake_promote)
+
+        p._promote_dir(
+            symbol="BTCUSDT-PERP",
+            data_type="aggTrades",
+            interval=None,
+            stage_root=tmp_path / ".ingest-staging" / "run-1",
+            live_root=tmp_path,
+            rollback_prefix=tmp_path / ".ingest-stage-rollback" / "run-1",
+        )
+
+        assert captured["temp"] == [str(obj.path) for obj in temp_objects]
+        assert captured["old"] == [str(live_dir / "shared.parquet")]
+
     def test_recover_discards_stale_manifest_after_newer_catalog_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

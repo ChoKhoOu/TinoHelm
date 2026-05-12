@@ -1389,9 +1389,14 @@ class BinanceVisionPipeline:
         if live_dir is None or stage_dir is None:
             return []
         temp_objects = list(self._storage.iter_files(stage_dir, suffix=".parquet", recursive=False))
-        old_objects = list(self._storage.iter_files(live_dir, suffix=".parquet", recursive=False))
         if not temp_objects:
             return []
+        temp_object_names = {Path(obj.path).name for obj in temp_objects}
+        old_objects = [
+            obj
+            for obj in self._storage.iter_files(live_dir, suffix=".parquet", recursive=False)
+            if Path(obj.path).name in temp_object_names
+        ]
         promote_objects_with_rollback(
             self._storage,
             temp_objects,
