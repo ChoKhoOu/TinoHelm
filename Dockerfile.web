@@ -7,7 +7,13 @@ WORKDIR /app
 # 1. Dependencies layer — only re-runs when package*.json changes
 COPY src/web/package*.json ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci
+    npm ci \
+      --prefer-offline \
+      --no-audit \
+      --no-fund \
+      --fetch-retries=5 \
+      --fetch-retry-mintimeout=20000 \
+      --fetch-retry-maxtimeout=120000
 
 # 2. Config layer — rarely changes, avoids full rebuild on source edits
 COPY src/web/next.config.ts src/web/tsconfig.json src/web/postcss.config.mjs src/web/components.json ./
