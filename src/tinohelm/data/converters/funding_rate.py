@@ -57,14 +57,25 @@ class FundingRateConverter:
             df = df.copy()
             df.columns = cols
 
+        df["calc_time"] = pd.to_numeric(df["calc_time"], errors="coerce")
+        df["funding_interval_hours"] = pd.to_numeric(df["funding_interval_hours"], errors="coerce")
+        df["last_funding_rate"] = pd.to_numeric(df["last_funding_rate"], errors="coerce")
+        df = df[["calc_time", "funding_interval_hours", "last_funding_rate"]].dropna().sort_values(by="calc_time")
+        df = df[df["funding_interval_hours"] > 0]
+        df = df.drop_duplicates(subset=["calc_time"], keep="last")
+
+        if df.empty:
+            logger.warning("fundingRate DataFrame empty after processing")
+            return []
+
         records: list[FundingRateUpdate] = []
-        for row in df.itertuples(index=False):
-            funding_time_ms = int(row.calc_time)
+        for calc_time, funding_interval_hours, last_funding_rate in df.itertuples(index=False, name=None):
+            funding_time_ms = int(calc_time)
             ts_ns = funding_time_ms * 1_000_000
-            interval_minutes = int(row.funding_interval_hours) * 60
+            interval_minutes = int(funding_interval_hours) * 60
             records.append(FundingRateUpdate(
                 instrument_id=instrument.id,
-                rate=Decimal(str(row.last_funding_rate)),
+                rate=Decimal(str(last_funding_rate)),
                 ts_event=ts_ns,
                 ts_init=ts_ns,
                 interval=interval_minutes,

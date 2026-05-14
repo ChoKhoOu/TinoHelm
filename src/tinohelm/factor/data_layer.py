@@ -448,6 +448,13 @@ def _bar_catalog_roots(base_root: Path, source_type: str | None) -> list[Path]:
     return out
 
 
+def _catalog_base_root(catalog_root: Path) -> Path:
+    base = Path(catalog_root)
+    if base.parent.name in {"bar", "ticks", "quotes"}:
+        return base.parent.parent
+    return base
+
+
 def _candidate_source_frequencies(target: _BarInterval) -> list[str]:
     """Return lower intervals that can compose ``target`` exactly."""
     from tinohelm.data.catalog_helpers import INTERVAL_MAP
@@ -2485,7 +2492,8 @@ class DataLayer:
         from nautilus_trader.model.identifiers import InstrumentId
         from tinohelm.data.catalog import _catalog_for_root, read_funding_rate_parquet
 
-        catalog = _catalog_for_root(self._catalog_root, self._storage)
+        catalog_root = _catalog_base_root(self._catalog_root)
+        catalog = _catalog_for_root(catalog_root, self._storage)
         try:
             rows = catalog.query(
                 FundingRateUpdate,
@@ -2505,7 +2513,7 @@ class DataLayer:
             frame = _build_series_frame(timestamps, values)
             return _filter_time_range(frame, start, end)
 
-        legacy = read_funding_rate_parquet(symbol, self._catalog_root)
+        legacy = read_funding_rate_parquet(symbol, catalog_root)
         if legacy is None or legacy.empty:
             return _empty_series_frame()
         timestamps = [_ns_to_datetime(int(ts_ns)) for ts_ns in legacy["ts_event"]]

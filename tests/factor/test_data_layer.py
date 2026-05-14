@@ -363,6 +363,19 @@ class TestFundingRate:
         assert isinstance(frame, pl.DataFrame)
         assert frame.is_empty()
 
+    def test_funding_updates_are_visible_from_bar_source_root(self, tmp_path: Path, monkeypatch):
+        _stub_make_instrument(monkeypatch)
+        catalog_path, funding_dir, uni, _ = self._base_setup(tmp_path)
+        bar_root = resolve_catalog_path(catalog_path, "klines")
+        dl = DataLayer(uni, catalog_root=bar_root, funding_dir=funding_dir)
+
+        frame = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
+
+        assert isinstance(frame, pl.DataFrame)
+        assert frame.columns == ["ts", "value"]
+        assert frame.height == 2
+        assert frame["value"].to_list() == pytest.approx([0.0001, 0.0002])
+
 
 # ---------------------------------------------------------------------------
 # Tests: PIT filtering (new-coin isolation)
