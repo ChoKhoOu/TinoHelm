@@ -1031,6 +1031,7 @@ class BacktestRunner:
             return out
 
         async def _ensure_mark_prices_for_funding(symbol: str) -> None:
+            nonlocal catalog
             if not self._redis_client:
                 return
             if self.start is None or self.end is None:
@@ -1055,6 +1056,7 @@ class BacktestRunner:
             if success:
                 self._invalidate_catalog_cache_for_source("fundingRate")
                 self._invalidate_catalog_cache_for_source("markPriceKlines")
+                catalog = self._catalog_for_path(self.catalog_path)
 
         def _build_rates(symbol: str, start: datetime | None, end: datetime | None) -> list[dict]:
             funding_rows = sorted(

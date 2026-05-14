@@ -152,7 +152,7 @@ class TestLoadFundingRatesNativeUpdates:
         assert captured[0]["data_type"] == "fundingRate"
         assert captured[0]["start_override"] == _utc(2024, 1, 10, 8) + timedelta(milliseconds=1)
 
-    def test_missing_mark_updates_enqueues_mark_price_fetch_before_assembly(self, monkeypatch):
+    def test_missing_mark_updates_refreshes_catalog_after_fetch(self, monkeypatch):
         runner = _mk_runner(
             ["BTCUSDT-PERP"],
             start=_utc(2024, 1, 10, 8),
@@ -166,7 +166,6 @@ class TestLoadFundingRatesNativeUpdates:
                 rate=Decimal("0.0001"),
             ),
         ]
-        empty_mark_rows: list[SimpleNamespace] = []
         loaded_mark_rows = [
             SimpleNamespace(
                 ts_event=_ns(_utc(2024, 1, 10, 7, 59)),
@@ -174,18 +173,14 @@ class TestLoadFundingRatesNativeUpdates:
             ),
         ]
 
-        call_counts = {"mark": 0}
+        stale_catalog = FakeCatalog(funding_updates=funding_rows, mark_updates=[])
+        fresh_catalog = FakeCatalog(funding_updates=funding_rows, mark_updates=loaded_mark_rows)
+        catalogs = [stale_catalog, fresh_catalog]
 
-        class Catalog:
-            def query(self, data_cls, identifiers, start, end):
-                if data_cls.__name__ == "FundingRateUpdate":
-                    return funding_rows
-                if data_cls.__name__ == "MarkPriceUpdate":
-                    call_counts["mark"] += 1
-                    return empty_mark_rows if call_counts["mark"] == 1 else loaded_mark_rows
-                return []
+        def catalog_for_path(path):
+            return catalogs.pop(0) if catalogs else fresh_catalog
 
-        monkeypatch.setattr(runner, "_catalog_for_path", lambda path: Catalog())
+        monkeypatch.setattr(runner, "_catalog_for_path", catalog_for_path)
 
         captured: list[dict] = []
 
@@ -211,3 +206,5 @@ class TestLoadFundingRatesNativeUpdates:
         assert captured[0]["data_type"] == "markPriceKlines"
         assert captured[0]["start_override"] == _utc(2024, 1, 10, 0)
         assert events[0]["mark_price"] == 101.0
+        assert {name for name, _ in stale_catalog.calls} == {"FundingRateUpdate", "MarkPriceUpdate"}
+        assert {name for name, _ in fresh_catalog.calls} == {"FundingRateUpdate", "MarkPriceUpdate"}
