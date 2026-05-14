@@ -700,8 +700,8 @@ async def delete_range(
         settings=settings,
         verb="delete-range",
         invoke=lambda catalog: catalog.delete_catalog_range(
-            start=body.start,
-            end=body.end,
+            start=start_dt,
+            end=end_dt,
         ),
     )
     return {

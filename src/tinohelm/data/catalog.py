@@ -1129,7 +1129,8 @@ class CatalogSession:
             from tinohelm.data.storage import StorageObject
 
             return [StorageObject(key=str(target), path=Path(target), size=size)]
-        return list(storage.iter_files(target, suffix=".parquet", recursive=False))
+        recursive = data_type == "funding_rate"
+        return list(storage.iter_files(target, suffix=".parquet", recursive=recursive))
 
     def _parquet_dir_for(
         self,
@@ -1158,7 +1159,7 @@ class CatalogSession:
             return book_depth_parquet_path(symbol, self.catalog_path)
         if data_type == "funding_rate":
             update_dir = funding_rate_update_dir(symbol, self.catalog_path)
-            if _iter_catalog_files(self.storage, update_dir, recursive=False):
+            if _iter_catalog_files(self.storage, update_dir, recursive=True):
                 return update_dir
             return funding_rate_parquet_path(symbol, self.catalog_path)
         return None

@@ -1179,6 +1179,29 @@ class TestFundingParquetCovers:
             "BTCUSDT-PERP", date(2024, 1, 1), date(2024, 1, 2)
         ) is True
 
+    def test_aggregate_stats_reads_nt_update_dir_for_funding_rate(self, tmp_path: Path):
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession, funding_rate_update_dir
+
+        update_dir = funding_rate_update_dir("BTCUSDT-PERP", tmp_path) / "2024" / "1"
+        update_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ts_event": [1_704_067_200_000_000_000, 1_704_758_400_000_000_000]}).write_parquet(
+            update_dir / "part.parquet"
+        )
+
+        session = CatalogSession(tmp_path)
+        stats = session.aggregate_parquet_stats(
+            symbol="BTCUSDT-PERP",
+            data_type="funding_rate",
+            interval="8h",
+            source_type="fundingRate",
+        )
+
+        assert stats is not None
+        assert stats["record_count"] == 2
+        assert stats["size_bytes"] > 0
+
 
 # ---------------------------------------------------------------------------
 # 9. compact_bars — remote provider

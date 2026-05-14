@@ -1357,6 +1357,8 @@ class TestNtNativeMaintenanceRoutes:
         assert calls == [(timedelta(days=1), None, None)]
 
     def test_delete_range_calls_catalog_verb_with_start_and_end(self, tmp_path: Path, monkeypatch):
+        from datetime import datetime, timezone
+
         calls = []
 
         class FakeCatalog:
@@ -1383,7 +1385,12 @@ class TestNtNativeMaintenanceRoutes:
             "start": "2024-01-01T00:00:00Z",
             "end": "2024-01-02T00:00:00Z",
         }
-        assert calls == [("2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")]
+        assert calls == [
+            (
+                datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+                datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc),
+            )
+        ]
 
     @pytest.mark.parametrize("period", ["", "xd", "1w", "0d", "-1h"])
     def test_parse_period_rejects_invalid_periods(self, period):
