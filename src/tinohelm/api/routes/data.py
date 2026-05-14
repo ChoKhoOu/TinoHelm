@@ -77,7 +77,7 @@ _PHASE1_DATA_TYPES: tuple[dict[str, Any], ...] = (
         "data_type": "mark_price",
         "upstream_data_type": "markPriceKlines",
         "db_category": "mark_price",
-        "interval_required": True,
+        "interval_required": False,
         "has_daily": True,
         "has_monthly": True,
     },
@@ -85,7 +85,7 @@ _PHASE1_DATA_TYPES: tuple[dict[str, Any], ...] = (
         "data_type": "index_price",
         "upstream_data_type": "indexPriceKlines",
         "db_category": "index_price",
-        "interval_required": True,
+        "interval_required": False,
         "has_daily": True,
         "has_monthly": True,
     },
@@ -135,8 +135,8 @@ class ConsolidateByPeriodRequest(BaseModel):
 
 
 class DeleteRangeRequest(BaseModel):
-    start: str | None = None
-    end: str | None = None
+    start: str
+    end: str
 
 
 # ---- helpers ----

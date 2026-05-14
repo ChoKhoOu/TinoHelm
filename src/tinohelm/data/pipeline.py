@@ -1826,7 +1826,7 @@ class BinanceVisionPipeline:
         try:
             for obj in overlapping:
                 original_path = Path(obj.path)
-                backup_path = rollback_prefix / original_path.name
+                backup_path = rollback_prefix / original_path.relative_to(target_dir)
                 self._storage.copy_path(original_path, backup_path)
                 guard.add_backup(original_path, backup_path)
             guard.persist_manifest()
