@@ -1787,7 +1787,8 @@ class BinanceVisionPipeline:
 
         from tinohelm.data.storage import delete_prefix
 
-        parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=False))
+        recursive = data_type in {"markPriceKlines", "indexPriceKlines"}
+        parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=recursive))
 
         start_ns = date_start_ns(start)
         end_ns = date_end_ns(end)
