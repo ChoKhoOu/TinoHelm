@@ -465,6 +465,28 @@ class TestIngestEarlyFailClosed:
         assert partial_path.exists()
         assert list((tmp_path / ".ingest-rollback").rglob("manifest.json"))
 
+    def test_mark_price_cleanup_scans_nested_update_parquet_recursively(self, tmp_path: Path):
+        from tinohelm.data.catalog import mark_price_update_dir
+
+        symbol = "BTCUSDT-PERP"
+        update_dir = mark_price_update_dir(symbol, tmp_path) / "2025" / "01" / "01"
+        update_dir.mkdir(parents=True)
+        old_path = update_dir / "old-overlap.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="markPriceKlines",
+            interval="1m",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+
+        assert guard is not None
+        assert not old_path.exists()
+        assert guard.backups
+
     def test_recover_skips_unresolved_manifest_after_verified_catalog_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

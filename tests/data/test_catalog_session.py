@@ -621,6 +621,34 @@ class TestFundingRateTxn:
         with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
             assert txn._storage is not None
 
+    def test_write_parquet_accepts_funding_rate_update_records(self, tmp_path: Path, paths_override):
+        import json
+        from decimal import Decimal
+
+        from nautilus_trader.model.data import FundingRateUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from tinohelm.data.catalog import CatalogSession
+
+        funding_dir = tmp_path / "funding_rates"
+        funding_dir.mkdir()
+        paths_override("funding_rates", funding_dir)
+
+        session = CatalogSession(tmp_path)
+        record = FundingRateUpdate(
+            InstrumentId.from_str("BTCUSDT-PERP.BINANCE"),
+            Decimal("0.0001"),
+            1_700_000_000_000_000_000,
+            1_700_000_000_000_000_000,
+            interval=480,
+        )
+
+        with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
+            txn.write_parquet([record])
+            txn.flush_json()
+
+        saved = json.loads((funding_dir / "btcusdt-perp.json").read_text())
+        assert saved == [{"funding_time_ms": 1_700_000_000_000, "funding_rate": 0.0001, "mark_price": 0}]
+
     def test_unflushed_normal_exit_leaves_json_untouched(
         self, tmp_path: Path, paths_override, caplog
     ):

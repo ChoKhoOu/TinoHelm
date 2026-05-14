@@ -338,14 +338,20 @@ class FundingRateTxn:
 
     def write_parquet(self, records: list) -> Path:
         """Write funding-rate records to the primary Parquet and stage JSON updates."""
-        cache_records = [
-            {
-                "funding_time_ms": r.funding_time_ms,
-                "funding_rate": r.funding_rate,
+        def _cache_record(record: Any) -> dict[str, Any]:
+            funding_time_ms = getattr(record, "funding_time_ms", None)
+            if funding_time_ms is None:
+                funding_time_ms = int(getattr(record, "ts_event")) // 1_000_000
+            funding_rate = getattr(record, "funding_rate", None)
+            if funding_rate is None:
+                funding_rate = getattr(record, "rate")
+            return {
+                "funding_time_ms": int(funding_time_ms),
+                "funding_rate": float(funding_rate),
                 "mark_price": 0,
             }
-            for r in records
-        ]
+
+        cache_records = [_cache_record(r) for r in records]
         parquet_path = write_funding_rate_parquet(
             records=records,
             symbol=self.symbol,
@@ -2258,8 +2264,10 @@ def write_funding_rate_parquet(
     # Normalise records → list of (ts_event_ns, funding_rate)
     def _to_tuple(r):
         if hasattr(r, "ts_event"):
-            # BinanceFundingRate dataclass
-            return int(r.ts_event), float(r.funding_rate)
+            rate = getattr(r, "funding_rate", None)
+            if rate is None:
+                rate = getattr(r, "rate")
+            return int(r.ts_event), float(rate)
         # Plain dict (JSON cache format)
         return int(r["funding_time_ms"]) * 1_000_000, float(r["funding_rate"])
 
