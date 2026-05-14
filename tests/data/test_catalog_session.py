@@ -1161,6 +1161,24 @@ class TestFundingParquetCovers:
             "BTCUSDT-PERP", date(2024, 1, 1), date(2024, 1, 2)
         ) is True
 
+    def test_returns_true_when_nt_update_dir_spans_range(self, tmp_path: Path):
+        from datetime import date
+
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession, funding_rate_update_dir
+
+        update_dir = funding_rate_update_dir("BTCUSDT-PERP", tmp_path) / "2024" / "1"
+        update_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(
+            {"ts_event": [1_704_067_200_000_000_000, 1_704_758_400_000_000_000]}
+        ).write_parquet(update_dir / "part.parquet")
+
+        session = CatalogSession(tmp_path)
+        assert session.funding_parquet_covers(
+            "BTCUSDT-PERP", date(2024, 1, 1), date(2024, 1, 2)
+        ) is True
+
 
 # ---------------------------------------------------------------------------
 # 9. compact_bars — remote provider
