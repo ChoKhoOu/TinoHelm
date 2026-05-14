@@ -2464,11 +2464,14 @@ class DataLayer:
         start: datetime | None,
         end: datetime | None,
     ) -> pl.DataFrame:
-        """Read funding-rate data for a symbol from NT-native funding updates."""
+        """Read funding-rate data for a symbol, preferring NT parquet over JSON."""
         frame = self._load_funding_rate_parquet(symbol, start, end)
-        if frame is not None:
+        if frame is not None and not frame.is_empty():
             return frame
-        return _empty_series_frame()
+        json_frame = self._load_funding_rate_json(symbol, start, end)
+        if not json_frame.is_empty():
+            return json_frame
+        return frame if frame is not None else _empty_series_frame()
 
     def _load_funding_rate_parquet(
         self,
@@ -2476,11 +2479,11 @@ class DataLayer:
         start: datetime | None,
         end: datetime | None,
     ) -> "pl.DataFrame | None":
-        """Try to load funding-rate updates from NT-native parquet."""
+        """Try to load funding-rate data from NT updates, then legacy parquet."""
         from decimal import Decimal
         from nautilus_trader.model.data import FundingRateUpdate
         from nautilus_trader.model.identifiers import InstrumentId
-        from tinohelm.data.catalog import _catalog_for_root
+        from tinohelm.data.catalog import _catalog_for_root, read_funding_rate_parquet
 
         catalog = _catalog_for_root(self._catalog_root, self._storage)
         try:
@@ -2494,13 +2497,19 @@ class DataLayer:
             logger.warning(
                 "Failed to read funding-rate updates for %s", symbol, exc_info=True
             )
-            return None
+            rows = None
 
-        if not rows:
+        if rows:
+            timestamps = [_ns_to_datetime(int(row.ts_event)) for row in rows]
+            values = [float(row.rate if not isinstance(row.rate, Decimal) else row.rate) for row in rows]
+            frame = _build_series_frame(timestamps, values)
+            return _filter_time_range(frame, start, end)
+
+        legacy = read_funding_rate_parquet(symbol, self._catalog_root)
+        if legacy is None or legacy.empty:
             return _empty_series_frame()
-
-        timestamps = [_ns_to_datetime(int(row.ts_event)) for row in rows]
-        values = [float(row.rate if not isinstance(row.rate, Decimal) else row.rate) for row in rows]
+        timestamps = [_ns_to_datetime(int(ts_ns)) for ts_ns in legacy["ts_event"]]
+        values = [float(rate) for rate in legacy["funding_rate"]]
         frame = _build_series_frame(timestamps, values)
         return _filter_time_range(frame, start, end)
 
