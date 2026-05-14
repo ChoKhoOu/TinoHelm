@@ -7,34 +7,91 @@ TinoHelm is a single-instance quantitative trading platform built on NautilusTra
 ### Data & storage
 
 **Catalog**:
-The on-disk home for all persisted market data under `{catalog_path}/`. NT ParquetDataCatalog is the underlying writer; TinoHelm overlays additional per-source grouping (`data/{category}/{source_type}/`).
+The persisted market-data home rooted at one NT-native `ParquetDataCatalog`; NautilusTrader owns the physical `data/...` layout.
 _Avoid_: data store, parquet store, datalake.
 
 **Catalog path**:
-The root directory that contains a **Catalog**. Passed as a string or Path; resolved by `catalog_helpers.resolve_catalog_path(base, source_type)`.
+The single logical root of the active **Catalog**; in production it is typically one S3-compatible URI, while development may use a local path.
 
 **CatalogSession**:
-A single module that owns **Catalog** CRUD — read (parquet stats, coverage), write (bars/ticks/quotes/funding), delete (per-symbol × data_type × source_type), and compact (local + remote unified). Constructed with `(catalog_path, storage=None)`; all methods are sync.
+A single module that owns **Catalog** CRUD and metadata sync for market data.
 _Avoid_: CatalogService, CatalogManager, DataCatalogService.
 
+**Funding rate update**:
+The NT-native `FundingRateUpdate` record for perpetual contracts, persisted in the same **Catalog** as other built-in NT data types; its event payload may carry a funding interval, but that interval is not a stream-identity dimension.
+_Avoid_: custom funding record, funding cache row.
+
+**Auxiliary price update**:
+An NT-native non-bar price stream such as `MarkPriceUpdate` or `IndexPriceUpdate`, written to and read from the **Catalog** directly rather than reconstructed from stored bars.
+_Avoid_: mark/index bar, derived update stream.
+
 **FundingRateTxn**:
-A context manager obtained via `CatalogSession.funding_rate_transaction(symbol)`. Owns the snapshot → write Parquet → flush JSON → restore-on-failure lifecycle for funding_rate, which is the only **Catalog** datum persisted to two backends simultaneously.
+A legacy transition artifact around funding-rate persistence; it should disappear once funding data is stored and read as NT-native **Funding rate update**.
 _Avoid_: FundingWriter, FundingCommitter.
 
 **Storage** (as a noun, `CatalogStorageProvider`):
-The concrete backing filesystem for a **Catalog** — `LocalCatalogStorage` or `S3CatalogStorage`. Always attached to exactly one catalog root. Obtained via `get_catalog_storage(catalog_root=...)` or injected.
-_Avoid_: backend, filesystem (overloaded), FS.
+The active backing store for the **Catalog** — local or S3-compatible — selected from config at runtime.
+_Avoid_: backend, provider, filesystem (overloaded), FS.
 
 **Vision type**:
-A Binance Vision download-side data identifier — one of 12 strings: `klines`, `markPriceKlines`, `indexPriceKlines`, `premiumIndexKlines`, `aggTrades`, `trades`, `bookTicker`, `fundingRate`, `metrics`, `liquidationHistory`, `BVOLIndex`, `EOHSummary`.
+A Binance download-side data identifier such as `klines`, `trades`, `fundingRate`, `markPriceKlines`, `indexPriceKlines`, or `bookTicker`; the current target model uses Binance-controlled upstreams (Vision packages plus REST tail fill where needed).
 _Avoid_: stream type, Binance type.
 
-**DB category**:
-The storage-side type stored in `data_catalog.data_type`: `bar`, `trade_tick`, `quote_tick`, `funding_rate`, `metrics`, `order_book_delta`. One DB category can receive multiple **Vision types** (e.g. `klines` + `markPriceKlines` both → `bar`).
+**Canonical upstream**:
+The single Binance source selected for one **NT stream type**. In the target model, each persisted NT-native stream has exactly one canonical upstream rather than multiple interchangeable feed labels.
+_Avoid_: source fallback, alternate download label.
+
+**NT-native ingest scope**:
+The phase-1 persisted market-data set is exactly `bar`, `trade_tick`, `quote_tick`, `mark_price`, `index_price`, and `funding_rate`; `bookDepth`, `metrics`, `liquidationSnapshot`, and `premiumIndexKlines` are out of scope.
+_Avoid_: mixed-scope catalog, partial-native mode.
+
+**True concurrency**:
+Real overlap of independent ingest work — multiple downloads and conversions progressing at the same time — while writes remain serialized only per physical NT data stream, with lock keys derived from the final NT-native stream identity rather than the download-side request label.
+_Avoid_: fake parallelism, queue-only concurrency.
+
+**In-memory ingest**:
+Download, checksum verification, ZIP extraction, CSV decoding, and object conversion all happen in memory; only final NT catalog outputs may be persisted. The target model does not require staging or filesystem spill for intermediate artifacts.
+_Avoid_: raw cache, staged CSV, intermediate ZIP persistence.
+
+**NT stream type**:
+The final NT-native market-data identity used by the catalog read/write path, such as `bar`, `mark_price`, `index_price`, `trade_tick`, `quote_tick`, or `funding_rate`.
 _Avoid_: write category (internal code name), storage type.
 
 **Source type**:
-The **Vision type** recorded on a catalog row, used to disambiguate multiple **Vision types** that map to the same **DB category**. Stored in `data_catalog.source_type`; `None` / empty means "legacy flat layout". Used by `resolve_catalog_path` to compute `{base}/{category}/{source_type}`.
+A legacy download-side label from the old schema/layout that should disappear from the target model.
+_Avoid_: treating it as durable storage identity.
+
+**Sampling interval**:
+The upstream cadence carried by the ingest/read request; for `bar` it is part of the bar stream identity, and for `mark_price` / `index_price` it remains resolution metadata that still keeps `1m` and `5m` streams distinct.
+_Avoid_: timeframe when the discussion is about non-bar update streams.
+
+**Single remote Catalog**:
+The production storage model: one S3-compatible NT-native `ParquetDataCatalog` that serves as the only persisted truth for market-data files.
+_Avoid_: per-source catalog root, split catalog tree.
+
+**NT-native query path**:
+The default read path for backtest, runtime, research, and general catalog access: query through NautilusTrader catalog APIs and let the engine select Rust or PyArrow backend automatically.
+_Avoid_: hand-scanning parquet as the primary read path.
+
+**Catalog overview**:
+A live, read-only summary of the current NT Catalog state returned by API queries rather than a persisted business index table.
+_Avoid_: DataCatalog as a separate truth source.
+
+**Data type list**:
+A static API capability list describing which NT-native data types this release supports.
+_Avoid_: deriving supported types from a persisted catalog index.
+
+**Catalog maintenance**:
+File reorganization operations such as reset-file-names, consolidate, consolidate-by-period, and delete-range are explicit maintenance actions outside the ingest hot path.
+_Avoid_: automatic maintenance during every ingest.
+
+**Catalog maintenance verbs**:
+Public maintenance APIs use NT-native operation names such as `reset-file-names`, `consolidate`, `consolidate-by-period`, and `delete-range`.
+_Avoid_: compact, scan, sync.
+
+**Append-only ingest**:
+The ingest hot path only appends new NT catalog data and does not perform overlap deletion or rewrite of existing time ranges.
+_Avoid_: automatic overlap cleanup, transactional rewrite.
 
 **DataFetchJob**:
 A persistent record (`data_fetch_jobs` table) representing one ingest request. States: `queued → running → completed | failed | cancelled`. On API restart, `running` is reset to `queued` and re-enqueued.
@@ -76,9 +133,9 @@ Pure-Python tracker of `StrategyBundle` discovery and strategy state machine (`a
 ## Relationships
 
 - A **CatalogSession** owns one **Storage** and one **Catalog path**.
-- A **CatalogSession** produces a **FundingRateTxn** only for `funding_rate`; all other categories write directly.
-- A **Vision type** maps to exactly one **DB category** (many-to-one).
-- A `data_catalog` row carries `(symbol, data_type=DB category, interval, source_type=Vision type or None)`.
+- A **Single remote Catalog** is backed by exactly one active **Storage** in production.
+- A **Vision type** maps to exactly one **NT stream type** (many-to-one only where multiple upstreams truly land on the same NT-native type).
+- A `data_catalog` row carries `(symbol, data_type=NT stream type, interval where relevant)`; `source_type` is legacy-only and should leave the target schema.
 - A **DataFetchJob** produces zero or more `data_catalog` rows on success; the `ingest_run_id` on each row points back to the job.
 - A **FetchBatch** owns one-or-more **DataFetchJob** rows via a shared `batch_id`; jobs in the same batch are siblings from one user submission.
 - A **FetchBatch** fans out into one-or-more **FetchBuckets** (one per distinct `(symbol, data_type, interval)` in the batch); buckets are the fairness unit, batches are the **Soft FIFO** unit.
@@ -93,5 +150,5 @@ Pure-Python tracker of `StrategyBundle` discovery and strategy state machine (`a
 
 ## Example dialogue
 
-> **Dev:** "Can I call `delete_storage` directly on the parquet files for `fundingRate`?"
-> **Domain expert:** "No — for `funding_rate` the **Catalog** holds the Parquet and `~/.tino/data/funding_rates/` holds the JSON read-side. Use `CatalogSession.delete_storage(symbol, 'funding_rate', ...)`; it takes care of both. And for writes, you always need a **FundingRateTxn** because the JSON flush is gated on your DB commit."
+> **Dev:** "Should `markPriceKlines` live under a separate `bar/markPriceKlines` storage prefix?"
+> **Domain expert:** "No — in the target model the **Catalog** is one NT-native root and NautilusTrader owns the physical layout. `source_type` stays metadata on the row, not a storage partition."
