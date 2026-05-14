@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
 from tinohelm.core.config import Settings
-from tinohelm.data.catalog_locks import catalog_lock_key, get_catalog_lock
+from tinohelm.data.catalog_locks import (
+    catalog_lock_key,
+    hold_catalog_lock,
+    hold_global_catalog_lock,
+)
 from tinohelm.data.pipeline_helpers import WRITE_CATEGORY, resolve_db_interval
 from tinohelm.data.worker import enqueue_job
 from tinohelm.db.models import DataCatalog, DataFetchJob
@@ -316,10 +320,11 @@ async def _run_catalog_maintenance(
 ) -> None:
     catalog, _ = _catalog_for_maintenance(settings)
     try:
-        await asyncio.to_thread(invoke, catalog)
+        async with hold_global_catalog_lock():
+            await asyncio.to_thread(invoke, catalog)
     except Exception as exc:
         logger.exception("Catalog maintenance failed for %s: %s", verb, exc)
-        raise HTTPException(status_code=500, detail=f"Catalog maintenance failed: {verb}")
+        raise HTTPException(status_code=500, detail=f"Catalog maintenance failed: {verb}") from exc
 
 
 # ---- routes ----
@@ -476,7 +481,7 @@ async def _run_compact(
         lock_key = catalog_lock_key(symbol, effective_source, interval)
         was_cancelled = False
         compact_session = CatalogSession(catalog_path, storage=storage)
-        async with get_catalog_lock(lock_key):
+        async with hold_catalog_lock(lock_key):
             result, cancelled = await _await_critical_mutation(
                 asyncio.to_thread(compact_session.compact_bars, symbol, interval)
             )
@@ -681,6 +686,15 @@ async def delete_range(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Delete a time range across the entire active catalog."""
+    if not body.start or not body.end:
+        raise HTTPException(status_code=400, detail="start and end are required")
+    try:
+        start_dt = datetime.fromisoformat(body.start.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(body.end.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="start and end must be valid ISO datetimes") from exc
+    if start_dt > end_dt:
+        raise HTTPException(status_code=400, detail="start must be on or before end")
     await _run_catalog_maintenance(
         settings=settings,
         verb="delete-range",
@@ -758,31 +772,32 @@ async def delete_catalog_entry(
     else:
         stmt = stmt.where(DataCatalog.source_type == source_type)
     row = (await db.execute(stmt)).scalar_one_or_none()
-    if not row:
-        raise HTTPException(status_code=404, detail="Catalog entry not found")
 
     from tinohelm.data.catalog import CatalogSession
     from tinohelm.data.storage import get_active_catalog_root
+
     session = CatalogSession(str(get_active_catalog_root(settings)))
     was_cancelled = False
-    async with get_catalog_lock(_catalog_row_lock_key(row)):
+    lock_key = _catalog_row_lock_key(row) if row is not None else catalog_lock_key(symbol, source_type or data_type, interval)
+    async with hold_catalog_lock(lock_key):
         (deleted_files, freed_bytes), cancelled = await _await_critical_mutation(asyncio.to_thread(
             session.delete_storage,
-            row.symbol,
-            row.data_type,
-            row.interval,
-            source_type=row.source_type,
+            symbol if row is None else row.symbol,
+            data_type if row is None else row.data_type,
+            interval if row is None else row.interval,
+            source_type=source_type if row is None else row.source_type,
         ))
         was_cancelled = was_cancelled or cancelled
 
-        _, cancelled = await _await_critical_mutation(_delete_catalog_row_after_storage(db, row))
-        was_cancelled = was_cancelled or cancelled
+        if row is not None:
+            _, cancelled = await _await_critical_mutation(_delete_catalog_row_after_storage(db, row))
+            was_cancelled = was_cancelled or cancelled
     if was_cancelled:
         raise asyncio.CancelledError
     return {
         "status": "deleted",
-        "symbol": row.symbol,
-        "data_type": row.data_type,
+        "symbol": symbol if row is None else row.symbol,
+        "data_type": data_type if row is None else row.data_type,
         "deleted_files": deleted_files,
         "freed_bytes": freed_bytes,
     }

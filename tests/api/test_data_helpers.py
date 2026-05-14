@@ -1392,6 +1392,56 @@ class TestNtNativeMaintenanceRoutes:
         with pytest.raises(HTTPException):
             _parse_period(period)
 
+    @pytest.mark.parametrize(
+        ("start", "end", "detail"),
+        [
+            (None, "2024-01-02T00:00:00Z", "start and end are required"),
+            ("2024-01-01T00:00:00Z", None, "start and end are required"),
+            ("2024-01-03T00:00:00Z", "2024-01-02T00:00:00Z", "start must be on or before end"),
+        ],
+    )
+    def test_delete_range_rejects_unsafe_or_invalid_bounds(self, start, end, detail, tmp_path: Path):
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(delete_range(DeleteRangeRequest(start=start, end=end), settings))
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == detail
+
+    async def test_catalog_maintenance_waits_on_global_lock(self, tmp_path: Path, monkeypatch):
+        import threading
+
+        from tinohelm.data.catalog_locks import get_catalog_lock
+
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        class FakeCatalog:
+            def reset_all_file_names(self):
+                started.set()
+                assert release.wait(timeout=1)
+                calls.append("reset")
+
+        monkeypatch.setattr("tinohelm.api.routes.data._catalog_for_root", lambda catalog_root, storage=None: FakeCatalog())
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings=None: tmp_path)
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: SimpleNamespace(catalog_root=tmp_path))
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        task = asyncio.create_task(reset_file_names(ResetFileNamesRequest(), settings))
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+
+        lock = get_catalog_lock("data_catalog:__global__")
+        assert lock.locked()
+        release.set()
+        result = await task
+
+        assert result == {"status": "ok", "verb": "reset-file-names", "scope": "catalog"}
+        assert calls == ["reset"]
+        assert not lock.locked()
+
 
 class TestDeleteCatalogEntry:
     async def test_delete_waits_on_legacy_default_catalog_lock(self, tmp_path: Path, monkeypatch):
@@ -1552,6 +1602,44 @@ class TestDeleteCatalogEntry:
 
         assert calls == [(str(tmp_path), "BTCUSDT-PERP", row_data_type, row_interval, None)]
 
+    async def test_delete_removes_filesystem_only_catalog_entry_without_db_row(self, tmp_path: Path, monkeypatch):
+        from tinohelm.data.catalog import CatalogSession
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return None
+
+        db = SimpleNamespace(
+            execute=AsyncMock(return_value=FakeResult()),
+            delete=AsyncMock(),
+            commit=AsyncMock(),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+        calls = []
+
+        def fake_delete_storage(self, symbol, data_type, interval, *, source_type=None):
+            calls.append((str(self.catalog_path), symbol, data_type, interval, source_type))
+            return (4, 64)
+
+        monkeypatch.setattr(CatalogSession, "delete_storage", fake_delete_storage)
+
+        result = await delete_catalog_entry(
+            "BTCUSDT-PERP|quote_tick|tick|bookTicker",
+            db=db,
+            settings=settings,
+        )
+
+        assert result == {
+            "status": "deleted",
+            "symbol": "BTCUSDT-PERP",
+            "data_type": "quote_tick",
+            "deleted_files": 4,
+            "freed_bytes": 64,
+        }
+        assert calls == [(str(tmp_path), "BTCUSDT-PERP", "quote_tick", "tick", "bookTicker")]
+        db.delete.assert_not_awaited()
+        db.commit.assert_not_awaited()
+
 
 class TestMaintenanceApiSurface:
     def test_scan_route_removed_from_router(self):
@@ -1632,6 +1720,44 @@ class TestCatalogApiFacade:
         rows = await list_data_catalog(settings=settings)
 
         assert [row.data_type for row in rows] == ["quote_tick"]
+
+    @pytest.mark.parametrize(
+        ("upstream_type", "public_type", "file_name"),
+        [
+            ("markPriceKlines", "mark_price", "mark.parquet"),
+            ("indexPriceKlines", "index_price", "index.parquet"),
+        ],
+    )
+    async def test_list_data_catalog_includes_direct_update_entries(
+        self,
+        upstream_type: str,
+        public_type: str,
+        file_name: str,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        from tinohelm.strategy.loader import normalize_symbol
+
+        symbol = "BTCUSDT-PERP"
+        nt_sym = normalize_symbol(symbol)
+        update_dir_name = "mark_price_update" if upstream_type == "markPriceKlines" else "index_price_update"
+        update_dir = tmp_path / "data" / update_dir_name / nt_sym
+        update_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(update_dir / file_name)
+
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data.select",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("live summary must not query data_catalog")
+            ),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        rows = await list_data_catalog(settings=settings)
+
+        assert len(rows) == 1
+        assert rows[0].symbol == symbol
+        assert rows[0].data_type == public_type
 
     def test_list_data_types_returns_static_phase1_capability_list(self):
         import asyncio

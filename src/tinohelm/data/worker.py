@@ -60,7 +60,8 @@ _handle: WorkerHandle = WorkerHandle(name="data-fetch-worker")
 _catalog_locks = _catalog_locking._catalog_locks
 _catalog_lock_key = _catalog_locking.catalog_lock_key
 _get_catalog_lock = _catalog_locking.get_catalog_lock
-_catalog_lock_attempt_guard = asyncio.Lock()
+_catalog_lock_attempt_guard = _catalog_locking._catalog_lock_attempt_guard
+_get_global_catalog_lock = _catalog_locking.get_global_catalog_lock
 # Strong references to fire-and-forget background tasks. asyncio drops tasks
 # that have no strong reference, so we keep them here until they finish.
 _background_tasks: set[asyncio.Task] = set()
@@ -495,6 +496,9 @@ async def _claim_queued_job(factory, job_id: str):
 async def _try_acquire_catalog_lock(lock_key: str):
     """Acquire a catalog lock only if immediately available."""
     async with _catalog_lock_attempt_guard:
+        global_lock = _get_global_catalog_lock()
+        if lock_key != _catalog_locking.GLOBAL_CATALOG_LOCK_KEY and global_lock.locked():
+            return None
         lock = _get_catalog_lock(lock_key)
         if lock.locked():
             return None
