@@ -748,18 +748,17 @@ class TestLoadGrouping:
         ])
         dl = DataLayer(Universe.load_csv(uni_path), catalog_root=catalog_path)
 
-        panel = dl.load(
-            DataRequest(
-                "BTCUSDT-PERP",
-                "close",
-                "1m",
-                0,
-                "bar",
-                source_type="markPriceKlines",
+        with pytest.raises(ValueError, match="Unknown bar source_type"):
+            dl.load(
+                DataRequest(
+                    "BTCUSDT-PERP",
+                    "close",
+                    "1m",
+                    0,
+                    "bar",
+                    source_type="markPriceKlines",
+                )
             )
-        )["close"]
-
-        assert panel.is_empty()
 
     def test_fallback_resample_drops_incomplete_child_buckets(self, tmp_path: Path):
         catalog_path = tmp_path / "catalog"
