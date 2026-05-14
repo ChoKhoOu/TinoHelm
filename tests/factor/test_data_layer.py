@@ -30,7 +30,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from tinohelm.factor.data_layer import DataLayer, _parse_ts, load_aligned
+from tinohelm.factor.data_layer import DataLayer, _catalog_base_root, _parse_ts, load_aligned
 from tinohelm.factor.types import DataRequest, EventRequest
 from tinohelm.factor.universe import Universe
 from tinohelm.data.catalog_helpers import resolve_catalog_path
@@ -42,6 +42,12 @@ def test_parse_ts_converts_offset_to_utc_naive() -> None:
     assert _parse_ts("2026-01-01T00:00:00-05:00") == datetime(2026, 1, 1, 5, 0)
     aware = datetime(2026, 1, 1, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
     assert _parse_ts(aware) == datetime(2026, 1, 1, 5, 0)
+
+
+def test_catalog_base_root_only_strips_direct_legacy_category_segment() -> None:
+    assert _catalog_base_root(Path("/srv/bar/tino_catalog")) == Path("/srv/bar/tino_catalog")
+    assert _catalog_base_root(Path("/srv/catalog/bar")) == Path("/srv/catalog")
+    assert _catalog_base_root(Path("/srv/catalog/bar/klines")) == Path("/srv/catalog")
 
 
 # ---------------------------------------------------------------------------
