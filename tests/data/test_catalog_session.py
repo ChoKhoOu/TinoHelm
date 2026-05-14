@@ -248,6 +248,42 @@ class TestDeleteStorageSingleFileCategories:
         assert freed == 13
 
 
+class TestDeleteStorageDirectUpdates:
+    def test_deletes_mark_price_update_files_recursively(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession, mark_price_update_dir
+
+        path = mark_price_update_dir("BTCUSDT-PERP", tmp_path) / "2025" / "01" / "01" / "part.parquet"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"m" * 17)
+
+        session = CatalogSession(tmp_path)
+        deleted, freed = session.delete_storage(
+            symbol="BTCUSDT-PERP",
+            data_type="mark_price",
+            interval="tick",
+        )
+        assert deleted == 1
+        assert freed == 17
+        assert not path.exists()
+
+    def test_deletes_index_price_update_files_recursively(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession, index_price_update_dir
+
+        path = index_price_update_dir("BTCUSDT-PERP", tmp_path) / "2025" / "01" / "01" / "part.parquet"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"i" * 19)
+
+        session = CatalogSession(tmp_path)
+        deleted, freed = session.delete_storage(
+            symbol="BTCUSDT-PERP",
+            data_type="index_price",
+            interval="tick",
+        )
+        assert deleted == 1
+        assert freed == 19
+        assert not path.exists()
+
+
 class TestDeleteStorageFundingRate:
     def test_deletes_parquet_and_json(self, tmp_path: Path, paths_override):
         from tinohelm.data.catalog import CatalogSession, funding_rate_parquet_path
@@ -292,6 +328,36 @@ class TestDeleteStorageFundingRate:
         )
         assert deleted == 1
         assert freed == 7
+
+    def test_deletes_nested_nt_update_files_recursively(self, tmp_path: Path, paths_override):
+        from tinohelm.data.catalog import CatalogSession, funding_rate_parquet_path, funding_rate_update_dir
+
+        funding_json_dir = tmp_path / "funding_rates"
+        funding_json_dir.mkdir()
+        paths_override("funding_rates", funding_json_dir)
+
+        update_file = funding_rate_update_dir("BTCUSDT-PERP", tmp_path) / "2025" / "1" / "part.parquet"
+        update_file.parent.mkdir(parents=True, exist_ok=True)
+        update_file.write_bytes(b"u" * 11)
+
+        parquet = funding_rate_parquet_path("BTCUSDT-PERP", tmp_path)
+        parquet.parent.mkdir(parents=True, exist_ok=True)
+        parquet.write_bytes(b"p" * 7)
+
+        json_file = funding_json_dir / "btcusdt-perp.json"
+        json_file.write_bytes(b"j" * 5)
+
+        session = CatalogSession(tmp_path)
+        deleted, freed = session.delete_storage(
+            symbol="BTCUSDT-PERP",
+            data_type="funding_rate",
+            interval="8h",
+        )
+        assert deleted == 3
+        assert freed == 23
+        assert not update_file.exists()
+        assert not parquet.exists()
+        assert not json_file.exists()
 
 
 # ---------------------------------------------------------------------------
