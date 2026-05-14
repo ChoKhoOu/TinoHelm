@@ -1338,7 +1338,8 @@ class TestIngestEarlyFailClosed:
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         path = funding_rate_update_dir(symbol, tmp_path) / "existing.parquet"
         path.parent.mkdir(parents=True)
-        path.write_bytes(b"old-valid-parquet-placeholder")
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "funding_rate": [0.0001]}).write_parquet(path)
+        old_payload = path.read_bytes()
 
         guard = p._clean_overlapping_parquet(
             symbol=symbol,
@@ -1352,7 +1353,7 @@ class TestIngestEarlyFailClosed:
 
         p._rollback_failed_ingest(guard, [str(path)], set())
 
-        assert path.read_bytes() == b"old-valid-parquet-placeholder"
+        assert path.read_bytes() == old_payload
         assert not (tmp_path / ".ingest-rollback").exists()
 
     def test_in_place_guard_deletes_untracked_new_single_file_parquet(self, tmp_path: Path):

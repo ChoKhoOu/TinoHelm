@@ -293,7 +293,7 @@ class TestFetchBatchSplitting:
         assert result["jobs"] == [
             {
                 "job_id": "job-1",
-                "data_type": "aggTrades",
+                "data_type": "trade_tick",
                 "db_interval": "tick",
                 "interval": None,
                 "start": "2024-01-01",
