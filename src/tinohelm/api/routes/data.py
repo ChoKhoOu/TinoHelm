@@ -4,9 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, timedelta
-from typing import Callable
+from typing import Any, Callable
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 import redis.asyncio as aioredis
