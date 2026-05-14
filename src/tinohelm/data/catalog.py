@@ -443,9 +443,6 @@ class LiveCatalogSummary:
 
 _BAR_SOURCE_TYPES: tuple[str, ...] = (
     "klines",
-    "markPriceKlines",
-    "indexPriceKlines",
-    "premiumIndexKlines",
 )
 _TICK_SCAN_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("trade_tick", "trade_tick", ("aggTrades", "trades")),

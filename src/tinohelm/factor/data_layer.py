@@ -420,7 +420,7 @@ def _bar_catalog_roots(base_root: Path, source_type: str | None) -> list[Path]:
 
     base = Path(base_root)
     source_type = source_type or _DEFAULT_BAR_SOURCE_TYPE
-    bar_source_types = {src for src, category in WRITE_CATEGORY.items() if category == "bar"}
+    bar_source_types = {"klines"}
     if source_type not in bar_source_types:
         raise ValueError(
             f"Unknown bar source_type {source_type!r}. Supported: {sorted(bar_source_types)}"
