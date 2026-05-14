@@ -252,7 +252,7 @@ def _public_data_type(data_type: str) -> str:
 
 def _is_bar_data_type(data_type: str) -> bool:
     """Return True for fetch types that require interval fan-out."""
-    return _normalize_requested_data_type(data_type) in {"klines", "markPriceKlines", "indexPriceKlines"}
+    return _normalize_requested_data_type(data_type) == "klines"
 
 
 def _is_bar_maintenance_data_type(data_type: str) -> bool:

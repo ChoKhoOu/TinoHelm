@@ -263,9 +263,10 @@ class TestFetchBatchSplitting:
         assert _fetch_batch_intervals("trades", ["1m", "5m"]) == []
         assert _fetch_batch_intervals("bookTicker", ["1m", "5m"]) == []
 
-    def test_fetch_batch_intervals_for_kline_types_fan_out(self):
+    def test_fetch_batch_intervals_for_klines_fan_out(self):
         assert _fetch_batch_intervals("klines", ["1m", "5m"]) == ["1m", "5m"]
-        assert _fetch_batch_intervals("markPriceKlines", ["1m", "5m"]) == ["1m", "5m"]
+        assert _fetch_batch_intervals("markPriceKlines", ["1m", "5m"]) == []
+        assert _fetch_batch_intervals("indexPriceKlines", ["1m", "5m"]) == []
 
     def test_fetch_batch_agg_trades_default_interval_enqueues_one_intervalless_job(self, monkeypatch):
         import asyncio
@@ -420,7 +421,7 @@ class TestFetchBatchSplitting:
         rds = AsyncMock()
         body = DataFetchBatchRequest(
             symbols=["BTCUSDT-PERP"],
-            intervals=["1m"],
+            intervals=[],
             start=date(2024, 1, 1),
             end=date(2024, 1, 1),
             data_type="mark_price",
@@ -434,9 +435,41 @@ class TestFetchBatchSplitting:
         ))
 
         assert result["data_type"] == "mark_price"
+        assert result["intervals"] == []
         assert result["jobs"][0]["data_type"] == "mark_price"
+        assert result["jobs"][0]["db_interval"] == "tick"
         assert db.jobs[0].data_type == "markPriceKlines"
-        assert db.jobs[0].interval == "1m"
+        assert db.jobs[0].interval is None
+        enqueue.assert_awaited_once_with(rds, "job-1")
+
+    def test_fetch_batch_accepts_canonical_index_price_type(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        db = _FetchBatchDb()
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=[],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 1),
+            data_type="index_price",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(
+            body,
+            db,
+            rds,
+            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+        ))
+
+        assert result["data_type"] == "index_price"
+        assert result["intervals"] == []
+        assert result["jobs"][0]["data_type"] == "index_price"
+        assert result["jobs"][0]["db_interval"] == "tick"
+        assert db.jobs[0].data_type == "indexPriceKlines"
+        assert db.jobs[0].interval is None
         enqueue.assert_awaited_once_with(rds, "job-1")
 
 
