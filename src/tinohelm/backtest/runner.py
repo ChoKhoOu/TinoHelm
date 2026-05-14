@@ -249,6 +249,9 @@ class BacktestRunner:
     def _catalog_for_path(self, path: str | Path) -> ParquetDataCatalog:
         """Return a cached ParquetDataCatalog for the runner lifetime."""
         _require_nt()
+        from tinohelm.data.catalog import _ensure_nt_update_query_support
+
+        _ensure_nt_update_query_support()
         uri = self._catalog_uri_for_root(path)
         key = json.dumps(
             {
@@ -882,7 +885,7 @@ class BacktestRunner:
                 mark_updates = await self._load_or_fetch_aux_updates(
                     sym, nt_sym, ivl,
                     source_type="markPriceKlines",
-                    build_fn=MarkPriceUpdate,
+                    data_cls=MarkPriceUpdate,
                 )
                 if mark_updates:
                     engine.add_data(mark_updates, sort=False)
@@ -895,7 +898,7 @@ class BacktestRunner:
                 index_updates = await self._load_or_fetch_aux_updates(
                     sym, nt_sym, ivl,
                     source_type="indexPriceKlines",
-                    build_fn=IndexPriceUpdate,
+                    data_cls=IndexPriceUpdate,
                 )
                 if index_updates:
                     engine.add_data(index_updates, sort=False)
@@ -933,10 +936,10 @@ class BacktestRunner:
         ivl: str,
         *,
         source_type: str,
-        build_fn,
+        data_cls,
     ) -> list:
         """Load aux (mark/index) updates directly from the NT catalog."""
-        data_cls = build_fn
+        _ = nt_sym
         updates = self._load_aux_updates(sym, data_cls)
         if updates:
             return updates
@@ -1027,6 +1030,32 @@ class BacktestRunner:
                 out.append(int(ts_event) // 1_000_000)
             return out
 
+        async def _ensure_mark_prices_for_funding(symbol: str) -> None:
+            if not self._redis_client:
+                return
+            if self.start is None or self.end is None:
+                return
+            interval_minutes = interval_minutes_by_symbol[symbol]
+            mark_start = self.start - timedelta(minutes=interval_minutes)
+            mark_rows = _query_updates(symbol, MarkPriceUpdate, start=mark_start, end=self.end)
+            if mark_rows:
+                return
+            logger.warning(
+                "Missing mark price updates for funding assembly: %s [%s..%s]",
+                symbol,
+                mark_start,
+                self.end,
+            )
+            success = await self._submit_and_wait_fetch(
+                symbol,
+                self.intervals[0] if self.intervals else "1h",
+                data_type="markPriceKlines",
+                start_override=mark_start,
+            )
+            if success:
+                self._invalidate_catalog_cache_for_source("fundingRate")
+                self._invalidate_catalog_cache_for_source("markPriceKlines")
+
         def _build_rates(symbol: str, start: datetime | None, end: datetime | None) -> list[dict]:
             funding_rows = sorted(
                 _query_updates(symbol, FundingRateUpdate, start=start, end=end),
@@ -1037,22 +1066,38 @@ class BacktestRunner:
                 _query_updates(symbol, MarkPriceUpdate, start=mark_start, end=end),
                 key=lambda row: int(getattr(row, "ts_event", 0)),
             )
+            if funding_rows and not mark_rows:
+                logger.warning(
+                    "Funding updates exist but no mark price updates were found for %s [%s..%s]",
+                    symbol,
+                    mark_start,
+                    end,
+                )
             mark_times = [int(getattr(row, "ts_event", 0)) for row in mark_rows]
             mark_values = [_price_to_float(getattr(row, "value")) for row in mark_rows]
             rates: list[dict] = []
+            skipped_missing_mark = 0
             for row in funding_rows:
                 ts_ns = int(getattr(row, "ts_event", 0))
                 mark_idx = bisect_right(mark_times, ts_ns) - 1
                 if mark_idx < 0:
+                    skipped_missing_mark += 1
                     continue
                 mark_price = mark_values[mark_idx]
                 if not mark_price:
+                    skipped_missing_mark += 1
                     continue
                 rates.append({
                     "funding_time_ms": ts_ns // 1_000_000,
                     "funding_rate": float(getattr(row, "rate")),
                     "mark_price": mark_price,
                 })
+            if skipped_missing_mark:
+                logger.warning(
+                    "Skipped %d funding event(s) without usable mark price for %s",
+                    skipped_missing_mark,
+                    symbol,
+                )
             return rates
 
         if self._redis_client and self.start and self.end:
@@ -1083,6 +1128,7 @@ class BacktestRunner:
 
         rates_by_symbol: dict[str, list[dict]] = {}
         for sym in self.symbols:
+            await _ensure_mark_prices_for_funding(sym)
             rates_by_symbol[sym] = _build_rates(sym, self.start, self.end)
             logger.info(
                 "Loaded %d funding rate events for %s",

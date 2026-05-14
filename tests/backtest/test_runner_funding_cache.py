@@ -151,3 +151,63 @@ class TestLoadFundingRatesNativeUpdates:
         assert captured[0]["sym"] == "BTCUSDT-PERP"
         assert captured[0]["data_type"] == "fundingRate"
         assert captured[0]["start_override"] == _utc(2024, 1, 10, 8) + timedelta(milliseconds=1)
+
+    def test_missing_mark_updates_enqueues_mark_price_fetch_before_assembly(self, monkeypatch):
+        runner = _mk_runner(
+            ["BTCUSDT-PERP"],
+            start=_utc(2024, 1, 10, 8),
+            end=_utc(2024, 1, 10, 8),
+        )
+        runner.__dict__["_redis_client"] = object()
+
+        funding_rows = [
+            SimpleNamespace(
+                ts_event=_ns(_utc(2024, 1, 10, 8)),
+                rate=Decimal("0.0001"),
+            ),
+        ]
+        empty_mark_rows: list[SimpleNamespace] = []
+        loaded_mark_rows = [
+            SimpleNamespace(
+                ts_event=_ns(_utc(2024, 1, 10, 7, 59)),
+                value=_StubPrice(101.0),
+            ),
+        ]
+
+        call_counts = {"mark": 0}
+
+        class Catalog:
+            def query(self, data_cls, identifiers, start, end):
+                if data_cls.__name__ == "FundingRateUpdate":
+                    return funding_rows
+                if data_cls.__name__ == "MarkPriceUpdate":
+                    call_counts["mark"] += 1
+                    return empty_mark_rows if call_counts["mark"] == 1 else loaded_mark_rows
+                return []
+
+        monkeypatch.setattr(runner, "_catalog_for_path", lambda path: Catalog())
+
+        captured: list[dict] = []
+
+        async def _spy(sym, ivl=None, *, data_type=None, start_override=None):
+            captured.append({
+                "sym": sym,
+                "ivl": ivl,
+                "data_type": data_type,
+                "start_override": start_override,
+            })
+            return True
+
+        monkeypatch.setattr(runner, "_submit_and_wait_fetch", _spy)
+
+        import tinohelm.data.instruments as instr_mod
+        monkeypatch.setattr(instr_mod, "fetch_funding_info", lambda: {"BTCUSDT": 8})
+
+        events = asyncio.run(runner._load_funding_rates(["BTCUSDT-PERP.BINANCE"]))
+
+        assert len(captured) == 1
+        assert captured[0]["sym"] == "BTCUSDT-PERP"
+        assert captured[0]["ivl"] == "1m"
+        assert captured[0]["data_type"] == "markPriceKlines"
+        assert captured[0]["start_override"] == _utc(2024, 1, 10, 0)
+        assert events[0]["mark_price"] == 101.0

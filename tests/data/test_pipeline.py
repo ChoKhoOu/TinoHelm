@@ -2349,6 +2349,112 @@ class TestUpdateDbCatalog:
         assert fake_session.row.record_count == 2
         assert fake_session.row.size_bytes == path.stat().st_size
 
+    def test_mark_price_disjoint_update_refreshes_direct_update_stats(self, tmp_path: Path):
+        from nautilus_trader.model.data import MarkPriceUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from nautilus_trader.model.objects import Price
+        from tinohelm.data.catalog import _catalog_for_root, mark_price_update_dir
+        from tinohelm.db.models import DataCatalog
+
+        class FakeSession:
+            def __init__(self):
+                self.row = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def execute(self, stmt):
+                return SimpleNamespace(scalar_one_or_none=lambda: self.row)
+
+            def add(self, row):
+                self.row = row
+
+            async def commit(self):
+                pass
+
+        symbol = "BTCUSDT-PERP"
+        inst = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        catalog = _catalog_for_root(tmp_path)
+        for ts, price in ((1, "1.0"), (2, "2.0"), (3, "3.0"), (4, "4.0")):
+            catalog.write_data([MarkPriceUpdate(inst, Price.from_str(price), ts, ts)], skip_disjoint_check=True)
+        update_dir = mark_price_update_dir(symbol, tmp_path)
+        size_bytes = sum(path.stat().st_size for path in update_dir.glob("*.parquet"))
+
+        fake_session = FakeSession()
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+
+        with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
+            asyncio.run(p._update_db_catalog(
+                symbol, "markPriceKlines", "1m",
+                date(2025, 1, 2), date(2025, 1, 2),
+                record_count=1, size_bytes=size_bytes, source_type="markPriceKlines",
+            ))
+            asyncio.run(p._update_db_catalog(
+                symbol, "markPriceKlines", "1m",
+                date(2025, 1, 4), date(2025, 1, 4),
+                record_count=1, size_bytes=size_bytes, source_type="markPriceKlines",
+            ))
+
+        assert isinstance(fake_session.row, DataCatalog)
+        assert fake_session.row.record_count == 4
+        assert fake_session.row.size_bytes == size_bytes
+
+    def test_index_price_disjoint_update_refreshes_direct_update_stats(self, tmp_path: Path):
+        from nautilus_trader.model.data import IndexPriceUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from nautilus_trader.model.objects import Price
+        from tinohelm.data.catalog import _catalog_for_root, index_price_update_dir
+        from tinohelm.db.models import DataCatalog
+
+        class FakeSession:
+            def __init__(self):
+                self.row = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def execute(self, stmt):
+                return SimpleNamespace(scalar_one_or_none=lambda: self.row)
+
+            def add(self, row):
+                self.row = row
+
+            async def commit(self):
+                pass
+
+        symbol = "BTCUSDT-PERP"
+        inst = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        catalog = _catalog_for_root(tmp_path)
+        for ts, price in ((1, "1.0"), (2, "2.0"), (3, "3.0"), (4, "4.0")):
+            catalog.write_data([IndexPriceUpdate(inst, Price.from_str(price), ts, ts)], skip_disjoint_check=True)
+        update_dir = index_price_update_dir(symbol, tmp_path)
+        size_bytes = sum(path.stat().st_size for path in update_dir.glob("*.parquet"))
+
+        fake_session = FakeSession()
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+
+        with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
+            asyncio.run(p._update_db_catalog(
+                symbol, "indexPriceKlines", "1m",
+                date(2025, 1, 2), date(2025, 1, 2),
+                record_count=1, size_bytes=size_bytes, source_type="indexPriceKlines",
+            ))
+            asyncio.run(p._update_db_catalog(
+                symbol, "indexPriceKlines", "1m",
+                date(2025, 1, 4), date(2025, 1, 4),
+                record_count=1, size_bytes=size_bytes, source_type="indexPriceKlines",
+            ))
+
+        assert isinstance(fake_session.row, DataCatalog)
+        assert fake_session.row.record_count == 4
+        assert fake_session.row.size_bytes == size_bytes
+
     def test_funding_rate_disjoint_update_refreshes_single_file_stats(self, tmp_path: Path):
         from decimal import Decimal
         from nautilus_trader.model.data import FundingRateUpdate

@@ -1,5 +1,5 @@
 export interface CatalogEntry {
-  id: number;
+  id: string;
   symbol: string;
   data_type: string;
   interval: string;

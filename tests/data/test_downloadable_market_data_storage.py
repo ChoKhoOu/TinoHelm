@@ -146,3 +146,31 @@ def test_clean_overlapping_parquet_handles_quote_tick_category(monkeypatch, tmp_
     )
 
     assert not quote_file.exists()
+
+
+def test_clean_overlapping_parquet_handles_mark_price_direct_update(monkeypatch, tmp_path: Path) -> None:
+    from tinohelm.data.pipeline import BinanceVisionPipeline
+
+    pipe = BinanceVisionPipeline(catalog_path=tmp_path / "catalog")
+    mark_file = (
+        tmp_path
+        / "catalog"
+        / "data"
+        / "mark_price_update"
+        / "BTCUSDT-PERP.BINANCE"
+        / "mark.parquet"
+    )
+    mark_file.parent.mkdir(parents=True)
+    mark_file.write_bytes(b"parquet-placeholder")
+
+    monkeypatch.setattr(pipe, "_parquet_time_range", lambda path: None)
+
+    pipe._clean_overlapping_parquet(
+        "BTCUSDT-PERP",
+        "markPriceKlines",
+        "1m",
+        date(2021, 5, 3),
+        date(2021, 5, 3),
+    )
+
+    assert not mark_file.exists()
