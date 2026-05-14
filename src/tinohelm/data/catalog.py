@@ -1123,7 +1123,7 @@ class CatalogSession:
             update_dir = funding_rate_update_dir(symbol, self.catalog_path)
             if _iter_catalog_files(self.storage, update_dir, recursive=False):
                 return update_dir
-            return None
+            return funding_rate_parquet_path(symbol, self.catalog_path)
         return None
 
     @contextmanager
