@@ -92,9 +92,9 @@ class TestCanonicalMappings:
 
     def test_write_category_canonical_keys(self):
         assert WRITE_CATEGORY["klines"] == "bar"
-        assert WRITE_CATEGORY["markPriceKlines"] == "bar"
-        assert WRITE_CATEGORY["indexPriceKlines"] == "bar"
-        assert WRITE_CATEGORY["premiumIndexKlines"] == "bar"
+        assert WRITE_CATEGORY["markPriceKlines"] == "mark_price"
+        assert WRITE_CATEGORY["indexPriceKlines"] == "index_price"
+        assert "premiumIndexKlines" not in WRITE_CATEGORY
         assert WRITE_CATEGORY["aggTrades"] == "trade_tick"
         assert WRITE_CATEGORY["trades"] == "trade_tick"
         assert WRITE_CATEGORY["bookTicker"] == "quote_tick"
@@ -102,7 +102,7 @@ class TestCanonicalMappings:
         assert WRITE_CATEGORY["bookDepth"] == "order_book_delta"
         assert WRITE_CATEGORY["liquidationSnapshot"] == "liquidation"
         assert WRITE_CATEGORY["metrics"] == "metrics"
-        assert len(WRITE_CATEGORY) == 11
+        assert len(WRITE_CATEGORY) == 10
 
     def test_write_categories_are_idempotent_but_not_source_type_keys(self):
         assert CANONICAL_WRITE_CATEGORIES == frozenset({
@@ -162,6 +162,12 @@ class TestResolveWriteCategory:
     def test_known_funding_rate(self):
         assert resolve_write_category("fundingRate") == "funding_rate"
 
+    def test_known_mark_price(self):
+        assert resolve_write_category("markPriceKlines") == "mark_price"
+
+    def test_known_index_price(self):
+        assert resolve_write_category("indexPriceKlines") == "index_price"
+
     def test_unknown_returns_custom(self):
         assert resolve_write_category("anUnknownType") == "custom"
 
@@ -179,6 +185,12 @@ class TestResolveDbCategory:
 
     def test_known_book_ticker(self):
         assert resolve_db_category("bookTicker") == "quote_tick"
+
+    def test_known_mark_price(self):
+        assert resolve_db_category("markPriceKlines") == "mark_price"
+
+    def test_known_index_price(self):
+        assert resolve_db_category("indexPriceKlines") == "index_price"
 
     def test_unknown_returns_input(self):
         # This is the contract: keep the row discoverable even if the type

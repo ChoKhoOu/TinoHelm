@@ -228,17 +228,17 @@ class TestResolveCatalogPath:
         p = resolve_catalog_path("/tmp/cat", "klines")
         assert p == Path("/tmp/cat") / "bar" / "klines"
 
-    def test_mark_price_klines_under_bar(self):
+    def test_mark_price_klines_falls_back_to_base(self):
         p = resolve_catalog_path("/tmp/cat", "markPriceKlines")
-        assert p == Path("/tmp/cat") / "bar" / "markPriceKlines"
+        assert p == Path("/tmp/cat")
 
-    def test_index_price_klines_under_bar(self):
+    def test_index_price_klines_falls_back_to_base(self):
         p = resolve_catalog_path("/tmp/cat", "indexPriceKlines")
-        assert p == Path("/tmp/cat") / "bar" / "indexPriceKlines"
+        assert p == Path("/tmp/cat")
 
-    def test_premium_index_klines_under_bar(self):
+    def test_premium_index_klines_falls_back_to_base(self):
         p = resolve_catalog_path("/tmp/cat", "premiumIndexKlines")
-        assert p == Path("/tmp/cat") / "bar" / "premiumIndexKlines"
+        assert p == Path("/tmp/cat")
 
     def test_agg_trades_under_ticks(self):
         p = resolve_catalog_path("/tmp/cat", "aggTrades")

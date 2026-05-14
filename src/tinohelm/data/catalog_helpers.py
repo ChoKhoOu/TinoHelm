@@ -180,7 +180,7 @@ def resolve_catalog_path(base_path: str | Path, source_type: str | None) -> Path
     >>> resolve_catalog_path("/tmp/cat", "klines").as_posix()
     '/tmp/cat/bar/klines'
     >>> resolve_catalog_path("/tmp/cat", "markPriceKlines").as_posix()
-    '/tmp/cat/bar/markPriceKlines'
+    '/tmp/cat'
     >>> resolve_catalog_path("/tmp/cat", "aggTrades").as_posix()
     '/tmp/cat/ticks/aggTrades'
     >>> resolve_catalog_path("/tmp/cat", "bookTicker").as_posix()

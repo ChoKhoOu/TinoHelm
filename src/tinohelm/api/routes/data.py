@@ -252,12 +252,12 @@ def _public_data_type(data_type: str) -> str:
 
 def _is_bar_data_type(data_type: str) -> bool:
     """Return True for fetch types that require interval fan-out."""
-    return WRITE_CATEGORY.get(_normalize_requested_data_type(data_type)) == "bar"
+    return _normalize_requested_data_type(data_type) in {"klines", "markPriceKlines", "indexPriceKlines"}
 
 
 def _is_bar_maintenance_data_type(data_type: str) -> bool:
-    """Return True for data types backed by NT Bar parquet compaction/validation."""
-    return _normalize_requested_data_type(data_type) in {"klines", "premiumIndexKlines"}
+    """Return True for phase-1 data types backed by NT Bar parquet maintenance."""
+    return _normalize_requested_data_type(data_type) == "klines"
 
 
 def _fetch_batch_intervals(data_type: str, intervals: list[str]) -> list[str]:
@@ -728,8 +728,8 @@ async def validate_data(
     """Validate data integrity for a symbol/interval. Returns synchronously."""
     from tinohelm.data.catalog import validate_bars
 
-    if data_type not in WRITE_CATEGORY or not _is_bar_data_type(data_type):
-        supported = ", ".join(sorted(k for k, v in WRITE_CATEGORY.items() if v == "bar"))
+    if data_type not in WRITE_CATEGORY or not _is_bar_maintenance_data_type(data_type):
+        supported = ", ".join(sorted({"klines", "bar"}))
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported bar data_type {data_type!r}. Supported values: {supported}",

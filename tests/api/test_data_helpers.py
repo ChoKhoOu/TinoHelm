@@ -559,28 +559,22 @@ class TestCancelDataFetchJob:
 
 
 class TestSourceAwareBarMaintenance:
-    def test_validate_data_resolves_source_aware_bar_root(self, tmp_path: Path, monkeypatch):
+    def test_validate_data_rejects_out_of_scope_premium_index(self, tmp_path: Path, monkeypatch):
         import asyncio
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
 
-        calls = []
-
-        def fake_validate_bars(*, symbol, interval, catalog_path, storage=None):
-            calls.append((symbol, interval, catalog_path))
-            return {"status": "ok"}
-
-        monkeypatch.setattr("tinohelm.data.catalog.validate_bars", fake_validate_bars)
+        monkeypatch.setattr("tinohelm.data.catalog.validate_bars", lambda **kwargs: {"status": "ok"})
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
 
-        result = asyncio.run(validate_data(
-            "BTCUSDT-PERP",
-            "1m",
-            data_type="premiumIndexKlines",
-            settings=settings,
-        ))
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(validate_data(
+                "BTCUSDT-PERP",
+                "1m",
+                data_type="premiumIndexKlines",
+                settings=settings,
+            ))
 
-        assert result == {"status": "ok"}
-        assert calls == [("BTCUSDT-PERP", "1m", str(resolve_catalog_path(tmp_path, "premiumIndexKlines")))]
+        assert exc_info.value.status_code == 400
+        assert "Unsupported bar data_type" in exc_info.value.detail
 
     def test_validate_data_falls_back_to_legacy_flat_default_klines_root(self, tmp_path: Path, monkeypatch):
         import asyncio
@@ -618,7 +612,11 @@ class TestSourceAwareBarMaintenance:
         from tinohelm.data.catalog_helpers import resolve_catalog_path
 
         calls = []
-        storage = SimpleNamespace(provider="s3", catalog_root=tmp_path)
+        storage = SimpleNamespace(
+            provider="s3",
+            catalog_root=tmp_path,
+            iter_files=lambda *args, **kwargs: [],
+        )
 
         def fake_validate_bars(*, symbol, interval, catalog_path, storage=None):
             calls.append((symbol, interval, catalog_path, storage))
@@ -632,7 +630,7 @@ class TestSourceAwareBarMaintenance:
         result = asyncio.run(validate_data(
             "BTCUSDT-PERP",
             "1m",
-            data_type="premiumIndexKlines",
+            data_type="klines",
             settings=settings,
         ))
 
@@ -640,7 +638,7 @@ class TestSourceAwareBarMaintenance:
         assert calls == [(
             "BTCUSDT-PERP",
             "1m",
-            str(resolve_catalog_path(tmp_path, "premiumIndexKlines")),
+            str(resolve_catalog_path(tmp_path, "klines")),
             storage,
         )]
 
@@ -865,7 +863,7 @@ class TestSourceAwareBarMaintenance:
         assert session.committed
         assert execute_results == []
 
-    def test_trigger_compact_passes_source_aware_bar_contract(self, tmp_path: Path):
+    def test_trigger_compact_rejects_out_of_scope_premium_index(self, tmp_path: Path):
         import asyncio
 
         class FakeBackgroundTasks:
@@ -879,14 +877,12 @@ class TestSourceAwareBarMaintenance:
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
         body = CompactRequest(symbol="BTCUSDT-PERP", interval="1m", data_type="premiumIndexKlines")
 
-        result = asyncio.run(trigger_compact(body, background, settings))
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(trigger_compact(body, background, settings))
 
-        assert result["status"] == "accepted"
-        assert len(background.calls) == 1
-        fn, args, kwargs = background.calls[0]
-        assert fn.__name__ == "_run_compact"
-        assert args == ("BTCUSDT-PERP", "1m", settings, "premiumIndexKlines", "premiumIndexKlines")
-        assert kwargs == {}
+        assert exc_info.value.status_code == 400
+        assert "Unsupported bar data_type" in exc_info.value.detail
+        assert not background.calls
 
     def test_trigger_compact_rejects_public_mark_price_contract(self, tmp_path: Path):
         import asyncio
@@ -1711,7 +1707,11 @@ class TestCatalogApiFacade:
         quote_dir.mkdir(parents=True)
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(quote_dir / "quotes.parquet")
 
-        premium_dir = resolve_catalog_path(tmp_path, "premiumIndexKlines") / "data" / "bar" / make_bar_type_str(symbol, "1m")
+        mark_dir = (tmp_path / "data" / "mark_price_update" / nt_sym / "2025" / "01" / "01")
+        mark_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [1.0]}).write_parquet(mark_dir / "mark.parquet")
+
+        premium_dir = tmp_path / "out_of_scope" / "premiumIndexKlines"
         premium_dir.mkdir(parents=True)
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(premium_dir / "bars.parquet")
 
@@ -1729,7 +1729,7 @@ class TestCatalogApiFacade:
 
         rows = await list_data_catalog(settings=settings)
 
-        assert [row.data_type for row in rows] == ["quote_tick"]
+        assert [row.data_type for row in rows] == ["mark_price", "quote_tick"]
 
     async def test_list_data_catalog_keeps_legacy_aggtrades_visible(self, tmp_path: Path, monkeypatch):
         from tinohelm.data.catalog_helpers import resolve_catalog_path

@@ -31,9 +31,8 @@ from typing import Mapping
 # which writer in :mod:`tinohelm.data.catalog` is used.
 WRITE_CATEGORY: Mapping[str, str] = MappingProxyType({
     "klines": "bar",
-    "markPriceKlines": "bar",
-    "indexPriceKlines": "bar",
-    "premiumIndexKlines": "bar",
+    "markPriceKlines": "mark_price",
+    "indexPriceKlines": "index_price",
     "aggTrades": "trade_tick",
     "trades": "trade_tick",
     "bookTicker": "quote_tick",
