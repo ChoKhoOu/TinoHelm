@@ -535,6 +535,10 @@ class CatalogSession:
             return self._delete_parquet_dirs(
                 self._tick_target_dirs(symbol, "quote_tick", source_type)
             )
+        if data_type == "mark_price":
+            return self._delete_parquet_dirs([mark_price_update_dir(symbol, self.catalog_path)])
+        if data_type == "index_price":
+            return self._delete_parquet_dirs([index_price_update_dir(symbol, self.catalog_path)])
         if data_type == "metrics":
             return self._delete_parquet_files([metrics_parquet_path(symbol, self.catalog_path)])
         if data_type == "order_book_delta":
@@ -597,11 +601,17 @@ class CatalogSession:
             stage_prefix_for_local_consumer(storage, target_dir)
             if not target_dir.exists():
                 continue
-            files = list(target_dir.glob("*.parquet"))
+            files = [path for path in target_dir.rglob("*.parquet") if path.is_file()]
             freed_bytes += sum(f.stat().st_size for f in files)
             for f in files:
                 f.unlink(missing_ok=True)
-            if target_dir.exists() and not list(target_dir.iterdir()):
+            for directory in sorted(
+                (path for path in target_dir.rglob("*") if path.is_dir()),
+                reverse=True,
+            ):
+                if not any(directory.iterdir()):
+                    directory.rmdir()
+            if target_dir.exists() and not any(target_dir.iterdir()):
                 target_dir.rmdir()
             deleted_files += len(files)
         return deleted_files, freed_bytes
