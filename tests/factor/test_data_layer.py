@@ -278,6 +278,26 @@ class TestFundingRate:
         assert frame.height == 2
         assert frame["value"].to_list()[0] == pytest.approx(0.0001)
 
+    def test_load_funding_skips_json_when_parquet_is_sufficient_for_bounded_range(self, tmp_path: Path, monkeypatch):
+        _stub_make_instrument(monkeypatch)
+        catalog_path, funding_dir, uni, _ = self._base_setup(tmp_path)
+        dl = DataLayer(uni, catalog_root=catalog_path, funding_dir=funding_dir)
+
+        calls = []
+
+        def fake_load_json(symbol, start, end):
+            calls.append((symbol, start, end))
+            return pl.DataFrame({"ts": [], "value": []}, schema={"ts": pl.Datetime("ns"), "value": pl.Float64})
+
+        monkeypatch.setattr(dl, "_load_funding_rate_json", fake_load_json)
+
+        start = datetime(2021, 5, 3, 0, 0)
+        end = datetime(2021, 5, 3, 8, 0)
+        frame = dl._load_funding_rate("BTCUSDT-PERP", start=start, end=end)
+
+        assert frame.height == 2
+        assert calls == []
+
     def test_funding_aligned_onto_bar_index_as_of_delay(self, tmp_path: Path, monkeypatch):
         """Funding prints become visible only after their exact timestamp."""
         _stub_make_instrument(monkeypatch)

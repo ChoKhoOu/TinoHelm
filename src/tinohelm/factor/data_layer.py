@@ -2473,13 +2473,20 @@ class DataLayer:
     ) -> pl.DataFrame:
         """Read funding-rate data for a symbol, preferring NT parquet over JSON."""
         frame = self._load_funding_rate_parquet(symbol, start, end)
-        json_frame = self._load_funding_rate_json(symbol, start, end)
         if frame is not None and not frame.is_empty():
+            if start is not None and end is not None:
+                from tinohelm.data.catalog import CatalogSession
+
+                session = CatalogSession(_catalog_base_root(self._catalog_root), storage=self._storage)
+                if session.funding_parquet_covers(symbol, start.date(), end.date()):
+                    return frame
+            json_frame = self._load_funding_rate_json(symbol, start, end)
             if json_frame.is_empty():
                 return frame
             merged = pl.concat([json_frame, frame]).sort("ts")
             merged = merged.unique(subset=["ts"], keep="last")
             return merged.sort("ts")
+        json_frame = self._load_funding_rate_json(symbol, start, end)
         if not json_frame.is_empty():
             return json_frame
         return frame if frame is not None else _empty_series_frame()
