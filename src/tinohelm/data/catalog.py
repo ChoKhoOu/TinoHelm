@@ -445,6 +445,10 @@ _TICK_SCAN_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("trade_tick", "trade_tick", ("aggTrades", "trades")),
     ("quote_tick", "quote_tick", ("bookTicker",)),
 )
+_UPDATE_SCAN_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    ("mark_price", "mark_price_update", "markPriceKlines", "tick"),
+    ("index_price", "index_price_update", "indexPriceKlines", "tick"),
+)
 # Single-file-per-symbol Parquet categories: one parquet sitting in a shared
 # parent dir, named ``{symbol.lower()}.parquet``. Interval is a sentinel
 # string because these categories don't have a time-bucket: funding rates
@@ -850,6 +854,7 @@ class CatalogSession:
         tick_result = self.scan_ticks()
         single_file_result = self.scan_single_files()
         funding_result = self.scan_funding_rate_updates()
+        direct_update_result = self.scan_direct_updates()
 
         merged_entries: dict[tuple[str, str, str, str], ScanEntry] = {}
         for entry in [
@@ -857,12 +862,19 @@ class CatalogSession:
             *tick_result.entries,
             *single_file_result.entries,
             *funding_result.entries,
+            *direct_update_result.entries,
         ]:
             merged_entries[(entry.symbol, entry.data_type, entry.interval, entry.source_type)] = entry
 
         return LiveCatalogSummary(
             entries=list(merged_entries.values()),
-            scanned=bar_result.scanned + tick_result.scanned + single_file_result.scanned + funding_result.scanned,
+            scanned=(
+                bar_result.scanned
+                + tick_result.scanned
+                + single_file_result.scanned
+                + funding_result.scanned
+                + direct_update_result.scanned
+            ),
         )
 
     def _single_file_parent_dir(self, data_type: str) -> Path | None:
@@ -898,6 +910,25 @@ class CatalogSession:
             merged=merged,
             pattern=sym_pattern,
         )
+        entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
+        return ScanResult(entries=entries, scanned=scanned)
+
+    def scan_direct_updates(self) -> ScanResult:
+        """Discover NT-native direct-update parquet files for auxiliary prices."""
+        sym_pattern = re.compile(r"^(.+)\.BINANCE$")
+        merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        scanned = 0
+        for data_type, dir_name, source_type, interval in _UPDATE_SCAN_SPECS:
+            scanned += self._collect_tick_entries_for_root(
+                tick_root=self.catalog_path / "data" / dir_name,
+                cat_root=self.catalog_path,
+                data_type=data_type,
+                source_type=source_type,
+                interval=interval,
+                is_source_aware=False,
+                merged=merged,
+                pattern=sym_pattern,
+            )
         entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
         return ScanResult(entries=entries, scanned=scanned)
 

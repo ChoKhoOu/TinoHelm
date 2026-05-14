@@ -363,6 +363,32 @@ class TestDataLayerFundingLoad:
             f"Expected Parquet value 0.9999, got {first_value} — JSON fallback must NOT win"
         )
 
+    def test_partial_parquet_merges_with_json_gap(self, tmp_path: Path):
+        catalog_root = tmp_path / "catalog"
+        funding_dir = tmp_path / "funding_rates"
+        funding_dir.mkdir(parents=True, exist_ok=True)
+
+        from tinohelm.data.catalog import write_funding_rate_parquet
+        from tinohelm.factor.data_layer import DataLayer
+
+        parquet_records = [
+            {"funding_time_ms": self._BASE_MS + self._8H_MS, "funding_rate": 0.9999},
+        ]
+        write_funding_rate_parquet(parquet_records, "BTCUSDT-PERP", catalog_root)
+
+        json_records = [
+            {"funding_time_ms": self._BASE_MS, "funding_rate": 0.0001},
+            {"funding_time_ms": self._BASE_MS + self._8H_MS, "funding_rate": 0.0002},
+        ]
+        with open(funding_dir / "btcusdt-perp.json", "w") as fh:
+            json.dump(json_records, fh)
+
+        uni = _make_universe(tmp_path)
+        dl = DataLayer(uni, catalog_root=catalog_root, funding_dir=funding_dir)
+        frame = dl._load_funding_rate("BTCUSDT-PERP", start=None, end=None)
+
+        assert frame["value"].to_list() == pytest.approx([0.0001, 0.9999])
+
 
 class TestCatalogSessionFundingSummary:
     def test_scan_funding_rate_updates_uses_8h_interval(self, tmp_path: Path):
