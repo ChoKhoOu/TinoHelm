@@ -3,7 +3,7 @@
 Design
 ------
 - Reads bar Parquet directly with column projection to avoid NT Bar object materialisation.
-- Reuses ``tinohelm.data.funding_cache._load_cache`` for funding_rate JSON reads.
+- Reads funding_rate from NT ``FundingRateUpdate`` parquet first, then falls back to the legacy JSON cache when needed.
 - Parallel per-symbol loading via ``ThreadPoolExecutor``.
 - Time alignment: non-bar sources (funding_rate) are forward-filled onto the bar index.
   funding_rate timestamps are shifted by +1ns before ffill to implement strict

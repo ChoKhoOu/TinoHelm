@@ -251,8 +251,13 @@ def _public_data_type(data_type: str) -> str:
 
 
 def _is_bar_data_type(data_type: str) -> bool:
-    """Return True for kline-family data types that require bar intervals."""
+    """Return True for fetch types that require interval fan-out."""
     return WRITE_CATEGORY.get(_normalize_requested_data_type(data_type)) == "bar"
+
+
+def _is_bar_maintenance_data_type(data_type: str) -> bool:
+    """Return True for data types backed by NT Bar parquet compaction/validation."""
+    return _normalize_requested_data_type(data_type) in {"klines", "premiumIndexKlines"}
 
 
 def _fetch_batch_intervals(data_type: str, intervals: list[str]) -> list[str]:
@@ -618,7 +623,7 @@ async def trigger_compact(
 ) -> dict:
     """Trigger background consolidation for a symbol/interval."""
     effective_data_type = _normalize_requested_data_type(body.data_type)
-    if effective_data_type not in WRITE_CATEGORY or not _is_bar_data_type(effective_data_type):
+    if effective_data_type not in WRITE_CATEGORY or not _is_bar_maintenance_data_type(effective_data_type):
         supported = ", ".join(sorted({
             *(k for k, v in WRITE_CATEGORY.items() if v == "bar"),
             *(public for public, upstream in _PHASE1_PUBLIC_TO_UPSTREAM.items() if WRITE_CATEGORY.get(upstream) == "bar"),
