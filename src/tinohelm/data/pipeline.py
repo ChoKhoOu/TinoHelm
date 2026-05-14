@@ -1737,7 +1737,7 @@ class BinanceVisionPipeline:
         phase fails, the caller restores this guard before surfacing failure.
         """
         category = resolve_write_category(data_type)
-        if data_type in {"markPriceKlines", "indexPriceKlines"}:
+        if data_type in {"markPriceKlines", "indexPriceKlines", "fundingRate"}:
             target_dir = self._catalog_item_dir(symbol, data_type, interval, data_type)
             if target_dir is None:
                 return None
@@ -1787,7 +1787,7 @@ class BinanceVisionPipeline:
 
         from tinohelm.data.storage import delete_prefix
 
-        recursive = data_type in {"markPriceKlines", "indexPriceKlines"}
+        recursive = data_type in {"markPriceKlines", "indexPriceKlines", "fundingRate"}
         parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=recursive))
 
         start_ns = date_start_ns(start)
