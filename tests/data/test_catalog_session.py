@@ -812,6 +812,55 @@ class TestAggregateParquetStats:
         )
         assert got == expected
 
+    @pytest.mark.parametrize(
+        ("data_type", "helper_name", "source_type"),
+        [
+            ("mark_price", "mark_price_update_dir", "markPriceKlines"),
+            ("index_price", "index_price_update_dir", "indexPriceKlines"),
+        ],
+    )
+    def test_direct_update_stats_scan_nested_update_dirs(
+        self,
+        tmp_path: Path,
+        data_type: str,
+        helper_name: str,
+        source_type: str,
+    ):
+        import polars as pl
+        from tinohelm.data.catalog import (
+            CatalogSession,
+            _aggregate_parquet_object_stats,
+            index_price_update_dir,
+            mark_price_update_dir,
+        )
+        from tinohelm.data.storage import get_catalog_storage
+
+        helper = {
+            "mark_price_update_dir": mark_price_update_dir,
+            "index_price_update_dir": index_price_update_dir,
+        }[helper_name]
+        root_dir = helper("BTCUSDT-PERP", tmp_path)
+        target_dir = root_dir / "2025" / "01" / "01"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        file_path = target_dir / "part.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(file_path)
+
+        storage = get_catalog_storage(catalog_root=tmp_path)
+        expected = _aggregate_parquet_object_stats(
+            list(storage.iter_files(root_dir, suffix=".parquet", recursive=True)),
+            storage,
+        )
+        assert expected is not None
+
+        session = CatalogSession(tmp_path)
+        got = session.aggregate_parquet_stats(
+            symbol="BTCUSDT-PERP",
+            data_type=data_type,
+            interval="tick",
+            source_type=source_type,
+        )
+        assert got == expected
+
 
 class TestParquetSizeFor:
     """Covers the bar-only ``session.parquet_size_for`` added for PR2 —
