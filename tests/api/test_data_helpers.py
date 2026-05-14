@@ -1400,15 +1400,23 @@ class TestNtNativeMaintenanceRoutes:
             _parse_period(period)
 
     @pytest.mark.parametrize(
-        ("start", "end", "detail"),
+        ("start", "end", "detail", "error_type"),
         [
-            (None, "2024-01-02T00:00:00Z", "start and end are required"),
-            ("2024-01-01T00:00:00Z", None, "start and end are required"),
-            ("2024-01-03T00:00:00Z", "2024-01-02T00:00:00Z", "start must be on or before end"),
+            (None, "2024-01-02T00:00:00Z", "Input should be a valid string", "validation"),
+            ("2024-01-01T00:00:00Z", None, "Input should be a valid string", "validation"),
+            ("2024-01-03T00:00:00Z", "2024-01-02T00:00:00Z", "start must be on or before end", "http"),
         ],
     )
-    def test_delete_range_rejects_unsafe_or_invalid_bounds(self, start, end, detail, tmp_path: Path):
+    def test_delete_range_rejects_unsafe_or_invalid_bounds(self, start, end, detail, error_type, tmp_path: Path):
+        from pydantic_core import ValidationError
+
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        if error_type == "validation":
+            with pytest.raises(ValidationError) as exc_info:
+                DeleteRangeRequest(start=start, end=end)
+            assert detail in str(exc_info.value)
+            return
 
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(delete_range(DeleteRangeRequest(start=start, end=end), settings))
@@ -1816,5 +1824,7 @@ class TestCatalogApiFacade:
         assert by_type["bar"]["interval_required"] is True
         assert by_type["trade_tick"]["interval_required"] is False
         assert by_type["quote_tick"]["interval_required"] is False
+        assert by_type["mark_price"]["interval_required"] is False
+        assert by_type["index_price"]["interval_required"] is False
         assert by_type["funding_rate"]["interval_required"] is False
         assert all(item["implemented"] is True for item in result)

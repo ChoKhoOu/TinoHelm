@@ -509,6 +509,33 @@ class TestIngestEarlyFailClosed:
         assert not old_path.exists()
         assert guard.backups
 
+    def test_recursive_cleanup_backup_preserves_relative_paths_for_duplicate_filenames(self, tmp_path: Path):
+        from tinohelm.data.catalog import funding_rate_update_dir
+
+        symbol = "BTCUSDT-PERP"
+        target_dir = funding_rate_update_dir(symbol, tmp_path)
+        jan = target_dir / "2025" / "1"
+        feb = target_dir / "2025" / "2"
+        jan.mkdir(parents=True)
+        feb.mkdir(parents=True)
+        jan_file = jan / "0.parquet"
+        feb_file = feb / "0.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "funding_rate": [0.0001]}).write_parquet(jan_file)
+        pl.DataFrame({"ts_event": [1_735_948_800_000_000_000], "funding_rate": [0.0002]}).write_parquet(feb_file)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="fundingRate",
+            interval=None,
+            start=date(2025, 1, 1),
+            end=date(2025, 2, 1),
+        )
+
+        assert guard is not None
+        backup_names = {Path(item.backup_path).relative_to(guard._rollback_prefix).as_posix() for item in guard.backups}
+        assert backup_names == {"2025/1/0.parquet", "2025/2/0.parquet"}
+
     def test_recover_skips_unresolved_manifest_after_verified_catalog_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
