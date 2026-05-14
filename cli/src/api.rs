@@ -518,7 +518,9 @@ impl ApiClient {
     }
 
     pub async fn scan_data(&self) -> Result<serde_json::Value> {
-        Err(anyhow::anyhow!("/api/data/scan 已删除；请改用 /api/data/catalog 或 NT maintenance APIs"))
+        Err(anyhow::anyhow!(
+            "/api/data/scan 已删除；请改用 /api/data/catalog 或 NT maintenance APIs"
+        ))
     }
 
     // ---- Trading ----
