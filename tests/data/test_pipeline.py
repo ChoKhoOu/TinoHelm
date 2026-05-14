@@ -129,6 +129,86 @@ class TestFundingRateWrites:
         assert cached[1]["funding_rate"] == 0.02
 
 
+class TestDirectUpdateWrites:
+    def test_write_objects_uses_nt_direct_updates_for_mark_price(self, tmp_path: Path, monkeypatch):
+        from nautilus_trader.model.data import MarkPriceUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from nautilus_trader.model.objects import Price
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        captured = []
+
+        class FakeCatalog:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def write_data(self, data, *args, **kwargs):
+                captured.append((list(data), kwargs))
+
+        monkeypatch.setattr("tinohelm.data.catalog._catalog_for_root", lambda *_args, **_kwargs: FakeCatalog())
+        monkeypatch.setattr("tinohelm.data.catalog.ensure_catalog_dirs", lambda path: path)
+        monkeypatch.setattr("tinohelm.data.catalog._iter_catalog_files", lambda *_args, **_kwargs: [tmp_path / "data" / "mark_price_update" / "BTCUSDT-PERP.BINANCE" / "part.parquet"])
+
+        records = [MarkPriceUpdate(InstrumentId.from_str("BTCUSDT-PERP.BINANCE"), Price.from_str("1.0"), 1, 1)]
+        paths = p._write_objects(records, "BTCUSDT-PERP", "markPriceKlines", "1m", merge=False)
+
+        assert paths
+        assert len(captured) == 1
+        assert isinstance(captured[0][0][0], MarkPriceUpdate)
+
+    def test_write_objects_uses_nt_direct_updates_for_index_price(self, tmp_path: Path, monkeypatch):
+        from nautilus_trader.model.data import IndexPriceUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from nautilus_trader.model.objects import Price
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        captured = []
+
+        class FakeCatalog:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def write_data(self, data, *args, **kwargs):
+                captured.append((list(data), kwargs))
+
+        monkeypatch.setattr("tinohelm.data.catalog._catalog_for_root", lambda *_args, **_kwargs: FakeCatalog())
+        monkeypatch.setattr("tinohelm.data.catalog.ensure_catalog_dirs", lambda path: path)
+        monkeypatch.setattr("tinohelm.data.catalog._iter_catalog_files", lambda *_args, **_kwargs: [tmp_path / "data" / "index_price_update" / "BTCUSDT-PERP.BINANCE" / "part.parquet"])
+
+        records = [IndexPriceUpdate(InstrumentId.from_str("BTCUSDT-PERP.BINANCE"), Price.from_str("2.0"), 2, 2)]
+        paths = p._write_objects(records, "BTCUSDT-PERP", "indexPriceKlines", "1m", merge=False)
+
+        assert paths
+        assert len(captured) == 1
+        assert isinstance(captured[0][0][0], IndexPriceUpdate)
+
+    def test_write_objects_uses_nt_direct_updates_for_funding_rate(self, tmp_path: Path, monkeypatch):
+        from decimal import Decimal
+        from nautilus_trader.model.data import FundingRateUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        captured = []
+
+        class FakeCatalog:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def write_data(self, data, *args, **kwargs):
+                captured.append((list(data), kwargs))
+
+        monkeypatch.setattr("tinohelm.data.catalog._catalog_for_root", lambda *_args, **_kwargs: FakeCatalog())
+        monkeypatch.setattr("tinohelm.data.catalog.ensure_catalog_dirs", lambda path: path)
+        monkeypatch.setattr("tinohelm.data.catalog._iter_catalog_files", lambda *_args, **_kwargs: [tmp_path / "data" / "funding_rate_update" / "BTCUSDT-PERP.BINANCE" / "part.parquet"])
+
+        records = [FundingRateUpdate(InstrumentId.from_str("BTCUSDT-PERP.BINANCE"), Decimal("0.1"), 3, 3, interval=480)]
+        paths = p._write_objects(records, "BTCUSDT-PERP", "fundingRate", None, merge=False)
+
+        assert paths
+        assert len(captured) == 1
+        assert isinstance(captured[0][0][0], FundingRateUpdate)
+
+
 class TestBoundedCsvConversion:
     def test_full_file_conversion_reads_csv_payload_without_filesystem_staging(self, tmp_path: Path):
         payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"a,b\n1,2\n")
@@ -814,10 +894,10 @@ class TestIngestEarlyFailClosed:
         assert not (tmp_path / ".ingest-rollback").exists()
 
     def test_recover_first_time_single_file_manifest_removes_partial_current_run_file(self, tmp_path: Path):
-        from tinohelm.data.catalog import funding_rate_parquet_path
+        from tinohelm.data.catalog import funding_rate_update_dir
 
         symbol = "BTCUSDT-PERP"
-        partial_path = funding_rate_parquet_path(symbol, tmp_path)
+        partial_path = funding_rate_update_dir(symbol, tmp_path) / "partial-current-run.parquet"
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         guard = p._clean_overlapping_parquet(
@@ -1160,8 +1240,10 @@ class TestIngestEarlyFailClosed:
         assert written_path.exists()
 
     def test_no_guard_rollback_preserves_preexisting_single_file_parquet(self, tmp_path: Path):
+        from tinohelm.data.catalog import funding_rate_update_dir
+
         p = BinanceVisionPipeline(catalog_path=tmp_path)
-        path = tmp_path / "data" / "funding_rate" / "btcusdt-perp.parquet"
+        path = funding_rate_update_dir("BTCUSDT-PERP", tmp_path) / "btcusdt-perp.parquet"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"old-valid-parquet-placeholder")
 
@@ -1170,11 +1252,11 @@ class TestIngestEarlyFailClosed:
         assert path.read_bytes() == b"old-valid-parquet-placeholder"
 
     def test_in_place_guard_restores_preexisting_single_file_parquet(self, tmp_path: Path):
-        from tinohelm.data.catalog import funding_rate_parquet_path
+        from tinohelm.data.catalog import funding_rate_update_dir
 
         symbol = "BTCUSDT-PERP"
         p = BinanceVisionPipeline(catalog_path=tmp_path)
-        path = funding_rate_parquet_path(symbol, tmp_path)
+        path = funding_rate_update_dir(symbol, tmp_path) / "existing.parquet"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"old-valid-parquet-placeholder")
 
@@ -1194,11 +1276,11 @@ class TestIngestEarlyFailClosed:
         assert not (tmp_path / ".ingest-rollback").exists()
 
     def test_in_place_guard_deletes_untracked_new_single_file_parquet(self, tmp_path: Path):
-        from tinohelm.data.catalog import funding_rate_parquet_path
+        from tinohelm.data.catalog import funding_rate_update_dir
 
         symbol = "BTCUSDT-PERP"
         p = BinanceVisionPipeline(catalog_path=tmp_path)
-        path = funding_rate_parquet_path(symbol, tmp_path)
+        path = funding_rate_update_dir(symbol, tmp_path) / "existing.parquet"
 
         guard = p._clean_overlapping_parquet(
             symbol=symbol,
@@ -1334,20 +1416,20 @@ class TestIngestEarlyFailClosed:
         assert not current_path.exists()
         assert not (tmp_path / ".ingest-rollback").exists()
 
-    def test_funding_ingest_failure_restores_parquet_and_json_cache(
+    def test_funding_ingest_failure_restores_direct_update_parquet(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from tinohelm.data.catalog import funding_rate_parquet_path
+        from decimal import Decimal
+        from nautilus_trader.model.data import FundingRateUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from tinohelm.data.catalog import _catalog_for_root
 
         symbol = "BTCUSDT-PERP"
-        old_parquet = b"old-valid-parquet-placeholder"
-        old_cache = b'[{"funding_time_ms": 1704067200000, "funding_rate": "0.01"}]'
-        parquet_path = funding_rate_parquet_path(symbol, tmp_path)
-        parquet_path.parent.mkdir(parents=True)
-        parquet_path.write_bytes(old_parquet)
-        cache_path = tmp_path / "funding-cache" / "btcusdt-perp.json"
-        cache_path.parent.mkdir(parents=True)
-        cache_path.write_bytes(old_cache)
+        inst = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        catalog = _catalog_for_root(tmp_path)
+        old_update = FundingRateUpdate(inst, Decimal("0.01"), 1_704_067_200_000_000_000, 1_704_067_200_000_000_000, interval=480)
+        catalog.write_data([old_update])
+        old_rows = catalog.query(FundingRateUpdate, identifiers=[str(inst)])
 
         task = SimpleNamespace(url="memory://funding.csv", granularity="daily", dest_path=Path("BTCUSDT-fundingRate-2025-01-02.csv"))
         mock_dl = MagicMock()
@@ -1362,24 +1444,14 @@ class TestIngestEarlyFailClosed:
                 assert list(df.columns) == ["a", "b"]
 
             def convert(self, df, instrument, **kwargs):
-                return [SimpleNamespace(funding_time_ms=1_704_153_600_000, funding_rate=0.02)]
-
-        def write_parquet(**_kwargs):
-            parquet_path.write_bytes(b"mutated-current-run")
-            return parquet_path
-
-        def save_cache(_symbol, _records):
-            cache_path.write_bytes(b"mutated-cache")
+                return [FundingRateUpdate(inst, Decimal("0.02"), 1_704_153_600_000_000_000, 1_704_153_600_000_000_000, interval=480)]
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         p.downloader = mock_dl
         p._convert_workers = 1
-        p._get_instrument = MagicMock(return_value=SimpleNamespace(id="BTCUSDT-PERP.BINANCE"))
+        p._get_instrument = MagicMock(return_value=SimpleNamespace(id=inst))
         p._read_db_catalog_snapshot = AsyncMock(return_value=None)
         monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: Converter())
-        monkeypatch.setattr("tinohelm.data.catalog.write_funding_rate_parquet", write_parquet)
-        monkeypatch.setattr("tinohelm.data.funding_cache._cache_path", lambda _symbol: cache_path)
-        monkeypatch.setattr("tinohelm.data.funding_cache._save_cache", save_cache)
         monkeypatch.setattr(p, "_update_db_catalog", AsyncMock(side_effect=RuntimeError("db down")))
 
         with pytest.raises(RuntimeError, match="db down"):
@@ -1390,8 +1462,10 @@ class TestIngestEarlyFailClosed:
                 end=date(2025, 1, 2),
             ))
 
-        assert parquet_path.read_bytes() == old_parquet
-        assert cache_path.read_bytes() == old_cache
+        restored_rows = catalog.query(FundingRateUpdate, identifiers=[str(inst)])
+        assert len(restored_rows) == len(old_rows) == 1
+        assert restored_rows[0].rate == old_rows[0].rate
+        assert restored_rows[0].ts_event == old_rows[0].ts_event
         assert not (tmp_path / ".ingest-rollback").exists()
 
     def test_funding_cache_restore_removes_new_cache_when_none_existed(
@@ -2276,7 +2350,10 @@ class TestUpdateDbCatalog:
         assert fake_session.row.size_bytes == path.stat().st_size
 
     def test_funding_rate_disjoint_update_refreshes_single_file_stats(self, tmp_path: Path):
-        from tinohelm.data.catalog import funding_rate_parquet_path
+        from decimal import Decimal
+        from nautilus_trader.model.data import FundingRateUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from tinohelm.data.catalog import _catalog_for_root, funding_rate_update_dir
         from tinohelm.db.models import DataCatalog
 
         class FakeSession:
@@ -2299,9 +2376,12 @@ class TestUpdateDbCatalog:
                 pass
 
         symbol = "BTCUSDT-PERP"
-        path = funding_rate_parquet_path(symbol, tmp_path)
-        path.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1, 2, 3, 4], "funding_rate": [0.1, 0.2, 0.3, 0.4]}).write_parquet(path)
+        inst = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        catalog = _catalog_for_root(tmp_path)
+        for ts in (1, 2, 3, 4):
+            catalog.write_data([FundingRateUpdate(inst, Decimal("0.1"), ts, ts, interval=480)], skip_disjoint_check=True)
+        update_dir = funding_rate_update_dir(symbol, tmp_path)
+        size_bytes = sum(path.stat().st_size for path in update_dir.glob("*.parquet"))
 
         fake_session = FakeSession()
         p = BinanceVisionPipeline(catalog_path=tmp_path)
@@ -2310,17 +2390,17 @@ class TestUpdateDbCatalog:
             asyncio.run(p._update_db_catalog(
                 symbol, "fundingRate", None,
                 date(2025, 1, 2), date(2025, 1, 2),
-                record_count=1, size_bytes=path.stat().st_size, source_type="fundingRate",
+                record_count=1, size_bytes=size_bytes, source_type="fundingRate",
             ))
             asyncio.run(p._update_db_catalog(
                 symbol, "fundingRate", None,
                 date(2025, 1, 4), date(2025, 1, 4),
-                record_count=1, size_bytes=path.stat().st_size, source_type="fundingRate",
+                record_count=1, size_bytes=size_bytes, source_type="fundingRate",
             ))
 
         assert isinstance(fake_session.row, DataCatalog)
         assert fake_session.row.record_count == 4
-        assert fake_session.row.size_bytes == path.stat().st_size
+        assert fake_session.row.size_bytes == size_bytes
 
     def test_bar_disjoint_update_refreshes_size_from_storage_without_recounting(self, tmp_path: Path):
         from tinohelm.db.models import DataCatalog

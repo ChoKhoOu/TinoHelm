@@ -429,6 +429,12 @@ class ScanResult:
     scanned: int
 
 
+@dataclass(frozen=True)
+class LiveCatalogSummary:
+    entries: list[ScanEntry]
+    scanned: int
+
+
 _BAR_SOURCE_TYPES: tuple[str, ...] = (
     "klines",
     "markPriceKlines",
@@ -838,11 +844,24 @@ class CatalogSession:
         entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
         return ScanResult(entries=entries, scanned=scanned)
 
+    def live_summary(self) -> LiveCatalogSummary:
+        """Return a live catalog summary derived from current NT catalog files."""
+        bar_result = self.scan_bars()
+        tick_result = self.scan_ticks()
+        single_file_result = self.scan_single_files()
+        funding_result = self.scan_funding_rate_updates()
+        return LiveCatalogSummary(
+            entries=[
+                *bar_result.entries,
+                *tick_result.entries,
+                *single_file_result.entries,
+                *funding_result.entries,
+            ],
+            scanned=bar_result.scanned + tick_result.scanned + single_file_result.scanned + funding_result.scanned,
+        )
+
     def _single_file_parent_dir(self, data_type: str) -> Path | None:
         """Return the directory that holds one parquet per symbol for ``data_type``."""
-        # Use the canonical per-symbol path and walk one up to the parent dir.
-        # Keeping the branch here rather than another spec table lets the
-        # canonical-path helpers remain the single source of truth for layout.
         sentinel = "scan"
         if data_type == "funding_rate":
             return funding_rate_parquet_path(sentinel, self.catalog_path).parent
@@ -859,6 +878,22 @@ class CatalogSession:
         if not name:
             return None
         return name.upper()
+
+    def scan_funding_rate_updates(self) -> ScanResult:
+        """Discover NT-native FundingRateUpdate parquet files and collapse to entries."""
+        sym_pattern = re.compile(r"^(.+)\.BINANCE$")
+        merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        scanned = self._collect_tick_entries_for_root(
+            tick_root=self.catalog_path / "data" / "funding_rate_update",
+            cat_root=self.catalog_path,
+            data_type="funding_rate",
+            source_type="fundingRate",
+            is_source_aware=False,
+            merged=merged,
+            pattern=sym_pattern,
+        )
+        entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
+        return ScanResult(entries=entries, scanned=scanned)
 
     def _collect_bar_entries_for_root(
         self,
@@ -1078,6 +1113,9 @@ class CatalogSession:
         if data_type == "order_book_delta":
             return book_depth_parquet_path(symbol, self.catalog_path)
         if data_type == "funding_rate":
+            update_dir = funding_rate_update_dir(symbol, self.catalog_path)
+            if _iter_catalog_files(self.storage, update_dir, recursive=False):
+                return update_dir
             return funding_rate_parquet_path(symbol, self.catalog_path)
         return None
 
@@ -1194,26 +1232,53 @@ class CatalogSession:
         """Return ``True`` iff the primary funding-rate Parquet spans ``[start, end]``."""
         from datetime import UTC, datetime
 
-        path = funding_rate_parquet_path(symbol, self.catalog_path)
+        target_dir = funding_rate_update_dir(symbol, self.catalog_path)
         storage = self.storage
         try:
-            if not storage.exists(path):
+            objects = list(storage.iter_files(target_dir, suffix=".parquet", recursive=False))
+        except Exception:
+            logger.warning(
+                "Funding-rate update parquet is not readable for %s", symbol, exc_info=True
+            )
+            return False
+        if objects:
+            min_ts: int | None = None
+            max_ts: int | None = None
+            for obj in objects:
+                try:
+                    time_range = _funding_parquet_time_range(obj.path, storage)
+                except Exception:
+                    logger.warning(
+                        "Funding-rate update parquet is not readable for %s", symbol, exc_info=True
+                    )
+                    return False
+                if time_range is None:
+                    return False
+                obj_min, obj_max = time_range
+                min_ts = obj_min if min_ts is None else min(min_ts, obj_min)
+                max_ts = obj_max if max_ts is None else max(max_ts, obj_max)
+            if min_ts is None or max_ts is None:
                 return False
-        except Exception:
-            logger.warning(
-                "Funding-rate primary parquet is not readable for %s", symbol, exc_info=True
-            )
-            return False
-        try:
-            time_range = _funding_parquet_time_range(path, storage)
-        except Exception:
-            logger.warning(
-                "Funding-rate primary parquet is not readable for %s", symbol, exc_info=True
-            )
-            return False
-        if time_range is None:
-            return False
-        min_ts, max_ts = time_range
+        else:
+            path = funding_rate_parquet_path(symbol, self.catalog_path)
+            try:
+                if not storage.exists(path):
+                    return False
+            except Exception:
+                logger.warning(
+                    "Funding-rate primary parquet is not readable for %s", symbol, exc_info=True
+                )
+                return False
+            try:
+                time_range = _funding_parquet_time_range(path, storage)
+            except Exception:
+                logger.warning(
+                    "Funding-rate primary parquet is not readable for %s", symbol, exc_info=True
+                )
+                return False
+            if time_range is None:
+                return False
+            min_ts, max_ts = time_range
         min_date = datetime.fromtimestamp(min_ts // 1_000_000_000, UTC).date()
         max_date = datetime.fromtimestamp(max_ts // 1_000_000_000, UTC).date()
         return min_date <= start and max_date >= end
@@ -1325,9 +1390,14 @@ class CatalogSession:
     def _delete_funding_rate(self, symbol: str) -> tuple[int, int]:
         from tinohelm.core.paths import paths
 
-        deleted_files, freed_bytes = self._delete_parquet_files(
+        deleted_files, freed_bytes = self._delete_parquet_dirs(
+            [funding_rate_update_dir(symbol, self.catalog_path)]
+        )
+        legacy_deleted, legacy_freed = self._delete_parquet_files(
             [funding_rate_parquet_path(symbol, self.catalog_path)]
         )
+        deleted_files += legacy_deleted
+        freed_bytes += legacy_freed
         json_path = paths.get("funding_rates") / f"{symbol.lower()}.json"
         if json_path.exists():
             freed_bytes += json_path.stat().st_size
@@ -1384,10 +1454,33 @@ def _remote_catalog_constructor_args(catalog_root: Path, storage: Any) -> tuple[
     return f"{parsed.netloc}{parsed.path}".lstrip("/"), parsed.scheme
 
 
+def _ensure_nt_update_query_support() -> None:
+    """Patch NT 1.225.0 to read IndexPriceUpdate via PyArrow decoder.
+
+    NT can write IndexPriceUpdate parquet, but its default query path routes the
+    type through the PyArrow deserializer without a registered decoder. We add
+    the missing decoder once per process so catalog.query(IndexPriceUpdate, ...)
+    works like MarkPriceUpdate/FundingRateUpdate.
+    """
+    try:
+        from nautilus_trader.model.data import IndexPriceUpdate
+        from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer, register_arrow
+        from nautilus_trader.serialization.arrow.schema import NAUTILUS_ARROW_SCHEMA
+    except Exception:
+        return
+
+    register_arrow(
+        data_cls=IndexPriceUpdate,
+        schema=NAUTILUS_ARROW_SCHEMA[IndexPriceUpdate],
+        decoder=make_dict_deserializer(IndexPriceUpdate),
+    )
+
+
 def _catalog_for_root(catalog_root: str | Path, storage: Any | None = None):
     """Create an NT catalog for a logical root, using object storage directly when active."""
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+    _ensure_nt_update_query_support()
     root = Path(catalog_root)
     if _is_remote_storage(storage):
         remote_path, fs_protocol = _remote_catalog_constructor_args(root, storage)
@@ -2053,16 +2146,33 @@ def read_book_depth_parquet(symbol: str, catalog_root: str | Path) -> "pl.DataFr
 
 
 # ---------------------------------------------------------------------------
-# FundingRate Parquet support
+# Direct-update / funding Parquet support
 # ---------------------------------------------------------------------------
 
-def funding_rate_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
-    """Return the canonical Parquet path for a symbol's funding-rate data.
+def _direct_update_dir(symbol: str, catalog_root: str | Path, update_type: str) -> Path:
+    from tinohelm.strategy.loader_helpers import normalize_symbol
 
-    Convention: ``{catalog_root}/data/funding_rate/{symbol.lower()}.parquet``.
-    This matches the ``funding_rate`` write-category in WRITE_CATEGORY and the
-    catalog root resolved by ``DataLayer._resolve_catalog_root`` (see
-    ``tinohelm.factor.data_layer``).
+    return Path(catalog_root) / "data" / update_type / normalize_symbol(symbol)
+
+
+def mark_price_update_dir(symbol: str, catalog_root: str | Path) -> Path:
+    return _direct_update_dir(symbol, catalog_root, "mark_price_update")
+
+
+def index_price_update_dir(symbol: str, catalog_root: str | Path) -> Path:
+    return _direct_update_dir(symbol, catalog_root, "index_price_update")
+
+
+def funding_rate_update_dir(symbol: str, catalog_root: str | Path) -> Path:
+    return _direct_update_dir(symbol, catalog_root, "funding_rate_update")
+
+
+def funding_rate_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
+    """Return the legacy single-file Parquet path for a symbol's funding-rate data.
+
+    The new NT-native funding update layout lives under
+    ``data/funding_rate_update/<instrument_id>/``. This helper is kept for the
+    legacy JSON/single-file compatibility path.
     """
     return Path(catalog_root) / "data" / "funding_rate" / f"{symbol.lower()}.parquet"
 

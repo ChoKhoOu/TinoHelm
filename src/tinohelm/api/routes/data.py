@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, timedelta
+from typing import Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -30,7 +31,7 @@ router = APIRouter(prefix="/api/data", tags=["data"])
 # ---- request / response schemas ----
 
 class DataCatalogItem(BaseModel):
-    """Single item in the data catalog."""
+    """Single item in the live data catalog summary."""
 
     id: int
     symbol: str
@@ -45,6 +46,64 @@ class DataCatalogItem(BaseModel):
     created_at: str | None = None
 
 
+_PHASE1_DATA_TYPES: tuple[dict[str, Any], ...] = (
+    {
+        "data_type": "bar",
+        "upstream_data_type": "klines",
+        "db_category": "bar",
+        "interval_required": True,
+        "has_daily": True,
+        "has_monthly": True,
+    },
+    {
+        "data_type": "trade_tick",
+        "upstream_data_type": "trades",
+        "db_category": "trade_tick",
+        "interval_required": False,
+        "has_daily": True,
+        "has_monthly": True,
+    },
+    {
+        "data_type": "quote_tick",
+        "upstream_data_type": "bookTicker",
+        "db_category": "quote_tick",
+        "interval_required": False,
+        "has_daily": True,
+        "has_monthly": True,
+    },
+    {
+        "data_type": "mark_price",
+        "upstream_data_type": "markPriceKlines",
+        "db_category": "mark_price",
+        "interval_required": True,
+        "has_daily": True,
+        "has_monthly": True,
+    },
+    {
+        "data_type": "index_price",
+        "upstream_data_type": "indexPriceKlines",
+        "db_category": "index_price",
+        "interval_required": True,
+        "has_daily": True,
+        "has_monthly": True,
+    },
+    {
+        "data_type": "funding_rate",
+        "upstream_data_type": "fundingRate",
+        "db_category": "funding_rate",
+        "interval_required": False,
+        "has_daily": False,
+        "has_monthly": True,
+    },
+)
+_PHASE1_UPSTREAM_TO_PUBLIC = {
+    item["upstream_data_type"]: item["data_type"] for item in _PHASE1_DATA_TYPES
+}
+_PHASE1_PUBLIC_TO_UPSTREAM = {
+    item["data_type"]: item["upstream_data_type"] for item in _PHASE1_DATA_TYPES
+}
+
+
 class DataFetchBatchRequest(BaseModel):
     """Request body for POST /fetch-batch."""
 
@@ -57,11 +116,29 @@ class DataFetchBatchRequest(BaseModel):
 
 
 class CompactRequest(BaseModel):
-    """Request body for POST /compact."""
+    """Request body for POST /consolidate."""
 
     symbol: str
     interval: str
     data_type: str = "klines"
+
+
+class ResetFileNamesRequest(BaseModel):
+    data_type: str
+    symbol: str | None = None
+
+
+class ConsolidateByPeriodRequest(BaseModel):
+    data_type: str
+    period: str
+    symbol: str | None = None
+
+
+class DeleteRangeRequest(BaseModel):
+    data_type: str
+    symbol: str | None = None
+    start: str | None = None
+    end: str | None = None
 
 
 # ---- helpers ----
@@ -167,9 +244,17 @@ def _split_fetch_date_ranges(
     return ranges
 
 
+def _normalize_requested_data_type(data_type: str) -> str:
+    return _PHASE1_PUBLIC_TO_UPSTREAM.get(data_type, data_type)
+
+
+def _public_data_type(data_type: str) -> str:
+    return _PHASE1_UPSTREAM_TO_PUBLIC.get(data_type, data_type)
+
+
 def _is_bar_data_type(data_type: str) -> bool:
     """Return True for kline-family data types that require bar intervals."""
-    return WRITE_CATEGORY.get(data_type) == "bar"
+    return WRITE_CATEGORY.get(_normalize_requested_data_type(data_type)) == "bar"
 
 
 def _fetch_batch_intervals(data_type: str, intervals: list[str]) -> list[str]:
@@ -179,34 +264,94 @@ def _fetch_batch_intervals(data_type: str, intervals: list[str]) -> list[str]:
 
 def _fetch_batch_job_intervals(data_type: str, intervals: list[str]) -> list[str | None]:
     """Return effective DB/job intervals for fetch-batch job creation."""
-    return intervals if _is_bar_data_type(data_type) else [None]
+    if _is_bar_data_type(data_type):
+        return [*intervals]
+    return [None]
 
+
+def _catalog_for_root(catalog_root: Path | str, storage: Any | None = None):
+    from tinohelm.data.catalog import _catalog_for_root as _nt_catalog_for_root
+
+    return _nt_catalog_for_root(catalog_root, storage)
+
+
+def _catalog_for_maintenance(settings: Settings):
+    from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
+
+    base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
+    storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path) if settings else get_catalog_storage(catalog_root=base_catalog_path)
+    return _catalog_for_root(base_catalog_path, storage), storage
+
+
+def _parse_period(value: str) -> timedelta:
+    token = str(value).strip().lower()
+    if not token:
+        raise HTTPException(status_code=400, detail="period must not be empty")
+    unit = token[-1]
+    amount_raw = token[:-1]
+    if unit not in {"d", "h", "m"} or not amount_raw.isdigit():
+        raise HTTPException(status_code=400, detail=f"Unsupported period {value!r}")
+    amount = int(amount_raw)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="period must be positive")
+    if unit == "d":
+        return timedelta(days=amount)
+    if unit == "h":
+        return timedelta(hours=amount)
+    return timedelta(minutes=amount)
+
+
+async def _run_catalog_maintenance(
+    *,
+    settings: Settings,
+    verb: str,
+    invoke: Callable[[Any], None],
+) -> None:
+    catalog, _storage = _catalog_for_maintenance(settings)
+    try:
+        await asyncio.to_thread(invoke, catalog)
+    except Exception as exc:
+        logger.exception("Catalog maintenance failed for %s: %s", verb, exc)
+        raise HTTPException(status_code=500, detail=f"Catalog maintenance failed: {verb}")
 
 
 # ---- routes ----
 
 @router.get("/catalog", response_model=list[DataCatalogItem])
 async def list_data_catalog(
-    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
 ) -> list[DataCatalogItem]:
-    """List all data catalog entries."""
-    stmt = select(DataCatalog).order_by(DataCatalog.symbol, DataCatalog.interval)
-    rows = (await db.execute(stmt)).scalars().all()
+    """List the live catalog summary derived from the current NT catalog."""
+    from tinohelm.data.catalog import CatalogSession
+    from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
+
+    base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
+    storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path) if settings else get_catalog_storage(catalog_root=base_catalog_path)
+    session = CatalogSession(base_catalog_path, storage=storage)
+    summary = await asyncio.to_thread(session.live_summary)
+    entries = sorted(
+        (
+            entry
+            for entry in summary.entries
+            if entry.source_type in _PHASE1_UPSTREAM_TO_PUBLIC
+        ),
+        key=lambda item: (item.symbol, item.data_type, item.interval, item.source_type),
+    )
     return [
         DataCatalogItem(
-            id=r.id,
-            symbol=r.symbol,
-            data_type=r.data_type,
-            interval=r.interval,
-            start_date=r.start_date,
-            end_date=r.end_date,
-            file_path=r.file_path,
-            size_bytes=r.size_bytes,
-            record_count=r.record_count,
-            source_type=r.source_type,
-            created_at=r.created_at.isoformat() if r.created_at else None,
+            id=index,
+            symbol=entry.symbol,
+            data_type=_PHASE1_UPSTREAM_TO_PUBLIC[entry.source_type],
+            interval=entry.interval,
+            start_date=entry.start_date,
+            end_date=entry.end_date,
+            file_path=entry.file_path,
+            size_bytes=entry.size_bytes,
+            record_count=entry.record_count,
+            source_type=entry.source_type,
+            created_at=None,
         )
-        for r in rows
+        for index, entry in enumerate(entries, start=1)
     ]
 
 
@@ -224,7 +369,7 @@ async def list_data_fetch_jobs(
         {
             "job_id": j.job_id,
             "symbol": j.symbol,
-            "data_type": j.data_type,
+            "data_type": _public_data_type(j.data_type),
             "interval": j.interval,
             "start_date": j.start_date.isoformat(),
             "end_date": j.end_date.isoformat(),
@@ -253,7 +398,7 @@ async def get_data_fetch_job(
     return {
         "job_id": job.job_id,
         "symbol": job.symbol,
-        "data_type": job.data_type,
+        "data_type": _public_data_type(job.data_type),
         "interval": job.interval,
         "start_date": job.start_date.isoformat(),
         "end_date": job.end_date.isoformat(),
@@ -380,8 +525,9 @@ async def trigger_data_fetch_batch(
         raise HTTPException(status_code=400, detail="symbols must not be empty")
     if body.start > body.end:
         raise HTTPException(status_code=400, detail="start must be on or before end")
-    if body.data_type not in WRITE_CATEGORY:
-        supported = ", ".join(sorted(WRITE_CATEGORY))
+    effective_data_type = _normalize_requested_data_type(body.data_type)
+    if effective_data_type not in WRITE_CATEGORY:
+        supported = ", ".join(sorted({*WRITE_CATEGORY, *tuple(_PHASE1_PUBLIC_TO_UPSTREAM)}))
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported data_type {body.data_type!r}. Supported values: {supported}",
@@ -389,13 +535,14 @@ async def trigger_data_fetch_batch(
     if _is_bar_data_type(body.data_type) and not body.intervals:
         raise HTTPException(status_code=400, detail="intervals must not be empty")
 
+    public_data_type = _public_data_type(effective_data_type)
     job_ids: list[str] = []
     jobs: list[dict[str, str | None]] = []
     # One fetch-batch submission = one FetchBatch. All fanned-out DataFetchJob
     # rows share this batch_id so the scheduler can treat them as a unit.
     batch_id = str(uuid4())
     ranges = _split_fetch_date_ranges(
-        data_type=body.data_type,
+        data_type=effective_data_type,
         start=body.start,
         end=body.end,
         max_days_per_job=settings.data.agg_trades_max_days_per_job,
@@ -406,7 +553,7 @@ async def trigger_data_fetch_batch(
             for start_date, end_date in ranges:
                 job = DataFetchJob(
                     symbol=symbol,
-                    data_type=body.data_type,
+                    data_type=effective_data_type,
                     interval=interval,
                     start_date=start_date,
                     end_date=end_date,
@@ -419,8 +566,8 @@ async def trigger_data_fetch_batch(
                 job_ids.append(job.job_id)
                 jobs.append({
                     "job_id": job.job_id,
-                    "data_type": body.data_type,
-                    "db_interval": resolve_db_interval(body.data_type, interval),
+                    "data_type": public_data_type,
+                    "db_interval": resolve_db_interval(effective_data_type, interval),
                     "interval": interval,
                     "start": start_date.isoformat(),
                     "end": end_date.isoformat(),
@@ -438,20 +585,20 @@ async def trigger_data_fetch_batch(
         "jobs": jobs,
         "symbols": body.symbols,
         "intervals": _fetch_batch_intervals(body.data_type, body.intervals),
-        "data_type": body.data_type,
+        "data_type": public_data_type,
         "start": body.start.isoformat(),
         "end": body.end.isoformat(),
         "count": len(job_ids),
     }
 
 
-@router.post("/compact")
+@router.post("/consolidate")
 async def trigger_compact(
     body: CompactRequest,
     background_tasks: BackgroundTasks,
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
-    """Trigger background compaction for a symbol/interval."""
+    """Trigger background consolidation for a symbol/interval."""
     if body.data_type not in WRITE_CATEGORY or not _is_bar_data_type(body.data_type):
         supported = ", ".join(sorted(k for k, v in WRITE_CATEGORY.items() if v == "bar"))
         raise HTTPException(
@@ -461,7 +608,70 @@ async def trigger_compact(
     background_tasks.add_task(_run_compact, body.symbol, body.interval, settings, body.data_type, body.data_type)
     return {
         "status": "accepted",
-        "message": f"Compaction for {body.symbol} {body.data_type} {body.interval} queued",
+        "message": f"Consolidation for {body.symbol} {body.data_type} {body.interval} queued",
+    }
+
+
+@router.post("/reset-file-names")
+async def reset_file_names(
+    body: ResetFileNamesRequest,
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    await _run_catalog_maintenance(
+        settings=settings,
+        verb="reset-file-names",
+        invoke=lambda catalog: catalog.reset_all_file_names(),
+    )
+    return {
+        "status": "ok",
+        "verb": "reset-file-names",
+        "data_type": body.data_type,
+        "symbol": body.symbol,
+    }
+
+
+@router.post("/consolidate-by-period")
+async def consolidate_by_period(
+    body: ConsolidateByPeriodRequest,
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    period = _parse_period(body.period)
+    await _run_catalog_maintenance(
+        settings=settings,
+        verb="consolidate-by-period",
+        invoke=lambda catalog: catalog.consolidate_catalog_by_period(
+            period=period,
+        ),
+    )
+    return {
+        "status": "ok",
+        "verb": "consolidate-by-period",
+        "data_type": body.data_type,
+        "symbol": body.symbol,
+        "period": body.period,
+    }
+
+
+@router.post("/delete-range")
+async def delete_range(
+    body: DeleteRangeRequest,
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    await _run_catalog_maintenance(
+        settings=settings,
+        verb="delete-range",
+        invoke=lambda catalog: catalog.delete_catalog_range(
+            start=body.start,
+            end=body.end,
+        ),
+    )
+    return {
+        "status": "ok",
+        "verb": "delete-range",
+        "data_type": body.data_type,
+        "symbol": body.symbol,
+        "start": body.start,
+        "end": body.end,
     }
 
 
@@ -505,92 +715,6 @@ async def validate_data(
     return result
 
 
-@router.post("/scan")
-async def scan_data_catalog(
-    db: AsyncSession = Depends(get_db),
-    settings: Settings = Depends(get_settings_dep),
-) -> dict:
-    """Scan Parquet files on disk and sync missing entries into DB catalog.
-
-    Discovery + per-symbol aggregation live on ``CatalogSession``; this route
-    owns only the DB upsert, including the legacy ``source_type IS NULL`` fallback.
-    """
-    from tinohelm.data.catalog import CatalogSession
-    from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
-
-    catalog_path = str(get_active_catalog_root(settings))
-    storage = get_catalog_storage(settings=settings)
-    session = CatalogSession(catalog_path, storage=storage)
-
-    bar_result = await asyncio.to_thread(session.scan_bars)
-    tick_result = await asyncio.to_thread(session.scan_ticks)
-    single_file_result = await asyncio.to_thread(session.scan_single_files)
-
-    created = 0
-    updated = 0
-    for entry in (
-        *bar_result.entries,
-        *tick_result.entries,
-        *single_file_result.entries,
-    ):
-        created_delta, updated_delta = await _upsert_scan_entry(db, entry)
-        created += created_delta
-        updated += updated_delta
-
-    await db.commit()
-    return {
-        "status": "ok",
-        "scanned": (
-            bar_result.scanned
-            + tick_result.scanned
-            + single_file_result.scanned
-        ),
-        "created": created,
-        "updated": updated,
-    }
-
-
-async def _upsert_scan_entry(db: AsyncSession, entry: ScanEntry) -> tuple[int, int]:
-    """Upsert one scan entry, falling back to the legacy ``source_type IS NULL`` row.
-
-    The fallback only applies when the entry's source_type is the legacy
-    default for its data_type — matches the rule the old in-route loop used.
-    """
-    stmt = select(DataCatalog).where(
-        DataCatalog.symbol == entry.symbol,
-        DataCatalog.data_type == entry.data_type,
-        DataCatalog.interval == entry.interval,
-        DataCatalog.source_type == entry.source_type,
-    )
-    existing_row = (await db.execute(stmt)).scalar_one_or_none()
-    if existing_row is None and entry.source_type == _LEGACY_DEFAULT_SOURCE.get(entry.data_type):
-        stmt_null = select(DataCatalog).where(
-            DataCatalog.symbol == entry.symbol,
-            DataCatalog.data_type == entry.data_type,
-            DataCatalog.interval == entry.interval,
-            DataCatalog.source_type.is_(None),
-        )
-        existing_row = (await db.execute(stmt_null)).scalar_one_or_none()
-    if existing_row is not None:
-        existing_row.start_date = min(existing_row.start_date, entry.start_date)
-        existing_row.end_date = max(existing_row.end_date, entry.end_date)
-        existing_row.size_bytes = entry.size_bytes
-        existing_row.record_count = entry.record_count
-        existing_row.file_path = entry.file_path
-        existing_row.source_type = entry.source_type
-        return 0, 1
-    db.add(DataCatalog(
-        symbol=entry.symbol,
-        data_type=entry.data_type,
-        interval=entry.interval,
-        start_date=entry.start_date,
-        end_date=entry.end_date,
-        file_path=entry.file_path,
-        size_bytes=entry.size_bytes,
-        record_count=entry.record_count,
-        source_type=entry.source_type,
-    ))
-    return 1, 0
 
 
 @router.delete("/catalog/{catalog_id}")
@@ -668,37 +792,14 @@ async def list_symbols() -> list[dict]:
 
 @router.get("/types")
 async def list_data_types() -> list[dict]:
-    """Return supported data types and their availability."""
-    from tinohelm.data.downloader import DATA_TYPE_AVAILABILITY
-    from tinohelm.data.converters import CONVERTER_REGISTRY
-    from tinohelm.data.pipeline_helpers import resolve_db_category
-
-    result = []
-    for dt, (has_daily, has_monthly) in DATA_TYPE_AVAILABILITY.items():
-        converter = CONVERTER_REGISTRY.get(dt)
-        implemented = converter is not None
-        try:
-            if implemented and converter is not None:
-                converter.convert.__func__  # check if it's not a stub
-                # Stubs raise NotImplementedError — detect via class check
-                from tinohelm.data.converters.book_ticker import BookTickerConverter
-                from tinohelm.data.converters.book_depth import BookDepthConverter
-                from tinohelm.data.converters.liquidation import LiquidationConverter
-                from tinohelm.data.converters.metrics import MetricsConverter
-                stub_types = (BookTickerConverter, BookDepthConverter, LiquidationConverter, MetricsConverter)
-                if isinstance(converter, stub_types):
-                    implemented = False
-        except Exception:
-            pass
-
-        result.append({
-            "data_type": dt,
-            "has_daily": has_daily,
-            "has_monthly": has_monthly,
-            "implemented": implemented,
-            "db_category": resolve_db_category(dt),
-        })
-    return result
+    """Return the static phase-1 NT-native capability list."""
+    return [
+        {
+            **item,
+            "implemented": True,
+        }
+        for item in _PHASE1_DATA_TYPES
+    ]
 
 
 @router.get("/coverage/{symbol}")

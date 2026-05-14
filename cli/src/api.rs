@@ -494,7 +494,7 @@ impl ApiClient {
     pub async fn compact_data(&self, req: &DataCompactRequest) -> Result<serde_json::Value> {
         self.typed_json(
             Method::POST,
-            "/api/data/compact",
+            "/api/data/consolidate",
             &[],
             Some(Self::json_body(req)?),
         )
@@ -518,8 +518,7 @@ impl ApiClient {
     }
 
     pub async fn scan_data(&self) -> Result<serde_json::Value> {
-        self.typed_json(Method::POST, "/api/data/scan", &[], None)
-            .await
+        Err(anyhow::anyhow!("/api/data/scan 已删除；请改用 /api/data/catalog 或 NT maintenance APIs"))
     }
 
     // ---- Trading ----

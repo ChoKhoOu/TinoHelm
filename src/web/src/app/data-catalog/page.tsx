@@ -73,8 +73,7 @@ export default function DataCatalogPage() {
     }
   }
 
-  const compact = useAction(() => apiPost("/api/data/compact"), { onSuccess: loadCatalog });
-  const scan = useAction(() => apiPost("/api/data/scan"), { onSuccess: loadCatalog });
+  const compact = useAction(() => apiPost("/api/data/consolidate"), { onSuccess: loadCatalog });
 
   function handleSort(col: SortKey) {
     if (sortKey === col) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -223,16 +222,6 @@ export default function DataCatalogPage() {
                 {compact.state === 'loading' ? '压缩中...' : compact.state === 'success' ? '✓ 压缩完成' : compact.state === 'error' ? '✕ 失败' : '⊕ 压缩'}
               </button>
               {compact.state === 'error' && compact.error && <InlineError>{compact.error}</InlineError>}
-            </div>
-            <div>
-              <button
-                className={`btn ${scan.state === 'error' ? 'btn-d' : scan.state === 'success' ? 'btn-p' : 'btn-o'}`}
-                onClick={scan.execute}
-                disabled={scan.state === 'loading'}
-              >
-                {scan.state === 'loading' ? '扫描中...' : scan.state === 'success' ? '✓ 扫描完成' : scan.state === 'error' ? '✕ 失败' : '↻ 扫描'}
-              </button>
-              {scan.state === 'error' && scan.error && <InlineError>{scan.error}</InlineError>}
             </div>
           </div>
         </div>
