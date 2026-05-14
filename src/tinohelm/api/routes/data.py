@@ -101,6 +101,7 @@ _PHASE1_DATA_TYPES: tuple[dict[str, Any], ...] = (
 _PHASE1_UPSTREAM_TO_PUBLIC = {
     item["upstream_data_type"]: item["data_type"] for item in _PHASE1_DATA_TYPES
 }
+_PHASE1_UPSTREAM_TO_PUBLIC["aggTrades"] = "trade_tick"
 _PHASE1_PUBLIC_TO_UPSTREAM = {
     item["data_type"]: item["upstream_data_type"] for item in _PHASE1_DATA_TYPES
 }
