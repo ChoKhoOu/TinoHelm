@@ -39,7 +39,14 @@ class IndexPriceConverter:
 
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
         df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce")
-        df = df[["close", "close_time"]].dropna().sort_values("close_time")
+        df = df[["close", "close_time"]].dropna().sort_values(by="close_time")
+
+        conflicts = df.groupby("close_time")["close"].nunique(dropna=True)
+        conflicting_times = conflicts[conflicts > 1]
+        if not conflicting_times.empty:
+            first_conflict = conflicting_times.index[0]
+            raise ValueError(f"Conflicting index price rows for close_time={int(first_conflict)}")
+
         df = df.drop_duplicates(subset=["close_time"], keep="last")
 
         if df.empty:
@@ -49,11 +56,11 @@ class IndexPriceConverter:
         records = [
             IndexPriceUpdate(
                 instrument_id=instrument.id,
-                value=instrument.make_price(float(row.close)),
-                ts_event=int(row.close_time) * 1_000_000,
-                ts_init=int(row.close_time) * 1_000_000,
+                value=instrument.make_price(float(close)),
+                ts_event=int(close_time) * 1_000_000,
+                ts_init=int(close_time) * 1_000_000,
             )
-            for row in df.itertuples(index=False)
+            for close, close_time in df.itertuples(index=False, name=None)
         ]
         logger.debug(
             "Converted %d indexPriceKlines rows to %d IndexPriceUpdate objects", len(df), len(records)

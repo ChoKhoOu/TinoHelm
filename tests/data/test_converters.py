@@ -69,6 +69,23 @@ class TestMarkAndIndexPriceConverters:
         assert isinstance(records[0], MarkPriceUpdate)
         assert records[0].ts_event == 1704067259999 * 1_000_000
 
+    def test_mark_price_conflicting_duplicates_raise(self):
+        pytest.importorskip("nautilus_trader")
+        from nautilus_trader.model.identifiers import InstrumentId
+        from nautilus_trader.model.objects import Price
+
+        c = get_converter("markPriceKlines")
+        df = pd.DataFrame([
+            [1704067200000, "42000.0", "42100.0", "41900.0", "42050.0", 1704067259999],
+            [1704067200001, "42000.0", "42100.0", "41900.0", "42060.0", 1704067259999],
+        ])
+        mock_instrument = MagicMock()
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        mock_instrument.make_price.side_effect = lambda v: Price.from_str(str(v))
+
+        with pytest.raises(ValueError, match="Conflicting mark price rows"):
+            c.convert(df, mock_instrument)
+
     def test_index_price_convert_returns_index_price_updates(self):
         pytest.importorskip("nautilus_trader")
         from nautilus_trader.model.data import IndexPriceUpdate
@@ -89,6 +106,23 @@ class TestMarkAndIndexPriceConverters:
         assert len(records) == 1
         assert isinstance(records[0], IndexPriceUpdate)
         assert records[0].ts_event == 1704067259999 * 1_000_000
+
+    def test_index_price_conflicting_duplicates_raise(self):
+        pytest.importorskip("nautilus_trader")
+        from nautilus_trader.model.identifiers import InstrumentId
+        from nautilus_trader.model.objects import Price
+
+        c = get_converter("indexPriceKlines")
+        df = pd.DataFrame([
+            [1704067200000, "42000.0", "42100.0", "41900.0", "42050.0", 1704067259999],
+            [1704067200001, "42000.0", "42100.0", "41900.0", "42040.0", 1704067259999],
+        ])
+        mock_instrument = MagicMock()
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        mock_instrument.make_price.side_effect = lambda v: Price.from_str(str(v))
+
+        with pytest.raises(ValueError, match="Conflicting index price rows"):
+            c.convert(df, mock_instrument)
 
 
 class TestKlinesConverter:
@@ -340,6 +374,7 @@ class TestFundingRateConverter:
         assert isinstance(records[1], FundingRateUpdate)
 
     def test_convert_funding_rate_value(self):
+        pytest.importorskip("nautilus_trader")
         from decimal import Decimal
         from nautilus_trader.model.identifiers import InstrumentId
 
@@ -353,6 +388,7 @@ class TestFundingRateConverter:
         assert records[0].rate == Decimal("0.0001")
 
     def test_convert_funding_time_ms_preserved(self):
+        pytest.importorskip("nautilus_trader")
         from nautilus_trader.model.identifiers import InstrumentId
 
         df = pd.DataFrame([
@@ -365,11 +401,13 @@ class TestFundingRateConverter:
         assert records[0].ts_event == 1704067200000 * 1_000_000
 
     def test_convert_ts_event_ms_to_ns(self):
+        pytest.importorskip("nautilus_trader")
+        from nautilus_trader.model.identifiers import InstrumentId
+
         df = pd.DataFrame([
             [1704067200000, 8, 0.0001],
         ])
         mock_instrument = MagicMock()
-        from nautilus_trader.model.identifiers import InstrumentId
         mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
 
@@ -387,14 +425,17 @@ class TestFundingRateConverter:
         assert str(records[0].instrument_id) == "BTCUSDT-PERP.BINANCE"
 
     def test_convert_empty_df_returns_empty_list(self):
+        pytest.importorskip("nautilus_trader")
+        from nautilus_trader.model.identifiers import InstrumentId
+
         df = pd.DataFrame(columns=[0, 1, 2])
         mock_instrument = MagicMock()
-        from nautilus_trader.model.identifiers import InstrumentId
         mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
         assert records == []
 
     def test_convert_preserves_interval_metadata(self):
+        pytest.importorskip("nautilus_trader")
         from decimal import Decimal
         from nautilus_trader.model.identifiers import InstrumentId
 
