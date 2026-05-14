@@ -239,25 +239,27 @@ class TestFundingRate:
     """Funding rate is loaded from JSON, shifted by 1 period, and ffilled."""
 
     def _base_setup(self, tmp_path: Path):
-        """Set up a 2-symbol catalog + universe + funding JSON."""
+        """Set up a 2-symbol catalog + universe + funding updates."""
+        from decimal import Decimal
+        from tinohelm.data.catalog import _catalog_for_root
+        from nautilus_trader.model.data import FundingRateUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+
         catalog_path = tmp_path / "catalog"
         catalog_path.mkdir()
         funding_dir = tmp_path / "funding_rates"
         funding_dir.mkdir()
 
-        # 12 1-minute bars starting at T0
         ts_ns = [_T0_NS + i * _1MIN_NS for i in range(12)]
         closes = [float(100 + i) for i in range(12)]
         _write_catalog_bars(catalog_path, "BTCUSDT-PERP", ts_ns, closes)
 
-        # funding_rate at T0 and T0 + 8h (two 8h periods)
-        _8h_ms = 8 * 3600 * 1000
-        t0_ms = _T0_NS // 1_000_000  # convert ns → ms
-        funding_records = [
-            {"funding_time_ms": t0_ms,          "funding_rate": 0.0001},
-            {"funding_time_ms": t0_ms + _8h_ms, "funding_rate": 0.0002},
-        ]
-        _make_funding_json(funding_dir, "BTCUSDT-PERP", funding_records)
+        inst = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        cat = _catalog_for_root(catalog_path)
+        cat.write_data([
+            FundingRateUpdate(inst, Decimal("0.0001"), _T0_NS, _T0_NS, interval=480),
+            FundingRateUpdate(inst, Decimal("0.0002"), _T0_NS + 8 * 3600 * 1_000_000_000, _T0_NS + 8 * 3600 * 1_000_000_000, interval=480),
+        ])
 
         uni_path = _make_universe_csv(tmp_path, [
             {"symbol": "BTCUSDT-PERP", "listing_date": "2020-01-01", "delisting_date": ""},
@@ -265,7 +267,7 @@ class TestFundingRate:
         uni = Universe.load_csv(uni_path)
         return catalog_path, funding_dir, uni, ts_ns
 
-    def test_load_funding_json_returns_frame(self, tmp_path: Path, monkeypatch):
+    def test_load_funding_updates_returns_frame(self, tmp_path: Path, monkeypatch):
         _stub_make_instrument(monkeypatch)
         catalog_path, funding_dir, uni, _ = self._base_setup(tmp_path)
         dl = DataLayer(uni, catalog_root=catalog_path, funding_dir=funding_dir)
@@ -346,7 +348,7 @@ class TestFundingRate:
             for ts in ts_ns
         ]
 
-    def test_missing_funding_json_returns_empty_frame(self, tmp_path: Path, monkeypatch):
+    def test_missing_funding_updates_returns_empty_frame(self, tmp_path: Path, monkeypatch):
         _stub_make_instrument(monkeypatch)
         catalog_path = tmp_path / "catalog"
         catalog_path.mkdir()

@@ -47,6 +47,50 @@ class TestConverterRegistry:
 # 2. KlinesConverter
 # ---------------------------------------------------------------------------
 
+class TestMarkAndIndexPriceConverters:
+    def test_mark_price_convert_returns_mark_price_updates(self):
+        pytest.importorskip("nautilus_trader")
+        from nautilus_trader.model.data import MarkPriceUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+
+        c = get_converter("markPriceKlines")
+        df = pd.DataFrame([
+            [1704067200000, "42000.0", "42100.0", "41900.0", "42050.0", 1704067259999],
+        ])
+        from nautilus_trader.model.objects import Price
+
+        mock_instrument = MagicMock()
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        mock_instrument.make_price.side_effect = lambda v: Price.from_str(str(v))
+
+        records = c.convert(df, mock_instrument)
+
+        assert len(records) == 1
+        assert isinstance(records[0], MarkPriceUpdate)
+        assert records[0].ts_event == 1704067259999 * 1_000_000
+
+    def test_index_price_convert_returns_index_price_updates(self):
+        pytest.importorskip("nautilus_trader")
+        from nautilus_trader.model.data import IndexPriceUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+
+        c = get_converter("indexPriceKlines")
+        df = pd.DataFrame([
+            [1704067200000, "42000.0", "42100.0", "41900.0", "42050.0", 1704067259999],
+        ])
+        from nautilus_trader.model.objects import Price
+
+        mock_instrument = MagicMock()
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
+        mock_instrument.make_price.side_effect = lambda v: Price.from_str(str(v))
+
+        records = c.convert(df, mock_instrument)
+
+        assert len(records) == 1
+        assert isinstance(records[0], IndexPriceUpdate)
+        assert records[0].ts_event == 1704067259999 * 1_000_000
+
+
 class TestKlinesConverter:
     def setup_method(self):
         self.c = get_converter("klines")
@@ -277,83 +321,93 @@ class TestFundingRateConverter:
         with pytest.raises(SchemaError):
             self.c.validate_schema(df)
 
-    def test_convert_returns_binance_funding_rate_objects(self):
-        from tinohelm.data.converters.funding_rate import BinanceFundingRate
+    def test_convert_returns_nt_funding_rate_updates(self):
+        pytest.importorskip("nautilus_trader")
+        from nautilus_trader.model.data import FundingRateUpdate
 
         df = pd.DataFrame([
             [1704067200000, 8, 0.0001],
             [1704096000000, 8, 0.0002],
         ])
         mock_instrument = MagicMock()
-        mock_instrument.id = "BTCUSDT-PERP.BINANCE"
+        from nautilus_trader.model.identifiers import InstrumentId
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
 
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
 
         assert len(records) == 2
-        assert isinstance(records[0], BinanceFundingRate)
-        assert isinstance(records[1], BinanceFundingRate)
+        assert isinstance(records[0], FundingRateUpdate)
+        assert isinstance(records[1], FundingRateUpdate)
 
     def test_convert_funding_rate_value(self):
+        from decimal import Decimal
+        from nautilus_trader.model.identifiers import InstrumentId
+
         df = pd.DataFrame([
             [1704067200000, 8, 0.0001],
         ])
         mock_instrument = MagicMock()
-        mock_instrument.id = "BTCUSDT-PERP.BINANCE"
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
 
-        assert records[0].funding_rate == pytest.approx(0.0001)
+        assert records[0].rate == Decimal("0.0001")
 
     def test_convert_funding_time_ms_preserved(self):
+        from nautilus_trader.model.identifiers import InstrumentId
+
         df = pd.DataFrame([
             [1704067200000, 8, 0.0001],
         ])
         mock_instrument = MagicMock()
-        mock_instrument.id = "BTCUSDT-PERP.BINANCE"
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
 
-        assert records[0].funding_time_ms == 1704067200000
+        assert records[0].ts_event == 1704067200000 * 1_000_000
 
     def test_convert_ts_event_ms_to_ns(self):
         df = pd.DataFrame([
             [1704067200000, 8, 0.0001],
         ])
         mock_instrument = MagicMock()
-        mock_instrument.id = "BTCUSDT-PERP.BINANCE"
+        from nautilus_trader.model.identifiers import InstrumentId
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
 
         assert records[0].ts_event == 1704067200000 * 1_000_000
         assert records[0].ts_init == 1704067200000 * 1_000_000
 
-    def test_convert_symbol_from_kwarg(self):
+    def test_convert_uses_instrument_id_from_instrument(self):
+        pytest.importorskip("nautilus_trader")
+        from nautilus_trader.model.identifiers import InstrumentId
+
         df = pd.DataFrame([[1704067200000, 8, 0.00015]])
         mock_instrument = MagicMock()
-        mock_instrument.id = "BTCUSDT-PERP.BINANCE"
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
-        assert records[0].symbol == "BTCUSDT-PERP"
-
-    def test_convert_symbol_fallback_to_instrument_id(self):
-        df = pd.DataFrame([[1704067200000, 8, 0.0001]])
-        mock_instrument = MagicMock()
-        mock_instrument.id = "BTCUSDT-PERP.BINANCE"
-        # No symbol kwarg → falls back to str(instrument.id)
-        records = self.c.convert(df, mock_instrument)
-        assert records[0].symbol == str(mock_instrument.id)
+        assert str(records[0].instrument_id) == "BTCUSDT-PERP.BINANCE"
 
     def test_convert_empty_df_returns_empty_list(self):
         df = pd.DataFrame(columns=[0, 1, 2])
         mock_instrument = MagicMock()
-        mock_instrument.id = "BTCUSDT-PERP.BINANCE"
+        from nautilus_trader.model.identifiers import InstrumentId
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
         assert records == []
 
-    def test_convert_multiple_rows(self):
+    def test_convert_preserves_interval_metadata(self):
+        from decimal import Decimal
+        from nautilus_trader.model.identifiers import InstrumentId
+
         df = pd.DataFrame([
             [1704067200000, 8, 0.0001],
             [1704096000000, 8, -0.0002],
             [1704124800000, 8, 0.0003],
         ])
         mock_instrument = MagicMock()
-        mock_instrument.id = "X"
+        mock_instrument.id = InstrumentId.from_str("BTCUSDT-PERP.BINANCE")
         records = self.c.convert(df, mock_instrument, symbol="BTCUSDT-PERP")
         assert len(records) == 3
-        assert records[1].funding_rate == pytest.approx(-0.0002)
+        assert records[1].rate == Decimal("-0.0002")
+        assert records[0].interval == 480
+        assert records[1].interval == 480
+        assert records[2].interval == 480

@@ -1,4 +1,4 @@
-"""markPriceKlines CSV → Bar (PriceType.MID, volume=0) converter."""
+"""markPriceKlines CSV → MarkPriceUpdate converter."""
 from __future__ import annotations
 
 import logging
@@ -16,11 +16,7 @@ _COLUMN_NAMES = ["open_time", "open", "high", "low", "close", "close_time"]
 
 @register("markPriceKlines")
 class MarkPriceConverter:
-    """Converts Binance Vision markPriceKlines CSV (no header) to NT Bar objects.
-
-    Volume is set to 0 since mark price bars carry no trading volume.
-    Uses PriceType.MID.
-    """
+    """Converts Binance Vision markPriceKlines CSV to NT MarkPriceUpdate."""
 
     supports_chunked = False
 
@@ -31,13 +27,8 @@ class MarkPriceConverter:
             )
 
     def convert(self, df: pd.DataFrame, instrument: Any, **kwargs) -> list:
-        bar_type = kwargs.get("bar_type")
-        if bar_type is None:
-            raise ValueError("markPriceKlines converter requires 'bar_type' kwarg")
+        from nautilus_trader.model.data import MarkPriceUpdate
 
-        from nautilus_trader.persistence.wranglers import BarDataWrangler
-
-        # Assign column names if integer columns (no-header read)
         if len(df.columns) >= len(_COLUMN_NAMES):
             df = df.iloc[:, : len(_COLUMN_NAMES)].copy()
             df.columns = _COLUMN_NAMES
@@ -46,26 +37,28 @@ class MarkPriceConverter:
             df = df.copy()
             df.columns = cols
 
-        for col in ["open", "high", "low", "close"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["volume"] = 0.0
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
         df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce")
-        df.index = pd.to_datetime(df["close_time"], unit="ms", utc=True)
-        df.index.name = "timestamp"
-        df = df[["open", "high", "low", "close", "volume"]].sort_index()
-        df = df[~df.index.duplicated(keep="last")]
-        df = df.dropna(subset=["open", "high", "low", "close"])
+        df = df[["close", "close_time"]].dropna().sort_values("close_time")
+        df = df.drop_duplicates(subset=["close_time"], keep="last")
 
         if df.empty:
             logger.warning("markPriceKlines DataFrame empty after processing")
             return []
 
-        wrangler = BarDataWrangler(bar_type=bar_type, instrument=instrument)
-        bars = wrangler.process(df)
+        records = [
+            MarkPriceUpdate(
+                instrument_id=instrument.id,
+                value=instrument.make_price(float(row.close)),
+                ts_event=int(row.close_time) * 1_000_000,
+                ts_init=int(row.close_time) * 1_000_000,
+            )
+            for row in df.itertuples(index=False)
+        ]
         logger.debug(
-            "Converted %d markPriceKlines rows to %d Bar objects", len(df), len(bars)
+            "Converted %d markPriceKlines rows to %d MarkPriceUpdate objects", len(df), len(records)
         )
-        return bars
+        return records
 
     def convert_chunk(self, chunk: pd.DataFrame, instrument: Any, **kwargs) -> list:
         return self.convert(chunk, instrument, **kwargs)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
 import logging
 import time
 from dataclasses import dataclass
@@ -877,10 +878,11 @@ class BacktestRunner:
         total_index = 0
         for sym, nt_sym in sym_pairs:
             try:
+                from nautilus_trader.model.data import MarkPriceUpdate
                 mark_updates = await self._load_or_fetch_aux_updates(
                     sym, nt_sym, ivl,
                     source_type="markPriceKlines",
-                    build_fn=self._build_mark_price_updates_from_bars,
+                    build_fn=MarkPriceUpdate,
                 )
                 if mark_updates:
                     engine.add_data(mark_updates, sort=False)
@@ -889,10 +891,11 @@ class BacktestRunner:
                 logger.debug("Failed to load mark price for %s", sym, exc_info=True)
 
             try:
+                from nautilus_trader.model.data import IndexPriceUpdate
                 index_updates = await self._load_or_fetch_aux_updates(
                     sym, nt_sym, ivl,
                     source_type="indexPriceKlines",
-                    build_fn=self._build_index_price_updates_from_bars,
+                    build_fn=IndexPriceUpdate,
                 )
                 if index_updates:
                     engine.add_data(index_updates, sort=False)
@@ -906,6 +909,23 @@ class BacktestRunner:
                 total_mark, total_index,
             )
 
+    def _load_aux_updates(self, symbol: str, data_cls: type) -> list | None:
+        from nautilus_trader.model.identifiers import InstrumentId
+
+        catalog = self._catalog_for_path(self.catalog_path)
+        instrument_id = str(InstrumentId.from_str(_normalize_symbol(symbol)))
+        try:
+            updates = catalog.query(
+                data_cls,
+                identifiers=[instrument_id],
+                start=self.start,
+                end=self.end,
+            )
+        except Exception:
+            logger.warning("Failed to load aux updates for %s %s", symbol, data_cls.__name__, exc_info=True)
+            return None
+        return updates or None
+
     async def _load_or_fetch_aux_updates(
         self,
         sym: str,
@@ -915,69 +935,19 @@ class BacktestRunner:
         source_type: str,
         build_fn,
     ) -> list:
-        """Load aux (mark/index) bars from catalog, fetching via job queue if missing.
+        """Load aux (mark/index) updates directly from the NT catalog."""
+        data_cls = build_fn
+        updates = self._load_aux_updates(sym, data_cls)
+        if updates:
+            return updates
 
-        Parquet for mark/index lives under ``{catalog}/bar/{source_type}/``
-        (see :func:`resolve_catalog_path`). We reuse ``_try_load_bars`` with
-        the correct ``source_type`` so we don't mix klines with mark/index.
-        """
-        bar_type_str = _make_bar_type_str(sym, ivl)
-        bars = self._try_load_bars(bar_type_str, source_type=source_type)
-        if bars:
-            return build_fn(bars, nt_sym)
-
-        # Missing — enqueue fetch job and retry catalog read once it's done.
         if self._redis_client:
             success = await self._submit_and_wait_fetch(sym, ivl, data_type=source_type)
             if success:
                 self._invalidate_catalog_cache_for_source(source_type)
-                bars = self._try_load_bars(bar_type_str, source_type=source_type)
+                updates = self._load_aux_updates(sym, data_cls)
 
-        if not bars:
-            return []
-        return build_fn(bars, nt_sym)
-
-    @staticmethod
-    def _build_mark_price_updates_from_bars(bars: list, nt_symbol: str) -> list:
-        """Convert NT Bar objects (mark price klines) into MarkPriceUpdate objects."""
-        try:
-            from nautilus_trader.model.data import MarkPriceUpdate
-            from nautilus_trader.model.identifiers import InstrumentId
-
-            inst_id = InstrumentId.from_str(nt_symbol)
-            updates = []
-            for b in bars:
-                updates.append(MarkPriceUpdate(
-                    instrument_id=inst_id,
-                    value=b.close,
-                    ts_event=b.ts_event,
-                    ts_init=b.ts_init,
-                ))
-            return updates
-        except Exception:
-            logger.warning("Failed to build MarkPriceUpdate from bars", exc_info=True)
-            return []
-
-    @staticmethod
-    def _build_index_price_updates_from_bars(bars: list, nt_symbol: str) -> list:
-        """Convert NT Bar objects (index price klines) into IndexPriceUpdate objects."""
-        try:
-            from nautilus_trader.model.data import IndexPriceUpdate
-            from nautilus_trader.model.identifiers import InstrumentId
-
-            inst_id = InstrumentId.from_str(nt_symbol)
-            updates = []
-            for b in bars:
-                updates.append(IndexPriceUpdate(
-                    instrument_id=inst_id,
-                    value=b.close,
-                    ts_event=b.ts_event,
-                    ts_init=b.ts_init,
-                ))
-            return updates
-        except Exception:
-            logger.warning("Failed to build IndexPriceUpdate from bars", exc_info=True)
-            return []
+        return updates or []
 
     @staticmethod
     def _build_funding_rate_updates(funding_events: list[dict]) -> list:
@@ -1007,40 +977,96 @@ class BacktestRunner:
             return []
 
     async def _load_funding_rates(self, nt_symbols: list[str]) -> list[dict]:
-        """Load historical funding rates for all symbols via data catalog queue.
+        """Load historical funding rates from NT-native funding/mark updates.
 
-        Submits DataFetchJobs for fundingRate data, waits for completion,
-        then loads from the local JSON cache via CatalogSession.
-
-        Symbols whose cache already covers ``[self.start, self.end]``
-        are skipped entirely — no DataFetchJob row is created.
-
-        Returns a list of funding events sorted by timestamp_ns, ready for the
-        FundingCostTracker actor.
+        FundingRateUpdate provides the settlement rate, while MarkPriceUpdate
+        provides the notional needed by the funding-cost tracker. The events are
+        assembled directly from the catalog so backtests no longer depend on the
+        legacy JSON cache path.
         """
-        from tinohelm.data.catalog import CatalogSession
+        from nautilus_trader.model.data import FundingRateUpdate, MarkPriceUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
         from tinohelm.data.funding_cache_helpers import compute_fetch_start
-        from tinohelm.data.funding_cache import _load_cache
         from tinohelm.data.instruments import fetch_funding_info, strip_to_binance_api_symbol
 
-        session = CatalogSession(self.catalog_path, storage=self._storage)
+        catalog = self._catalog_for_path(self.catalog_path)
+        funding_info = fetch_funding_info()
+        nt_symbols_by_symbol: dict[str, str] = dict(zip(self.symbols, nt_symbols))
+        interval_minutes_by_symbol: dict[str, int] = {}
+
+        def _instrument_id(symbol: str) -> str:
+            return str(InstrumentId.from_str(_normalize_symbol(symbol)))
+
+        def _query_updates(symbol: str, data_cls: type, *, start: datetime | None, end: datetime | None) -> list:
+            try:
+                return catalog.query(
+                    data_cls,
+                    identifiers=[_instrument_id(symbol)],
+                    start=start,
+                    end=end,
+                ) or []
+            except Exception:
+                logger.warning(
+                    "Failed to load %s updates for %s",
+                    data_cls.__name__, symbol,
+                    exc_info=True,
+                )
+                return []
+
+        def _price_to_float(value: Any) -> float:
+            if hasattr(value, "as_double"):
+                return float(value.as_double())
+            return float(value)
+
+        def _timestamps_ms(rows: list) -> list[int]:
+            out: list[int] = []
+            for row in rows:
+                ts_event = getattr(row, "ts_event", None)
+                if ts_event is None:
+                    continue
+                out.append(int(ts_event) // 1_000_000)
+            return out
+
+        def _build_rates(symbol: str, start: datetime | None, end: datetime | None) -> list[dict]:
+            funding_rows = sorted(
+                _query_updates(symbol, FundingRateUpdate, start=start, end=end),
+                key=lambda row: int(getattr(row, "ts_event", 0)),
+            )
+            mark_start = start - timedelta(minutes=interval_minutes_by_symbol[symbol]) if start is not None else None
+            mark_rows = sorted(
+                _query_updates(symbol, MarkPriceUpdate, start=mark_start, end=end),
+                key=lambda row: int(getattr(row, "ts_event", 0)),
+            )
+            mark_times = [int(getattr(row, "ts_event", 0)) for row in mark_rows]
+            mark_values = [_price_to_float(getattr(row, "value")) for row in mark_rows]
+            rates: list[dict] = []
+            for row in funding_rows:
+                ts_ns = int(getattr(row, "ts_event", 0))
+                mark_idx = bisect_right(mark_times, ts_ns) - 1
+                if mark_idx < 0:
+                    continue
+                mark_price = mark_values[mark_idx]
+                if not mark_price:
+                    continue
+                rates.append({
+                    "funding_time_ms": ts_ns // 1_000_000,
+                    "funding_rate": float(getattr(row, "rate")),
+                    "mark_price": mark_price,
+                })
+            return rates
 
         if self._redis_client and self.start and self.end:
             for sym in self.symbols:
-                cached = _load_cache(sym)
-                cached_times = [
-                    int(r["funding_time_ms"])
-                    for r in cached
-                    if isinstance(r, dict)
-                    and isinstance(r.get("funding_time_ms"), (int, float))
-                ]
+                api_sym = strip_to_binance_api_symbol(sym)
+                interval_minutes_by_symbol[sym] = funding_info.get(api_sym, 8) * 60
+                cached = _query_updates(sym, FundingRateUpdate, start=self.start, end=self.end)
                 fetch_start = compute_fetch_start(
-                    cached_times, start=self.start, end=self.end,
+                    _timestamps_ms(cached), start=self.start, end=self.end,
                 )
                 if fetch_start is None:
                     logger.info(
-                        "Funding rate cache already covers %s [%s..%s], "
-                        "skipping fetch job", sym, self.start, self.end,
+                        "Funding updates already cover %s [%s..%s], skipping fetch job",
+                        sym, self.start, self.end,
                     )
                     continue
                 self._report_progress(5, message=f"Fetching funding rates: {sym}...")
@@ -1048,29 +1074,20 @@ class BacktestRunner:
                     sym, None, data_type="fundingRate",
                     start_override=fetch_start,
                 )
-
-        funding_info = fetch_funding_info()
+                self._invalidate_catalog_cache_for_source("fundingRate")
+                catalog = self._catalog_for_path(self.catalog_path)
+        else:
+            for sym in self.symbols:
+                api_sym = strip_to_binance_api_symbol(sym)
+                interval_minutes_by_symbol[sym] = funding_info.get(api_sym, 8) * 60
 
         rates_by_symbol: dict[str, list[dict]] = {}
-        nt_symbols_by_symbol: dict[str, str] = dict(zip(self.symbols, nt_symbols))
-        interval_minutes_by_symbol: dict[str, int] = {}
         for sym in self.symbols:
-            api_sym = strip_to_binance_api_symbol(sym)
-            interval_minutes_by_symbol[sym] = funding_info.get(api_sym, 8) * 60
-            try:
-                rates_by_symbol[sym] = session.load_funding_rates(
-                    symbol=sym, start=self.start, end=self.end,
-                )
-                logger.info(
-                    "Loaded %d funding rate events for %s",
-                    len(rates_by_symbol[sym]), sym,
-                )
-            except Exception:
-                rates_by_symbol[sym] = []
-                logger.warning(
-                    "Failed to load funding rates for %s, skipping", sym,
-                    exc_info=True,
-                )
+            rates_by_symbol[sym] = _build_rates(sym, self.start, self.end)
+            logger.info(
+                "Loaded %d funding rate events for %s",
+                len(rates_by_symbol[sym]), sym,
+            )
 
         return assemble_funding_events(
             rates_by_symbol, nt_symbols_by_symbol, interval_minutes_by_symbol,

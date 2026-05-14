@@ -751,13 +751,6 @@ class BinanceVisionPipeline:
             data_type, symbol, interval, instrument,
         )
         cleanup_guard = self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
-        funding_txn = None
-        if data_type == "fundingRate":
-            from tinohelm.data.catalog import CatalogSession
-
-            _fs = CatalogSession(self.catalog_path, storage=self._storage)
-            funding_txn = _fs.create_funding_txn(symbol)
-            self._active_funding_txn = funding_txn
 
         # 3. Pipelined download → convert (overlap via asyncio.Queue)
         dl_concurrency = self.downloader.concurrency
@@ -873,16 +866,11 @@ class BinanceVisionPipeline:
             if rollback_done:
                 return
             rollback_done = True
-            try:
-                self._rollback_failed_ingest(
-                    cleanup_guard,
-                    all_file_paths,
-                    preexisting_output_paths,
-                )
-            finally:
-                if funding_txn is not None:
-                    funding_txn.restore()
-                self._active_funding_txn = None
+            self._rollback_failed_ingest(
+                cleanup_guard,
+                all_file_paths,
+                preexisting_output_paths,
+            )
 
         try:
             await _progress(
@@ -1179,13 +1167,6 @@ class BinanceVisionPipeline:
             await _progress(100, "Failed")
             logger.exception("Failed to update DB catalog")
             raise
-
-        if funding_txn is not None:
-            try:
-                funding_txn.flush_json()
-            except Exception:
-                logger.warning("Failed to update legacy funding JSON cache for %s", symbol, exc_info=True)
-            self._active_funding_txn = None
 
         if cleanup_guard is not None:
             cleanup_guard.discard(best_effort=True)
@@ -1541,6 +1522,32 @@ class BinanceVisionPipeline:
         if not objects:
             return []
 
+        if data_type in {"markPriceKlines", "indexPriceKlines", "fundingRate"}:
+            from tinohelm.data.catalog import _catalog_for_root, _iter_catalog_files, ensure_catalog_dirs
+
+            catalog_path = Path(self.catalog_path)
+            if getattr(self._storage, "provider", "local") == "local":
+                ensure_catalog_dirs(catalog_path)
+            catalog = _catalog_for_root(catalog_path, self._storage)
+            update_dir_name = {
+                "markPriceKlines": "mark_price_update",
+                "indexPriceKlines": "index_price_update",
+                "fundingRate": "funding_rate_update",
+            }[data_type]
+            update_dir = catalog_path / "data" / update_dir_name
+            existing = {
+                str(p)
+                for p in _iter_catalog_files(self._storage, update_dir, recursive=True)
+            }
+            catalog.write_data(objects, skip_disjoint_check=True)
+            current = sorted({str(p) for p in _iter_catalog_files(self._storage, update_dir, recursive=True)})
+            written = sorted(set(current) - existing)
+            if objects and not current:
+                raise RuntimeError(
+                    f"{objects[0].__class__.__name__} write for {symbol} produced no parquet files under {update_dir}"
+                )
+            return written or current
+
         category = resolve_write_category(data_type)
 
         if category == "bar":
@@ -1576,13 +1583,22 @@ class BinanceVisionPipeline:
             return paths
 
         elif category == "funding_rate":
-            txn = getattr(self, "_active_funding_txn", None)
-            if txn is None:
+            from tinohelm.data.catalog import _catalog_for_root, _iter_catalog_files, ensure_catalog_dirs
+
+            catalog_path = Path(self.catalog_path)
+            if getattr(self._storage, "provider", "local") == "local":
+                ensure_catalog_dirs(catalog_path)
+            catalog = _catalog_for_root(catalog_path, self._storage)
+            funding_dir = catalog_path / "data" / "funding_rate_update"
+            existing = {str(p) for p in _iter_catalog_files(self._storage, funding_dir, recursive=False)}
+            catalog.write_data(objects, skip_disjoint_check=True)
+            current = sorted({str(p) for p in _iter_catalog_files(self._storage, funding_dir, recursive=False)})
+            written = sorted(set(current) - existing)
+            if objects and not current:
                 raise RuntimeError(
-                    "funding_rate write requires an active FundingRateTxn"
+                    f"FundingRateUpdate write for {symbol} produced no parquet files under {funding_dir}"
                 )
-            parquet_path = txn.write_parquet(objects)
-            return [str(parquet_path)]
+            return written or current
 
         elif category == "metrics":
             from tinohelm.data.catalog import write_metrics_parquet
@@ -1766,9 +1782,16 @@ class BinanceVisionPipeline:
             )
             try:
                 if self._storage.exists(target_path):
-                    backup_path = rollback_prefix / target_path.name
-                    self._storage.copy_path(target_path, backup_path)
-                    guard.add_backup(target_path, backup_path)
+                    if target_path.suffix == ".parquet":
+                        backup_path = rollback_prefix / target_path.name
+                        self._storage.copy_path(target_path, backup_path)
+                        guard.add_backup(target_path, backup_path)
+                    else:
+                        backup_dir = rollback_prefix / target_path.name
+                        for original_path in self._storage.iter_files(target_path, suffix=".parquet", recursive=False):
+                            backup_path = backup_dir / original_path.path.name
+                            self._storage.copy_path(original_path.path, backup_path)
+                            guard.add_backup(original_path.path, backup_path)
             except FileNotFoundError:
                 pass
             except Exception:
@@ -2048,9 +2071,9 @@ class BinanceVisionPipeline:
 
             return book_depth_parquet_path(symbol, self.catalog_path)
         if category == "funding_rate":
-            from tinohelm.data.catalog import funding_rate_parquet_path
+            from tinohelm.data.catalog import funding_rate_update_dir
 
-            return funding_rate_parquet_path(symbol, self.catalog_path)
+            return funding_rate_update_dir(symbol, self.catalog_path)
 
         effective_source = source_type or data_type
         resolved = resolve_catalog_path(self.catalog_path, effective_source)

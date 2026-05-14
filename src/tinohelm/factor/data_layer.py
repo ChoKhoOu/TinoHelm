@@ -70,6 +70,7 @@ from tinohelm.core.paths import paths
 from tinohelm.data.storage import CatalogStorageProvider, StorageObject, is_remote_storage
 from tinohelm.factor.types import DataRequest, EventRequest, Panel
 from tinohelm.factor.universe import Universe
+from tinohelm.strategy.loader_helpers import normalize_symbol as _normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -2463,22 +2464,11 @@ class DataLayer:
         start: datetime | None,
         end: datetime | None,
     ) -> pl.DataFrame:
-        """Read funding-rate data for a symbol and return a 8h-frequency frame.
-
-        Priority
-        --------
-        1. Parquet at ``{catalog_root}/data/funding_rate/{symbol.lower()}.parquet``
-           (written by pipeline after s13 upgrade).
-        2. JSON at ``{funding_dir}/{symbol.lower()}.json``
-           (legacy path — present on deployments that have not yet migrated).
-
-        Both paths decode to the same shape: a 2-column polars frame
-        ``[ts, value]`` (UTC-naive ``Datetime("ns")`` and ``Float64``).
-        """
+        """Read funding-rate data for a symbol from NT-native funding updates."""
         frame = self._load_funding_rate_parquet(symbol, start, end)
         if frame is not None:
             return frame
-        return self._load_funding_rate_json(symbol, start, end)
+        return _empty_series_frame()
 
     def _load_funding_rate_parquet(
         self,
@@ -2486,29 +2476,32 @@ class DataLayer:
         start: datetime | None,
         end: datetime | None,
     ) -> "pl.DataFrame | None":
-        """Try to load funding rate from Parquet; return None if not available."""
-        from tinohelm.data.catalog import CatalogSession
+        """Try to load funding-rate updates from NT-native parquet."""
+        from decimal import Decimal
+        from nautilus_trader.model.data import FundingRateUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from tinohelm.data.catalog import _catalog_for_root
 
-        session = CatalogSession(self._catalog_root, storage=self._storage)
-        parquet_path = session.funding_rate_parquet_path(symbol)
+        catalog = _catalog_for_root(self._catalog_root, self._storage)
         try:
-            files = list(self._storage.iter_files(parquet_path, suffix=".parquet"))
-            if not files:
-                return None
-            frame = _read_parquet_frame(self._storage, files[0], columns=["ts_event", "funding_rate"])
+            rows = catalog.query(
+                FundingRateUpdate,
+                identifiers=[str(InstrumentId.from_str(_normalize_symbol(symbol)))],
+                start=start,
+                end=end,
+            )
         except Exception:
             logger.warning(
-                "Failed to read funding-rate Parquet for %s", symbol, exc_info=True
+                "Failed to read funding-rate updates for %s", symbol, exc_info=True
             )
             return None
 
-        if frame.is_empty():
+        if not rows:
             return _empty_series_frame()
 
-        timestamps = [_ns_to_datetime(int(ts_ns)) for ts_ns in frame["ts_event"]]
-        values = [float(v) for v in frame["funding_rate"]]
+        timestamps = [_ns_to_datetime(int(row.ts_event)) for row in rows]
+        values = [float(row.rate if not isinstance(row.rate, Decimal) else row.rate) for row in rows]
         frame = _build_series_frame(timestamps, values)
-
         return _filter_time_range(frame, start, end)
 
     def _load_funding_rate_json(

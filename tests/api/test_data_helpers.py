@@ -6,7 +6,7 @@ storage-file deletion helper used by DELETE /api/data/catalog/{id}.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,13 +18,21 @@ from fastapi import HTTPException
 
 from tinohelm.api.routes.data import (
     CompactRequest,
+    ConsolidateByPeriodRequest,
     DataFetchBatchRequest,
+    DeleteRangeRequest,
+    ResetFileNamesRequest,
     _fetch_batch_intervals,
     _split_fetch_date_ranges,
     _run_compact,
     cancel_data_fetch_job,
+    consolidate_by_period,
     delete_catalog_entry,
-    scan_data_catalog,
+    delete_range,
+    list_data_catalog,
+    list_data_types,
+    reset_file_names,
+    router,
     trigger_compact,
     trigger_data_fetch_batch,
     validate_data,
@@ -373,6 +381,62 @@ class TestFetchBatchSplitting:
         assert result["intervals"] == []
         assert result["jobs"][0]["db_interval"] == "tick"
         assert [job.interval for job in db.jobs] == [None]
+        enqueue.assert_awaited_once_with(rds, "job-1")
+
+    def test_fetch_batch_accepts_canonical_quote_tick_type(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        db = _FetchBatchDb()
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=[],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 1),
+            data_type="quote_tick",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(
+            body,
+            db,
+            rds,
+            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+        ))
+
+        assert result["data_type"] == "quote_tick"
+        assert result["jobs"][0]["data_type"] == "quote_tick"
+        assert db.jobs[0].data_type == "bookTicker"
+        assert db.jobs[0].interval is None
+        enqueue.assert_awaited_once_with(rds, "job-1")
+
+    def test_fetch_batch_accepts_canonical_mark_price_type(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        db = _FetchBatchDb()
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=["1m"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 1),
+            data_type="mark_price",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(
+            body,
+            db,
+            rds,
+            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+        ))
+
+        assert result["data_type"] == "mark_price"
+        assert result["jobs"][0]["data_type"] == "mark_price"
+        assert db.jobs[0].data_type == "markPriceKlines"
+        assert db.jobs[0].interval == "1m"
         enqueue.assert_awaited_once_with(rds, "job-1")
 
 
@@ -1216,6 +1280,91 @@ class TestSourceAwareBarMaintenance:
 # (::TestDeleteStorage*) — route now delegates to CatalogSession.delete_storage.
 
 
+class TestNtNativeMaintenanceRoutes:
+    def test_reset_file_names_calls_catalog_reset(self, tmp_path: Path, monkeypatch):
+        calls = []
+
+        class FakeCatalog:
+            def reset_all_file_names(self):
+                calls.append(("reset_all_file_names",))
+
+        monkeypatch.setattr("tinohelm.api.routes.data._catalog_for_root", lambda catalog_root, storage=None: FakeCatalog())
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings=None: tmp_path)
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: SimpleNamespace(catalog_root=tmp_path))
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        result = asyncio.run(reset_file_names(
+            ResetFileNamesRequest(data_type="funding_rate"),
+            settings,
+        ))
+
+        assert result == {
+            "status": "ok",
+            "verb": "reset-file-names",
+            "data_type": "funding_rate",
+            "symbol": None,
+        }
+        assert calls == [("reset_all_file_names",)]
+
+    def test_consolidate_by_period_calls_catalog_verb_with_optional_bounds(self, tmp_path: Path, monkeypatch):
+        calls = []
+
+        class FakeCatalog:
+            def consolidate_catalog_by_period(self, *, period, start=None, end=None):
+                calls.append((period, start, end))
+
+        monkeypatch.setattr("tinohelm.api.routes.data._catalog_for_root", lambda catalog_root, storage=None: FakeCatalog())
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings=None: tmp_path)
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: SimpleNamespace(catalog_root=tmp_path))
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        result = asyncio.run(consolidate_by_period(
+            ConsolidateByPeriodRequest(data_type="bar", symbol="BTCUSDT-PERP", period="1d"),
+            settings,
+        ))
+
+        assert result == {
+            "status": "ok",
+            "verb": "consolidate-by-period",
+            "data_type": "bar",
+            "symbol": "BTCUSDT-PERP",
+            "period": "1d",
+        }
+        assert calls == [(timedelta(days=1), None, None)]
+
+    def test_delete_range_calls_catalog_verb_with_start_and_end(self, tmp_path: Path, monkeypatch):
+        calls = []
+
+        class FakeCatalog:
+            def delete_catalog_range(self, *, start=None, end=None):
+                calls.append((start, end))
+
+        monkeypatch.setattr("tinohelm.api.routes.data._catalog_for_root", lambda catalog_root, storage=None: FakeCatalog())
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings=None: tmp_path)
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: SimpleNamespace(catalog_root=tmp_path))
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        result = asyncio.run(delete_range(
+            DeleteRangeRequest(
+                data_type="funding_rate",
+                symbol="BTCUSDT-PERP",
+                start="2024-01-01T00:00:00Z",
+                end="2024-01-02T00:00:00Z",
+            ),
+            settings,
+        ))
+
+        assert result == {
+            "status": "ok",
+            "verb": "delete-range",
+            "data_type": "funding_rate",
+            "symbol": "BTCUSDT-PERP",
+            "start": "2024-01-01T00:00:00Z",
+            "end": "2024-01-02T00:00:00Z",
+        }
+        assert calls == [("2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")]
+
+
 class TestDeleteCatalogEntry:
     async def test_delete_waits_on_legacy_default_catalog_lock(self, tmp_path: Path, monkeypatch):
         from tinohelm.data.catalog import CatalogSession
@@ -1373,19 +1522,22 @@ class TestDeleteCatalogEntry:
         assert calls == [(str(tmp_path), "BTCUSDT-PERP", row_data_type, row_interval, None)]
 
 
-class TestScanDataCatalog:
-    @staticmethod
-    def _empty_db(added_rows: list):
-        execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
-        return SimpleNamespace(
-            execute=AsyncMock(return_value=execute_result),
-            add=MagicMock(side_effect=added_rows.append),
-            commit=AsyncMock(),
-        )
+class TestMaintenanceApiSurface:
+    def test_scan_route_removed_from_router(self):
+        paths = {(route.path, tuple(sorted(route.methods or []))) for route in router.routes}
+        assert ("/api/data/scan", ("POST",)) not in paths
 
-    async def test_scan_creates_source_aware_book_ticker_quote_tick(self, tmp_path: Path):
+    def test_nt_native_maintenance_routes_exist(self):
+        paths = {(route.path, tuple(sorted(route.methods or []))) for route in router.routes}
+        assert ("/api/data/reset-file-names", ("POST",)) in paths
+        assert ("/api/data/consolidate", ("POST",)) in paths
+        assert ("/api/data/consolidate-by-period", ("POST",)) in paths
+        assert ("/api/data/delete-range", ("POST",)) in paths
+
+
+class TestCatalogApiFacade:
+    async def test_list_data_catalog_returns_live_summary_without_db_index(self, tmp_path: Path):
         from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.db.models import DataCatalog
         from tinohelm.strategy.loader import normalize_symbol
 
         symbol = "BTCUSDT-PERP"
@@ -1396,280 +1548,72 @@ class TestScanDataCatalog:
             quote_dir / "quotes.parquet"
         )
 
-        added_rows = []
-        execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
-        db = SimpleNamespace(
-            execute=AsyncMock(return_value=execute_result),
-            add=MagicMock(side_effect=added_rows.append),
-            commit=AsyncMock(),
-        )
+        db = SimpleNamespace(execute=AsyncMock(side_effect=AssertionError("live summary must not query data_catalog")))
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
 
-        result = await scan_data_catalog(db=db, settings=settings)
+        rows = await list_data_catalog(settings=settings)
 
-        assert result["created"] == 1
-        assert len(added_rows) == 1
-        row = added_rows[0]
-        assert isinstance(row, DataCatalog)
+        assert len(rows) == 1
+        row = rows[0]
         assert row.symbol == symbol
         assert row.data_type == "quote_tick"
         assert row.interval == "tick"
-        assert row.source_type == "bookTicker"
         assert row.record_count == 1
         assert row.start_date == date(2025, 1, 1)
         assert row.end_date == date(2025, 1, 1)
+        assert row.file_path == str(resolve_catalog_path(tmp_path, "bookTicker"))
+        db.execute.assert_not_awaited()
 
-    async def test_scan_reads_remote_source_aware_quote_tick_without_local_dirs(self, tmp_path: Path, monkeypatch):
-        from tinohelm.db.models import DataCatalog
-
-        class _RemoteScanStorage:
-            provider = "s3"
-
-            def __init__(self, catalog_root: Path, objects: dict[str, bytes]) -> None:
-                self.catalog_root = catalog_root
-                self.objects = objects
-
-            def iter_files(self, prefix: Path | str, suffix: str = "", recursive: bool = True):
-                root = Path(prefix)
-                prefix_rel = root.relative_to(self.catalog_root).as_posix().rstrip("/")
-                for key, payload in sorted(self.objects.items()):
-                    if not key.startswith(prefix_rel + "/"):
-                        continue
-                    rel = key[len(prefix_rel) + 1 :]
-                    if suffix and not rel.endswith(suffix):
-                        continue
-                    obj = SimpleNamespace(
-                        key=key,
-                        path=self.catalog_root / key,
-                        size=len(payload),
-                        last_modified=None,
-                    )
-                    yield obj
-
-            def open_input_file(self, path_or_object):
-                key = getattr(path_or_object, "key", None)
-                if key is None:
-                    key = str(Path(path_or_object).relative_to(self.catalog_root))
-                return BytesIO(self.objects[key])
-
-        source_root = tmp_path / "quotes" / "bookTicker"
-        rel_dir = "quotes/bookTicker/data/quote_tick/BTCUSDT-PERP.BINANCE"
-        tmp_file = tmp_path / "quotes.parquet"
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(tmp_file)
-        objects = {f"{rel_dir}/quotes.parquet": tmp_file.read_bytes()}
-        storage = _RemoteScanStorage(tmp_path, objects)
-
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **kwargs: storage)
-        added_rows = []
-        db = self._empty_db(added_rows)
-        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
-
-        result = await scan_data_catalog(db=db, settings=settings)
-
-        assert result["created"] == 1
-        assert len(added_rows) == 1
-        row = added_rows[0]
-        assert isinstance(row, DataCatalog)
-        assert row.symbol == "BTCUSDT-PERP"
-        assert row.data_type == "quote_tick"
-        assert row.interval == "tick"
-        assert row.source_type == "bookTicker"
-        assert row.record_count == 1
-        assert row.start_date == date(2025, 1, 1)
-        assert row.end_date == date(2025, 1, 1)
-        assert row.file_path == str(source_root)
-        assert not (tmp_path / "quotes" / "bookTicker" / "data").exists()
-
-    async def test_scan_combines_source_aware_and_legacy_book_ticker_stats(self, tmp_path: Path):
+    async def test_list_data_catalog_filters_out_non_phase1_types(self, tmp_path: Path):
+        from tinohelm.data.catalog import metrics_parquet_path
         from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.strategy.loader import normalize_symbol
+        from tinohelm.strategy.loader_helpers import make_bar_type_str
 
         symbol = "BTCUSDT-PERP"
         nt_sym = normalize_symbol(symbol)
-        source_root = resolve_catalog_path(tmp_path, "bookTicker")
-        source_dir = source_root / "data" / "quote_tick" / nt_sym
-        legacy_dir = tmp_path / "data" / "quote_tick" / nt_sym
-        source_dir.mkdir(parents=True)
-        legacy_dir.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}).write_parquet(
-            source_dir / "source.parquet"
-        )
-        pl.DataFrame({"ts_event": [1_735_862_400_000_000_000, 1_735_948_800_000_000_000, 1_736_035_200_000_000_000]}).write_parquet(
-            legacy_dir / "legacy.parquet"
-        )
-        expected_size = (source_dir / "source.parquet").stat().st_size + (legacy_dir / "legacy.parquet").stat().st_size
-        added_rows = []
+
+        quote_dir = resolve_catalog_path(tmp_path, "bookTicker") / "data" / "quote_tick" / nt_sym
+        quote_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(quote_dir / "quotes.parquet")
+
+        premium_dir = resolve_catalog_path(tmp_path, "premiumIndexKlines") / "data" / "bar" / make_bar_type_str(symbol, "1m")
+        premium_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(premium_dir / "bars.parquet")
+
+        metrics_path = metrics_parquet_path(symbol, tmp_path)
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(metrics_path)
+
+        db = SimpleNamespace(execute=AsyncMock(side_effect=AssertionError("live summary must not query data_catalog")))
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
 
-        result = await scan_data_catalog(db=self._empty_db(added_rows), settings=settings)
+        rows = await list_data_catalog(settings=settings)
 
-        assert result["created"] == 1
-        assert len(added_rows) == 1
-        row = added_rows[0]
-        assert row.symbol == symbol
-        assert row.data_type == "quote_tick"
-        assert row.interval == "tick"
-        assert row.source_type == "bookTicker"
-        assert row.record_count == 5
-        assert row.size_bytes == expected_size
-        assert row.start_date == date(2025, 1, 1)
-        assert row.end_date == date(2025, 1, 5)
-        assert row.file_path == str(source_root)
+        assert [row.data_type for row in rows] == ["quote_tick"]
 
-    async def test_scan_book_ticker_unknown_legacy_count_clears_existing_record_count(self, tmp_path: Path):
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.db.models import DataCatalog
-        from tinohelm.strategy.loader import normalize_symbol
+    def test_list_data_types_returns_static_phase1_capability_list(self):
+        import asyncio
 
-        symbol = "BTCUSDT-PERP"
-        nt_sym = normalize_symbol(symbol)
-        source_root = resolve_catalog_path(tmp_path, "bookTicker")
-        source_dir = source_root / "data" / "quote_tick" / nt_sym
-        legacy_dir = tmp_path / "data" / "quote_tick" / nt_sym
-        source_dir.mkdir(parents=True)
-        legacy_dir.mkdir(parents=True)
-        source_path = source_dir / "source.parquet"
-        legacy_path = legacy_dir / "legacy.parquet"
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}).write_parquet(
-            source_path
-        )
-        legacy_path.write_bytes(b"not parquet")
-        legacy_mtime = datetime(2025, 1, 5, tzinfo=timezone.utc).timestamp()
-        legacy_path.touch()
-        import os
+        result = asyncio.run(list_data_types())
+        by_type = {item["data_type"]: item for item in result}
 
-        os.utime(legacy_path, (legacy_mtime, legacy_mtime))
-        expected_size = source_path.stat().st_size + legacy_path.stat().st_size
-        existing_row = DataCatalog(
-            symbol=symbol,
-            data_type="quote_tick",
-            interval="tick",
-            start_date=date(2025, 1, 2),
-            end_date=date(2025, 1, 2),
-            file_path=str(tmp_path),
-            size_bytes=1,
-            record_count=99,
-            source_type="bookTicker",
-        )
-        db = SimpleNamespace(
-            execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: existing_row)),
-            add=MagicMock(),
-            commit=AsyncMock(),
-        )
-        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
-
-        result = await scan_data_catalog(db=db, settings=settings)
-
-        assert result["updated"] == 1
-        db.add.assert_not_called()
-        assert existing_row.record_count is None
-        assert existing_row.size_bytes == expected_size
-        assert existing_row.start_date == date(2025, 1, 1)
-        assert existing_row.end_date == date(2025, 1, 5)
-        assert existing_row.file_path == str(source_root)
-        assert existing_row.source_type == "bookTicker"
-
-    async def test_scan_combines_source_aware_and_legacy_agg_trades_stats(self, tmp_path: Path):
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.strategy.loader import normalize_symbol
-
-        symbol = "BTCUSDT-PERP"
-        nt_sym = normalize_symbol(symbol)
-        source_root = resolve_catalog_path(tmp_path, "aggTrades")
-        source_dir = source_root / "data" / "trade_tick" / nt_sym
-        legacy_dir = tmp_path / "data" / "trade_tick" / nt_sym
-        source_dir.mkdir(parents=True)
-        legacy_dir.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}).write_parquet(
-            source_dir / "source.parquet"
-        )
-        pl.DataFrame({"ts_event": [1_735_862_400_000_000_000, 1_735_948_800_000_000_000, 1_736_035_200_000_000_000]}).write_parquet(
-            legacy_dir / "legacy.parquet"
-        )
-        expected_size = (source_dir / "source.parquet").stat().st_size + (legacy_dir / "legacy.parquet").stat().st_size
-        added_rows = []
-        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
-
-        result = await scan_data_catalog(db=self._empty_db(added_rows), settings=settings)
-
-        assert result["created"] == 1
-        assert len(added_rows) == 1
-        row = added_rows[0]
-        assert row.symbol == symbol
-        assert row.data_type == "trade_tick"
-        assert row.interval == "tick"
-        assert row.source_type == "aggTrades"
-        assert row.record_count == 5
-        assert row.size_bytes == expected_size
-        assert row.start_date == date(2025, 1, 1)
-        assert row.end_date == date(2025, 1, 5)
-        assert row.file_path == str(source_root)
-
-    async def test_scan_keeps_source_aware_trades_separate_from_legacy_agg_trades(self, tmp_path: Path):
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.strategy.loader import normalize_symbol
-
-        symbol = "BTCUSDT-PERP"
-        nt_sym = normalize_symbol(symbol)
-        trades_root = resolve_catalog_path(tmp_path, "trades")
-        trades_dir = trades_root / "data" / "trade_tick" / nt_sym
-        legacy_dir = tmp_path / "data" / "trade_tick" / nt_sym
-        trades_dir.mkdir(parents=True)
-        legacy_dir.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}).write_parquet(
-            trades_dir / "trades.parquet"
-        )
-        pl.DataFrame({"ts_event": [1_735_862_400_000_000_000, 1_735_948_800_000_000_000, 1_736_035_200_000_000_000]}).write_parquet(
-            legacy_dir / "legacy.parquet"
-        )
-        added_rows = []
-        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
-
-        result = await scan_data_catalog(db=self._empty_db(added_rows), settings=settings)
-
-        assert result["created"] == 2
-        rows = {(row.source_type, row.file_path): row for row in added_rows}
-        trades_row = rows[("trades", str(trades_root))]
-        agg_row = rows[("aggTrades", str(tmp_path))]
-        assert trades_row.record_count == 2
-        assert agg_row.record_count == 3
-
-    async def test_scan_non_default_tick_does_not_adopt_null_default_row(self, tmp_path: Path):
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.db.models import DataCatalog
-        from tinohelm.strategy.loader import normalize_symbol
-
-        symbol = "BTCUSDT-PERP"
-        nt_sym = normalize_symbol(symbol)
-        trades_root = resolve_catalog_path(tmp_path, "trades")
-        trades_dir = trades_root / "data" / "trade_tick" / nt_sym
-        trades_dir.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(trades_dir / "trades.parquet")
-        legacy_row = DataCatalog(
-            symbol=symbol,
-            data_type="trade_tick",
-            interval="tick",
-            start_date=date(2025, 1, 1),
-            end_date=date(2025, 1, 1),
-            file_path=str(tmp_path),
-            size_bytes=1,
-            record_count=1,
-            source_type=None,
-        )
-        added_rows = []
-
-        async def execute(stmt):
-            text = str(stmt)
-            if "source_type IS NULL" in text:
-                return SimpleNamespace(scalar_one_or_none=lambda: legacy_row)
-            return SimpleNamespace(scalar_one_or_none=lambda: None)
-
-        db = SimpleNamespace(execute=AsyncMock(side_effect=execute), add=MagicMock(side_effect=added_rows.append), commit=AsyncMock())
-        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
-
-        result = await scan_data_catalog(db=db, settings=settings)
-
-        assert result["created"] == 1
-        assert result["updated"] == 0
-        assert legacy_row.source_type is None
-        assert added_rows[0].source_type == "trades"
+        assert list(by_type) == [
+            "bar",
+            "trade_tick",
+            "quote_tick",
+            "mark_price",
+            "index_price",
+            "funding_rate",
+        ]
+        assert by_type["bar"]["upstream_data_type"] == "klines"
+        assert by_type["trade_tick"]["upstream_data_type"] == "trades"
+        assert by_type["quote_tick"]["upstream_data_type"] == "bookTicker"
+        assert by_type["mark_price"]["upstream_data_type"] == "markPriceKlines"
+        assert by_type["index_price"]["upstream_data_type"] == "indexPriceKlines"
+        assert by_type["funding_rate"]["upstream_data_type"] == "fundingRate"
+        assert by_type["bar"]["interval_required"] is True
+        assert by_type["trade_tick"]["interval_required"] is False
+        assert by_type["quote_tick"]["interval_required"] is False
+        assert by_type["funding_rate"]["interval_required"] is False
+        assert all(item["implemented"] is True for item in result)
