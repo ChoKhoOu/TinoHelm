@@ -1721,6 +1721,33 @@ class TestCatalogApiFacade:
 
         assert [row.data_type for row in rows] == ["quote_tick"]
 
+    async def test_list_data_catalog_keeps_legacy_aggtrades_visible(self, tmp_path: Path, monkeypatch):
+        from tinohelm.data.catalog_helpers import resolve_catalog_path
+        from tinohelm.strategy.loader import normalize_symbol
+
+        symbol = "BTCUSDT-PERP"
+        nt_sym = normalize_symbol(symbol)
+        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_sym
+        trade_dir.mkdir(parents=True)
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [1.0], "size": [1.0]}).write_parquet(
+            trade_dir / "trades.parquet"
+        )
+
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data.select",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("live summary must not query data_catalog")
+            ),
+        )
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+
+        rows = await list_data_catalog(settings=settings)
+
+        assert len(rows) == 1
+        assert rows[0].id == "BTCUSDT-PERP|trade_tick|tick|aggTrades"
+        assert rows[0].data_type == "trade_tick"
+        assert rows[0].source_type == "aggTrades"
+
     @pytest.mark.parametrize(
         ("upstream_type", "public_type", "file_name"),
         [
