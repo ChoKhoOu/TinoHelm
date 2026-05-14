@@ -1279,7 +1279,7 @@ class CatalogSession:
         target_dir = funding_rate_update_dir(symbol, self.catalog_path)
         storage = self.storage
         try:
-            objects = list(storage.iter_files(target_dir, suffix=".parquet", recursive=False))
+            objects = list(storage.iter_files(target_dir, suffix=".parquet", recursive=True))
         except Exception:
             logger.warning(
                 "Funding-rate update parquet is not readable for %s", symbol, exc_info=True
