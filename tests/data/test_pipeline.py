@@ -189,6 +189,7 @@ class TestDirectUpdateWrites:
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         captured = []
+        iter_calls = []
 
         class FakeCatalog:
             def __init__(self, *_args, **_kwargs):
@@ -197,9 +198,13 @@ class TestDirectUpdateWrites:
             def write_data(self, data, *args, **kwargs):
                 captured.append((list(data), kwargs))
 
+        def fake_iter(storage, path, recursive=True):
+            iter_calls.append((Path(path), recursive))
+            return [tmp_path / "data" / "funding_rate_update" / "BTCUSDT-PERP.BINANCE" / "part.parquet"]
+
         monkeypatch.setattr("tinohelm.data.catalog._catalog_for_root", lambda *_args, **_kwargs: FakeCatalog())
         monkeypatch.setattr("tinohelm.data.catalog.ensure_catalog_dirs", lambda path: path)
-        monkeypatch.setattr("tinohelm.data.catalog._iter_catalog_files", lambda *_args, **_kwargs: [tmp_path / "data" / "funding_rate_update" / "BTCUSDT-PERP.BINANCE" / "part.parquet"])
+        monkeypatch.setattr("tinohelm.data.catalog._iter_catalog_files", fake_iter)
 
         records = [FundingRateUpdate(InstrumentId.from_str("BTCUSDT-PERP.BINANCE"), Decimal("0.1"), 3, 3, interval=480)]
         paths = p._write_objects(records, "BTCUSDT-PERP", "fundingRate", None, merge=False)
@@ -207,6 +212,10 @@ class TestDirectUpdateWrites:
         assert paths
         assert len(captured) == 1
         assert isinstance(captured[0][0][0], FundingRateUpdate)
+        assert iter_calls == [
+            (tmp_path / "data" / "funding_rate_update" / "BTCUSDT-PERP.BINANCE", True),
+            (tmp_path / "data" / "funding_rate_update" / "BTCUSDT-PERP.BINANCE", True),
+        ]
 
 
 class TestBoundedCsvConversion:

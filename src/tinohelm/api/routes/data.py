@@ -611,13 +611,24 @@ async def trigger_compact(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Trigger background consolidation for a symbol/interval."""
-    if body.data_type not in WRITE_CATEGORY or not _is_bar_data_type(body.data_type):
-        supported = ", ".join(sorted(k for k, v in WRITE_CATEGORY.items() if v == "bar"))
+    effective_data_type = _normalize_requested_data_type(body.data_type)
+    if effective_data_type not in WRITE_CATEGORY or not _is_bar_data_type(effective_data_type):
+        supported = ", ".join(sorted({
+            *(k for k, v in WRITE_CATEGORY.items() if v == "bar"),
+            *(public for public, upstream in _PHASE1_PUBLIC_TO_UPSTREAM.items() if WRITE_CATEGORY.get(upstream) == "bar"),
+        }))
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported bar data_type {body.data_type!r}. Supported values: {supported}",
         )
-    background_tasks.add_task(_run_compact, body.symbol, body.interval, settings, body.data_type, body.data_type)
+    background_tasks.add_task(
+        _run_compact,
+        body.symbol,
+        body.interval,
+        settings,
+        effective_data_type,
+        effective_data_type,
+    )
     return {
         "status": "accepted",
         "message": f"Consolidation for {body.symbol} {body.data_type} {body.interval} queued",

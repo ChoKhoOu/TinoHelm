@@ -2487,7 +2487,6 @@ class DataLayer:
         end: datetime | None,
     ) -> "pl.DataFrame | None":
         """Try to load funding-rate data from NT updates, then legacy parquet."""
-        from decimal import Decimal
         from nautilus_trader.model.data import FundingRateUpdate
         from nautilus_trader.model.identifiers import InstrumentId
         from tinohelm.data.catalog import _catalog_for_root, read_funding_rate_parquet
@@ -2509,7 +2508,7 @@ class DataLayer:
 
         if rows:
             timestamps = [_ns_to_datetime(int(row.ts_event)) for row in rows]
-            values = [float(row.rate if not isinstance(row.rate, Decimal) else row.rate) for row in rows]
+            values = [float(row.rate) for row in rows]
             frame = _build_series_frame(timestamps, values)
             return _filter_time_range(frame, start, end)
 
