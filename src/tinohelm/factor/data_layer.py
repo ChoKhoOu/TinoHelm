@@ -450,7 +450,9 @@ def _bar_catalog_roots(base_root: Path, source_type: str | None) -> list[Path]:
 
 def _catalog_base_root(catalog_root: Path) -> Path:
     base = Path(catalog_root)
-    if base.parent.name in {"bar", "ticks", "quotes"}:
+    if base.name in {"bar", "ticks", "quotes"}:
+        return base.parent
+    if base.parent.name in {"bar", "ticks", "quotes"} and base.parent.parent.name == "catalog":
         return base.parent.parent
     return base
 
