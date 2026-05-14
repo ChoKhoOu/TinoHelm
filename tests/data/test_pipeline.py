@@ -487,6 +487,28 @@ class TestIngestEarlyFailClosed:
         assert not old_path.exists()
         assert guard.backups
 
+    def test_funding_rate_cleanup_scans_nested_update_parquet_recursively(self, tmp_path: Path):
+        from tinohelm.data.catalog import funding_rate_update_dir
+
+        symbol = "BTCUSDT-PERP"
+        update_dir = funding_rate_update_dir(symbol, tmp_path) / "2025" / "1"
+        update_dir.mkdir(parents=True)
+        old_path = update_dir / "old-overlap.parquet"
+        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "funding_rate": [0.0001]}).write_parquet(old_path)
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        guard = p._clean_overlapping_parquet(
+            symbol=symbol,
+            data_type="fundingRate",
+            interval=None,
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+
+        assert guard is not None
+        assert not old_path.exists()
+        assert guard.backups
+
     def test_recover_skips_unresolved_manifest_after_verified_catalog_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
