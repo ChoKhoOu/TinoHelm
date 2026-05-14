@@ -1579,24 +1579,6 @@ class BinanceVisionPipeline:
             )
             return paths
 
-        elif category == "funding_rate":
-            from tinohelm.data.catalog import _catalog_for_root, _iter_catalog_files, ensure_catalog_dirs
-
-            catalog_path = Path(self.catalog_path)
-            if getattr(self._storage, "provider", "local") == "local":
-                ensure_catalog_dirs(catalog_path)
-            catalog = _catalog_for_root(catalog_path, self._storage)
-            funding_dir = catalog_path / "data" / "funding_rate_update"
-            existing = {str(p) for p in _iter_catalog_files(self._storage, funding_dir, recursive=False)}
-            catalog.write_data(objects, skip_disjoint_check=True)
-            current = sorted({str(p) for p in _iter_catalog_files(self._storage, funding_dir, recursive=False)})
-            written = sorted(set(current) - existing)
-            if objects and not current:
-                raise RuntimeError(
-                    f"FundingRateUpdate write for {symbol} produced no parquet files under {funding_dir}"
-                )
-            return written or current
-
         elif category == "metrics":
             from tinohelm.data.catalog import write_metrics_parquet
             path = write_metrics_parquet(objects, symbol, self.catalog_path, storage=self._storage)

@@ -888,6 +888,32 @@ class TestSourceAwareBarMaintenance:
         assert args == ("BTCUSDT-PERP", "1m", settings, "markPriceKlines", "markPriceKlines")
         assert kwargs == {}
 
+    def test_trigger_compact_normalizes_public_mark_price_contract(self, tmp_path: Path):
+        import asyncio
+
+        class FakeBackgroundTasks:
+            def __init__(self):
+                self.calls = []
+
+            def add_task(self, fn, *args, **kwargs):
+                self.calls.append((fn, args, kwargs))
+
+        background = FakeBackgroundTasks()
+        settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
+        body = CompactRequest(symbol="BTCUSDT-PERP", interval="1m", data_type="mark_price")
+
+        result = asyncio.run(trigger_compact(body, background, settings))
+
+        assert result == {
+            "status": "accepted",
+            "message": "Consolidation for BTCUSDT-PERP mark_price 1m queued",
+        }
+        assert len(background.calls) == 1
+        fn, args, kwargs = background.calls[0]
+        assert fn.__name__ == "_run_compact"
+        assert args == ("BTCUSDT-PERP", "1m", settings, "markPriceKlines", "markPriceKlines")
+        assert kwargs == {}
+
     def test_remote_compact_writes_remote_nt_catalog_without_local_upload(self, tmp_path: Path, monkeypatch):
         bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
         bar_dir = tmp_path / "data" / "bar" / bar_type_str
