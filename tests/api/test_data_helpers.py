@@ -1294,15 +1294,14 @@ class TestNtNativeMaintenanceRoutes:
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
 
         result = asyncio.run(reset_file_names(
-            ResetFileNamesRequest(data_type="funding_rate"),
+            ResetFileNamesRequest(),
             settings,
         ))
 
         assert result == {
             "status": "ok",
             "verb": "reset-file-names",
-            "data_type": "funding_rate",
-            "symbol": None,
+            "scope": "catalog",
         }
         assert calls == [("reset_all_file_names",)]
 
@@ -1319,15 +1318,14 @@ class TestNtNativeMaintenanceRoutes:
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
 
         result = asyncio.run(consolidate_by_period(
-            ConsolidateByPeriodRequest(data_type="bar", symbol="BTCUSDT-PERP", period="1d"),
+            ConsolidateByPeriodRequest(period="1d"),
             settings,
         ))
 
         assert result == {
             "status": "ok",
             "verb": "consolidate-by-period",
-            "data_type": "bar",
-            "symbol": "BTCUSDT-PERP",
+            "scope": "catalog",
             "period": "1d",
         }
         assert calls == [(timedelta(days=1), None, None)]
@@ -1346,8 +1344,6 @@ class TestNtNativeMaintenanceRoutes:
 
         result = asyncio.run(delete_range(
             DeleteRangeRequest(
-                data_type="funding_rate",
-                symbol="BTCUSDT-PERP",
                 start="2024-01-01T00:00:00Z",
                 end="2024-01-02T00:00:00Z",
             ),
@@ -1357,12 +1353,18 @@ class TestNtNativeMaintenanceRoutes:
         assert result == {
             "status": "ok",
             "verb": "delete-range",
-            "data_type": "funding_rate",
-            "symbol": "BTCUSDT-PERP",
+            "scope": "catalog",
             "start": "2024-01-01T00:00:00Z",
             "end": "2024-01-02T00:00:00Z",
         }
         assert calls == [("2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z")]
+
+    @pytest.mark.parametrize("period", ["", "xd", "1w", "0d", "-1h"])
+    def test_parse_period_rejects_invalid_periods(self, period):
+        from tinohelm.api.routes.data import _parse_period
+
+        with pytest.raises(HTTPException):
+            _parse_period(period)
 
 
 class TestDeleteCatalogEntry:
@@ -1378,6 +1380,7 @@ class TestDeleteCatalogEntry:
             interval="1m",
             source_type=None,
         )
+        catalog_id = "BTCUSDT-PERP|bar|1m|"
         calls = []
 
         class FakeResult:
@@ -1400,7 +1403,7 @@ class TestDeleteCatalogEntry:
         lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "klines", "1m"))
         await lock.acquire()
         try:
-            task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+            task = asyncio.create_task(delete_catalog_entry(catalog_id, db=db, settings=settings))
             await asyncio.sleep(0.02)
             assert calls == []
             db.delete.assert_not_awaited()
@@ -1427,6 +1430,7 @@ class TestDeleteCatalogEntry:
             interval="1m",
             source_type="klines",
         )
+        catalog_id = "BTCUSDT-PERP|bar|1m|klines"
         started = threading.Event()
         release = threading.Event()
         calls = []
@@ -1450,7 +1454,7 @@ class TestDeleteCatalogEntry:
 
         monkeypatch.setattr(CatalogSession, "delete_storage", fake_delete_storage)
 
-        task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+        task = asyncio.create_task(delete_catalog_entry(catalog_id, db=db, settings=settings))
         while not started.is_set():
             await asyncio.sleep(0.001)
         task.cancel()
@@ -1489,6 +1493,7 @@ class TestDeleteCatalogEntry:
             interval=row_interval,
             source_type=None,
         )
+        catalog_id = f"BTCUSDT-PERP|{row_data_type}|{row_interval}|"
         calls = []
 
         class FakeResult:
@@ -1511,7 +1516,7 @@ class TestDeleteCatalogEntry:
         lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", worker_data_type, None))
         await lock.acquire()
         try:
-            task = asyncio.create_task(delete_catalog_entry(123, db=db, settings=settings))
+            task = asyncio.create_task(delete_catalog_entry(catalog_id, db=db, settings=settings))
             await asyncio.sleep(0.02)
             assert calls == []
         finally:
@@ -1536,7 +1541,7 @@ class TestMaintenanceApiSurface:
 
 
 class TestCatalogApiFacade:
-    async def test_list_data_catalog_returns_live_summary_without_db_index(self, tmp_path: Path):
+    async def test_list_data_catalog_returns_live_summary_without_db_index(self, tmp_path: Path, monkeypatch):
         from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.strategy.loader import normalize_symbol
 
@@ -1548,13 +1553,19 @@ class TestCatalogApiFacade:
             quote_dir / "quotes.parquet"
         )
 
-        db = SimpleNamespace(execute=AsyncMock(side_effect=AssertionError("live summary must not query data_catalog")))
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data.select",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("live summary must not query data_catalog")
+            ),
+        )
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
 
         rows = await list_data_catalog(settings=settings)
 
         assert len(rows) == 1
         row = rows[0]
+        assert row.id == "BTCUSDT-PERP|quote_tick|tick|bookTicker"
         assert row.symbol == symbol
         assert row.data_type == "quote_tick"
         assert row.interval == "tick"
@@ -1562,9 +1573,8 @@ class TestCatalogApiFacade:
         assert row.start_date == date(2025, 1, 1)
         assert row.end_date == date(2025, 1, 1)
         assert row.file_path == str(resolve_catalog_path(tmp_path, "bookTicker"))
-        db.execute.assert_not_awaited()
 
-    async def test_list_data_catalog_filters_out_non_phase1_types(self, tmp_path: Path):
+    async def test_list_data_catalog_filters_out_non_phase1_types(self, tmp_path: Path, monkeypatch):
         from tinohelm.data.catalog import metrics_parquet_path
         from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.strategy.loader import normalize_symbol
@@ -1585,7 +1595,12 @@ class TestCatalogApiFacade:
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(metrics_path)
 
-        db = SimpleNamespace(execute=AsyncMock(side_effect=AssertionError("live summary must not query data_catalog")))
+        monkeypatch.setattr(
+            "tinohelm.api.routes.data.select",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("live summary must not query data_catalog")
+            ),
+        )
         settings = SimpleNamespace(paths=SimpleNamespace(catalog=tmp_path))
 
         rows = await list_data_catalog(settings=settings)

@@ -15,7 +15,7 @@ interface DeleteDialogProps {
 
 export function DeleteDialog({ entry, open, onClose, onDeleted }: DeleteDialogProps) {
   const deleteAction = useAction(
-    () => apiDelete(`/api/data/catalog/${entry!.id}`),
+    () => apiDelete(`/api/data/catalog/${encodeURIComponent(entry!.id)}`),
     { onSuccess: () => { onDeleted(); setTimeout(onClose, 800); }, successDuration: 800 }
   );
 

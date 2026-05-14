@@ -4,8 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, timedelta
-from typing import Any, Callable
 from pathlib import Path
+from typing import Any, Callable
 from uuid import uuid4
 
 import redis.asyncio as aioredis
@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
 from tinohelm.core.config import Settings
-from tinohelm.data.catalog import ScanEntry
 from tinohelm.data.catalog_locks import catalog_lock_key, get_catalog_lock
 from tinohelm.data.pipeline_helpers import WRITE_CATEGORY, resolve_db_interval
 from tinohelm.data.worker import enqueue_job
@@ -32,7 +31,7 @@ router = APIRouter(prefix="/api/data", tags=["data"])
 class DataCatalogItem(BaseModel):
     """Single item in the live data catalog summary."""
 
-    id: int
+    id: str
     symbol: str
     data_type: str
     interval: str
@@ -123,19 +122,14 @@ class CompactRequest(BaseModel):
 
 
 class ResetFileNamesRequest(BaseModel):
-    data_type: str
-    symbol: str | None = None
+    pass
 
 
 class ConsolidateByPeriodRequest(BaseModel):
-    data_type: str
     period: str
-    symbol: str | None = None
 
 
 class DeleteRangeRequest(BaseModel):
-    data_type: str
-    symbol: str | None = None
     start: str | None = None
     end: str | None = None
 
@@ -300,13 +294,27 @@ def _parse_period(value: str) -> timedelta:
     return timedelta(minutes=amount)
 
 
+def _catalog_entry_id(*, symbol: str, data_type: str, interval: str, source_type: str | None) -> str:
+    return "|".join([symbol, data_type, interval, source_type or ""])
+
+
+def _parse_catalog_entry_id(catalog_id: str) -> tuple[str, str, str, str | None]:
+    parts = catalog_id.split("|", 3)
+    if len(parts) != 4:
+        raise HTTPException(status_code=400, detail="Invalid catalog entry id")
+    symbol, data_type, interval, source_type = parts
+    if not symbol or not data_type or not interval:
+        raise HTTPException(status_code=400, detail="Invalid catalog entry id")
+    return symbol, data_type, interval, source_type or None
+
+
 async def _run_catalog_maintenance(
     *,
     settings: Settings,
     verb: str,
     invoke: Callable[[Any], None],
 ) -> None:
-    catalog, _storage = _catalog_for_maintenance(settings)
+    catalog, _ = _catalog_for_maintenance(settings)
     try:
         await asyncio.to_thread(invoke, catalog)
     except Exception as exc:
@@ -338,7 +346,12 @@ async def list_data_catalog(
     )
     return [
         DataCatalogItem(
-            id=index,
+            id=_catalog_entry_id(
+                symbol=entry.symbol,
+                data_type=entry.data_type,
+                interval=entry.interval,
+                source_type=entry.source_type,
+            ),
             symbol=entry.symbol,
             data_type=_PHASE1_UPSTREAM_TO_PUBLIC[entry.source_type],
             interval=entry.interval,
@@ -350,7 +363,7 @@ async def list_data_catalog(
             source_type=entry.source_type,
             created_at=None,
         )
-        for index, entry in enumerate(entries, start=1)
+        for entry in entries
     ]
 
 
@@ -613,9 +626,10 @@ async def trigger_compact(
 
 @router.post("/reset-file-names")
 async def reset_file_names(
-    body: ResetFileNamesRequest,
+    _: ResetFileNamesRequest,
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
+    """Reset file names across the entire active catalog."""
     await _run_catalog_maintenance(
         settings=settings,
         verb="reset-file-names",
@@ -624,8 +638,7 @@ async def reset_file_names(
     return {
         "status": "ok",
         "verb": "reset-file-names",
-        "data_type": body.data_type,
-        "symbol": body.symbol,
+        "scope": "catalog",
     }
 
 
@@ -634,6 +647,7 @@ async def consolidate_by_period(
     body: ConsolidateByPeriodRequest,
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
+    """Consolidate files by period across the entire active catalog."""
     period = _parse_period(body.period)
     await _run_catalog_maintenance(
         settings=settings,
@@ -645,8 +659,7 @@ async def consolidate_by_period(
     return {
         "status": "ok",
         "verb": "consolidate-by-period",
-        "data_type": body.data_type,
-        "symbol": body.symbol,
+        "scope": "catalog",
         "period": body.period,
     }
 
@@ -656,6 +669,7 @@ async def delete_range(
     body: DeleteRangeRequest,
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
+    """Delete a time range across the entire active catalog."""
     await _run_catalog_maintenance(
         settings=settings,
         verb="delete-range",
@@ -667,8 +681,7 @@ async def delete_range(
     return {
         "status": "ok",
         "verb": "delete-range",
-        "data_type": body.data_type,
-        "symbol": body.symbol,
+        "scope": "catalog",
         "start": body.start,
         "end": body.end,
     }
@@ -718,14 +731,22 @@ async def validate_data(
 
 @router.delete("/catalog/{catalog_id}")
 async def delete_catalog_entry(
-    catalog_id: int,
+    catalog_id: str,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Delete a data catalog entry and its underlying storage files."""
-    row = (await db.execute(
-        select(DataCatalog).where(DataCatalog.id == catalog_id)
-    )).scalar_one_or_none()
+    symbol, data_type, interval, source_type = _parse_catalog_entry_id(catalog_id)
+    stmt = select(DataCatalog).where(
+        DataCatalog.symbol == symbol,
+        DataCatalog.data_type == data_type,
+        DataCatalog.interval == interval,
+    )
+    if source_type is None:
+        stmt = stmt.where(DataCatalog.source_type.is_(None))
+    else:
+        stmt = stmt.where(DataCatalog.source_type == source_type)
+    row = (await db.execute(stmt)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Catalog entry not found")
 

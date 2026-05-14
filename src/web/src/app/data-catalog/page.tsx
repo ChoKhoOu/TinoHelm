@@ -50,7 +50,7 @@ export default function DataCatalogPage() {
   const [activeSub, setActiveSub] = useState<string | null>(null);
 
   // Coverage
-  const [covId, setCovId] = useState<number | null>(null);
+  const [covId, setCovId] = useState<string | null>(null);
   const [covRows, setCovRows] = useState<CatalogEntry[]>([]);
 
   // Sort
@@ -152,7 +152,7 @@ export default function DataCatalogPage() {
   const recLabel = isKlineGrp ? "Bars" : isTradeGrp ? "Ticks" : "记录数";
   const visColCount = 3 + (showType ? 1 : 0) + (showInterval ? 1 : 0);
 
-  function toggleCoverage(id: number, symbol: string) {
+  function toggleCoverage(id: string, symbol: string) {
     if (covId === id) { setCovId(null); return; }
     setCovId(id);
     setCovRows(datasets.filter((d) => d.symbol === symbol));

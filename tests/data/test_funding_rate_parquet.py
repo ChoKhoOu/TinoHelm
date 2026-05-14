@@ -362,3 +362,75 @@ class TestDataLayerFundingLoad:
         assert first_value == pytest.approx(0.9999), (
             f"Expected Parquet value 0.9999, got {first_value} — JSON fallback must NOT win"
         )
+
+
+class TestCatalogSessionFundingSummary:
+    def test_scan_funding_rate_updates_uses_8h_interval(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession, funding_rate_update_dir
+
+        update_dir = funding_rate_update_dir("BTCUSDT-PERP", tmp_path)
+        update_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).to_parquet(update_dir / "part.parquet")
+
+        result = CatalogSession(tmp_path).scan_funding_rate_updates()
+
+        assert len(result.entries) == 1
+        entry = result.entries[0]
+        assert entry.symbol == "BTCUSDT-PERP"
+        assert entry.data_type == "funding_rate"
+        assert entry.interval == "8h"
+        assert entry.source_type == "fundingRate"
+
+    def test_live_summary_prefers_nt_funding_updates_over_legacy_single_file(self, tmp_path: Path):
+        from tinohelm.data.catalog import CatalogSession, funding_rate_parquet_path, funding_rate_update_dir
+
+        update_dir = funding_rate_update_dir("BTCUSDT-PERP", tmp_path)
+        update_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).to_parquet(update_dir / "part.parquet")
+
+        legacy_path = funding_rate_parquet_path("BTCUSDT-PERP", tmp_path)
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"ts_event": [1_700_000_000_000_000_000]}).to_parquet(legacy_path)
+
+        summary = CatalogSession(tmp_path).live_summary()
+
+        funding_entries = [
+            entry for entry in summary.entries
+            if entry.symbol == "BTCUSDT-PERP" and entry.data_type == "funding_rate"
+        ]
+        assert len(funding_entries) == 1
+        assert funding_entries[0].interval == "8h"
+        assert funding_entries[0].record_count == 1
+
+    def test_ensure_nt_update_query_support_registers_once(self, monkeypatch):
+        import tinohelm.data.catalog as catalog_mod
+
+        calls: list[tuple[object, object, object]] = []
+
+        class FakeIndexPriceUpdate:
+            pass
+
+        monkeypatch.setattr(catalog_mod, "_NT_UPDATE_QUERY_SUPPORT_READY", False)
+
+        import sys
+        import types
+
+        serializer_mod = types.ModuleType("nautilus_trader.serialization.arrow.serializer")
+        serializer_mod.register_arrow = lambda data_cls, schema, decoder: calls.append((data_cls, schema, decoder))
+        serializer_mod.make_dict_deserializer = lambda data_cls: f"decoder:{data_cls.__name__}"
+
+        schema_mod = types.ModuleType("nautilus_trader.serialization.arrow.schema")
+        schema_mod.NAUTILUS_ARROW_SCHEMA = {FakeIndexPriceUpdate: "schema"}
+
+        model_data_mod = types.ModuleType("nautilus_trader.model.data")
+        model_data_mod.IndexPriceUpdate = FakeIndexPriceUpdate
+
+        monkeypatch.setitem(sys.modules, "nautilus_trader.model.data", model_data_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.serialization.arrow.serializer", serializer_mod)
+        monkeypatch.setitem(sys.modules, "nautilus_trader.serialization.arrow.schema", schema_mod)
+
+        catalog_mod._ensure_nt_update_query_support()
+        catalog_mod._ensure_nt_update_query_support()
+
+        assert calls == [(FakeIndexPriceUpdate, "schema", "decoder:FakeIndexPriceUpdate")]
+        assert catalog_mod._NT_UPDATE_QUERY_SUPPORT_READY is True

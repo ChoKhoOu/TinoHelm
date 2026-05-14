@@ -850,13 +850,18 @@ class CatalogSession:
         tick_result = self.scan_ticks()
         single_file_result = self.scan_single_files()
         funding_result = self.scan_funding_rate_updates()
+
+        merged_entries: dict[tuple[str, str, str, str], ScanEntry] = {}
+        for entry in [
+            *bar_result.entries,
+            *tick_result.entries,
+            *single_file_result.entries,
+            *funding_result.entries,
+        ]:
+            merged_entries[(entry.symbol, entry.data_type, entry.interval, entry.source_type)] = entry
+
         return LiveCatalogSummary(
-            entries=[
-                *bar_result.entries,
-                *tick_result.entries,
-                *single_file_result.entries,
-                *funding_result.entries,
-            ],
+            entries=list(merged_entries.values()),
             scanned=bar_result.scanned + tick_result.scanned + single_file_result.scanned + funding_result.scanned,
         )
 
@@ -888,6 +893,7 @@ class CatalogSession:
             cat_root=self.catalog_path,
             data_type="funding_rate",
             source_type="fundingRate",
+            interval="8h",
             is_source_aware=False,
             merged=merged,
             pattern=sym_pattern,
@@ -954,6 +960,7 @@ class CatalogSession:
         cat_root: Path,
         data_type: str,
         source_type: str,
+        interval: str = "tick",
         is_source_aware: bool,
         merged: dict[tuple[str, str, str, str], dict[str, Any]],
         pattern: "re.Pattern[str]",
@@ -973,7 +980,7 @@ class CatalogSession:
             scanned_here += 1
             self._merge_scan_stats(
                 merged,
-                key=(symbol, data_type, "tick", source_type),
+                key=(symbol, data_type, interval, source_type),
                 stats=stats,
                 cat_root=cat_root,
                 is_source_aware=is_source_aware,
@@ -1116,7 +1123,7 @@ class CatalogSession:
             update_dir = funding_rate_update_dir(symbol, self.catalog_path)
             if _iter_catalog_files(self.storage, update_dir, recursive=False):
                 return update_dir
-            return funding_rate_parquet_path(symbol, self.catalog_path)
+            return None
         return None
 
     @contextmanager
@@ -1454,6 +1461,9 @@ def _remote_catalog_constructor_args(catalog_root: Path, storage: Any) -> tuple[
     return f"{parsed.netloc}{parsed.path}".lstrip("/"), parsed.scheme
 
 
+_NT_UPDATE_QUERY_SUPPORT_READY = False
+
+
 def _ensure_nt_update_query_support() -> None:
     """Patch NT 1.225.0 to read IndexPriceUpdate via PyArrow decoder.
 
@@ -1462,6 +1472,11 @@ def _ensure_nt_update_query_support() -> None:
     the missing decoder once per process so catalog.query(IndexPriceUpdate, ...)
     works like MarkPriceUpdate/FundingRateUpdate.
     """
+    global _NT_UPDATE_QUERY_SUPPORT_READY
+
+    if _NT_UPDATE_QUERY_SUPPORT_READY:
+        return
+
     try:
         from nautilus_trader.model.data import IndexPriceUpdate
         from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer, register_arrow
@@ -1474,6 +1489,7 @@ def _ensure_nt_update_query_support() -> None:
         schema=NAUTILUS_ARROW_SCHEMA[IndexPriceUpdate],
         decoder=make_dict_deserializer(IndexPriceUpdate),
     )
+    _NT_UPDATE_QUERY_SUPPORT_READY = True
 
 
 def _catalog_for_root(catalog_root: str | Path, storage: Any | None = None):

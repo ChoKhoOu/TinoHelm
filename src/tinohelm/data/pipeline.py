@@ -1529,12 +1529,9 @@ class BinanceVisionPipeline:
             if getattr(self._storage, "provider", "local") == "local":
                 ensure_catalog_dirs(catalog_path)
             catalog = _catalog_for_root(catalog_path, self._storage)
-            update_dir_name = {
-                "markPriceKlines": "mark_price_update",
-                "indexPriceKlines": "index_price_update",
-                "fundingRate": "funding_rate_update",
-            }[data_type]
-            update_dir = catalog_path / "data" / update_dir_name
+            update_dir = self._catalog_item_dir(symbol, data_type, interval, data_type)
+            if update_dir is None:
+                raise RuntimeError(f"No direct-update catalog path for data_type={data_type!r}")
             existing = {
                 str(p)
                 for p in _iter_catalog_files(self._storage, update_dir, recursive=True)
@@ -1758,7 +1755,11 @@ class BinanceVisionPipeline:
         phase fails, the caller restores this guard before surfacing failure.
         """
         category = resolve_write_category(data_type)
-        if category == "bar" and interval:
+        if data_type in {"markPriceKlines", "indexPriceKlines"}:
+            target_dir = self._catalog_item_dir(symbol, data_type, interval, data_type)
+            if target_dir is None:
+                return None
+        elif category == "bar" and interval:
             from tinohelm.data.catalog import _make_bar_type, _make_instrument, resolve_catalog_path
             inst = _make_instrument(symbol)
             bar_type = _make_bar_type(inst.id, interval)
@@ -2075,6 +2076,15 @@ class BinanceVisionPipeline:
 
             return funding_rate_update_dir(symbol, self.catalog_path)
 
+        if data_type == "markPriceKlines":
+            from tinohelm.data.catalog import mark_price_update_dir
+
+            return mark_price_update_dir(symbol, self.catalog_path)
+        if data_type == "indexPriceKlines":
+            from tinohelm.data.catalog import index_price_update_dir
+
+            return index_price_update_dir(symbol, self.catalog_path)
+
         effective_source = source_type or data_type
         resolved = resolve_catalog_path(self.catalog_path, effective_source)
         nt_symbol = normalize_symbol(symbol)
@@ -2189,7 +2199,10 @@ class BinanceVisionPipeline:
                 else:
                     existing.start_date = min(existing.start_date, start)
                     existing.end_date = max(existing.end_date, end)
-                    if write_category in {"metrics", "order_book_delta", "funding_rate"}:
+                    if (
+                        write_category in {"metrics", "order_book_delta", "funding_rate"}
+                        or data_type in {"markPriceKlines", "indexPriceKlines"}
+                    ):
                         storage_record_count, storage_size_bytes = self._catalog_storage_stats(
                             symbol,
                             data_type,
