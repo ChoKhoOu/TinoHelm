@@ -707,16 +707,7 @@ class CatalogSession:
         from tinohelm.strategy.loader_helpers import make_bar_type_str
 
         bar_type_dir_name = make_bar_type_str(symbol, interval)
-        resolved_root = self.resolve_catalog_path(source_type)
-
-        roots: list[Path] = [resolved_root / "data" / "bar" / bar_type_dir_name]
-        if (
-            source_type == _LEGACY_DEFAULT_SOURCE_FOR_BAR
-            and resolved_root != self.catalog_path
-        ):
-            roots.append(
-                self.catalog_path / "data" / "bar" / bar_type_dir_name
-            )
+        roots = [root / "data" / "bar" / bar_type_dir_name for root in self._target_roots("bar", source_type)]
 
         collected: list[dict[str, Any]] = []
         storage = self.storage

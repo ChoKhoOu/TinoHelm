@@ -90,8 +90,7 @@ class TestResolveBarCatalogPath:
         from tinohelm.data.catalog import CatalogSession
         from tinohelm.strategy.loader_helpers import make_bar_type_str
 
-        # Only legacy files present, but source_type is markPriceKlines —
-        # fallback only applies to the legacy default source (klines).
+        # Only the legacy default source (klines) may claim flat bar layout.
         legacy_dir = tmp_path / "data" / "bar" / make_bar_type_str("BTCUSDT-PERP", "5m")
         _write_dummy_parquet(legacy_dir)
 
@@ -99,7 +98,7 @@ class TestResolveBarCatalogPath:
         resolved = session.resolve_bar_catalog_path(
             "markPriceKlines", "BTCUSDT-PERP", "5m"
         )
-        assert resolved == tmp_path / "bar" / "markPriceKlines"
+        assert resolved == tmp_path
 
 
 # ---------------------------------------------------------------------------
@@ -1128,24 +1127,15 @@ class TestMergedBarStats:
         assert stats["size_bytes"] == expected_size
 
     def test_non_default_source_does_not_fold_legacy(self, tmp_path: Path):
-        """Only the legacy default (``klines``) owns the flat fallback —
-        ``markPriceKlines`` and friends must stay scoped to their own root.
-        """
+        """Non-default bar-like sources should not claim flat legacy bars."""
         import polars as pl
 
         from tinohelm.data.catalog import CatalogSession
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.strategy.loader_helpers import make_bar_type_str
 
         nt_sub = make_bar_type_str("BTCUSDT-PERP", "5m")
-        mark_root = resolve_catalog_path(tmp_path, "markPriceKlines")
-        mark_dir = mark_root / "data" / "bar" / nt_sub
         legacy_dir = tmp_path / "data" / "bar" / nt_sub
-        mark_dir.mkdir(parents=True)
         legacy_dir.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(
-            mark_dir / "mark.parquet"
-        )
         pl.DataFrame({"ts_event": [1_735_862_400_000_000_000]}).write_parquet(
             legacy_dir / "legacy.parquet"
         )
@@ -1154,9 +1144,7 @@ class TestMergedBarStats:
         stats = session.merged_bar_stats(
             "BTCUSDT-PERP", "5m", source_type="markPriceKlines"
         )
-        assert stats is not None
-        assert stats["record_count"] == 1  # Only the markPriceKlines parquet.
-        assert stats["size_bytes"] == (mark_dir / "mark.parquet").stat().st_size
+        assert stats is None
 
 
 class TestScanSingleFiles:

@@ -371,7 +371,7 @@ def test_nt_layout_decodes_fixed_precision_binary_bar_values(tmp_path):
     )
 
 
-def test_nt_layout_accepts_mid_price_type_for_mark_price_source(tmp_path):
+def test_nt_layout_rejects_mark_price_as_bar_source(tmp_path):
     root = tmp_path / "bar" / "markPriceKlines" / "data" / "bar"
     bar_dir = root / make_bar_type_str("BTCUSDT-PERP", "1m").replace("-LAST-EXTERNAL", "-MID-EXTERNAL")
     bar_dir.mkdir(parents=True)
@@ -380,16 +380,15 @@ def test_nt_layout_accepts_mid_price_type_for_mark_price_source(tmp_path):
         "close": [100],
     }).write_parquet(bar_dir / "bars.parquet")
 
-    bars = ResearchParquetReader(tmp_path).load_bars(_request(
-        symbols=("BTCUSDT-PERP",),
-        interval="1m",
-        source="markPriceKlines",
-    ))
+    with pytest.raises(ValueError, match="unsupported bar source"):
+        ResearchParquetReader(tmp_path).load_bars(_request(
+            symbols=("BTCUSDT-PERP",),
+            interval="1m",
+            source="markPriceKlines",
+        ))
 
-    assert bars.frame["close"].to_list() == [100.0]
 
-
-def test_nt_layout_accepts_current_last_price_type_for_mark_price_source(tmp_path):
+def test_nt_layout_rejects_current_last_bar_layout_for_mark_price_source(tmp_path):
     root = tmp_path / "bar" / "markPriceKlines"
     root.mkdir(parents=True)
     pl.DataFrame({
@@ -398,13 +397,12 @@ def test_nt_layout_accepts_current_last_price_type_for_mark_price_source(tmp_pat
         "close": [100],
     }).write_parquet(root / "bars.parquet")
 
-    bars = ResearchParquetReader(tmp_path).load_bars(_request(
-        symbols=("BTCUSDT-PERP",),
-        interval="1m",
-        source="markPriceKlines",
-    ))
-
-    assert bars.frame["close"].to_list() == [100.0]
+    with pytest.raises(ValueError, match="unsupported bar source"):
+        ResearchParquetReader(tmp_path).load_bars(_request(
+            symbols=("BTCUSDT-PERP",),
+            interval="1m",
+            source="markPriceKlines",
+        ))
 
 
 def test_nt_layout_rejects_ambiguous_alias_directories(tmp_path):
@@ -499,9 +497,8 @@ def test_known_bar_source_does_not_fallback_to_root_level_parquet(tmp_path):
         "close": [100],
     }).write_parquet(tmp_path / "klines.parquet")
 
-    bars = ResearchParquetReader(tmp_path).load_bars(_request(source="markPriceKlines"))
-
-    assert bars.frame.height == 0
+    with pytest.raises(ValueError, match="unsupported bar source"):
+        ResearchParquetReader(tmp_path).load_bars(_request(source="markPriceKlines"))
 
 
 def test_unknown_source_is_rejected_before_base_fallback(tmp_path):
