@@ -17,8 +17,6 @@ from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
     DOWNLOAD_PROGRESS_SPAN,
     INTERVAL_CONVENTION,
-    KLINES_REST_FETCH_FN,
-    REST_FALLBACK_TYPES,
     WRITE_CATEGORY,
     compute_chunk_subprogress,
     compute_stage_pct,
@@ -27,7 +25,6 @@ from tinohelm.data.pipeline_helpers import (
     date_end_ns,
     date_start_dt,
     date_start_ns,
-    is_rest_fallback_supported,
     parse_vision_coverage_end,
     resolve_db_category,
     resolve_db_interval,
@@ -86,10 +83,6 @@ class TestCanonicalMappings:
         with pytest.raises(TypeError):
             INTERVAL_CONVENTION["new_type"] = "1m"  # type: ignore[index]
 
-    def test_klines_fetch_map_is_immutable(self):
-        with pytest.raises(TypeError):
-            KLINES_REST_FETCH_FN["new_type"] = "fetch_x"  # type: ignore[index]
-
     def test_write_category_canonical_keys(self):
         assert WRITE_CATEGORY["klines"] == "bar"
         assert WRITE_CATEGORY["markPriceKlines"] == "mark_price"
@@ -126,26 +119,10 @@ class TestCanonicalMappings:
         assert INTERVAL_CONVENTION["liquidationSnapshot"] == "tick"
         assert INTERVAL_CONVENTION["metrics"] == "5m"
 
-    def test_klines_fetch_map_canonical_pairs(self):
-        assert KLINES_REST_FETCH_FN["klines"] == "fetch_klines"
-        assert KLINES_REST_FETCH_FN["markPriceKlines"] == "fetch_mark_price_klines"
-        assert KLINES_REST_FETCH_FN["indexPriceKlines"] == "fetch_index_price_klines"
-        assert "premiumIndexKlines" not in KLINES_REST_FETCH_FN
-        assert len(KLINES_REST_FETCH_FN) == 3
-
-    def test_rest_fallback_types_pin(self):
-        assert REST_FALLBACK_TYPES == frozenset({
-            "klines", "markPriceKlines", "indexPriceKlines",
-            "aggTrades",
-        })
-        assert is_rest_fallback_supported("premiumIndexKlines") is False
-
     def test_progress_band_constants(self):
         assert DOWNLOAD_PROGRESS_BASE == 5
-        assert DOWNLOAD_PROGRESS_SPAN == 85
-        # The download phase reserves [5, 90] — the remaining 10% is for
-        # REST fallback (~92) and DB catalog update (~96 → 100).
-        assert DOWNLOAD_PROGRESS_BASE + DOWNLOAD_PROGRESS_SPAN == 90
+        assert DOWNLOAD_PROGRESS_SPAN == 90
+        assert DOWNLOAD_PROGRESS_BASE + DOWNLOAD_PROGRESS_SPAN == 95
 
 
 # ---------------------------------------------------------------------------
@@ -245,24 +222,6 @@ class TestResolveDbInterval:
         assert resolve_db_interval("klines", None) == "tick"
 
 
-# ---------------------------------------------------------------------------
-# 6. is_rest_fallback_supported
-# ---------------------------------------------------------------------------
-
-class TestRestFallbackSupport:
-    @pytest.mark.parametrize("dt", [
-        "klines", "markPriceKlines", "indexPriceKlines",
-        "aggTrades",
-    ])
-    def test_supported_types(self, dt: str):
-        assert is_rest_fallback_supported(dt) is True
-
-    @pytest.mark.parametrize("dt", [
-        "fundingRate", "bookTicker", "bookDepth",
-        "liquidationSnapshot", "metrics", "trades", "premiumIndexKlines", "unknown", "",
-    ])
-    def test_unsupported_types(self, dt: str):
-        assert is_rest_fallback_supported(dt) is False
 
 
 # ---------------------------------------------------------------------------
@@ -274,37 +233,33 @@ class TestComputeStagePct:
         assert compute_stage_pct(0, 10) == 5
 
     def test_total_zero_returns_base(self):
-        # Avoids ZeroDivisionError (the inline expression `5 + round(85 * 0
-        # / 0)` would crash).
         assert compute_stage_pct(0, 0) == 5
 
     def test_negative_total_returns_base(self):
         assert compute_stage_pct(5, -1) == 5
 
     def test_full_completion_returns_top_of_band(self):
-        assert compute_stage_pct(10, 10) == 90  # 5 + 85
+        assert compute_stage_pct(10, 10) == 95  # 5 + 90
 
     def test_half_completion(self):
-        # 5 + round(85 * 0.5) = 5 + round(42.5) = 5 + 42 = 47
-        # (Python's banker's rounding: round-half-to-even pulls 42.5 → 42)
-        assert compute_stage_pct(1, 2) == 47
+        # 5 + round(90 * 0.5) = 5 + 45 = 50
+        assert compute_stage_pct(1, 2) == 50
 
     def test_one_third_completion(self):
-        # 5 + round(85 / 3) = 5 + round(28.333) = 5 + 28 = 33
-        assert compute_stage_pct(1, 3) == 33
+        # 5 + round(90 / 3) = 5 + 30 = 35
+        assert compute_stage_pct(1, 3) == 35
 
     def test_quarter_completion(self):
-        # 5 + round(85 * 0.25) = 5 + round(21.25) = 5 + 21 = 26
-        assert compute_stage_pct(1, 4) == 26
+        # 5 + round(90 * 0.25) = 5 + round(22.5) = 5 + 22 = 27
+        assert compute_stage_pct(1, 4) == 27
 
     def test_negative_done_clamps_to_zero(self):
         assert compute_stage_pct(-5, 10) == 5
 
     def test_done_exceeds_total_clamps_to_total(self):
-        assert compute_stage_pct(15, 10) == 90
+        assert compute_stage_pct(15, 10) == 95
 
     def test_custom_band(self):
-        # Different base/span — used by the non-default streaming path.
         assert compute_stage_pct(2, 4, base=78, span=12) == 84  # 78 + 6
         assert compute_stage_pct(0, 4, base=78, span=12) == 78
         assert compute_stage_pct(4, 4, base=78, span=12) == 90
@@ -319,47 +274,36 @@ class TestComputeStagePct:
 
 class TestComputeChunkSubprogress:
     def test_strictly_below_next_slice(self):
-        # 0/4 done → base = 5; next = 5 + round(85/4) = 26
-        # 1 chunk → 5 + round(21 * 1/3) = 5 + 7 = 12 < 25 (next-1)
+        # 0/4 done → base = 5; next = 27
         result = compute_chunk_subprogress(0, 4, 1)
-        assert 5 < result < 26
+        assert 5 < result < 27
 
     def test_more_chunks_get_closer_to_next_but_never_reach(self):
-        # 100 chunks should approach but not reach next_pct - 1
-        next_pct = compute_stage_pct(1, 4)  # 26
+        next_pct = compute_stage_pct(1, 4)  # 27
         result = compute_chunk_subprogress(0, 4, 100)
         assert result == next_pct - 1
 
     def test_at_least_one_chunk_assumption(self):
-        # Zero chunks gets clamped to 1 internally
         with_zero = compute_chunk_subprogress(0, 4, 0)
         with_one = compute_chunk_subprogress(0, 4, 1)
         assert with_zero == with_one
 
     def test_full_completion_no_room_to_interpolate(self):
-        # When done == total, base == next, no sub-window: returns base
         result = compute_chunk_subprogress(4, 4, 10)
-        assert result == 90  # base of last slice == top of band
+        assert result == 95  # base of last slice == top of band
 
     def test_total_zero_returns_base(self):
         assert compute_chunk_subprogress(0, 0, 5) == 5
 
     def test_monotonic_in_chunks(self):
-        # More chunks done → higher (or equal) sub-percentage
         results = [compute_chunk_subprogress(1, 5, c) for c in (1, 2, 5, 10, 50)]
         assert results == sorted(results)
 
     def test_interpolation_formula_pin(self):
-        # Pin the chunks/(chunks+2) interpolation:
-        # 0/2 done → base = 5; next = 5 + round(85/2) = 5 + 42 = 47
-        #   (banker's rounding: round(42.5) → 42)
-        # sub-width = next - base = 42
-        # 1 chunk → 5 + round(42 * 1/3) = 5 + 14 = 19
-        # 2 chunks → 5 + round(42 * 2/4) = 5 + 21 = 26
-        # 4 chunks → 5 + round(42 * 4/6) = 5 + 28 = 33
-        assert compute_chunk_subprogress(0, 2, 1) == 19
-        assert compute_chunk_subprogress(0, 2, 2) == 26
-        assert compute_chunk_subprogress(0, 2, 4) == 33
+        # 0/2 done → base = 5; next = 50; sub-width = 45
+        assert compute_chunk_subprogress(0, 2, 1) == 20
+        assert compute_chunk_subprogress(0, 2, 2) == 27
+        assert compute_chunk_subprogress(0, 2, 4) == 35
 
 
 # ---------------------------------------------------------------------------
@@ -537,4 +481,3 @@ class TestCrossReferenceWithPipeline:
         assert mod is not None
         assert mod._WRITE_CATEGORY is WRITE_CATEGORY
         assert mod._INTERVAL_CONVENTION is INTERVAL_CONVENTION
-        assert mod._REST_FALLBACK_TYPES is REST_FALLBACK_TYPES

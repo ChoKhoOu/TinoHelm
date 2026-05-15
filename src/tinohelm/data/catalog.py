@@ -11,9 +11,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from tinohelm.data.catalog_helpers import (
-    CATEGORY_DIR,
     INTERVAL_MAP,
-    WRITABLE_CATEGORIES,
     build_validation_issues,
     classify_status,
     count_duplicates,
@@ -38,39 +36,7 @@ if TYPE_CHECKING:
     import polars as pl
 
 
-# ---------------------------------------------------------------------------
-# Backward-compatibility aliases — pre-extraction code paths and tests
-# imported these private names directly. They now re-export the helpers so
-# existing callers (and any future ones that landed on historical names)
-# keep working unchanged.
-# ---------------------------------------------------------------------------
 _INTERVAL_MAP = INTERVAL_MAP
-_CATEGORY_DIR = CATEGORY_DIR
-# ``_SOURCE_TO_CATEGORY`` used to be a catalog-local subset of
-# ``pipeline_helpers.WRITE_CATEGORY``. The subset is now derived on the fly
-# in ``resolve_catalog_path`` — the alias below is kept for any external
-# caller that grep-imported the old constant directly.
-_SOURCE_TO_CATEGORY: dict[str, str] = {
-    src: cat
-    for src, cat in _PIPELINE_WRITE_CATEGORY.items()
-    if cat in WRITABLE_CATEGORIES
-}
-
-# Default source-types carried by legacy (pre-source-aware) catalog rows.
-# Used by ``CatalogSession`` to replicate the double-delete / fallback semantics
-# that ``api/routes/data.py`` implements via its own ``_LEGACY_DEFAULT_SOURCE``
-# table. Keep the two in sync — candidate 2 (``DataTypeRegistry``) will
-# eventually collapse them.
-_LEGACY_DEFAULT_SOURCE: dict[str, str] = {
-    "bar": "klines",
-    "trade_tick": "aggTrades",
-    "quote_tick": "bookTicker",
-    "funding_rate": "fundingRate",
-    "order_book_delta": "bookDepth",
-    "liquidation": "liquidationSnapshot",
-    "metrics": "metrics",
-}
-_LEGACY_DEFAULT_SOURCE_FOR_BAR = _LEGACY_DEFAULT_SOURCE["bar"]
 
 
 def _interval_to_nanoseconds(interval: str) -> int:
@@ -289,28 +255,14 @@ def ensure_catalog_dirs(catalog_path: str | Path) -> Path:
 
 @dataclass
 class _FundingCacheSnapshot:
-    path: Path
-    existed: bool
-    payload: bytes | None
+    pass
 
 
 class FundingRateTxn:
-    """Context manager owning the funding-rate dual-store transaction.
+    """Write handle for funding-rate Parquet ingest.
 
-    Responsibilities
-    ----------------
-    * ``write_parquet(records)`` writes the Parquet primary and stages records
-      to be merged into the JSON cache after the DB commit succeeds.
-    * ``flush_json()`` merges the staged records into the legacy JSON cache.
-      Callers must invoke it explicitly after a successful DB commit — the
-      session will not auto-flush so that cancelled/half-committed ingests
-      leave the JSON read-side stale rather than lying ahead of the DB.
-    * Exit with exception rolls the JSON read-side back to the pre-write
-      snapshot. Parquet rollback is the caller's responsibility (the pipeline
-      handles it via ``_ParquetCleanupGuard``).
-
-    Normal exit without ``flush_json`` logs a warning — indicates a caller
-    bug (forgot to flush) but leaves the JSON untouched.
+    Wraps the Parquet write into a transaction-like shape so callers can
+    detect whether the write happened and roll back at the Parquet level.
     """
 
     def __init__(
@@ -323,89 +275,39 @@ class FundingRateTxn:
         self._catalog_path = catalog_path
         self.symbol = symbol
         self._storage = storage
-        self._snapshot = snapshot
-        self._pending: list[dict[str, Any]] = []
-        self._flushed = False
         self._written_parquet = False
 
     @property
     def flushed(self) -> bool:
-        return self._flushed
+        return True
 
     @property
     def wrote_parquet(self) -> bool:
         return self._written_parquet
 
     def write_parquet(self, records: list) -> Path:
-        """Write funding-rate records to the primary Parquet and stage JSON updates."""
-        def _cache_record(record: Any) -> dict[str, Any]:
-            funding_time_ms = getattr(record, "funding_time_ms", None)
-            if funding_time_ms is None:
-                funding_time_ms = int(getattr(record, "ts_event")) // 1_000_000
-            funding_rate = getattr(record, "funding_rate", None)
-            if funding_rate is None:
-                funding_rate = getattr(record, "rate")
-            return {
-                "funding_time_ms": int(funding_time_ms),
-                "funding_rate": float(funding_rate),
-                "mark_price": 0,
-            }
-
-        cache_records = [_cache_record(r) for r in records]
+        """Write funding-rate records to the NT-native Parquet catalog."""
         parquet_path = write_funding_rate_parquet(
             records=records,
             symbol=self.symbol,
             catalog_root=self._catalog_path,
             storage=self._storage,
         )
-        self._pending.extend(cache_records)
         self._written_parquet = True
         logger.info(
-            "Wrote %d funding rate records for %s (Parquet primary; JSON pending)",
+            "Wrote %d funding rate records for %s",
             len(records),
             self.symbol,
         )
         return parquet_path
 
     def flush_json(self) -> None:
-        """Merge staged records into the JSON cache. Call after a successful DB commit."""
-        from tinohelm.data.funding_cache import _load_cache, _save_cache
-
-        if not self._pending:
-            self._flushed = True
-            return
-        by_time: dict[int, dict[str, Any]] = {}
-        for row in _load_cache(self.symbol):
-            if isinstance(row, dict) and isinstance(row.get("funding_time_ms"), (int, float)):
-                by_time[int(row["funding_time_ms"])] = row
-        for row in self._pending:
-            by_time[int(row["funding_time_ms"])] = row
-        _save_cache(self.symbol, [by_time[key] for key in sorted(by_time)])
-        self._flushed = True
+        """No-op — legacy JSON cache removed."""
+        pass
 
     def restore(self) -> None:
-        """Write the JSON snapshot back, or remove the file if it didn't exist.
-
-        If the snapshot recorded ``existed=True`` but its payload could not be
-        captured at snapshot time, leave whatever is currently on disk alone
-        rather than overwriting with empty bytes — a best-effort recovery that
-        refuses to destroy data it couldn't read.
-        """
-        snapshot = self._snapshot
-        try:
-            if snapshot.existed:
-                if snapshot.payload is None:
-                    logger.warning(
-                        "Skipping funding cache restore for %s — snapshot payload was unavailable",
-                        snapshot.path,
-                    )
-                    return
-                snapshot.path.parent.mkdir(parents=True, exist_ok=True)
-                snapshot.path.write_bytes(snapshot.payload)
-            else:
-                snapshot.path.unlink(missing_ok=True)
-        except Exception:
-            logger.warning("Failed to restore funding cache %s", snapshot.path, exc_info=True)
+        """No-op — Parquet rollback handled by pipeline cleanup guard."""
+        pass
 
 
 @dataclass(frozen=True)
@@ -445,7 +347,7 @@ _BAR_SOURCE_TYPES: tuple[str, ...] = (
     "klines",
 )
 _TICK_SCAN_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("trade_tick", "trade_tick", ("aggTrades", "trades")),
+    ("trade_tick", "trade_tick", ("trades",)),
     ("quote_tick", "quote_tick", ("bookTicker",)),
 )
 _UPDATE_SCAN_SPECS: tuple[tuple[str, str, str, str], ...] = (
@@ -547,15 +449,7 @@ class CatalogSession:
         return (0, 0)
 
     def _target_roots(self, category: str, source_type: str | None) -> list[Path]:
-        base = self.catalog_path
-        if not source_type:
-            return [base]
-        resolved = self.resolve_catalog_path(source_type)
-        if source_type == _LEGACY_DEFAULT_SOURCE.get(category):
-            return [resolved, base]
-        if resolved == base:
-            return []
-        return [resolved]
+        return [self.catalog_path]
 
     def _bar_target_dirs(
         self,
@@ -645,20 +539,10 @@ class CatalogSession:
         *,
         source_type: str | None = None,
     ) -> int:
-        """Sum on-disk sizes of all bar parquet files for ``(symbol, interval)``.
-
-        Matches the now-retired ``routes.data._parquet_size_for`` — raises
-        ``ValueError`` on a malformed interval so callers see the same
-        failure mode they used to. Defaults ``source_type`` to the legacy
-        bar default (``klines``) so callers that only know the interval
-        keep working.
-        """
-        # Validate interval shape eagerly: ``make_bar_type_str`` falls back to
-        # ``1-MINUTE`` on garbage inputs, but the route layer raised here.
+        """Sum on-disk sizes of all bar parquet files for ``(symbol, interval)``."""
         interval_to_nt_suffix(interval)
-        effective_source = source_type or _LEGACY_DEFAULT_SOURCE_FOR_BAR
         total = 0
-        for obj in self._parquet_objects_for(symbol, "bar", interval, effective_source):
+        for obj in self._parquet_objects_for(symbol, "bar", interval, source_type):
             size = getattr(obj, "size", None)
             if size is not None:
                 total += int(size)
@@ -694,87 +578,34 @@ class CatalogSession:
         *,
         source_type: str,
     ) -> dict[str, Any] | None:
-        """Return merged stats across source-aware + legacy flat bar layouts.
-
-        ``_run_compact`` only rewrites one side (whichever ``resolve_bar_catalog_path``
-        picked), but the DB row in ``data_catalog`` still describes the union
-        of both layouts — so after compacting klines we must re-sum both the
-        source-aware root and any legacy flat copy before updating
-        ``size_bytes`` / ``record_count``. Only the legacy default source
-        (``klines``) has a flat fallback; other sources stay scoped.
-        """
-        interval_to_nt_suffix(interval)  # eager validation — see parquet_size_for
+        """Return bar stats from the single NT-native catalog root."""
+        interval_to_nt_suffix(interval)
         from tinohelm.strategy.loader_helpers import make_bar_type_str
 
         bar_type_dir_name = make_bar_type_str(symbol, interval)
-        roots = [root / "data" / "bar" / bar_type_dir_name for root in self._target_roots("bar", source_type)]
+        bar_dir = self.catalog_path / "data" / "bar" / bar_type_dir_name
 
-        collected: list[dict[str, Any]] = []
         storage = self.storage
-        for root in roots:
-            objects = list(storage.iter_files(root, suffix=".parquet", recursive=False))
-            if not objects:
-                continue
-            stats = _aggregate_parquet_object_stats(objects, storage)
-            if stats is not None:
-                collected.append(stats)
-
-        if not collected:
+        objects = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
+        if not objects:
             return None
-
-        size_bytes = sum(int(s["size_bytes"]) for s in collected)
-        all_rows_known = all(s["all_record_counts_known"] for s in collected)
-        record_count = (
-            sum(int(s["record_count"]) for s in collected) if all_rows_known else None
-        )
-        start_date = min(s["start_date"] for s in collected)
-        end_date = max(s["end_date"] for s in collected)
-        return {
-            "size_bytes": size_bytes,
-            "record_count": record_count,
-            "all_record_counts_known": all_rows_known,
-            "start_date": start_date,
-            "end_date": end_date,
-        }
+        return _aggregate_parquet_object_stats(objects, storage)
 
     def scan_bars(self) -> ScanResult:
-        """Discover bar parquet files on disk and collapse to catalog entries.
-
-        One entry per ``(symbol, interval, source_type)``. Source-aware and
-        legacy flat layouts are merged when both coexist — source-aware wins
-        the reported ``file_path`` to steer future reads to the new layout.
-        """
+        """Discover bar parquet files on disk and collapse to catalog entries."""
         bar_type_pattern = re.compile(r"^(.+\.BINANCE)-(\d+-\w+)-LAST-EXTERNAL$")
         merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         scanned = 0
 
-        for source_type in _BAR_SOURCE_TYPES:
-            resolved_root = self.resolve_catalog_path(source_type)
-            bar_root = resolved_root / "data" / "bar"
-            is_source_aware = resolved_root != self.catalog_path
-            scanned += self._collect_bar_entries_for_root(
-                bar_root=bar_root,
-                cat_root=resolved_root,
-                source_type=source_type,
-                is_source_aware=is_source_aware,
-                merged=merged,
-                pattern=bar_type_pattern,
-            )
-
-        legacy_root = self.catalog_path / "data" / "bar"
-        already_scanned_legacy = any(
-            self.resolve_catalog_path(src) == self.catalog_path
-            for src in _BAR_SOURCE_TYPES
+        bar_root = self.catalog_path / "data" / "bar"
+        scanned += self._collect_bar_entries_for_root(
+            bar_root=bar_root,
+            cat_root=self.catalog_path,
+            source_type="klines",
+            is_source_aware=False,
+            merged=merged,
+            pattern=bar_type_pattern,
         )
-        if not already_scanned_legacy:
-            scanned += self._collect_bar_entries_for_root(
-                bar_root=legacy_root,
-                cat_root=self.catalog_path,
-                source_type="klines",
-                is_source_aware=False,
-                merged=merged,
-                pattern=bar_type_pattern,
-            )
 
         entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
         return ScanResult(entries=entries, scanned=scanned)
@@ -786,34 +617,16 @@ class CatalogSession:
         scanned = 0
 
         for data_type, dir_name, source_types in _TICK_SCAN_SPECS:
-            for source_type in source_types:
-                resolved_root = self.resolve_catalog_path(source_type)
-                tick_root = resolved_root / "data" / dir_name
-                is_source_aware = resolved_root != self.catalog_path
-                scanned += self._collect_tick_entries_for_root(
-                    tick_root=tick_root,
-                    cat_root=resolved_root,
-                    data_type=data_type,
-                    source_type=source_type,
-                    is_source_aware=is_source_aware,
-                    merged=merged,
-                    pattern=sym_pattern,
-                )
-            legacy_root = self.catalog_path / "data" / dir_name
-            legacy_already_scanned = any(
-                self.resolve_catalog_path(src) == self.catalog_path
-                for src in source_types
+            tick_root = self.catalog_path / "data" / dir_name
+            scanned += self._collect_tick_entries_for_root(
+                tick_root=tick_root,
+                cat_root=self.catalog_path,
+                data_type=data_type,
+                source_type=source_types[0],
+                is_source_aware=False,
+                merged=merged,
+                pattern=sym_pattern,
             )
-            if not legacy_already_scanned:
-                scanned += self._collect_tick_entries_for_root(
-                    tick_root=legacy_root,
-                    cat_root=self.catalog_path,
-                    data_type=data_type,
-                    source_type=source_types[0],
-                    is_source_aware=False,
-                    merged=merged,
-                    pattern=sym_pattern,
-                )
 
         entries = [self._build_scan_entry(key, stats) for key, stats in merged.items()]
         return ScanResult(entries=entries, scanned=scanned)
@@ -1137,20 +950,13 @@ class CatalogSession:
         interval: str,
         source_type: str | None,
     ) -> Path | None:
-        """Return the directory (dir-backed) OR concrete file (single-file) path.
-
-        Single-file categories return the parquet path itself so callers can
-        scope stats/iteration to a specific symbol rather than bleeding across
-        every symbol that shares the parent directory.
-        """
+        """Return the directory (dir-backed) OR concrete file (single-file) path."""
         from tinohelm.strategy.loader_helpers import make_bar_type_str, normalize_symbol
 
         if data_type == "bar":
-            resolved = self.resolve_bar_catalog_path(source_type or _LEGACY_DEFAULT_SOURCE_FOR_BAR, symbol, interval)
-            return resolved / "data" / "bar" / make_bar_type_str(symbol, interval)
+            return self.catalog_path / "data" / "bar" / make_bar_type_str(symbol, interval)
         if data_type in {"trade_tick", "quote_tick"}:
-            resolved = self.resolve_catalog_path(source_type)
-            return resolved / "data" / data_type / normalize_symbol(symbol)
+            return self.catalog_path / "data" / data_type / normalize_symbol(symbol)
         if data_type == "metrics":
             return metrics_parquet_path(symbol, self.catalog_path)
         if data_type == "order_book_delta":
@@ -1219,57 +1025,11 @@ class CatalogSession:
 
     @staticmethod
     def _take_funding_snapshot(symbol: str) -> _FundingCacheSnapshot:
-        from tinohelm.core.paths import paths
-
-        path = paths.get("funding_rates") / f"{symbol.lower()}.json"
-        if not path.exists():
-            return _FundingCacheSnapshot(path=path, existed=False, payload=None)
-        # Preserve ``existed=True`` even if the body cannot be read: rollback
-        # must NOT unlink a real file it simply failed to snapshot. Leaving
-        # ``payload=None`` means restore will rewrite the file with an empty
-        # body, which matches the fail-safe bias (a best-effort recovery
-        # beats silent data loss).
-        try:
-            payload = path.read_bytes()
-        except OSError:
-            logger.warning("Failed to read funding cache %s; snapshot payload unavailable", path, exc_info=True)
-            return _FundingCacheSnapshot(path=path, existed=True, payload=None)
-        return _FundingCacheSnapshot(path=path, existed=True, payload=payload)
-
-    def load_funding_rates(
-        self,
-        symbol: str,
-        start,
-        end,
-    ) -> list[dict[str, Any]]:
-        """Return cached funding-rate records intersecting ``[start, end]``.
-
-        Thin delegate over :func:`tinohelm.data.funding_cache.load_funding_rates`;
-        exists so callers never need to know whether the read-side is JSON or
-        Parquet.
-        """
-        from tinohelm.data.funding_cache import load_funding_rates
-
-        return load_funding_rates(symbol, start, end)
+        return _FundingCacheSnapshot()
 
     def funding_cache_covers(self, symbol: str, start, end) -> bool:
-        """Return ``True`` iff the JSON funding cache fully spans ``[start, end]``."""
-        from datetime import datetime as _dt, time as _time, timezone as _tz
-
-        from tinohelm.data.funding_cache import _load_cache
-        from tinohelm.data.funding_cache_helpers import compute_fetch_start
-
-        cached = _load_cache(symbol)
-        cached_times = [
-            int(r["funding_time_ms"])
-            for r in cached
-            if isinstance(r, dict) and isinstance(r.get("funding_time_ms"), (int, float))
-        ]
-        if not cached_times:
-            return False
-        start_dt = _dt.combine(start, _time.min, tzinfo=_tz.utc)
-        end_dt = _dt.combine(end, _time.max, tzinfo=_tz.utc)
-        return compute_fetch_start(cached_times, start=start_dt, end=end_dt) is None
+        """Delegate to parquet coverage check — legacy JSON cache removed."""
+        return self.funding_parquet_covers(symbol, start, end)
 
     def funding_rate_parquet_path(self, symbol: str) -> Path:
         """Return the primary funding-rate Parquet path for ``symbol``."""
@@ -1458,29 +1218,8 @@ class CatalogSession:
         symbol: str,
         interval: str,
     ) -> Path:
-        """Resolve the bar catalog root, falling back to legacy flat-layout files.
-
-        Before source-aware layouts existed, bars were written directly under
-        ``{base}/data/bar/<bar_type>/``. The migration to ``{base}/bar/<source_type>``
-        kept the old files readable by falling back to the base path only when:
-        (a) the requested source is the legacy default for bars (``klines``); and
-        (b) the new layout contains no parquet files but the legacy layout does.
-        """
-        from tinohelm.strategy.loader_helpers import make_bar_type_str
-
-        resolved = self.resolve_catalog_path(source_type)
-        if source_type != _LEGACY_DEFAULT_SOURCE_FOR_BAR:
-            return resolved
-        bar_type_dir_name = make_bar_type_str(symbol, interval)
-        new_layout_dir = resolved / "data" / "bar" / bar_type_dir_name
-        legacy_layout_dir = self.catalog_path / "data" / "bar" / bar_type_dir_name
-        new_has_files = bool(_iter_catalog_files(self.storage, new_layout_dir, recursive=False))
-        if new_has_files:
-            return resolved
-        legacy_has_files = bool(_iter_catalog_files(self.storage, legacy_layout_dir, recursive=False))
-        if legacy_has_files:
-            return self.catalog_path
-        return resolved
+        """Return the single NT-native catalog root for bars."""
+        return self.catalog_path
 
 
 def _is_remote_storage(storage: Any | None) -> bool:

@@ -163,42 +163,13 @@ def interval_to_nanoseconds(interval: str) -> int:
 # Catalog path resolution
 # ---------------------------------------------------------------------------
 
-def resolve_catalog_path(base_path: str | Path, source_type: str | None) -> Path:
-    """Return the effective catalog root for a given source type.
+def resolve_catalog_path(base_path: str | Path, source_type: str | None = None) -> Path:
+    """Return the single NT-native catalog root.
 
-    Structure: ``base_path / {category_dir} / {source_type}/``
-
-    The category is resolved by looking up ``source_type`` in
-    :data:`pipeline_helpers.WRITE_CATEGORY`. Only categories in
-    :data:`WRITABLE_CATEGORIES` get a nested path; anything else (including
-    an unknown source type or a ``None``/empty string) returns the base path
-    unchanged — this preserves the behaviour of callers that treated
-    ``fundingRate`` and ``bookTicker`` as "write-to-base".
-
-    Examples
-    --------
-    >>> resolve_catalog_path("/tmp/cat", "klines").as_posix()
-    '/tmp/cat/bar/klines'
-    >>> resolve_catalog_path("/tmp/cat", "markPriceKlines").as_posix()
-    '/tmp/cat'
-    >>> resolve_catalog_path("/tmp/cat", "aggTrades").as_posix()
-    '/tmp/cat/ticks/aggTrades'
-    >>> resolve_catalog_path("/tmp/cat", "bookTicker").as_posix()
-    '/tmp/cat/quotes/bookTicker'
-    >>> resolve_catalog_path("/tmp/cat", "fundingRate").as_posix()
-    '/tmp/cat'
-    >>> resolve_catalog_path("/tmp/cat", None).as_posix()
-    '/tmp/cat'
-    >>> resolve_catalog_path("/tmp/cat", "unknown").as_posix()
-    '/tmp/cat'
+    After the phase-1 refactor (#180), source_type no longer participates in
+    storage identity. All data lives under one catalog root.
     """
-    base = Path(base_path)
-    if not source_type:
-        return base
-    category = WRITE_CATEGORY.get(source_type)
-    if category not in WRITABLE_CATEGORIES:
-        return base
-    return base / CATEGORY_DIR[category] / source_type
+    return Path(base_path)
 
 
 # ---------------------------------------------------------------------------

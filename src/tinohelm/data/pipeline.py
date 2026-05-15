@@ -18,7 +18,7 @@ import json
 import logging
 import shutil
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -30,18 +30,12 @@ from tinohelm.data.downloader import VisionCsvPayload, VisionDownloader, _KLINES
 from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
     INTERVAL_CONVENTION,
-    KLINES_REST_FETCH_FN,
-    REST_FALLBACK_TYPES,
     WRITE_CATEGORY,
     compute_chunk_subprogress,
     compute_stage_pct,
     csv_has_header,
-    date_end_dt,
     date_end_ns,
-    date_start_dt,
     date_start_ns,
-    is_rest_fallback_supported,
-    parse_vision_coverage_end,
     resolve_db_category,
     resolve_db_interval,
     resolve_write_category,
@@ -62,11 +56,6 @@ def _timestamp_stat_to_ns(value: Any) -> int:
         return int(dt.timestamp() * 1_000_000_000)
     return int(value)
 
-# Backwards-compat aliases (kept so external imports keep working):
-# ``api/routes/data.py`` historically reaches into ``_WRITE_CATEGORY``;
-# the canonical name is now :data:`WRITE_CATEGORY` exported from
-# ``pipeline_helpers``.
-_REST_FALLBACK_TYPES = REST_FALLBACK_TYPES
 _WRITE_CATEGORY = WRITE_CATEGORY
 _INTERVAL_CONVENTION = INTERVAL_CONVENTION
 
@@ -88,8 +77,6 @@ class IngestResult:
     start: date | None = None
     end: date | None = None
     skipped: bool = False
-    rest_fallback_used: bool = False
-    rest_fallback_range: tuple[date, date] | None = None
 
 
 @dataclass
@@ -710,16 +697,12 @@ class BinanceVisionPipeline:
 
         await _progress(0, f"Planning downloads for {symbol} {data_type}...")
 
-        # Early exit: funding-rate cache already covers [start, end].
         if data_type == "fundingRate":
             from tinohelm.data.catalog import CatalogSession
 
             _funding_session = CatalogSession(self.catalog_path, storage=self._storage)
-            if (
-                _funding_session.funding_cache_covers(symbol, start, end)
-                and _funding_session.funding_parquet_covers(symbol, start, end)
-            ):
-                await _progress(100, "Funding rate cache already covers range")
+            if _funding_session.funding_parquet_covers(symbol, start, end):
+                await _progress(100, "Funding rate parquet already covers range")
                 return IngestResult(
                     symbol=symbol, data_type=data_type,
                     objects_count=0, files_written=0,
@@ -998,30 +981,7 @@ class BinanceVisionPipeline:
             _rollback_once()
             raise
 
-        def _rest_fallback_start_for_tail_download_errors() -> date | None:
-            if not download_failed_indices or not is_rest_fallback_supported(data_type):
-                return None
-            if not download_success_indices:
-                return None
-            first_failed = min(download_failed_indices)
-            expected_tail = set(range(first_failed, len(tasks)))
-            if set(download_failed_indices) != expected_tail:
-                return None
-            last_success = first_failed - 1
-            if last_success not in download_success_indices:
-                return None
-            last_success_task = tasks[last_success]
-            vision_end = parse_vision_coverage_end(
-                last_success_task.granularity,
-                last_success_task.dest_path.stem,
-            )
-            if not vision_end or vision_end >= end:
-                return None
-            return vision_end + timedelta(days=1)
-
-        tail_rest_start = _rest_fallback_start_for_tail_download_errors()
-        blocking_download_errors = bool(download_errors) and tail_rest_start is None
-        if blocking_download_errors or convert_errors:
+        if download_errors or convert_errors:
             _rollback_once()
             parts: list[str] = []
             first_exc: Exception | None = None
@@ -1042,50 +1002,7 @@ class BinanceVisionPipeline:
                 f"{symbol} {data_type} converted 0 objects from {len(tasks)} downloaded file(s)"
             )
 
-        # 4. REST API fallback for recent data gap
-        rest_fallback_used = False
-        rest_fallback_range = None
-
-        if is_rest_fallback_supported(data_type):
-            rest_start = tail_rest_start
-            if rest_start is None:
-                vision_end = self._detect_vision_coverage_end(tasks)
-                if vision_end and vision_end < end:
-                    rest_start = vision_end + timedelta(days=1)
-            if rest_start is not None:
-                try:
-                    await _progress(92, f"REST fallback: {rest_start} → {end}")
-                except asyncio.CancelledError:
-                    _rollback_once()
-                    raise
-                try:
-                    fb_count, fb_paths = await self._rest_fallback(
-                        symbol, data_type, interval, rest_start, end, instrument,
-                    )
-                    if fb_count <= 0 or not fb_paths:
-                        raise RuntimeError(
-                            f"REST fallback produced no objects/files for {symbol} {data_type} "
-                            f"[{rest_start}..{end}]"
-                        )
-                    total_objects += fb_count
-                    all_file_paths.extend(fb_paths)
-                    rest_fallback_used = True
-                    rest_fallback_range = (rest_start, end)
-                except asyncio.CancelledError:
-                    _rollback_once()
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "REST fallback failed for %s %s [%s..%s]",
-                        symbol, data_type, rest_start, end, exc_info=True,
-                    )
-                    _rollback_once()
-                    await _progress(100, "Failed")
-                    raise RuntimeError(
-                        f"REST fallback failed for {symbol} {data_type} [{rest_start}..{end}]: {exc}"
-                    ) from exc
-
-        # 5. Update DB catalog
+        # 4. Update DB catalog
         try:
             await _progress(96, "Updating catalog database...")
         except asyncio.CancelledError:
@@ -1198,8 +1115,6 @@ class BinanceVisionPipeline:
             file_paths=all_file_paths,
             start=start,
             end=end,
-            rest_fallback_used=rest_fallback_used,
-            rest_fallback_range=rest_fallback_range,
         )
         if post_commit_was_cancelled:
             _recancel_current_task()
@@ -1595,127 +1510,6 @@ class BinanceVisionPipeline:
             )
 
 
-    # ------------------------------------------------------------------
-    # REST API fallback
-    # ------------------------------------------------------------------
-
-    def _detect_vision_coverage_end(
-        self,
-        tasks,
-    ) -> date | None:
-        """Detect the last date covered by Vision downloads.
-
-        Thin wrapper around :func:`pipeline_helpers.parse_vision_coverage_end`
-        that pulls ``granularity`` and ``stem`` off the last task. Stems look
-        like ``BTCUSDT-klines-1m-2025-03-15`` (daily) or
-        ``BTCUSDT-aggTrades-2025-03`` (monthly).
-        """
-        if not tasks:
-            return None
-        last_task = tasks[-1]
-        return parse_vision_coverage_end(last_task.granularity, last_task.dest_path.stem)
-
-    async def _rest_fallback(
-        self,
-        symbol: str,
-        data_type: str,
-        interval: str | None,
-        start: date,
-        end: date,
-        instrument,
-    ) -> tuple[int, list[str]]:
-        """Use REST API to fill the gap between Vision coverage and requested end."""
-        start_dt = date_start_dt(start)
-        end_dt = date_end_dt(end)
-
-        # Klines-family: unified handler with per-type fetch function
-        if data_type in KLINES_REST_FETCH_FN:
-            return await self._rest_fallback_klines(
-                fetch_fn_name=KLINES_REST_FETCH_FN[data_type],
-                symbol=symbol, data_type=data_type,
-                interval=interval, start_dt=start_dt,
-                end_dt=end_dt, instrument=instrument,
-            )
-
-        if data_type == "aggTrades":
-            return await self._rest_fallback_trades(
-                symbol, start_dt, end_dt,
-            )
-
-        # trades: no REST fallback (Binance /fapi/v1/trades has
-        # different schema from aggTrades; skip to avoid mismatch)
-        logger.info(
-            "No REST fallback for data_type=%r, skipping", data_type,
-        )
-        return 0, []
-
-    async def _rest_fallback_klines(
-        self, fetch_fn_name: str, symbol: str, data_type: str,
-        interval: str | None, start_dt, end_dt, instrument,
-    ) -> tuple[int, list[str]]:
-        """Shared REST fallback for all klines-family types."""
-        from tinohelm.data.catalog import write_bars
-
-        if not interval:
-            return 0, []
-
-        import importlib
-        mod = importlib.import_module("tinohelm.data.providers.binance")
-        fetch_fn = getattr(mod, fetch_fn_name)
-
-        klines = await fetch_fn(
-            symbol=symbol, interval=interval,
-            start=start_dt, end=end_dt,
-        )
-        if not klines:
-            return 0, []
-
-        converter = get_converter(data_type)
-        kwargs = self._build_converter_kwargs(
-            data_type, symbol, interval, instrument,
-        )
-        df = pd.DataFrame(klines)
-        bars = converter.convert(df, instrument, **kwargs)
-        if bars:
-            paths = write_bars(
-                bars,
-                symbol,
-                interval,
-                self.catalog_path,
-                merge=False,
-                source_type=data_type,
-                storage=self._storage,
-            )
-            return len(bars), [str(p) for p in paths]
-        return 0, []
-
-    async def _rest_fallback_trades(
-        self, symbol: str, start_dt, end_dt,
-    ) -> tuple[int, list[str]]:
-        """REST fallback for aggTrades only."""
-        from tinohelm.data.providers.binance import fetch_agg_trades
-        from tinohelm.data.catalog import (
-            agg_trades_to_trade_ticks,
-            write_trade_ticks,
-        )
-
-        agg_trades = await fetch_agg_trades(
-            symbol=symbol, start=start_dt, end=end_dt,
-        )
-        if not agg_trades:
-            return 0, []
-
-        ticks = agg_trades_to_trade_ticks(agg_trades, symbol)
-        if ticks:
-            paths = write_trade_ticks(
-                ticks,
-                symbol,
-                self.catalog_path,
-                source_type="aggTrades",
-                storage=self._storage,
-            )
-            return len(ticks), paths
-        return 0, []
 
     # ------------------------------------------------------------------
     # Helpers
