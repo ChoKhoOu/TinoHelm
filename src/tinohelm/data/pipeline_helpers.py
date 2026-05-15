@@ -30,7 +30,6 @@ WRITE_CATEGORY: Mapping[str, str] = MappingProxyType({
     "klines": "bar",
     "markPriceKlines": "mark_price",
     "indexPriceKlines": "index_price",
-    "aggTrades": "trade_tick",
     "trades": "trade_tick",
     "bookTicker": "quote_tick",
     "fundingRate": "funding_rate",
@@ -41,7 +40,7 @@ WRITE_CATEGORY: Mapping[str, str] = MappingProxyType({
 
 # Idempotent write-category inputs used by DB/catalog rows. Keep these out of
 # WRITE_CATEGORY because that mapping also doubles as source_type → category for
-# source-aware catalog roots (e.g. resolve_catalog_path("aggTrades")).
+# source-aware catalog roots (e.g. resolve_catalog_path("trades")).
 CANONICAL_WRITE_CATEGORIES: frozenset[str] = frozenset({
     "bar",
     "trade_tick",
@@ -55,7 +54,6 @@ CANONICAL_WRITE_CATEGORIES: frozenset[str] = frozenset({
 # Mapping: data_type → DB ``interval`` column convention when the user did
 # not provide an interval (typically because the data type is intervalless).
 INTERVAL_CONVENTION: Mapping[str, str] = MappingProxyType({
-    "aggTrades": "tick",
     "trades": "tick",
     "bookTicker": "tick",
     "fundingRate": "8h",
@@ -198,10 +196,10 @@ def parse_vision_coverage_end(granularity: str, stem: str) -> date | None:
 
     Stems look like:
 
-    - daily:   ``BTCUSDT-aggTrades-2025-03-15``         → ``date(2025, 3, 15)``
+    - daily:   ``BTCUSDT-trades-2025-03-15``             → ``date(2025, 3, 15)``
     - daily:   ``BTCUSDT-klines-1m-2025-03-15``         → ``date(2025, 3, 15)``
     - monthly: ``BTCUSDT-klines-1m-2025-03``            → ``date(2025, 3, 31)``
-    - monthly: ``BTCUSDT-aggTrades-2024-12``            → ``date(2024, 12, 31)``
+    - monthly: ``BTCUSDT-trades-2024-12``               → ``date(2024, 12, 31)``
 
     Returns ``None`` for unrecognized formats.
     """

@@ -645,7 +645,7 @@ class BinanceVisionPipeline:
         )
         self._convert_workers = max(1, cfg.data.convert_workers)
         self._chunk_rows = max(1, cfg.data.chunk_rows)
-        self._agg_trades_chunk_rows = max(1, cfg.data.agg_trades_chunk_rows)
+        self._tick_chunk_rows = max(1, cfg.data.tick_chunk_rows)
         self._csv_queue_maxsize = max(1, cfg.data.csv_queue_maxsize)
 
     # ------------------------------------------------------------------
@@ -671,7 +671,7 @@ class BinanceVisionPipeline:
         symbol:
             TinoHelm-style symbol (e.g. ``"BTCUSDT-PERP"``).
         data_type:
-            Vision data type key (e.g. ``"klines"``, ``"aggTrades"``).
+            Vision data type key (e.g. ``"klines"``, ``"trades"``).
         start / end:
             Inclusive date range.
         asset_class:
@@ -1382,8 +1382,8 @@ class BinanceVisionPipeline:
         return count, fps
 
     def _chunk_rows_for(self, data_type: str) -> int:
-        if data_type in {"aggTrades", "trades"}:
-            return self._agg_trades_chunk_rows
+        if data_type == "trades":
+            return self._tick_chunk_rows
         return self._chunk_rows
 
     def _stream_full_file(

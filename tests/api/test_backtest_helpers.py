@@ -236,7 +236,7 @@ def test_backtest_runner_optional_replay_loads_and_injects(monkeypatch):
     runner = BacktestRunner(
         symbol="BTCUSDT-PERP",
         interval="1m",
-        extra_data_types=["bookTicker", "aggTrades"],
+        extra_data_types=["bookTicker", "trades"],
     )
 
     def fake_load(symbol, source_type):

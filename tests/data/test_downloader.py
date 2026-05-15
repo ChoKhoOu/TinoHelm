@@ -652,7 +652,7 @@ class TestExtractZip:
 class TestDataTypeAvailability:
     def test_known_types_present(self):
         expected = {
-            "klines", "aggTrades", "trades", "bookTicker",
+            "klines", "trades", "bookTicker",
             "fundingRate", "bookDepth", "metrics",
             "indexPriceKlines", "markPriceKlines", "premiumIndexKlines",
         }

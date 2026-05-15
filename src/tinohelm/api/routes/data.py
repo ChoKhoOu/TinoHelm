@@ -221,7 +221,6 @@ def _split_fetch_date_ranges(
 
 
 _LEGACY_UPSTREAM_ALIASES: dict[str, str] = {
-    "aggTrades": "trades",
     "agg_trades": "trades",
     "trade": "trades",
 }
@@ -554,7 +553,7 @@ async def trigger_data_fetch_batch(
         data_type=effective_data_type,
         start=body.start,
         end=body.end,
-        max_days_per_job=settings.data.agg_trades_max_days_per_job,
+        max_days_per_job=settings.data.tick_max_days_per_job,
     )
     effective_intervals = _fetch_batch_job_intervals(body.data_type, body.intervals)
     for symbol in body.symbols:
