@@ -4,9 +4,7 @@ Main data pipeline uses BinanceVisionPipeline (data/pipeline.py).
 This module is retained ONLY for filling the T+1~T+3 gap where
 Vision archives are not yet available.
 
-Retained: fetch_klines, fetch_mark_price_klines, fetch_index_price_klines,
-          fetch_agg_trades
-Removed:  fetch_funding_rates (replaced by Vision fundingRate monthly packs)
+Exports: fetch_klines, fetch_mark_price_klines, fetch_index_price_klines
 
 Shared pagination / retry / throttle policy lives in :mod:`tinohelm.data.providers._rest`
 — see that module for the retry classification matrix and the Binance
@@ -23,9 +21,7 @@ import httpx
 
 from tinohelm.data.instruments import strip_to_binance_api_symbol as _strip_to_binance_api_symbol
 from tinohelm.data.providers._rest import (
-    advance_cursor_after_agg_trade,
     advance_cursor_after_kline,
-    agg_trade_row_to_dict,
     kline_row_to_dict,
     ms_range,
     parse_used_weight_header,
@@ -44,15 +40,11 @@ INTERVAL_MS = {
     "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
 }
 
-# Minimum per-request sleep for each endpoint family. Matches legacy behaviour:
-# the two klines-family loops used 0.5s, the aggTrades loop used 0.3s, and the
-# simpler mark/index "generic" path also used 0.5s.
+# Minimum per-request sleep for each endpoint family.
 _KLINES_LOW_SLEEP: float = 0.5
-_AGG_TRADES_LOW_SLEEP: float = 0.3
 
-# Progress log intervals (rows-between-emits) — retained from legacy code.
+# Progress log intervals (rows-between-emits).
 _KLINES_PROGRESS_EVERY: int = 15_000
-_AGG_TRADES_PROGRESS_EVERY: int = 50_000
 
 
 async def fetch_klines(
@@ -137,59 +129,6 @@ async def fetch_index_price_klines(
         label=f"index price klines for {symbol}",
     )
 
-
-async def fetch_agg_trades(
-    symbol: str,
-    start: datetime,
-    end: datetime,
-    testnet: bool = False,
-    limit: int = 1000,
-) -> list[dict[str, Any]]:
-    """Fetch aggregate trades from Binance ``/fapi/v1/aggTrades`` with pagination.
-
-    Returns list of dicts with: ``agg_id, price, quantity, timestamp_ms,
-    is_buyer_maker``.
-    """
-    base_url = BINANCE_FUTURES_TESTNET if testnet else BINANCE_FUTURES_BASE
-    url = f"{base_url}/fapi/v1/aggTrades"
-    api_symbol = _strip_to_binance_api_symbol(symbol)
-
-    start_ms, end_ms = ms_range(start, end)
-    all_trades: list[dict[str, Any]] = []
-    current_start = start_ms
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        while current_start < end_ms:
-            params = {
-                "symbol": api_symbol,
-                "startTime": current_start,
-                "endTime": end_ms,
-                "limit": limit,
-            }
-            resp = await request_with_retry(client, url, params=params)
-            assert resp is not None  # raise_on_404=True default — never None
-            raw = resp.json()
-            if not raw:
-                break
-
-            all_trades.extend(agg_trade_row_to_dict(t) for t in raw)
-
-            if len(all_trades) % _AGG_TRADES_PROGRESS_EVERY == 0:
-                logger.info("Progress: %d trades fetched for %s", len(all_trades), symbol)
-
-            current_start = advance_cursor_after_agg_trade(raw[-1]["T"])
-
-            if len(raw) < limit:
-                break
-
-            sleep_s = throttle_seconds(
-                parse_used_weight_header(resp.headers),
-                low_sleep=_AGG_TRADES_LOW_SLEEP,
-            )
-            await asyncio.sleep(sleep_s)
-
-    logger.info("Fetched %d aggregate trades for %s", len(all_trades), symbol)
-    return all_trades
 
 
 async def _paginate_klines(

@@ -32,7 +32,3 @@ LIFECYCLE_FLATTEN = "lifecycle.flatten"
 # requires expected_px context + venue rebate data source.
 SIGNAL_COMMISSION_DEVIATION = "signal.commission.deviation"
 
-# DEPRECATED: alias for SIGNAL_COMMISSION_DEVIATION. Removed after one
-# release cycle. Subscribers should migrate to SIGNAL_COMMISSION_DEVIATION /
-# the ``signal.commission.deviation`` channel suffix.
-SIGNAL_COST_DEVIATION = "signal.cost.deviation"

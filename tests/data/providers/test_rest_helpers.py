@@ -26,9 +26,7 @@ from tinohelm.data.providers._rest import (
     WEIGHT_HIGH_THRESHOLD,
     WEIGHT_MEDIUM_SLEEP,
     WEIGHT_MEDIUM_THRESHOLD,
-    advance_cursor_after_agg_trade,
     advance_cursor_after_kline,
-    agg_trade_row_to_dict,
     backoff_seconds,
     classify_http_status,
     kline_row_to_dict,
@@ -179,7 +177,7 @@ class TestThrottleSeconds:
         assert throttle_seconds(WEIGHT_HIGH_THRESHOLD, low_sleep=0.5) == WEIGHT_MEDIUM_SLEEP
 
     def test_custom_low_sleep_per_endpoint(self):
-        """fetch_agg_trades and fetch_klines pass different low_sleep values."""
+        """Different endpoints pass different low_sleep values."""
         assert throttle_seconds(0, low_sleep=0.5) == 0.5
         assert throttle_seconds(500, low_sleep=0.3) == 0.3
 
@@ -290,37 +288,7 @@ class TestKlineRowToDict:
 
 
 # ---------------------------------------------------------------------------
-# agg_trade_row_to_dict
-# ---------------------------------------------------------------------------
-
-
-class TestAggTradeRowToDict:
-    def test_canonical_shape(self):
-        raw = {"a": 1001, "p": "50000.00", "q": "0.123", "T": 1735689600123, "m": True}
-        out = agg_trade_row_to_dict(raw)
-        assert out == {
-            "agg_id": 1001,
-            "price": "50000.00",
-            "quantity": "0.123",
-            "timestamp_ms": 1735689600123,
-            "is_buyer_maker": True,
-        }
-
-    def test_five_keys_exactly(self):
-        raw = {"a": 1, "p": "1", "q": "1", "T": 1, "m": False, "f": 2, "l": 3}
-        out = agg_trade_row_to_dict(raw)
-        # Only 5 canonical fields — extra keys in the raw row are ignored.
-        assert set(out.keys()) == {
-            "agg_id", "price", "quantity", "timestamp_ms", "is_buyer_maker",
-        }
-
-    def test_is_buyer_maker_false_preserved(self):
-        raw = {"a": 1, "p": "1", "q": "1", "T": 1, "m": False}
-        assert agg_trade_row_to_dict(raw)["is_buyer_maker"] is False
-
-
-# ---------------------------------------------------------------------------
-# advance_cursor_after_*
+# advance_cursor_after_kline
 # ---------------------------------------------------------------------------
 
 
@@ -329,10 +297,6 @@ class TestAdvanceCursor:
         """Next-page startTime must be strictly after the last close time."""
         assert advance_cursor_after_kline(1735689659999) == 1735689660000
         assert advance_cursor_after_kline(0) == 1
-
-    def test_agg_trade_cursor_is_strict_plus_one(self):
-        assert advance_cursor_after_agg_trade(1735689600123) == 1735689600124
-        assert advance_cursor_after_agg_trade(0) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -645,9 +609,7 @@ class TestRestModuleSurface:
             "throttle_seconds",
             "ms_range",
             "kline_row_to_dict",
-            "agg_trade_row_to_dict",
             "advance_cursor_after_kline",
-            "advance_cursor_after_agg_trade",
             "request_with_retry",
         ):
             assert hasattr(_rest, name), f"_rest.{name} missing"

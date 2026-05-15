@@ -85,13 +85,6 @@ class _CleanupBackup:
     backup_path: Path
 
 
-@dataclass
-class _FundingCacheSnapshot:
-    path: Path
-    existed: bool
-    payload: bytes | None
-
-
 class _ParquetCleanupGuard:
     """Rollback handle for overlapping parquet files removed before ingest writes."""
 

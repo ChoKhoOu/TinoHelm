@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import logging
 import re
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -35,13 +34,6 @@ if TYPE_CHECKING:
     import pandas as pd
     import polars as pl
 
-
-_INTERVAL_MAP = INTERVAL_MAP
-
-
-def _interval_to_nanoseconds(interval: str) -> int:
-    """Backward-compatible wrapper around :func:`interval_to_nanoseconds`."""
-    return interval_to_nanoseconds(interval)
 
 
 def _make_instrument(symbol: str):
@@ -211,8 +203,8 @@ def _funding_parquet_time_range(path: Path, storage: Any) -> tuple[int, int] | N
     """Read min/max ``ts_event`` from a funding-rate parquet.
 
     Funding-rate parquets carry ``ts_event`` as the row-level funding time
-    in nanoseconds (see :func:`write_funding_rate_parquet`). This helper
-    returns ``None`` when statistics are missing; I/O errors propagate.
+    in nanoseconds. This helper returns ``None`` when statistics are missing;
+    I/O errors propagate.
     """
     import pyarrow.parquet as pq
 
@@ -252,62 +244,6 @@ def ensure_catalog_dirs(catalog_path: str | Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-
-@dataclass
-class _FundingCacheSnapshot:
-    pass
-
-
-class FundingRateTxn:
-    """Write handle for funding-rate Parquet ingest.
-
-    Wraps the Parquet write into a transaction-like shape so callers can
-    detect whether the write happened and roll back at the Parquet level.
-    """
-
-    def __init__(
-        self,
-        catalog_path: Path,
-        symbol: str,
-        snapshot: _FundingCacheSnapshot,
-        storage: Any | None = None,
-    ) -> None:
-        self._catalog_path = catalog_path
-        self.symbol = symbol
-        self._storage = storage
-        self._written_parquet = False
-
-    @property
-    def flushed(self) -> bool:
-        return True
-
-    @property
-    def wrote_parquet(self) -> bool:
-        return self._written_parquet
-
-    def write_parquet(self, records: list) -> Path:
-        """Write funding-rate records to the NT-native Parquet catalog."""
-        parquet_path = write_funding_rate_parquet(
-            records=records,
-            symbol=self.symbol,
-            catalog_root=self._catalog_path,
-            storage=self._storage,
-        )
-        self._written_parquet = True
-        logger.info(
-            "Wrote %d funding rate records for %s",
-            len(records),
-            self.symbol,
-        )
-        return parquet_path
-
-    def flush_json(self) -> None:
-        """No-op — legacy JSON cache removed."""
-        pass
-
-    def restore(self) -> None:
-        """No-op — Parquet rollback handled by pipeline cleanup guard."""
-        pass
 
 
 @dataclass(frozen=True)
@@ -971,61 +907,6 @@ class CatalogSession:
         if data_type == "index_price":
             return index_price_update_dir(symbol, self.catalog_path)
         return None
-
-    @contextmanager
-    def funding_rate_transaction(self, symbol: str) -> Iterator[FundingRateTxn]:
-        """Yield a :class:`FundingRateTxn` for ``symbol``.
-
-        Behaviour:
-
-        * The JSON snapshot is captured on entry.
-        * Exit with an exception restores the snapshot and re-raises.
-        * Normal exit without ``flush_json`` logs a warning — the Parquet is
-          already written and the JSON is stale; callers must flush after
-          their own DB commit or skip writing entirely.
-        """
-        snapshot = self._take_funding_snapshot(symbol)
-        # Resolve lazily here so remote-configured sessions built without an
-        # explicit storage argument still route the parquet write through
-        # their backend, not a silent ``None`` that defaults to local.
-        txn = FundingRateTxn(
-            catalog_path=self.catalog_path,
-            symbol=symbol,
-            snapshot=snapshot,
-            storage=self.storage,
-        )
-        try:
-            yield txn
-        except BaseException:
-            txn.restore()
-            raise
-        else:
-            if txn.wrote_parquet and not txn.flushed:
-                logger.warning(
-                    "FundingRateTxn for %s left the JSON cache unflushed — "
-                    "Parquet was written but legacy JSON readers will be stale",
-                    symbol,
-                )
-
-    def create_funding_txn(self, symbol: str) -> FundingRateTxn:
-        """Create an unmanaged :class:`FundingRateTxn` for callers that need
-        to control flush/restore timing across async boundaries (e.g. pipeline
-        ingest where DB commit happens between write and flush).
-
-        The caller is responsible for calling ``txn.flush_json()`` on success
-        and ``txn.restore()`` on failure.
-        """
-        snapshot = self._take_funding_snapshot(symbol)
-        return FundingRateTxn(
-            catalog_path=self.catalog_path,
-            symbol=symbol,
-            snapshot=snapshot,
-            storage=self.storage,
-        )
-
-    @staticmethod
-    def _take_funding_snapshot(symbol: str) -> _FundingCacheSnapshot:
-        return _FundingCacheSnapshot()
 
     def funding_cache_covers(self, symbol: str, start, end) -> bool:
         """Delegate to parquet coverage check — legacy JSON cache removed."""
@@ -1702,47 +1583,6 @@ def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
 # TradeTick support
 # ---------------------------------------------------------------------------
 
-def agg_trades_to_trade_ticks(
-    agg_trades: list[dict[str, Any]],
-    symbol: str,
-) -> list:
-    """Convert Binance aggregate trades to NT TradeTick objects.
-
-    Args:
-        agg_trades: list of dicts from ``fetch_agg_trades()``
-            (keys: agg_id, price, quantity, timestamp_ms, is_buyer_maker)
-        symbol: TinoHelm symbol (e.g. ``BTCUSDT-PERP``)
-
-    Returns:
-        list of ``TradeTick`` objects sorted by ts_event.
-    """
-    from nautilus_trader.model.data import TradeTick
-    from nautilus_trader.model.enums import AggressorSide
-    from nautilus_trader.model.identifiers import TradeId
-
-    from tinohelm.data.instruments import make_instrument
-
-    instrument = make_instrument(symbol)
-    inst_id = instrument.id
-
-    ticks: list[TradeTick] = []
-    for t in agg_trades:
-        ts_ns = int(t["timestamp_ms"]) * 1_000_000  # ms → ns
-        ticks.append(TradeTick(
-            instrument_id=inst_id,
-            price=instrument.make_price(float(t["price"])),
-            size=instrument.make_qty(float(t["quantity"])),
-            aggressor_side=AggressorSide.SELLER if t["is_buyer_maker"] else AggressorSide.BUYER,
-            trade_id=TradeId(str(t["agg_id"])),
-            ts_event=ts_ns,
-            ts_init=ts_ns,
-        ))
-
-    ticks.sort(key=lambda x: x.ts_event)
-    logger.info("Converted %d aggregate trades to TradeTick for %s", len(ticks), symbol)
-    return ticks
-
-
 def write_trade_ticks(
     ticks: list,
     symbol: str,
@@ -1963,115 +1803,13 @@ def funding_rate_update_dir(symbol: str, catalog_root: str | Path) -> Path:
 
 
 def funding_rate_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
-    """Return the legacy single-file Parquet path for a symbol's funding-rate data.
+    """Return the single-file Parquet path for a symbol's funding-rate data.
 
-    The new NT-native funding update layout lives under
-    ``data/funding_rate_update/<instrument_id>/``. This helper is kept for the
-    legacy JSON/single-file compatibility path.
+    Used by the read path and delete path. The NT-native funding update layout
+    lives under ``data/funding_rate_update/<instrument_id>/``.
     """
     return Path(catalog_root) / "data" / "funding_rate" / f"{symbol.lower()}.parquet"
 
-
-def write_funding_rate_parquet(
-    records: list,
-    symbol: str,
-    catalog_root: str | Path,
-    storage: Any | None = None,
-) -> Path:
-    """Write BinanceFundingRate records to a single Parquet file per symbol.
-
-    Schema
-    ------
-    - ``ts_event`` : int64 — funding time in nanoseconds since epoch
-    - ``funding_rate`` : float64
-
-    Records from ``records`` may be :class:`BinanceFundingRate` dataclass
-    instances (with ``.ts_event`` and ``.funding_rate`` attrs) **or** plain
-    dicts with ``funding_time_ms`` / ``funding_rate`` keys (JSON cache format).
-
-    Existing data is merged (deduped by ``ts_event``, keeping latest) before
-    writing so incremental ingestion is safe.
-
-    Returns the path of the written Parquet file.
-    """
-    import fcntl
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    from io import BytesIO
-
-    out_path = funding_rate_parquet_path(symbol, catalog_root)
-    if not _is_remote_storage(storage):
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Normalise records → list of (ts_event_ns, funding_rate)
-    def _to_tuple(r):
-        if hasattr(r, "ts_event"):
-            rate = getattr(r, "funding_rate", None)
-            if rate is None:
-                rate = getattr(r, "rate")
-            return int(r.ts_event), float(rate)
-        # Plain dict (JSON cache format)
-        return int(r["funding_time_ms"]) * 1_000_000, float(r["funding_rate"])
-
-    new_rows: dict[int, float] = {}
-    for r in records:
-        ts_ns, rate = _to_tuple(r)
-        new_rows[ts_ns] = rate
-
-    lock_path = _catalog_write_lock_path(out_path, storage)
-    with lock_path.open("a+b") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            # Merge with existing Parquet if present
-            if _is_remote_storage(storage):
-                try:
-                    exists = storage.exists(out_path)
-                except FileNotFoundError:
-                    exists = False
-                if exists:
-                    try:
-                        existing_payload = storage.read_bytes(out_path)
-                    except FileNotFoundError:
-                        existing_payload = None
-                    else:
-                        existing_table = pq.read_table(BytesIO(existing_payload))
-                        for ts_ns, rate in zip(
-                            existing_table["ts_event"].to_pylist(),
-                            existing_table["funding_rate"].to_pylist(),
-                        ):
-                            # New records take precedence (overwrite existing by ts_event key)
-                            if ts_ns not in new_rows:
-                                new_rows[ts_ns] = float(rate)
-            elif out_path.exists():
-                existing_table = pq.read_table(str(out_path))
-                for ts_ns, rate in zip(
-                    existing_table["ts_event"].to_pylist(),
-                    existing_table["funding_rate"].to_pylist(),
-                ):
-                    # New records take precedence (overwrite existing by ts_event key)
-                    if ts_ns not in new_rows:
-                        new_rows[ts_ns] = float(rate)
-
-            # Sort by ts_event and build Arrow table
-            sorted_ts = sorted(new_rows)
-            table = pa.table(
-                {
-                    "ts_event": pa.array(sorted_ts, type=pa.int64()),
-                    "funding_rate": pa.array([new_rows[t] for t in sorted_ts], type=pa.float64()),
-                }
-            )
-            if _is_remote_storage(storage):
-                buf = BytesIO()
-                pq.write_table(table, buf)
-                storage.upload_bytes(out_path, buf.getvalue())
-            else:
-                pq.write_table(table, str(out_path))
-            logger.info(
-                "Wrote %d funding-rate rows to %s", len(sorted_ts), out_path
-            )
-            return out_path
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def read_funding_rate_parquet(

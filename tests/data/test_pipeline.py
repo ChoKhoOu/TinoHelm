@@ -89,28 +89,6 @@ class TestIngestResult:
         assert r.skipped is True
 
 
-class TestFundingRateWrites:
-    def test_funding_txn_write_and_flush_merges_incremental_records(self, tmp_path: Path, paths_override, monkeypatch):
-        """Pipeline funding writes use FundingRateTxn — verify Parquet-only write semantics."""
-        from tinohelm.data.catalog import CatalogSession, FundingRateTxn
-
-        def _write_parquet(**_kwargs):
-            return tmp_path / "catalog" / "funding_rates" / "BTCUSDT-PERP.parquet"
-
-        monkeypatch.setattr("tinohelm.data.catalog.write_funding_rate_parquet", _write_parquet)
-
-        session = CatalogSession(tmp_path / "catalog")
-        with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
-            records = [
-                SimpleNamespace(funding_time_ms=2_000, funding_rate=0.02),
-            ]
-            path = txn.write_parquet(records)
-            assert path is not None
-            assert txn.wrote_parquet is True
-            txn.flush_json()  # no-op now
-
-        assert txn.flushed is True
-
 
 class TestDirectUpdateWrites:
     def test_write_objects_uses_nt_direct_updates_for_mark_price(self, tmp_path: Path, monkeypatch):
@@ -1473,16 +1451,6 @@ class TestIngestEarlyFailClosed:
         assert restored_rows[0].ts_event == old_rows[0].ts_event
         assert not (tmp_path / ".ingest-rollback").exists()
 
-    def test_funding_txn_restore_is_noop(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths_override
-    ):
-        from tinohelm.data.catalog import CatalogSession
-
-        symbol = "BTCUSDT-PERP"
-        session = CatalogSession(tmp_path)
-        txn = session.create_funding_txn(symbol)
-        txn.restore()  # no-op — legacy JSON cache removed
-
     def test_cancelled_ingest_restores_overlap_cleanup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         from tinohelm.data.catalog import resolve_catalog_path
 
@@ -1708,32 +1676,6 @@ class TestIngestEarlyFailClosed:
 
         with pytest.raises(OSError, match="remote auth failed"):
             BinanceVisionPipeline._parquet_time_range(tmp_path / "broken.parquet", storage=Storage())
-
-    def test_funding_rate_parquet_failure_does_not_commit_json_cache(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths_override
-    ):
-        """FundingRateTxn: if write_parquet raises, flush_json is never reached."""
-        from tinohelm.data.catalog import CatalogSession, FundingRateTxn
-
-        saved: list[list[dict]] = []
-        paths_override("funding_rates", tmp_path / "funding_rates")
-
-        def boom(**_kwargs):
-            raise RuntimeError("parquet write failed")
-
-        monkeypatch.setattr("tinohelm.data.catalog.write_funding_rate_parquet", boom)
-        monkeypatch.setattr(
-            "tinohelm.data.funding_cache._save_cache",
-            lambda _symbol, records: saved.append(records),
-        )
-        session = CatalogSession(tmp_path)
-        records = [SimpleNamespace(funding_time_ms=1_704_067_200_000, funding_rate=0.01)]
-
-        with pytest.raises(RuntimeError, match="parquet write failed"):
-            with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
-                txn.write_parquet(records)
-
-        assert saved == []
 
 
 class TestCatalogStorageStats:

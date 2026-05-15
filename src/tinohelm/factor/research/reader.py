@@ -138,9 +138,6 @@ class ResearchParquetReader:
             exact = _exact_bar_files(root, request, self._storage)
             if exact:
                 return exact
-            legacy = [_CandidateFile(file) for file in _legacy_files(root, request.source, self._storage)]
-            if legacy:
-                return legacy
         return []
 
     def _normalize_scan(
@@ -244,32 +241,6 @@ def _is_metadata_parquet(path: Path) -> bool:
         "_common_metadata.parquet",
     }
 
-
-def _legacy_files(root: Path, source: str, storage: CatalogStorageProvider) -> list[StorageObject]:
-    files = _safe_parquet_objects(root, _storage_parquet_files(storage, root, recursive=False))
-    if root.name == source:
-        return files
-    source_matched = [file for file in files if _legacy_source_file_matches(file.path, source)]
-    if source_matched:
-        return source_matched
-    if source == "klines":
-        return [file for file in files if not _legacy_source_file_matches_any(file.path)]
-    return []
-
-
-_LEGACY_BAR_SOURCE_NAMES = tuple(
-    source.lower() for source in ("klines", "markPriceKlines", "indexPriceKlines", "premiumIndexKlines")
-)
-
-
-def _legacy_source_file_matches(path: Path, source: str) -> bool:
-    stem = path.stem.lower()
-    source_name = source.lower()
-    return stem == source_name or stem.startswith((f"{source_name}.", f"{source_name}_", f"{source_name}-"))
-
-
-def _legacy_source_file_matches_any(path: Path) -> bool:
-    return any(_legacy_source_file_matches(path, source) for source in _LEGACY_BAR_SOURCE_NAMES)
 
 
 def _safe_parquet_objects(root: Path, objects: Sequence[StorageObject]) -> list[StorageObject]:

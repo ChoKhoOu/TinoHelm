@@ -629,19 +629,11 @@ class TestRecoverInterruptedJobs:
             "_recover_pending_ingest_rollbacks_on_startup",
             AsyncMock(return_value=0),
         )
-        monkeypatch.setattr(
-            dw,
-            "backfill_legacy_batch_ids",
-            AsyncMock(return_value=0),
-        )
-
         rds = AsyncMock()
         count = await dw.recover_interrupted_jobs(rds)
 
         assert count == 4
         assert flipped == {"factory": factory_marker, "model": dw.DataFetchJob}
-        # Legacy Redis backlog is cleared, not replayed.
-        rds.delete.assert_awaited_once_with("tino:data:queue")
 
     async def test_pushes_one_wake_token_when_queued_work_exists(self, monkeypatch):
         """With queued rows still present, recovery must wake exactly ONE
@@ -652,11 +644,6 @@ class TestRecoverInterruptedJobs:
         monkeypatch.setattr(
             dw,
             "_recover_pending_ingest_rollbacks_on_startup",
-            AsyncMock(return_value=0),
-        )
-        monkeypatch.setattr(
-            dw,
-            "backfill_legacy_batch_ids",
             AsyncMock(return_value=0),
         )
 
@@ -677,67 +664,11 @@ class TestRecoverInterruptedJobs:
             "_recover_pending_ingest_rollbacks_on_startup",
             AsyncMock(return_value=0),
         )
-        monkeypatch.setattr(
-            dw,
-            "backfill_legacy_batch_ids",
-            AsyncMock(return_value=0),
-        )
 
         rds = AsyncMock()
         await dw.recover_interrupted_jobs(rds)
 
         rds.lpush.assert_not_awaited()
-
-    async def test_backfills_legacy_backlog_before_clearing_redis(
-        self, monkeypatch
-    ):
-        """Issue #166: startup recovery must adopt legacy backlog into the
-        new scheduler by backfilling ``batch_id`` before clearing Redis.
-
-        Verifies:
-          - ``backfill_legacy_batch_ids`` is invoked with the session factory.
-          - It runs BEFORE ``rds.delete`` so legacy Redis tokens are only
-            purged once DB-side adoption has succeeded (if the backfill
-            raised, Redis would still carry the old wake signal for retry).
-          - Its touched-row count is logged/returned alongside the flip count.
-        """
-        factory_marker = object()
-        call_order: list[str] = []
-
-        async def _fake_flip(_factory, _model):
-            call_order.append("flip")
-            return 2
-
-        async def _fake_backfill(factory):
-            call_order.append("backfill")
-            assert factory is factory_marker
-            return 5
-
-        monkeypatch.setattr(dw, "_flip_running_to_queued", _fake_flip)
-        monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=7))
-        monkeypatch.setattr(dw, "get_session_factory", lambda: factory_marker)
-        monkeypatch.setattr(
-            dw,
-            "_recover_pending_ingest_rollbacks_on_startup",
-            AsyncMock(return_value=0),
-        )
-        monkeypatch.setattr(dw, "backfill_legacy_batch_ids", _fake_backfill)
-
-        rds = AsyncMock()
-
-        async def _delete(_key):
-            call_order.append("redis-delete")
-            return 1
-
-        rds.delete = _delete
-
-        await dw.recover_interrupted_jobs(rds)
-
-        # Backfill must run before we drop the legacy Redis list — otherwise
-        # a crash mid-backfill could leave both DB legacy rows AND a wake
-        # signal unreachable.
-        assert "backfill" in call_order
-        assert call_order.index("backfill") < call_order.index("redis-delete")
 
     async def test_startup_rollback_recovery_keeps_db_check_on_current_event_loop(
         self, monkeypatch, tmp_path
