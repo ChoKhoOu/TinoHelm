@@ -222,7 +222,7 @@ def test_write_trade_ticks_remote_storage_constructs_catalog_without_from_uri_ho
     symbol = "BTCUSDT-PERP"
     source_type = "aggTrades"
     instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
-    resolved_root = tmp_path / "ticks" / source_type
+    resolved_root = tmp_path
     tick_dir = resolved_root / "data" / "trade_tick" / str(instrument.id)
     written_path = tick_dir / "part-0.parquet"
 
@@ -240,7 +240,7 @@ def test_write_trade_ticks_remote_storage_constructs_catalog_without_from_uri_ho
 
         def uri_for_catalog_root(self, logical_root):
             assert Path(logical_root) == resolved_root
-            return "s3://bucket/catalog/ticks/aggTrades"
+            return "s3://bucket/catalog"
 
         def iter_files(self, prefix, *, suffix="", recursive=True):
             assert Path(prefix) == tick_dir
@@ -299,14 +299,14 @@ def test_write_trade_ticks_remote_storage_constructs_catalog_without_from_uri_ho
     assert FakeCatalog.from_uri_calls == []
     assert FakeCatalog.init_calls == [
         (
-            "bucket/catalog/ticks/aggTrades",
+            "bucket/catalog",
             "s3",
             RemoteStorage.fs_storage_options,
             RemoteStorage.fs_rust_storage_options,
         )
     ]
     assert FakeCatalog.write_data_calls == [([tick], True)]
-    assert not resolved_root.exists()
+    assert not (tmp_path / "data").exists()
 
 
 def test_write_trade_ticks_remote_storage_allows_overwrite_without_new_key(
@@ -318,7 +318,7 @@ def test_write_trade_ticks_remote_storage_allows_overwrite_without_new_key(
     symbol = "BTCUSDT-PERP"
     source_type = "aggTrades"
     instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
-    resolved_root = tmp_path / "ticks" / source_type
+    resolved_root = tmp_path
     tick_dir = resolved_root / "data" / "trade_tick" / str(instrument.id)
     written_path = tick_dir / "part-0.parquet"
 
@@ -333,7 +333,7 @@ def test_write_trade_ticks_remote_storage_allows_overwrite_without_new_key(
 
         def uri_for_catalog_root(self, logical_root):
             assert Path(logical_root) == resolved_root
-            return "s3://bucket/catalog/ticks/aggTrades"
+            return "s3://bucket/catalog"
 
         def iter_files(self, prefix, *, suffix="", recursive=True):
             assert Path(prefix) == tick_dir
@@ -382,7 +382,7 @@ def test_write_trade_ticks_remote_storage_raises_when_write_produces_no_parquet(
     symbol = "BTCUSDT-PERP"
     source_type = "aggTrades"
     instrument = SimpleNamespace(id="BTCUSDT-PERP.BINANCE")
-    resolved_root = tmp_path / "ticks" / source_type
+    resolved_root = tmp_path
     tick_dir = resolved_root / "data" / "trade_tick" / str(instrument.id)
 
     class RemoteStorage:
@@ -393,7 +393,7 @@ def test_write_trade_ticks_remote_storage_raises_when_write_produces_no_parquet(
 
         def uri_for_catalog_root(self, logical_root):
             assert Path(logical_root) == resolved_root
-            return "s3://bucket/catalog/ticks/aggTrades"
+            return "s3://bucket/catalog"
 
         def iter_files(self, prefix, *, suffix="", recursive=True):
             assert Path(prefix) == tick_dir
@@ -434,7 +434,7 @@ def test_write_bars_remote_storage_uses_nt_constructor_without_local_catalog(tmp
     symbol = "BTCUSDT-PERP"
     source_type = "klines"
     bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
-    resolved_root = tmp_path / "bar" / source_type
+    resolved_root = tmp_path
     bar_dir = resolved_root / "data" / "bar" / bar_type_str
     written_path = bar_dir / "part-0.parquet"
 
@@ -446,7 +446,7 @@ def test_write_bars_remote_storage_uses_nt_constructor_without_local_catalog(tmp
 
         def uri_for_catalog_root(self, logical_root):
             assert Path(logical_root) == resolved_root
-            return "s3://bucket/catalog/bar/klines"
+            return "s3://bucket/catalog"
 
         def iter_files(self, prefix, *, suffix="", recursive=True):
             assert Path(prefix) == bar_dir
@@ -500,13 +500,13 @@ def test_write_bars_remote_storage_uses_nt_constructor_without_local_catalog(tmp
     assert FakeCatalog.from_uri_calls == []
     assert FakeCatalog.init_calls == [
         (
-            "bucket/catalog/bar/klines",
+            "bucket/catalog",
             "s3",
             {"endpoint_url": "https://example.com"},
             {"endpoint_url": "https://example.com"},
         )
     ]
-    assert not resolved_root.exists()
+    assert not (tmp_path / "data").exists()
 
 
 def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, monkeypatch) -> None:
@@ -515,7 +515,7 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
     symbol = "BTCUSDT-PERP"
     source_type = "klines"
     bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
-    resolved_root = tmp_path / "bar" / source_type
+    resolved_root = tmp_path
     bar_dir = resolved_root / "data" / "bar" / bar_type_str
     bar_dir.mkdir(parents=True)
 
@@ -536,6 +536,8 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
             logical_root = Path(logical_root)
             assert logical_root.is_relative_to(resolved_root)
             rel = logical_root.relative_to(tmp_path).as_posix()
+            if rel == ".":
+                return "s3://bucket/catalog"
             return f"s3://bucket/catalog/{rel}"
 
         def iter_files(self, prefix, *, suffix="", recursive=True):
@@ -594,8 +596,15 @@ def test_write_bars_remote_merge_skips_deleting_fresh_parquet(tmp_path: Path, mo
                     raw_catalog_path
                     .removeprefix("s3://bucket/catalog/")
                     .removeprefix("bucket/catalog/")
+                    .removeprefix("s3://bucket/catalog")
+                    .removeprefix("bucket/catalog")
+                    .lstrip("/")
+                    or "."
                 )
-                dest = tmp_path / rel / "data" / "bar" / bar_type_str / same_name_file.name
+                if rel == "." or rel == "":
+                    dest = tmp_path / "data" / "bar" / bar_type_str / same_name_file.name
+                else:
+                    dest = tmp_path / rel / "data" / "bar" / bar_type_str / same_name_file.name
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(b"new")
 
@@ -648,7 +657,7 @@ def test_write_bars_remote_merge_fails_closed_when_existing_catalog_read_fails(t
     symbol = "BTCUSDT-PERP"
     source_type = "klines"
     bar_type_str = "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"
-    resolved_root = tmp_path / "bar" / source_type
+    resolved_root = tmp_path
     bar_dir = resolved_root / "data" / "bar" / bar_type_str
     existing_path = bar_dir / "old.parquet"
     write_data_calls = []
@@ -661,7 +670,7 @@ def test_write_bars_remote_merge_fails_closed_when_existing_catalog_read_fails(t
 
         def uri_for_catalog_root(self, logical_root):
             assert Path(logical_root) == resolved_root
-            return "s3://bucket/catalog/bar/klines"
+            return "s3://bucket/catalog"
 
         def iter_files(self, prefix, *, suffix="", recursive=True):
             assert Path(prefix) == bar_dir
@@ -681,7 +690,7 @@ def test_write_bars_remote_merge_fails_closed_when_existing_catalog_read_fails(t
 
         @classmethod
         def from_uri(cls, uri, fs_storage_options=None, fs_rust_storage_options=None):
-            assert uri == "s3://bucket/catalog/bar/klines"
+            assert uri == "s3://bucket/catalog"
             return cls(uri)
 
         def bars(self, bar_types):
