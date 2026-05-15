@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 # (data_type) -> (supports_daily, supports_monthly)
 # ---------------------------------------------------------------------------
 DATA_TYPE_AVAILABILITY: dict[str, tuple[bool, bool]] = {
-    "aggTrades":            (True,  True),
     "trades":               (True,  True),
     "bookTicker":           (True,  True),
     "klines":               (True,  True),
@@ -196,7 +195,7 @@ class VisionDownloader:
         Parameters
         ----------
         data_type:
-            E.g. ``"klines"``, ``"aggTrades"``, ``"fundingRate"``.
+            E.g. ``"klines"``, ``"trades"``, ``"fundingRate"``.
         symbol:
             Raw API symbol without exchange suffix, e.g. ``"BTCUSDT"``.
         asset_class:

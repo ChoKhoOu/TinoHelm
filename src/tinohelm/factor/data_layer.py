@@ -206,7 +206,7 @@ _TRADE_TICK_FIELDS: frozenset[str] = frozenset({
     "buy_qty", "sell_qty", "trade_imbalance",
 })
 _TRADE_EVENT_FIELDS: frozenset[str] = (_TRADE_TICK_FIELDS - frozenset({"trade_imbalance"})) | frozenset({"trade_id"})
-_TRADE_TICK_SOURCE_TYPES: frozenset[str] = frozenset({"aggTrades", "trades"})
+_TRADE_TICK_SOURCE_TYPES: frozenset[str] = frozenset({"trades"})
 _QUOTE_TICK_SOURCE_TYPES: frozenset[str] = frozenset({"bookTicker"})
 _METRICS_FIELDS: frozenset[str] = frozenset({
     "open_interest", "sum_open_interest", "open_interest_value",

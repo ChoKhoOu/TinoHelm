@@ -88,14 +88,13 @@ class TestCanonicalMappings:
         assert WRITE_CATEGORY["markPriceKlines"] == "mark_price"
         assert WRITE_CATEGORY["indexPriceKlines"] == "index_price"
         assert "premiumIndexKlines" not in WRITE_CATEGORY
-        assert WRITE_CATEGORY["aggTrades"] == "trade_tick"
         assert WRITE_CATEGORY["trades"] == "trade_tick"
         assert WRITE_CATEGORY["bookTicker"] == "quote_tick"
         assert WRITE_CATEGORY["fundingRate"] == "funding_rate"
         assert WRITE_CATEGORY["bookDepth"] == "order_book_delta"
         assert WRITE_CATEGORY["liquidationSnapshot"] == "liquidation"
         assert WRITE_CATEGORY["metrics"] == "metrics"
-        assert len(WRITE_CATEGORY) == 10
+        assert len(WRITE_CATEGORY) == 9
 
     def test_write_categories_are_idempotent_but_not_source_type_keys(self):
         assert CANONICAL_WRITE_CATEGORIES == frozenset({
@@ -111,7 +110,6 @@ class TestCanonicalMappings:
         assert "order_book_delta" not in WRITE_CATEGORY
 
     def test_interval_convention_canonical_keys(self):
-        assert INTERVAL_CONVENTION["aggTrades"] == "tick"
         assert INTERVAL_CONVENTION["trades"] == "tick"
         assert INTERVAL_CONVENTION["bookTicker"] == "tick"
         assert INTERVAL_CONVENTION["fundingRate"] == "8h"
@@ -133,8 +131,8 @@ class TestResolveWriteCategory:
     def test_known_klines(self):
         assert resolve_write_category("klines") == "bar"
 
-    def test_known_agg_trades(self):
-        assert resolve_write_category("aggTrades") == "trade_tick"
+    def test_known_trades(self):
+        assert resolve_write_category("trades") == "trade_tick"
 
     def test_known_funding_rate(self):
         assert resolve_write_category("fundingRate") == "funding_rate"
@@ -195,15 +193,15 @@ class TestResolveDbInterval:
         assert resolve_db_interval("klines", "5m") == "5m"
 
     def test_explicit_interval_wins_for_intervalless_type(self):
-        # Even for "aggTrades" (which has a "tick" convention), an explicit
+        # Even for "trades" (which has a "tick" convention), an explicit
         # interval still wins.
-        assert resolve_db_interval("aggTrades", "1m") == "1m"
+        assert resolve_db_interval("trades", "1m") == "1m"
 
     def test_falls_back_to_convention_for_funding_rate(self):
         assert resolve_db_interval("fundingRate", None) == "8h"
 
-    def test_falls_back_to_convention_for_agg_trades(self):
-        assert resolve_db_interval("aggTrades", None) == "tick"
+    def test_falls_back_to_convention_for_trades(self):
+        assert resolve_db_interval("trades", None) == "tick"
 
     def test_falls_back_to_tick_for_unknown(self):
         assert resolve_db_interval("unknownType", None) == "tick"
@@ -212,7 +210,7 @@ class TestResolveDbInterval:
         # Empty string is treated as "not provided" — falls through to
         # convention/default.
         assert resolve_db_interval("fundingRate", "") == "8h"
-        assert resolve_db_interval("aggTrades", "") == "tick"
+        assert resolve_db_interval("trades", "") == "tick"
 
     def test_none_for_klines_falls_back_to_tick(self):
         # klines is not in INTERVAL_CONVENTION (real klines paths always
@@ -355,9 +353,9 @@ class TestDateBoundaryHelpers:
 # ---------------------------------------------------------------------------
 
 class TestParseVisionCoverageEnd:
-    def test_daily_aggtrades_stem(self):
+    def test_daily_trades_stem(self):
         assert parse_vision_coverage_end(
-            "daily", "BTCUSDT-aggTrades-2025-03-15"
+            "daily", "BTCUSDT-trades-2025-03-15"
         ) == date(2025, 3, 15)
 
     def test_daily_klines_stem_includes_interval(self):
@@ -370,7 +368,7 @@ class TestParseVisionCoverageEnd:
 
     def test_daily_invalid_date_returns_none(self):
         assert parse_vision_coverage_end(
-            "daily", "BTCUSDT-aggTrades-2025-13-99"
+            "daily", "BTCUSDT-trades-2025-13-99"
         ) is None
 
     def test_daily_too_few_parts_returns_none(self):
@@ -413,7 +411,7 @@ class TestParseVisionCoverageEnd:
 
     def test_monthly_non_numeric_returns_none(self):
         assert parse_vision_coverage_end(
-            "monthly", "BTCUSDT-aggTrades-foo-bar"
+            "monthly", "BTCUSDT-trades-foo-bar"
         ) is None
 
     def test_monthly_too_few_parts_returns_none(self):
@@ -429,7 +427,7 @@ class TestParseVisionCoverageEnd:
         assert parse_vision_coverage_end("monthly", "") is None
 
     def test_empty_granularity_returns_none(self):
-        assert parse_vision_coverage_end("", "BTCUSDT-aggTrades-2025-03-15") is None
+        assert parse_vision_coverage_end("", "BTCUSDT-trades-2025-03-15") is None
 
 
 # ---------------------------------------------------------------------------

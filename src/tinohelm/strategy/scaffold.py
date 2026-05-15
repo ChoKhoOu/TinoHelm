@@ -201,7 +201,7 @@ class {class_name}(Strategy):
 
             # 如需 tick 级数据，取消对应注释:
             # self.subscribe_quote_ticks(inst.id)   → on_quote_tick()
-            # self.subscribe_trade_ticks(inst.id)   → on_trade_tick()（需先 fetch aggTrades 数据）
+            # self.subscribe_trade_ticks(inst.id)   → on_trade_tick()（需先 fetch trades 数据）
 
         if self._instruments:
             first_inst = next(iter(self._instruments.values()))
@@ -334,7 +334,7 @@ class {class_name}(Strategy):
         pass
 
     def on_trade_tick(self, tick: TradeTick) -> None:
-        """每笔成交时触发（需 subscribe_trade_ticks + fetch aggTrades 数据）。
+        """每笔成交时触发（需 subscribe_trade_ticks + fetch trades 数据）。
 
         字段:
             tick.price           — 成交价 (Price)

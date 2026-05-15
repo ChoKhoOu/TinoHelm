@@ -1457,7 +1457,7 @@ def test_quote_tick_panel_grouped_loader_reads_once_for_multiple_fields(tmp_path
     assert set(panels) == {"bid_price", "orderbook_imbalance"}
 
 
-def test_trade_tick_panel_rejects_same_field_across_source_types(tmp_path: Path, monkeypatch) -> None:
+def test_trade_tick_panel_rejects_duplicate_field_requests(tmp_path: Path, monkeypatch) -> None:
     symbol = "BTCUSDT-PERP"
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path, max_workers=1)
 
@@ -1470,8 +1470,8 @@ def test_trade_tick_panel_rejects_same_field_across_source_types(tmp_path: Path,
 
     monkeypatch.setattr(dl, "_load_trade_tick_fields", fake_loader)
     reqs = [
-        DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="aggTrades"),
         DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="trades"),
+        DataRequest(symbol, "trade_qty", "5m", 0, "trade_tick", source_type="trades"),
     ]
 
     with pytest.raises(ValueError, match="output key collision.*trade_qty.*single frequency/source_type"):
@@ -1687,13 +1687,13 @@ def test_trade_tick_panel_source_type_reads_from_single_root(tmp_path: Path) -> 
 
 
 
-def test_trade_tick_explicit_agg_trades_reads_legacy_flat_catalog(tmp_path: Path) -> None:
+def test_trade_tick_explicit_trades_reads_legacy_flat_catalog(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
     _write_trade_ticks(tmp_path, symbol, [
         {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 100.0, "size": 3.0, "aggressor_side": "BUYER"},
     ])
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
-    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="aggTrades")
+    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="trades")
 
     panel = dl.load_panel(req, start="2021-05-03T00:00:00", end="2021-05-03T00:00:59.999000")["trade_qty"]
 
@@ -1701,16 +1701,16 @@ def test_trade_tick_explicit_agg_trades_reads_legacy_flat_catalog(tmp_path: Path
     np.testing.assert_allclose(panel[symbol].to_numpy(), [3.0])
 
 
-def test_trade_tick_explicit_agg_trades_falls_through_after_pruned_root(tmp_path: Path) -> None:
+def test_trade_tick_explicit_trades_falls_through_after_pruned_root(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "aggTrades"), symbol, [
+    _write_trade_ticks(resolve_catalog_path(tmp_path, "trades"), symbol, [
         {"ts_event": _T0_NS - 86_400 * 1_000_000_000, "price": 200.0, "size": 99.0, "aggressor_side": "BUYER"},
     ])
     _write_trade_ticks(tmp_path, symbol, [
         {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 100.0, "size": 4.0, "aggressor_side": "BUYER"},
     ])
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
-    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="aggTrades")
+    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="trades")
 
     panel = dl.load_panel(req, start="2021-05-03T00:00:00", end="2021-05-03T00:00:59.999000")["trade_qty"]
 
@@ -1731,7 +1731,7 @@ def test_trade_tick_overlap_dedupes_by_trade_id(tmp_path: Path) -> None:
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
 
     panel = dl.load_panel(
-        DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="aggTrades"),
+        DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="trades"),
         start="2021-05-03T00:00:00",
         end="2021-05-03T00:00:59.999000",
     )["trade_qty"]
@@ -1739,7 +1739,7 @@ def test_trade_tick_overlap_dedupes_by_trade_id(tmp_path: Path) -> None:
         symbol=symbol,
         source="trade_tick",
         fields=("trade_price", "trade_qty", "trade_side", "trade_id"),
-        source_type="aggTrades",
+        source_type="trades",
     )
 
     np.testing.assert_allclose(panel[symbol].to_numpy(), [2.0])
@@ -1805,7 +1805,7 @@ def test_trade_tick_no_trade_id_panel_aggregation_sums_same_business_rows(tmp_pa
 def test_trade_tick_same_timestamp_last_price_uses_trade_id_order(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
     ts_event = _T0_NS + 10 * 1_000_000_000
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "aggTrades"), symbol, [
+    _write_trade_ticks(resolve_catalog_path(tmp_path, "trades"), symbol, [
         {"ts_event": ts_event, "price": 101.0, "size": 1.0, "aggressor_side": "BUYER", "trade_id": 2},
         {"ts_event": ts_event, "price": 100.0, "size": 1.0, "aggressor_side": "SELLER", "trade_id": 1},
     ])
@@ -1830,7 +1830,7 @@ def test_trade_tick_same_timestamp_last_price_uses_trade_id_order(tmp_path: Path
 
 def test_trade_tick_implicit_source_fallback_continues_after_pruned_root(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "aggTrades"), symbol, [
+    _write_trade_ticks(resolve_catalog_path(tmp_path, "trades"), symbol, [
         {"ts_event": _T0_NS - 86_400 * 1_000_000_000, "price": 200.0, "size": 99.0, "aggressor_side": "BUYER"},
     ])
     _write_trade_ticks(resolve_catalog_path(tmp_path, "trades"), symbol, [

@@ -49,7 +49,7 @@ def _write_quote_ticks(root: Path) -> None:
 
 
 def _write_trade_ticks(root: Path) -> None:
-    trade_dir = resolve_catalog_path(root, "aggTrades") / "data" / "trade_tick" / INSTRUMENT
+    trade_dir = resolve_catalog_path(root, "trades") / "data" / "trade_tick" / INSTRUMENT
     trade_dir.mkdir(parents=True)
     pl.DataFrame({
         "ts_event": [T0 + 10_000_000_000, T0 + 20_000_000_000, T0 + MIN + 5_000_000_000],
@@ -107,7 +107,7 @@ def test_trade_tick_loads_from_resolved_source_root(tmp_path: Path) -> None:
     _write_trade_ticks(root)
     dl = DataLayer(
         _universe(tmp_path),
-        catalog_root=resolve_catalog_path(root, "aggTrades"),
+        catalog_root=resolve_catalog_path(root, "trades"),
         max_workers=1,
     )
 

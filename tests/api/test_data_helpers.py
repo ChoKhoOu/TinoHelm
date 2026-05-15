@@ -259,7 +259,6 @@ class TestFetchBatchSplitting:
         assert exc.value.detail == "start must be on or before end"
 
     def test_fetch_batch_response_intervals_for_raw_tick_type_are_string_only(self):
-        assert _fetch_batch_intervals("aggTrades", ["1m", "5m"]) == []
         assert _fetch_batch_intervals("trades", ["1m", "5m"]) == []
         assert _fetch_batch_intervals("bookTicker", ["1m", "5m"]) == []
 
@@ -268,7 +267,7 @@ class TestFetchBatchSplitting:
         assert _fetch_batch_intervals("markPriceKlines", ["1m", "5m"]) == []
         assert _fetch_batch_intervals("indexPriceKlines", ["1m", "5m"]) == []
 
-    def test_fetch_batch_agg_trades_default_interval_enqueues_one_intervalless_job(self, monkeypatch):
+    def test_fetch_batch_trades_default_interval_enqueues_one_intervalless_job(self, monkeypatch):
         import asyncio
 
         enqueue = AsyncMock()
@@ -279,14 +278,14 @@ class TestFetchBatchSplitting:
             symbols=["BTCUSDT-PERP"],
             start=date(2024, 1, 1),
             end=date(2024, 1, 1),
-            data_type="aggTrades",
+            data_type="trade_tick",
         )
 
         result = asyncio.run(trigger_data_fetch_batch(
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["count"] == 1
@@ -323,7 +322,7 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["count"] == 2
@@ -350,7 +349,7 @@ class TestFetchBatchSplitting:
                 body,
                 db,
                 AsyncMock(),
-                SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+                SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
             ))
 
         assert exc.value.status_code == 400
@@ -376,7 +375,7 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["intervals"] == []
@@ -403,7 +402,7 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["data_type"] == "quote_tick"
@@ -431,7 +430,7 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["data_type"] == "mark_price"
@@ -461,7 +460,7 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=30)),
+            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["data_type"] == "index_price"
@@ -486,19 +485,19 @@ class TestFetchBatchIdentity:
             body,
             db,
             AsyncMock(),
-            SimpleNamespace(data=SimpleNamespace(agg_trades_max_days_per_job=1)),
+            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=1)),
         ))
         return db
 
     def test_fetch_batch_assigns_one_shared_batch_id_across_fanout(self, monkeypatch):
-        # 2 symbols x 1 interval x 3 days (agg_trades split by 1 day) = 6 jobs,
+        # 2 symbols x 1 interval x 3 days (trades split by 1 day) = 6 jobs,
         # but they all belong to the same FetchBatch, so share one batch_id.
         body = DataFetchBatchRequest(
             symbols=["BTCUSDT-PERP", "ETHUSDT-PERP"],
             intervals=["1m", "5m"],
             start=date(2024, 1, 1),
             end=date(2024, 1, 3),
-            data_type="aggTrades",
+            data_type="trade_tick",
         )
 
         db = self._run_batch(body, monkeypatch)

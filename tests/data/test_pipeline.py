@@ -203,7 +203,7 @@ class TestDirectUpdateWrites:
 
 class TestBoundedCsvConversion:
     def test_full_file_conversion_reads_csv_payload_without_filesystem_staging(self, tmp_path: Path):
-        payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"a,b\n1,2\n")
+        payload = _csv_payload("BTCUSDT-trades-2025-01-15.csv", b"a,b\n1,2\n")
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         p._write_objects = MagicMock(return_value=["memory://catalog/file.parquet"])
 
@@ -236,10 +236,10 @@ class TestBoundedCsvConversion:
         )
 
     def test_chunked_conversion_reads_csv_payload_in_chunks(self, tmp_path: Path):
-        payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"1,2\n3,4\n")
+        payload = _csv_payload("BTCUSDT-trades-2025-01-15.csv", b"1,2\n3,4\n")
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         p._chunk_rows = 1
-        p._agg_trades_chunk_rows = 1
+        p._tick_chunk_rows = 1
         p._write_objects = MagicMock(side_effect=[
             ["memory://catalog/a.parquet"],
             ["memory://catalog/b.parquet"],
@@ -261,7 +261,7 @@ class TestBoundedCsvConversion:
             object(),
             {"symbol": "BTCUSDT-PERP"},
             "BTCUSDT-PERP",
-            "aggTrades",
+            "trades",
             None,
             False,
             chunk_cb=seen_progress.append,
@@ -272,7 +272,7 @@ class TestBoundedCsvConversion:
         assert seen_progress == [1, 2]
 
     def test_cleanup_closes_in_memory_csv_payload(self, tmp_path: Path):
-        payload = _csv_payload("BTCUSDT-aggTrades-2025-01-15.csv", b"1,2\n")
+        payload = _csv_payload("BTCUSDT-trades-2025-01-15.csv", b"1,2\n")
         p = BinanceVisionPipeline(catalog_path=tmp_path)
 
         p._cleanup_raw_file(payload)
@@ -286,7 +286,7 @@ class TestIngestEarlyFailClosed:
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
-        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-empty.csv", b""))
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-empty.csv", b""))
 
         class Converter:
             supports_chunked = True
@@ -303,7 +303,7 @@ class TestIngestEarlyFailClosed:
         with pytest.raises(RuntimeError, match="conversion failed"):
             asyncio.run(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -317,7 +317,7 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
@@ -327,7 +327,7 @@ class TestIngestEarlyFailClosed:
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
-        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-empty.csv", b""))
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-empty.csv", b""))
 
         class Converter:
             supports_chunked = True
@@ -343,7 +343,7 @@ class TestIngestEarlyFailClosed:
         with pytest.raises(RuntimeError, match="conversion failed"):
             asyncio.run(p.ingest(
                 symbol=symbol,
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -360,18 +360,18 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
         old_payload = old_path.read_bytes()
         partial_path = trade_dir / "partial-current-run.parquet"
 
-        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
-        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n"))
 
         class Converter:
             supports_chunked = False
@@ -398,7 +398,7 @@ class TestIngestEarlyFailClosed:
         with pytest.raises(RuntimeError, match="db down"):
             asyncio.run(p.ingest(
                 symbol=symbol,
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -415,7 +415,7 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
@@ -426,7 +426,7 @@ class TestIngestEarlyFailClosed:
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
         guard = p._clean_overlapping_parquet(
             symbol=symbol,
-            data_type="aggTrades",
+            data_type="trades",
             interval=None,
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
@@ -526,7 +526,7 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
@@ -535,7 +535,7 @@ class TestIngestEarlyFailClosed:
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
         guard = p._clean_overlapping_parquet(
             symbol=symbol,
-            data_type="aggTrades",
+            data_type="trades",
             interval=None,
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
@@ -547,10 +547,10 @@ class TestIngestEarlyFailClosed:
             symbol=symbol,
             data_type="trade_tick",
             interval="tick",
-            source_type="aggTrades",
+            source_type="trades",
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
-            file_path=str(resolve_catalog_path(tmp_path, "aggTrades")),
+            file_path=str(resolve_catalog_path(tmp_path, "trades")),
             record_count=1,
             size_bytes=9,
             pre_update_row=None,
@@ -581,7 +581,7 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        catalog_root = resolve_catalog_path(tmp_path, "aggTrades")
+        catalog_root = resolve_catalog_path(tmp_path, "trades")
         trade_dir = catalog_root / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
@@ -591,7 +591,7 @@ class TestIngestEarlyFailClosed:
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
         guard = p._clean_overlapping_parquet(
             symbol=symbol,
-            data_type="aggTrades",
+            data_type="trades",
             interval=None,
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
@@ -603,7 +603,7 @@ class TestIngestEarlyFailClosed:
             symbol=symbol,
             data_type="trade_tick",
             interval="tick",
-            source_type="aggTrades",
+            source_type="trades",
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
             file_path=str(catalog_root),
@@ -616,7 +616,7 @@ class TestIngestEarlyFailClosed:
             symbol=symbol,
             data_type="trade_tick",
             interval="tick",
-            source_type="aggTrades",
+            source_type="trades",
             start_date=date(2025, 1, 1),
             end_date=date(2025, 1, 1),
             file_path=str(catalog_root),
@@ -655,10 +655,10 @@ class TestIngestEarlyFailClosed:
             symbol="BTCUSDT-PERP",
             data_type="trade_tick",
             interval="tick",
-            source_type="aggTrades",
+            source_type="trades",
             start_date=date(2025, 1, 1),
             end_date=date(2025, 1, 1),
-            file_path="/catalog/aggTrades",
+            file_path="/catalog/trades",
             record_count=100,
             size_bytes=4096,
         )
@@ -710,10 +710,10 @@ class TestIngestEarlyFailClosed:
             symbol="BTCUSDT-PERP",
             data_type="trade_tick",
             interval="tick",
-            source_type="aggTrades",
+            source_type="trades",
             start_date=date(2025, 1, 1),
             end_date=date(2025, 1, 1),
-            file_path="/catalog/aggTrades",
+            file_path="/catalog/trades",
             record_count=101,
             size_bytes=4097,
             last_ingest_id=None,
@@ -767,10 +767,10 @@ class TestIngestEarlyFailClosed:
             symbol="BTCUSDT-PERP",
             data_type="trade_tick",
             interval="tick",
-            source_type="aggTrades",
+            source_type="trades",
             start_date=date(2025, 1, 1),
             end_date=date(2025, 1, 1),
-            file_path="/catalog/aggTrades",
+            file_path="/catalog/trades",
             record_count=100,
             size_bytes=4096,
             last_ingest_id="run-new",
@@ -823,7 +823,7 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
@@ -833,7 +833,7 @@ class TestIngestEarlyFailClosed:
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
         guard = p._clean_overlapping_parquet(
             symbol=symbol,
-            data_type="aggTrades",
+            data_type="trades",
             interval=None,
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
@@ -860,7 +860,7 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
@@ -869,7 +869,7 @@ class TestIngestEarlyFailClosed:
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
         guard = p._clean_overlapping_parquet(
             symbol=symbol,
-            data_type="aggTrades",
+            data_type="trades",
             interval=None,
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
@@ -932,14 +932,14 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         p._get_instrument = MagicMock(return_value=SimpleNamespace(id=nt_symbol))
         guard = p._clean_overlapping_parquet(
             symbol=symbol,
-            data_type="aggTrades",
+            data_type="trades",
             interval=None,
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
@@ -989,7 +989,7 @@ class TestIngestEarlyFailClosed:
         from tinohelm.data.catalog import resolve_catalog_path
 
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_a = trade_dir / "old-a.parquet"
         old_b = trade_dir / "old-b.parquet"
@@ -1042,11 +1042,11 @@ class TestIngestEarlyFailClosed:
     def test_db_update_cancellation_after_commit_recancels_after_successful_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
-        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n"))
         written_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "current.parquet"
         update_completed = []
 
@@ -1084,7 +1084,7 @@ class TestIngestEarlyFailClosed:
 
             ingest_task = asyncio.create_task(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -1101,11 +1101,11 @@ class TestIngestEarlyFailClosed:
     def test_rollback_manifest_records_commit_intent_before_db_catalog_update(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
-        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n"))
         written_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "current.parquet"
         events: list[str] = []
         ingest_ids: list[str] = []
@@ -1116,7 +1116,7 @@ class TestIngestEarlyFailClosed:
                 ingest_ids.append(kwargs["ingest_run_id"])
                 assert kwargs["symbol"] == "BTCUSDT-PERP"
                 assert kwargs["data_type"] == "trade_tick"
-                assert kwargs["source_type"] == "aggTrades"
+                assert kwargs["source_type"] == "trades"
                 assert kwargs["record_count"] == 1
                 assert kwargs["size_bytes"] == 123
                 assert kwargs["pre_update_row"] == {"old": "row"}
@@ -1165,7 +1165,7 @@ class TestIngestEarlyFailClosed:
 
         result = asyncio.run(p.ingest(
             symbol="BTCUSDT-PERP",
-            data_type="aggTrades",
+            data_type="trades",
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
         ))
@@ -1179,11 +1179,11 @@ class TestIngestEarlyFailClosed:
     def test_cancelled_before_catalog_commit_intent_rolls_back_outputs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
-        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n"))
         written_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "current.parquet"
         events: list[str] = []
 
@@ -1234,7 +1234,7 @@ class TestIngestEarlyFailClosed:
 
             ingest_task = asyncio.create_task(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -1252,11 +1252,11 @@ class TestIngestEarlyFailClosed:
     def test_final_progress_cancellation_after_db_commit_recancels(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
-        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n"))
         written_path = tmp_path / "data" / "trade_tick" / "BTCUSDT-PERP.BINANCE" / "current.parquet"
 
         class Converter:
@@ -1293,7 +1293,7 @@ class TestIngestEarlyFailClosed:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
                 progress_cb=progress,
@@ -1389,13 +1389,13 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         partial_path = trade_dir / "partial-before-error.parquet"
-        task = SimpleNamespace(url="memory://partial.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        task = SimpleNamespace(url="memory://partial.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
         mock_dl = MagicMock()
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
-        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n"))
+        mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n"))
 
         def write_then_raise(*_args, **_kwargs):
             trade_dir.mkdir(parents=True, exist_ok=True)
@@ -1413,7 +1413,7 @@ class TestIngestEarlyFailClosed:
         with pytest.raises(RuntimeError, match="conversion failed"):
             asyncio.run(p.ingest(
                 symbol=symbol,
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -1488,13 +1488,13 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
         old_payload = old_path.read_bytes()
 
-        task = SimpleNamespace(url="memory://slow.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        task = SimpleNamespace(url="memory://slow.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
 
         class Downloader:
             concurrency = 1
@@ -1520,7 +1520,7 @@ class TestIngestEarlyFailClosed:
 
             ingest_task = asyncio.create_task(p.ingest(
                 symbol=symbol,
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
                 progress_cb=progress_cb,
@@ -1546,7 +1546,7 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
@@ -1555,7 +1555,7 @@ class TestIngestEarlyFailClosed:
         started = threading.Event()
         release = threading.Event()
 
-        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
+        task = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
 
         class Downloader:
             concurrency = 1
@@ -1564,7 +1564,7 @@ class TestIngestEarlyFailClosed:
                 return [task]
 
             async def execute_task(self, _task):
-                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+                return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n")
 
         def slow_convert(*_args, **_kwargs):
             started.set()
@@ -1581,7 +1581,7 @@ class TestIngestEarlyFailClosed:
             monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: SimpleNamespace(supports_chunked=False))
             ingest_task = asyncio.create_task(p.ingest(
                 symbol=symbol,
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -1610,7 +1610,7 @@ class TestIngestEarlyFailClosed:
 
         symbol = "BTCUSDT-PERP"
         nt_symbol = "BTCUSDT-PERP.BINANCE"
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_symbol
+        trade_dir = resolve_catalog_path(tmp_path, "trades") / "data" / "trade_tick" / nt_symbol
         trade_dir.mkdir(parents=True)
         old_path = trade_dir / "old-overlap.parquet"
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [100.0]}).write_parquet(old_path)
@@ -1619,8 +1619,8 @@ class TestIngestEarlyFailClosed:
         started = threading.Event()
         release = threading.Event()
 
-        first = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-01.csv"))
-        second = SimpleNamespace(url="memory://two.csv", granularity="daily", dest_path=Path("BTCUSDT-aggTrades-2025-01-02.csv"))
+        first = SimpleNamespace(url="memory://one.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
+        second = SimpleNamespace(url="memory://two.csv", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-02.csv"))
 
         class Downloader:
             concurrency = 1
@@ -1633,7 +1633,7 @@ class TestIngestEarlyFailClosed:
 
             async def execute_task(self, task):
                 if task is first:
-                    return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+                    return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n")
                 self.second_entered.set()
                 await asyncio.sleep(10)
                 raise AssertionError("second download should be cancelled")
@@ -1654,7 +1654,7 @@ class TestIngestEarlyFailClosed:
             monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda data_type: SimpleNamespace(supports_chunked=False))
             ingest_task = asyncio.create_task(p.ingest(
                 symbol=symbol,
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 2),
             ))
@@ -1801,7 +1801,7 @@ class TestCatalogStorageStats:
         from tinohelm.strategy.loader_helpers import normalize_symbol
 
         symbol = "BTCUSDT-PERP"
-        catalog_root = resolve_catalog_path(tmp_path, "aggTrades")
+        catalog_root = resolve_catalog_path(tmp_path, "trades")
         trade_dir = catalog_root / "data" / "trade_tick" / normalize_symbol(symbol)
         trade_dir.mkdir(parents=True)
         pl.DataFrame({"ts_event": [1, 2], "price": [100.0, 101.0], "size": [1.0, 2.0]}).write_parquet(trade_dir / "a.parquet")
@@ -1810,14 +1810,14 @@ class TestCatalogStorageStats:
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
 
-        assert p._catalog_storage_stats(symbol, "aggTrades", None, "aggTrades") == (5, expected_size)
+        assert p._catalog_storage_stats(symbol, "trades", None, "trades") == (5, expected_size)
 
     def test_trade_tick_stats_unknown_when_any_parquet_count_unreadable(self, tmp_path: Path):
         from tinohelm.data.catalog import resolve_catalog_path
         from tinohelm.strategy.loader_helpers import normalize_symbol
 
         symbol = "BTCUSDT-PERP"
-        catalog_root = resolve_catalog_path(tmp_path, "aggTrades")
+        catalog_root = resolve_catalog_path(tmp_path, "trades")
         trade_dir = catalog_root / "data" / "trade_tick" / normalize_symbol(symbol)
         trade_dir.mkdir(parents=True)
         pl.DataFrame({"ts_event": [1, 2], "price": [100.0, 101.0], "size": [1.0, 2.0]}).write_parquet(trade_dir / "ok.parquet")
@@ -1826,7 +1826,7 @@ class TestCatalogStorageStats:
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
 
-        assert p._catalog_storage_stats(symbol, "aggTrades", None, "aggTrades") == (None, expected_size)
+        assert p._catalog_storage_stats(symbol, "trades", None, "trades") == (None, expected_size)
 
     def test_metrics_stats_count_rows_from_single_file_path(self, tmp_path: Path):
         from tinohelm.data.catalog import metrics_parquet_path
@@ -1884,14 +1884,14 @@ class TestUpdateDbCatalog:
 
         with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 2), date(2025, 1, 2),
-                record_count=10, size_bytes=100, source_type="aggTrades",
+                record_count=10, size_bytes=100, source_type="trades",
             ))
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 3), date(2025, 1, 3),
-                record_count=15, size_bytes=150, source_type="aggTrades",
+                record_count=15, size_bytes=150, source_type="trades",
             ))
 
         assert isinstance(fake_session.row, DataCatalog)
@@ -1931,14 +1931,14 @@ class TestUpdateDbCatalog:
 
         with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 2), date(2025, 1, 2),
-                record_count=10, size_bytes=100, source_type="aggTrades",
+                record_count=10, size_bytes=100, source_type="trades",
             ))
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 3), date(2025, 1, 3),
-                record_count=None, size_bytes=150, source_type="aggTrades",
+                record_count=None, size_bytes=150, source_type="trades",
             ))
 
         assert isinstance(fake_session.row, DataCatalog)
@@ -1979,19 +1979,19 @@ class TestUpdateDbCatalog:
 
         with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 2), date(2025, 1, 3),
-                record_count=10, size_bytes=100, source_type="aggTrades",
+                record_count=10, size_bytes=100, source_type="trades",
             ))
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 3), date(2025, 1, 4),
-                record_count=10, size_bytes=100, source_type="aggTrades",
+                record_count=10, size_bytes=100, source_type="trades",
             ))
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 3), date(2025, 1, 4),
-                record_count=10, size_bytes=100, source_type="aggTrades",
+                record_count=10, size_bytes=100, source_type="trades",
             ))
 
         assert isinstance(fake_session.row, DataCatalog)
@@ -2031,14 +2031,14 @@ class TestUpdateDbCatalog:
 
         with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 1), date(2025, 1, 31),
-                record_count=31, size_bytes=3100, source_type="aggTrades",
+                record_count=31, size_bytes=3100, source_type="trades",
             ))
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 15), date(2025, 1, 15),
-                record_count=2, size_bytes=200, source_type="aggTrades",
+                record_count=2, size_bytes=200, source_type="trades",
             ))
 
         assert isinstance(fake_session.row, DataCatalog)
@@ -2074,7 +2074,7 @@ class TestUpdateDbCatalog:
         symbol = "BTCUSDT-PERP"
         replacement_day = date(2025, 1, 15)
         day_start_ns = 1_736_899_200_000_000_000
-        catalog_root = resolve_catalog_path(tmp_path, "aggTrades")
+        catalog_root = resolve_catalog_path(tmp_path, "trades")
         trade_dir = catalog_root / "data" / "trade_tick" / normalize_symbol(symbol)
         trade_dir.mkdir(parents=True)
         pl.DataFrame({
@@ -2088,15 +2088,15 @@ class TestUpdateDbCatalog:
 
         with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
             asyncio.run(p._update_db_catalog(
-                symbol, "aggTrades", None,
+                symbol, "trades", None,
                 date(2025, 1, 1), date(2025, 1, 31),
-                record_count=31, size_bytes=3100, source_type="aggTrades",
+                record_count=31, size_bytes=3100, source_type="trades",
             ))
             asyncio.run(p._update_db_catalog(
-                symbol, "aggTrades", None,
+                symbol, "trades", None,
                 replacement_day, replacement_day,
                 record_count=2, size_bytes=trade_dir.joinpath("replacement-day.parquet").stat().st_size,
-                source_type="aggTrades",
+                source_type="trades",
             ))
 
         assert isinstance(fake_session.row, DataCatalog)
@@ -2574,14 +2574,14 @@ class TestUpdateDbCatalog:
 
         with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 2), date(2025, 1, 3),
-                record_count=10, size_bytes=100, source_type="aggTrades",
+                record_count=10, size_bytes=100, source_type="trades",
             ))
             asyncio.run(p._update_db_catalog(
-                "BTCUSDT-PERP", "aggTrades", None,
+                "BTCUSDT-PERP", "trades", None,
                 date(2025, 1, 3), date(2025, 1, 4),
-                record_count=10, size_bytes=100, source_type="aggTrades",
+                record_count=10, size_bytes=100, source_type="trades",
             ))
 
         assert fake_session.row.record_count is None
@@ -2623,8 +2623,8 @@ class TestIngestValidation:
                 end=date(2025, 1, 31),
             ))
 
-    def test_ingest_no_interval_required_for_agg_trades(self):
-        """aggTrades does not need interval — should not raise ValueError on that check."""
+    def test_ingest_no_interval_required_for_trades(self):
+        """trades does not need interval — should not raise ValueError on that check."""
         p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
 
         # We patch everything deep so we just test the validation path exits cleanly
@@ -2639,7 +2639,7 @@ class TestIngestValidation:
         with patch.object(p, "_update_db_catalog", side_effect=_noop):
             result = asyncio.run(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 5),
             ))
@@ -2685,7 +2685,7 @@ class TestIngestFailClosed:
     ):
         p = BinanceVisionPipeline(catalog_path=tmp_path)
 
-        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-aggTrades.zip")
+        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-trades.zip")
 
         class Downloader:
             concurrency = 1
@@ -2694,7 +2694,7 @@ class TestIngestFailClosed:
                 return [task]
 
             async def execute_task(self, _task):
-                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+                return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n")
 
         class Converter:
             supports_chunked = False
@@ -2716,7 +2716,7 @@ class TestIngestFailClosed:
         with pytest.raises(RuntimeError, match="remote parquet write failed"):
             asyncio.run(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -2729,7 +2729,7 @@ class TestIngestFailClosed:
         monkeypatch: pytest.MonkeyPatch,
     ):
         p = BinanceVisionPipeline(catalog_path=tmp_path)
-        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-aggTrades.zip")
+        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-trades.zip")
 
         class Downloader:
             concurrency = 1
@@ -2738,7 +2738,7 @@ class TestIngestFailClosed:
                 return [task]
 
             async def execute_task(self, _task):
-                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+                return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n")
 
         class Converter:
             supports_chunked = False
@@ -2754,7 +2754,7 @@ class TestIngestFailClosed:
         with pytest.raises(RuntimeError, match="csv header unreadable"):
             asyncio.run(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -2767,7 +2767,7 @@ class TestIngestFailClosed:
         monkeypatch: pytest.MonkeyPatch,
     ):
         p = BinanceVisionPipeline(catalog_path=tmp_path)
-        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-aggTrades.zip")
+        task = SimpleNamespace(url="https://data.binance.vision/BTCUSDT-trades.zip")
 
         class Downloader:
             concurrency = 1
@@ -2776,7 +2776,7 @@ class TestIngestFailClosed:
                 return [task]
 
             async def execute_task(self, _task):
-                return _csv_payload("BTCUSDT-aggTrades-2025-01-01.csv", b"a,b\n1,2\n")
+                return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n")
 
         class Converter:
             supports_chunked = False
@@ -2798,7 +2798,7 @@ class TestIngestFailClosed:
         with pytest.raises(RuntimeError, match="wrote no parquet files"):
             asyncio.run(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 1),
             ))
@@ -2813,9 +2813,9 @@ class TestIngestFailClosed:
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         tasks = [
             SimpleNamespace(
-                url=f"https://data.binance.vision/BTCUSDT-aggTrades-2025-01-0{day}.zip",
+                url=f"https://data.binance.vision/BTCUSDT-trades-2025-01-0{day}.zip",
                 granularity="daily",
-                dest_path=Path(f"BTCUSDT-aggTrades-2025-01-0{day}.csv"),
+                dest_path=Path(f"BTCUSDT-trades-2025-01-0{day}.csv"),
             )
             for day in (1, 2, 3)
         ]
@@ -2845,13 +2845,13 @@ class TestIngestFailClosed:
         monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
         monkeypatch.setattr(p, "_clean_overlapping_parquet", lambda *_args: None)
         monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
-        p._write_objects = MagicMock(return_value=["/catalog/ticks/aggTrades/day.parquet"])
+        p._write_objects = MagicMock(return_value=["/catalog/ticks/trades/day.parquet"])
         p._update_db_catalog = AsyncMock()
 
         with pytest.raises(RuntimeError, match="download failed"):
             asyncio.run(p.ingest(
                 symbol="BTCUSDT-PERP",
-                data_type="aggTrades",
+                data_type="trades",
                 start=date(2025, 1, 1),
                 end=date(2025, 1, 3),
             ))

@@ -26,10 +26,10 @@ class TestConverterRegistry:
         with pytest.raises(ValueError, match="Unknown data_type"):
             get_converter("nonexistent_xyz")
 
-    def test_all_11_types_registered(self):
+    def test_all_10_types_registered(self):
         expected = {
             "klines", "markPriceKlines", "indexPriceKlines", "premiumIndexKlines",
-            "aggTrades", "trades", "fundingRate",
+            "trades", "fundingRate",
             "bookTicker", "bookDepth", "liquidationSnapshot", "metrics",
         }
         assert expected == set(CONVERTER_REGISTRY.keys())
@@ -203,107 +203,7 @@ class TestKlinesConverter:
 
 
 # ---------------------------------------------------------------------------
-# 3. AggTradesConverter
-# ---------------------------------------------------------------------------
-
-class TestAggTradesConverter:
-    def setup_method(self):
-        self.c = get_converter("aggTrades")
-
-    def test_supports_chunked_true(self):
-        assert self.c.supports_chunked is True
-
-    def test_validate_schema_ok(self):
-        # 7 columns: agg_trade_id, price, qty, first_trade_id, last_trade_id,
-        #            transact_time, is_buyer_maker
-        df = pd.DataFrame([[12345, "42000.0", "0.5", 100, 105, 1704067200000, True]])
-        self.c.validate_schema(df)  # should not raise
-
-    def test_validate_schema_too_few_columns(self):
-        df = pd.DataFrame([[1, 2, 3]])
-        with pytest.raises(SchemaError):
-            self.c.validate_schema(df)
-
-    def test_validate_schema_exactly_7_ok(self):
-        df = pd.DataFrame([[0] * 7])
-        self.c.validate_schema(df)
-
-    def test_convert_aggressor_side_buyer_when_not_buyer_maker(self):
-        pytest.importorskip("nautilus_trader")
-        from nautilus_trader.model.enums import AggressorSide
-
-        df = pd.DataFrame([
-            [100, "42000.0", "0.5", 90, 100, 1704067200000, False],  # is_buyer_maker=False → BUYER aggressor
-        ])
-        mock_instrument = MagicMock()
-        mock_instrument.make_price.side_effect = lambda v: v
-        mock_instrument.make_qty.side_effect = lambda v: v
-
-        with patch("nautilus_trader.model.data.TradeTick") as mock_tick_cls:
-            mock_tick_cls.return_value = MagicMock()
-            result = self.c.convert(df, mock_instrument)
-
-        call_kwargs = mock_tick_cls.call_args[1]
-        assert call_kwargs["aggressor_side"] == AggressorSide.BUYER
-
-    def test_convert_aggressor_side_seller_when_buyer_maker(self):
-        pytest.importorskip("nautilus_trader")
-        from nautilus_trader.model.enums import AggressorSide
-
-        df = pd.DataFrame([
-            [101, "42000.0", "0.5", 91, 101, 1704067200000, True],  # is_buyer_maker=True → SELLER aggressor
-        ])
-        mock_instrument = MagicMock()
-        mock_instrument.make_price.side_effect = lambda v: v
-        mock_instrument.make_qty.side_effect = lambda v: v
-
-        with patch("nautilus_trader.model.data.TradeTick") as mock_tick_cls:
-            mock_tick_cls.return_value = MagicMock()
-            result = self.c.convert(df, mock_instrument)
-
-        call_kwargs = mock_tick_cls.call_args[1]
-        assert call_kwargs["aggressor_side"] == AggressorSide.SELLER
-
-    def test_convert_ts_event_ms_to_ns(self):
-        pytest.importorskip("nautilus_trader")
-
-        df = pd.DataFrame([
-            [200, "50000.0", "1.0", 200, 200, 1704067200000, False],
-        ])
-        mock_instrument = MagicMock()
-        mock_instrument.make_price.side_effect = lambda v: v
-        mock_instrument.make_qty.side_effect = lambda v: v
-
-        with patch("nautilus_trader.model.data.TradeTick") as mock_tick_cls:
-            mock_tick_cls.return_value = MagicMock()
-            self.c.convert(df, mock_instrument)
-
-        call_kwargs = mock_tick_cls.call_args[1]
-        # 1704067200000 ms * 1_000_000 = ts_ns
-        assert call_kwargs["ts_event"] == 1704067200000 * 1_000_000
-
-    def test_convert_chunk_same_as_convert(self):
-        pytest.importorskip("nautilus_trader")
-        df = pd.DataFrame([
-            [300, "42000.0", "0.5", 300, 300, 1704067200000, False],
-        ])
-        mock_instrument = MagicMock()
-        mock_instrument.make_price.side_effect = lambda v: v
-        mock_instrument.make_qty.side_effect = lambda v: v
-
-        with patch("nautilus_trader.model.data.TradeTick") as mock_tick_cls:
-            mock_tick_cls.return_value = MagicMock()
-            r1 = self.c.convert(df.copy(), mock_instrument)
-
-        with patch("nautilus_trader.model.data.TradeTick") as mock_tick_cls:
-            mock_tick_cls.return_value = MagicMock()
-            r2 = self.c.convert_chunk(df.copy(), mock_instrument)
-
-        assert len(r1) == len(r2)
-
-
-# ---------------------------------------------------------------------------
-# 4. TradesConverter
+# 3. TradesConverter
 # ---------------------------------------------------------------------------
 
 class TestTradesConverter:
@@ -323,15 +223,11 @@ class TestTradesConverter:
         with pytest.raises(SchemaError):
             self.c.validate_schema(df)
 
-    def test_different_schema_from_agg_trades(self):
-        """trades CSV has 6 columns vs aggTrades 7 — schema reqs differ."""
+    def test_validate_schema_exactly_6_ok(self):
+        """trades CSV has exactly 6 columns."""
         trades_c = get_converter("trades")
-        agg_c = get_converter("aggTrades")
-        # 6-column DF: valid for trades, invalid for aggTrades
         df_6col = pd.DataFrame([[0] * 6])
         trades_c.validate_schema(df_6col)  # OK
-        with pytest.raises(SchemaError):
-            agg_c.validate_schema(df_6col)  # needs 7
 
 
 # ---------------------------------------------------------------------------

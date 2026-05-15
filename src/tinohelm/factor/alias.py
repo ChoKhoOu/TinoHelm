@@ -114,7 +114,7 @@ FIELD_ALIAS: dict[str, str] = {
     "spread_bps": "spread_bps",
     "depth_l1_usd": "depth_l1_usd",
 
-    # ── trade tick fields (source="trade_tick" / aggTrades) ───────────────
+    # ── trade tick fields (source="trade_tick" / trades) ───────────────
     "trade_price": "trade_price",
     "trade_qty": "trade_qty",
     "trade_side": "trade_side",
