@@ -1672,28 +1672,8 @@ class DataLayer:
         return out
 
     def _trade_tick_root_groups(self, source_type: str | None = None) -> list[list[Path]]:
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
-
         _validate_trade_tick_source_type(source_type)
-        is_source_root = self._catalog_root.name in _TRADE_TICK_SOURCE_TYPES and self._catalog_root.parent.name == "ticks"
-        if source_type:
-            if is_source_root:
-                roots = [self._catalog_root] if self._catalog_root.name == source_type else []
-            else:
-                roots = [resolve_catalog_path(self._catalog_root, source_type)]
-                if source_type == "aggTrades":
-                    roots.append(self._catalog_root)
-            return [[Path(path) for path in _ordered_unique(str(path) for path in roots)]] if roots else []
-
-        if is_source_root:
-            return [[self._catalog_root]]
-
-        default_roots = [resolve_catalog_path(self._catalog_root, "aggTrades"), self._catalog_root]
-        fallback_roots = [resolve_catalog_path(self._catalog_root, "trades")]
-        return [
-            [Path(path) for path in _ordered_unique(str(path) for path in default_roots)],
-            [Path(path) for path in _ordered_unique(str(path) for path in fallback_roots)],
-        ]
+        return [[self._catalog_root]]
 
 
     def _trade_tick_candidate_groups(
@@ -1718,13 +1698,10 @@ class DataLayer:
                     start,
                     end,
                 )
-                candidate_source_type = source_type or ("trades" if root_path.name == "trades" else "aggTrades")
-                source_aware = root_path.name in _TRADE_TICK_SOURCE_TYPES and root_path.parent.name == "ticks"
+                candidate_source_type = source_type or "trades"
                 for file in files:
-                    candidates.append(_TickFileCandidate(file, source_priority, file_ordinal, candidate_source_type, source_aware))
+                    candidates.append(_TickFileCandidate(file, source_priority, file_ordinal, candidate_source_type, False))
                     file_ordinal += 1
-            if any(candidate.source_aware for candidate in candidates):
-                candidates = [candidate for candidate in candidates if candidate.source_aware]
             if candidates:
                 groups.append(candidates)
         return groups

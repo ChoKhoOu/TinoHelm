@@ -3,13 +3,10 @@
 This module contains *only* dependency-free, side-effect-free logic extracted
 from ``pipeline.py``:
 
-- Canonical mappings (``WRITE_CATEGORY``, ``INTERVAL_CONVENTION``,
-  ``KLINES_REST_FETCH_FN``).
-- Three named category-resolution functions with distinct fallback semantics
-  that used to be expressed inline as different ``.get(..., default)`` calls
-  scattered across ``pipeline.py`` and ``api/routes/data.py``.
-- Progress-percentage math for the two-phase download/convert pipeline.
-- UTC date-boundary conversions for parquet pruning and REST fallback windows.
+- Canonical mappings (``WRITE_CATEGORY``, ``INTERVAL_CONVENTION``).
+- Category-resolution functions for DB and catalog writer dispatch.
+- Progress-percentage math for the download/convert pipeline.
+- UTC date-boundary conversions for parquet pruning.
 - Vision filename stem parsing for coverage-end detection.
 - CSV header sniffing predicate.
 
@@ -67,26 +64,9 @@ INTERVAL_CONVENTION: Mapping[str, str] = MappingProxyType({
     "metrics": "5m",
 })
 
-# Mapping: klines-family ``data_type`` → REST provider fetch function name.
-# Used by ``BinanceVisionPipeline._rest_fallback`` to fill the recent-data
-# gap that Binance Vision does not yet have.
-KLINES_REST_FETCH_FN: Mapping[str, str] = MappingProxyType({
-    "klines": "fetch_klines",
-    "markPriceKlines": "fetch_mark_price_klines",
-    "indexPriceKlines": "fetch_index_price_klines",
-})
 
-# Data types that support REST API fallback for recent data.
-REST_FALLBACK_TYPES: frozenset[str] = frozenset({
-    "klines", "markPriceKlines", "indexPriceKlines",
-    "aggTrades",
-})
-
-# Default progress band for the download → convert phase. A small head room
-# (``base``) is reserved for planning and a small tail room (``100 - base -
-# span``) is reserved for the REST fallback + DB catalog update phase.
 DOWNLOAD_PROGRESS_BASE = 5
-DOWNLOAD_PROGRESS_SPAN = 85
+DOWNLOAD_PROGRESS_SPAN = 90
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +106,6 @@ def resolve_db_interval(data_type: str, interval: str | None) -> str:
     return INTERVAL_CONVENTION.get(data_type, "tick")
 
 
-def is_rest_fallback_supported(data_type: str) -> bool:
-    """Return True if ``data_type`` has a REST fetch path for recent data."""
-    return data_type in REST_FALLBACK_TYPES
 
 
 # ---------------------------------------------------------------------------

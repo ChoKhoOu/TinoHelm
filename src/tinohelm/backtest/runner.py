@@ -282,9 +282,7 @@ class BacktestRunner:
         return catalog
 
     def _logical_root_for_source(self, source_type: str) -> Path:
-        from tinohelm.data.catalog import resolve_catalog_path
-
-        return Path(resolve_catalog_path(self.catalog_path, source_type))
+        return Path(self.catalog_path)
 
     def _catalog_for_logical_root(self, logical_root: Path) -> ParquetDataCatalog:
         return self._catalog_for_path(logical_root)
@@ -428,12 +426,12 @@ class BacktestRunner:
             "bookticker": "bookTicker",
             "quote_tick": "bookTicker",
             "quotes": "bookTicker",
-            "aggTrades": "aggTrades",
-            "aggtrades": "aggTrades",
-            "agg_trades": "aggTrades",
+            "aggTrades": "trades",
+            "aggtrades": "trades",
+            "agg_trades": "trades",
             "trades": "trades",
-            "trade_tick": "aggTrades",
-            "trade": "aggTrades",
+            "trade_tick": "trades",
+            "trade": "trades",
         }
         return mapping.get(token) or mapping.get(token.lower())
 

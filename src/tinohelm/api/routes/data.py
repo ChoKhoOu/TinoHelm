@@ -101,7 +101,6 @@ _PHASE1_DATA_TYPES: tuple[dict[str, Any], ...] = (
 _PHASE1_UPSTREAM_TO_PUBLIC = {
     item["upstream_data_type"]: item["data_type"] for item in _PHASE1_DATA_TYPES
 }
-_PHASE1_UPSTREAM_TO_PUBLIC["aggTrades"] = "trade_tick"
 _PHASE1_PUBLIC_TO_UPSTREAM = {
     item["data_type"]: item["upstream_data_type"] for item in _PHASE1_DATA_TYPES
 }
@@ -141,23 +140,10 @@ class DeleteRangeRequest(BaseModel):
 
 # ---- helpers ----
 
-_LEGACY_DEFAULT_SOURCE = {
-    "bar": "klines",
-    "trade_tick": "aggTrades",
-    "quote_tick": "bookTicker",
-    "funding_rate": "fundingRate",
-    "order_book_delta": "bookDepth",
-    "liquidation": "liquidationSnapshot",
-    "metrics": "metrics",
-}
-
-
 def _catalog_row_lock_key(row: Any) -> str:
     """Return the mutation lock key for one persisted catalog row."""
-    source_type = getattr(row, "source_type", None)
-    data_type = getattr(row, "data_type")
-    effective_source = source_type or _LEGACY_DEFAULT_SOURCE.get(data_type) or data_type
-    return catalog_lock_key(getattr(row, "symbol"), effective_source, getattr(row, "interval", None))
+    source_type = getattr(row, "source_type", None) or getattr(row, "data_type")
+    return catalog_lock_key(getattr(row, "symbol"), source_type, getattr(row, "interval", None))
 
 
 def _clear_current_task_cancellation() -> None:
@@ -202,14 +188,6 @@ async def _update_compact_catalog_row(
             DataCatalog.source_type == effective_source,
         )
         existing = (await db.execute(stmt)).scalar_one_or_none()
-        if existing is None and effective_source == _LEGACY_DEFAULT_SOURCE["bar"]:
-            legacy_stmt = select(DataCatalog).where(
-                DataCatalog.symbol == symbol,
-                DataCatalog.data_type == "bar",
-                DataCatalog.interval == interval,
-                DataCatalog.source_type.is_(None),
-            )
-            existing = (await db.execute(legacy_stmt)).scalar_one_or_none()
         if existing:
             existing.size_bytes = total_size
             if bars_count is not None:
@@ -229,8 +207,8 @@ def _split_fetch_date_ranges(
     end: date,
     max_days_per_job: int,
 ) -> list[tuple[date, date]]:
-    """Split large aggTrades requests into bounded inclusive date windows."""
-    if data_type != "aggTrades" or max_days_per_job <= 0:
+    """Split large tick-data requests into bounded inclusive date windows."""
+    if data_type not in ("trades", "aggTrades") or max_days_per_job <= 0:
         return [(start, end)]
     ranges: list[tuple[date, date]] = []
     current = start
@@ -857,23 +835,25 @@ async def list_data_types() -> list[dict]:
 @router.get("/coverage/{symbol}")
 async def get_data_coverage(
     symbol: str,
-    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
 ) -> list[dict]:
-    """Return data coverage ranges for a symbol across all data types."""
-    stmt = (
-        select(DataCatalog)
-        .where(DataCatalog.symbol == symbol)
-        .order_by(DataCatalog.data_type, DataCatalog.interval)
-    )
-    rows = (await db.execute(stmt)).scalars().all()
+    """Return data coverage ranges for a symbol across all data types (live summary)."""
+    from tinohelm.data.catalog import CatalogSession
+    from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
+
+    base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
+    storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path) if settings else get_catalog_storage(catalog_root=base_catalog_path)
+    session = CatalogSession(base_catalog_path, storage=storage)
+    summary = await asyncio.to_thread(session.live_summary)
     return [
         {
-            "data_type": r.data_type,
-            "source_type": r.source_type,
-            "interval": r.interval,
-            "start_date": r.start_date.isoformat(),
-            "end_date": r.end_date.isoformat(),
-            "size_bytes": r.size_bytes,
+            "data_type": _PHASE1_UPSTREAM_TO_PUBLIC.get(entry.source_type, entry.data_type),
+            "source_type": entry.source_type,
+            "interval": entry.interval,
+            "start_date": entry.start_date.isoformat() if entry.start_date else None,
+            "end_date": entry.end_date.isoformat() if entry.end_date else None,
+            "size_bytes": entry.size_bytes,
         }
-        for r in rows
+        for entry in summary.entries
+        if entry.symbol == symbol and entry.source_type in _PHASE1_UPSTREAM_TO_PUBLIC
     ]
