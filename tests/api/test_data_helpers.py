@@ -609,17 +609,14 @@ class TestSourceAwareBarMaintenance:
         assert exc_info.value.status_code == 400
         assert "Unsupported bar data_type" in exc_info.value.detail
 
-    def test_validate_data_falls_back_to_legacy_flat_default_klines_root(self, tmp_path: Path, monkeypatch):
+    def test_validate_data_uses_single_catalog_root(self, tmp_path: Path, monkeypatch):
         import asyncio
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.strategy.loader import normalize_symbol
 
         nt_sym = normalize_symbol("BTCUSDT-PERP")
-        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        legacy_dir.mkdir(parents=True)
-        (legacy_dir / "bars.parquet").write_bytes(b"legacy")
-        resolved_dir = resolve_catalog_path(tmp_path, "klines") / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        resolved_dir.mkdir(parents=True)
+        bar_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        bar_dir.mkdir(parents=True)
+        (bar_dir / "bars.parquet").write_bytes(b"data")
 
         calls = []
 
@@ -740,17 +737,14 @@ class TestSourceAwareBarMaintenance:
         assert result["size_bytes"] == len(b"payload")
         assert result["status"] == "ok"
 
-    def test_run_compact_falls_back_to_legacy_flat_default_klines_root(self, tmp_path: Path, monkeypatch):
+    def test_run_compact_uses_single_catalog_root(self, tmp_path: Path, monkeypatch):
         import asyncio
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.strategy.loader import normalize_symbol
 
         nt_sym = normalize_symbol("BTCUSDT-PERP")
-        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        legacy_dir.mkdir(parents=True)
-        (legacy_dir / "bars.parquet").write_bytes(b"legacy")
-        resolved_dir = resolve_catalog_path(tmp_path, "klines") / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        resolved_dir.mkdir(parents=True)
+        bar_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        bar_dir.mkdir(parents=True)
+        (bar_dir / "bars.parquet").write_bytes(b"data")
 
         calls = []
         statements = []
@@ -831,17 +825,14 @@ class TestSourceAwareBarMaintenance:
 
         assert calls == [("BTCUSDT-PERP", "1m")]
 
-    def test_run_compact_updates_legacy_null_source_row_for_default_klines(self, tmp_path: Path, monkeypatch):
+    def test_run_compact_updates_catalog_row_for_klines(self, tmp_path: Path, monkeypatch):
         import asyncio
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.strategy.loader import normalize_symbol
 
         nt_sym = normalize_symbol("BTCUSDT-PERP")
-        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        legacy_dir.mkdir(parents=True)
-        (legacy_dir / "bars.parquet").write_bytes(b"legacy-bytes")
-        resolved_dir = resolve_catalog_path(tmp_path, "klines") / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        resolved_dir.mkdir(parents=True)
+        bar_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
+        bar_dir.mkdir(parents=True)
+        (bar_dir / "bars.parquet").write_bytes(b"legacy-bytes")
 
         calls = []
 
@@ -852,10 +843,9 @@ class TestSourceAwareBarMaintenance:
         class Entry:
             size_bytes = 1
             record_count = 2
-            source_type = None
+            source_type = "klines"
 
-        legacy_entry = Entry()
-        execute_results = [None, legacy_entry]
+        entry = Entry()
 
         class FakeResult:
             def __init__(self, item):
@@ -874,7 +864,7 @@ class TestSourceAwareBarMaintenance:
                 return False
 
             async def execute(self, stmt):
-                return FakeResult(execute_results.pop(0))
+                return FakeResult(entry)
 
             async def commit(self):
                 self.committed = True
@@ -890,11 +880,10 @@ class TestSourceAwareBarMaintenance:
         assert calls[0][0] == "BTCUSDT-PERP"
         assert calls[0][1] == "1m"
         assert Path(calls[0][2]) == tmp_path
-        assert legacy_entry.size_bytes == len(b"legacy-bytes")
-        assert legacy_entry.record_count == 7
-        assert legacy_entry.source_type is None
+        assert entry.size_bytes == len(b"legacy-bytes")
+        assert entry.record_count == 7
+        assert entry.source_type == "klines"
         assert session.committed
-        assert execute_results == []
 
     def test_trigger_compact_rejects_out_of_scope_premium_index(self, tmp_path: Path):
         import asyncio
@@ -1483,7 +1472,7 @@ class TestNtNativeMaintenanceRoutes:
 
 
 class TestDeleteCatalogEntry:
-    async def test_delete_waits_on_legacy_default_catalog_lock(self, tmp_path: Path, monkeypatch):
+    async def test_delete_waits_on_catalog_lock(self, tmp_path: Path, monkeypatch):
         from tinohelm.data.catalog import CatalogSession
         from tinohelm.data.catalog_locks import _catalog_locks, catalog_lock_key, get_catalog_lock
 
@@ -1515,7 +1504,7 @@ class TestDeleteCatalogEntry:
 
         monkeypatch.setattr(CatalogSession, "delete_storage", fake_delete_storage)
 
-        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "klines", "1m"))
+        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "bar", "1m"))
         await lock.acquire()
         try:
             task = asyncio.create_task(delete_catalog_entry(catalog_id, db=db, settings=settings))
@@ -1583,17 +1572,16 @@ class TestDeleteCatalogEntry:
         db.commit.assert_awaited_once()
 
     @pytest.mark.parametrize(
-        ("row_data_type", "row_interval", "worker_data_type"),
+        ("row_data_type", "row_interval"),
         [
-            ("funding_rate", "8h", "fundingRate"),
-            ("order_book_delta", "tick", "bookDepth"),
+            ("funding_rate", "8h"),
+            ("order_book_delta", "tick"),
         ],
     )
-    async def test_delete_waits_on_non_bar_legacy_default_source_lock(
+    async def test_delete_waits_on_non_bar_catalog_lock(
         self,
         row_data_type: str,
         row_interval: str,
-        worker_data_type: str,
         tmp_path: Path,
         monkeypatch,
     ):
@@ -1628,7 +1616,7 @@ class TestDeleteCatalogEntry:
 
         monkeypatch.setattr(CatalogSession, "delete_storage", fake_delete_storage)
 
-        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", worker_data_type, None))
+        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", row_data_type, row_interval))
         await lock.acquire()
         try:
             task = asyncio.create_task(delete_catalog_entry(catalog_id, db=db, settings=settings))
@@ -1764,13 +1752,12 @@ class TestCatalogApiFacade:
 
         assert [row.data_type for row in rows] == ["mark_price", "quote_tick"]
 
-    async def test_list_data_catalog_keeps_legacy_aggtrades_visible(self, tmp_path: Path, monkeypatch):
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
+    async def test_list_data_catalog_shows_trades_as_trade_tick(self, tmp_path: Path, monkeypatch):
         from tinohelm.strategy.loader import normalize_symbol
 
         symbol = "BTCUSDT-PERP"
         nt_sym = normalize_symbol(symbol)
-        trade_dir = resolve_catalog_path(tmp_path, "aggTrades") / "data" / "trade_tick" / nt_sym
+        trade_dir = tmp_path / "data" / "trade_tick" / nt_sym
         trade_dir.mkdir(parents=True)
         pl.DataFrame({"ts_event": [1_735_689_600_000_000_000], "price": [1.0], "size": [1.0]}).write_parquet(
             trade_dir / "trades.parquet"
@@ -1787,9 +1774,9 @@ class TestCatalogApiFacade:
         rows = await list_data_catalog(settings=settings)
 
         assert len(rows) == 1
-        assert rows[0].id == "BTCUSDT-PERP|trade_tick|tick|aggTrades"
+        assert rows[0].id == "BTCUSDT-PERP|trade_tick|tick|trades"
         assert rows[0].data_type == "trade_tick"
-        assert rows[0].source_type == "aggTrades"
+        assert rows[0].source_type == "trades"
 
     @pytest.mark.parametrize(
         ("upstream_type", "public_type", "file_name"),

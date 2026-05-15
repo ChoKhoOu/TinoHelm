@@ -230,16 +230,12 @@ def test_list_symbols_with_bar_dirs(client, tmp_path):
     assert "ETHUSDT-PERP" in body
 
 
-def test_list_symbols_scans_source_aware_local_bar_roots(client, tmp_path):
-    """GET /symbols sees source-aware bar roots, not just legacy data/bar."""
-    from tinohelm.data.catalog_helpers import resolve_catalog_path
-
-    klines_dir = resolve_catalog_path(tmp_path, "klines") / "data" / "bar"
-    mark_dir = resolve_catalog_path(tmp_path, "markPriceKlines") / "data" / "bar"
-    klines_dir.mkdir(parents=True)
-    mark_dir.mkdir(parents=True)
-    (klines_dir / "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL").mkdir()
-    (mark_dir / "ETHUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL").mkdir()
+def test_list_symbols_scans_local_bar_root(client, tmp_path):
+    """GET /symbols sees all bar-type directories under the single catalog root."""
+    bar_dir = tmp_path / "data" / "bar"
+    bar_dir.mkdir(parents=True)
+    (bar_dir / "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL").mkdir()
+    (bar_dir / "ETHUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL").mkdir()
 
     def _override_settings_with_catalog():
         s = MagicMock()
@@ -257,9 +253,8 @@ def test_list_symbols_scans_source_aware_local_bar_roots(client, tmp_path):
     assert resp.json() == ["BTCUSDT-PERP", "ETHUSDT-PERP"]
 
 
-def test_list_symbols_scans_source_aware_remote_bar_roots(client, tmp_path, monkeypatch):
-    """Remote source-aware objects are enumerated through the storage provider."""
-    from tinohelm.data.catalog_helpers import resolve_catalog_path
+def test_list_symbols_scans_remote_bar_root(client, tmp_path, monkeypatch):
+    """Remote objects are enumerated through the storage provider under single root."""
 
     class Obj:
         def __init__(self, path: Path):
@@ -271,9 +266,8 @@ def test_list_symbols_scans_source_aware_remote_bar_roots(client, tmp_path, monk
 
         def iter_files(self, prefix, suffix="", recursive=True):
             base = Path(prefix)
-            if base == resolve_catalog_path(tmp_path, "klines") / "data" / "bar":
+            if base == tmp_path / "data" / "bar":
                 yield Obj(base / "BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL" / "a.parquet")
-            if base == resolve_catalog_path(tmp_path, "markPriceKlines") / "data" / "bar":
                 yield Obj(base / "ETHUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL" / "b.parquet")
 
     storage = Storage()

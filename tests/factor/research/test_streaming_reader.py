@@ -9,13 +9,11 @@ from tinohelm.factor.research.reader import ResearchDataRequest, ResearchParquet
 
 
 def test_research_reader_uses_lazy_scan_and_streaming_collect(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "bar" / "klines"
-    root.mkdir(parents=True)
     pl.DataFrame({
         "ts_event": [datetime(2024, 1, 1), datetime(2024, 1, 1, 0, 1)],
         "symbol": ["BTCUSDT", "BTCUSDT"],
         "close": [100.0, 101.0],
-    }).write_parquet(root / "bars.parquet")
+    }).write_parquet(tmp_path / "bars.parquet")
 
     original_scan = pl.scan_parquet
     original_collect = pl.LazyFrame.collect

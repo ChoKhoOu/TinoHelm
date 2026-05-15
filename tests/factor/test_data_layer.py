@@ -1650,13 +1650,11 @@ def test_trade_tick_panel_start_inside_bucket_uses_complete_first_bucket(tmp_pat
     np.testing.assert_allclose(panel[symbol].to_numpy(), [7.0])
 
 
-def test_trade_tick_panel_implicit_source_prefers_default_feed_without_union(tmp_path: Path) -> None:
+def test_trade_tick_panel_implicit_source_reads_from_single_root(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "aggTrades"), symbol, [
+    # All data lives in one catalog root — no source-aware subdirectories.
+    _write_trade_ticks(tmp_path, symbol, [
         {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER"},
-    ])
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "trades"), symbol, [
-        {"ts_event": _T0_NS + 20 * 1_000_000_000, "price": 101.0, "size": 5.0, "aggressor_side": "BUYER"},
     ])
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
     req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick")
@@ -1667,13 +1665,12 @@ def test_trade_tick_panel_implicit_source_prefers_default_feed_without_union(tmp
     np.testing.assert_allclose(panel[symbol].to_numpy(), [2.0])
 
 
-def test_trade_tick_panel_source_type_reads_only_requested_catalog(tmp_path: Path) -> None:
+def test_trade_tick_panel_source_type_reads_from_single_root(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "trades"), symbol, [
+    # All data in one catalog root — source_type parameter accepted but
+    # resolve_catalog_path always returns base.
+    _write_trade_ticks(tmp_path, symbol, [
         {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER"},
-    ])
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "aggTrades"), symbol, [
-        {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 200.0, "size": 99.0, "aggressor_side": "BUYER"},
     ])
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
     req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="trades")
@@ -1684,47 +1681,10 @@ def test_trade_tick_panel_source_type_reads_only_requested_catalog(tmp_path: Pat
     np.testing.assert_allclose(panel[symbol].to_numpy(), [2.0])
 
 
-def test_trade_tick_source_type_does_not_fallback_to_unrelated_catalog_root(tmp_path: Path) -> None:
-    symbol = "BTCUSDT-PERP"
-    catalog_path = resolve_catalog_path(tmp_path, "aggTrades")
-    _write_trade_ticks(catalog_path, symbol, [
-        {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 200.0, "size": 99.0, "aggressor_side": "BUYER"},
-    ])
-    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=catalog_path)
-    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="trades")
-
-    panel = dl.load_panel(req)["trade_qty"]
-
-    assert panel.is_empty() or 99.0 not in panel.get_column(symbol).drop_nulls().to_list()
 
 
-def test_trade_tick_explicit_agg_trades_does_not_read_trades_source_root(tmp_path: Path) -> None:
-    symbol = "BTCUSDT-PERP"
-    catalog_path = resolve_catalog_path(tmp_path, "trades")
-    _write_trade_ticks(catalog_path, symbol, [
-        {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 100.0, "size": 7.0, "aggressor_side": "BUYER"},
-    ])
-    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=catalog_path)
-    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="aggTrades")
-
-    panel = dl.load_panel(req, start="2021-05-03T00:00:00", end="2021-05-03T00:00:59.999000")["trade_qty"]
-
-    assert panel.is_empty()
 
 
-def test_trade_tick_explicit_agg_trades_does_not_read_nested_under_trades_root(tmp_path: Path) -> None:
-    symbol = "BTCUSDT-PERP"
-    catalog_path = resolve_catalog_path(tmp_path, "trades")
-    nested_agg_trades_path = resolve_catalog_path(catalog_path, "aggTrades")
-    _write_trade_ticks(nested_agg_trades_path, symbol, [
-        {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 100.0, "size": 7.0, "aggressor_side": "BUYER"},
-    ])
-    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=catalog_path)
-    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="aggTrades")
-
-    panel = dl.load_panel(req, start="2021-05-03T00:00:00", end="2021-05-03T00:00:59.999000")["trade_qty"]
-
-    assert panel.is_empty()
 
 
 def test_trade_tick_explicit_agg_trades_reads_legacy_flat_catalog(tmp_path: Path) -> None:
@@ -1758,31 +1718,14 @@ def test_trade_tick_explicit_agg_trades_falls_through_after_pruned_root(tmp_path
     np.testing.assert_allclose(panel[symbol].to_numpy(), [4.0])
 
 
-def test_trade_tick_explicit_agg_trades_uses_source_aware_only_when_available(tmp_path: Path) -> None:
-    symbol = "BTCUSDT-PERP"
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "aggTrades"), symbol, [
-        {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER"},
-    ])
-    _write_trade_ticks(tmp_path, symbol, [
-        {"ts_event": _T0_NS + 70 * 1_000_000_000, "price": 101.0, "size": 3.0, "aggressor_side": "BUYER"},
-    ])
-    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
-    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="aggTrades")
-
-    panel = dl.load_panel(req, start="2021-05-03T00:00:00", end="2021-05-03T00:01:59.999000")["trade_qty"]
-
-    assert panel["ts"].to_list() == [datetime(2021, 5, 3, 0, 0, 59, 999000)]
-    np.testing.assert_allclose(panel[symbol].to_numpy(), [2.0])
 
 
-def test_trade_tick_overlap_dedupes_by_trade_id_preferring_source_aware(tmp_path: Path) -> None:
+def test_trade_tick_overlap_dedupes_by_trade_id(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
     ts_event = _T0_NS + 10 * 1_000_000_000
-    _write_trade_ticks(resolve_catalog_path(tmp_path, "aggTrades"), symbol, [
-        {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER", "trade_id": 10},
-    ])
+    # Write ticks with trade_id — deduplication by trade_id keeps unique entries.
     _write_trade_ticks(tmp_path, symbol, [
-        {"ts_event": ts_event, "price": 999.0, "size": 99.0, "aggressor_side": "SELLER"},
+        {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER", "trade_id": 10},
     ])
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
 
@@ -1882,17 +1825,6 @@ def test_trade_tick_same_timestamp_last_price_uses_trade_id_order(tmp_path: Path
     np.testing.assert_allclose(side_panel[symbol].to_numpy(), [1.0])
 
 
-def test_trade_tick_explicit_trades_does_not_read_legacy_flat_agg_trades(tmp_path: Path) -> None:
-    symbol = "BTCUSDT-PERP"
-    _write_trade_ticks(tmp_path, symbol, [
-        {"ts_event": _T0_NS + 10 * 1_000_000_000, "price": 100.0, "size": 99.0, "aggressor_side": "BUYER"},
-    ])
-    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
-    req = DataRequest(symbol, "trade_qty", "1m", 0, "trade_tick", source_type="trades")
-
-    panel = dl.load_panel(req, start="2021-05-03T00:00:00", end="2021-05-03T00:00:59.999000")["trade_qty"]
-
-    assert panel.is_empty()
 
 
 def test_trade_tick_implicit_source_fallback_continues_after_pruned_root(tmp_path: Path) -> None:
@@ -1929,55 +1861,29 @@ def test_quote_tick_implicit_root_fallback_continues_after_pruned_root(tmp_path:
     np.testing.assert_allclose(panel[symbol].to_numpy(), [100.0])
 
 
-def test_quote_tick_implicit_root_uses_source_aware_only_when_available(tmp_path: Path) -> None:
+def test_quote_tick_implicit_root_reads_from_single_catalog(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
-    _write_quote_ticks(resolve_catalog_path(tmp_path, "bookTicker"), symbol, [
-        {"ts_event": _T0_NS + 10 * 1_000_000_000, "bid_price": 99.0, "bid_size": 3.0, "ask_price": 101.0, "ask_size": 1.0},
-    ])
+    # All data lives in one catalog root — no source-aware subdirectories.
     _write_quote_ticks(tmp_path, symbol, [
-        {"ts_event": _T0_NS + 70 * 1_000_000_000, "bid_price": 109.0, "bid_size": 1.0, "ask_price": 111.0, "ask_size": 1.0},
+        {"ts_event": _T0_NS + 10 * 1_000_000_000, "bid_price": 99.0, "bid_size": 3.0, "ask_price": 101.0, "ask_size": 1.0},
     ])
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
     req = DataRequest(symbol, "mid_price", "1m", 0, "quote_tick")
 
-    panel = dl.load_panel(req, start="2021-05-03T00:00:00", end="2021-05-03T00:01:59.999000")["mid_price"]
+    panel = dl.load_panel(req, start="2021-05-03T00:00:00", end="2021-05-03T00:00:59.999000")["mid_price"]
 
     assert panel["ts"].to_list() == [datetime(2021, 5, 3, 0, 0, 59, 999000)]
     np.testing.assert_allclose(panel[symbol].to_numpy(), [100.0])
 
 
-def test_quote_tick_overlap_prefers_source_aware_for_panel_and_events(tmp_path: Path) -> None:
+
+
+def test_quote_tick_explicit_book_ticker_source_reads_from_single_root(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
     ts_event = _T0_NS + 10 * 1_000_000_000
-    _write_quote_ticks(resolve_catalog_path(tmp_path, "bookTicker"), symbol, [
-        {"ts_event": ts_event, "bid_price": 99.0, "bid_size": 3.0, "ask_price": 101.0, "ask_size": 1.0, "update_id": 2},
-    ])
+    # All data in one catalog root — no source-aware subdirectories.
     _write_quote_ticks(tmp_path, symbol, [
-        {"ts_event": ts_event, "bid_price": 1.0, "bid_size": 1.0, "ask_price": 3.0, "ask_size": 1.0},
-    ])
-    dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
-
-    panel = dl.load_panel(
-        DataRequest(symbol, "mid_price", "1m", 0, "quote_tick"),
-        start="2021-05-03T00:00:00",
-        end="2021-05-03T00:00:59.999000",
-    )["mid_price"]
-    events = dl.load_events(symbol=symbol, source="quote_tick", fields=("bid_price", "ask_price", "mid_price"))
-
-    np.testing.assert_allclose(panel[symbol].to_numpy(), [100.0])
-    assert events.select("bid_price", "ask_price", "mid_price").to_dicts() == [
-        {"bid_price": 99.0, "ask_price": 101.0, "mid_price": 100.0},
-    ]
-
-
-def test_quote_tick_explicit_book_ticker_source_uses_same_overlap_rules(tmp_path: Path) -> None:
-    symbol = "BTCUSDT-PERP"
-    ts_event = _T0_NS + 10 * 1_000_000_000
-    _write_quote_ticks(resolve_catalog_path(tmp_path, "bookTicker"), symbol, [
         {"ts_event": ts_event, "bid_price": 99.0, "bid_size": 3.0, "ask_price": 101.0, "ask_size": 1.0, "update_id": 2},
-    ])
-    _write_quote_ticks(tmp_path, symbol, [
-        {"ts_event": ts_event, "bid_price": 1.0, "bid_size": 1.0, "ask_price": 3.0, "ask_size": 1.0},
     ])
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
 
