@@ -253,5 +253,5 @@ def test_backtest_runner_optional_replay_loads_and_injects(monkeypatch):
     engine = Engine()
     runner._inject_optional_replay_data(engine)
 
-    assert calls == [("BTCUSDT-PERP", "bookTicker"), ("BTCUSDT-PERP", "aggTrades")]
-    assert engine.added == [(["bookTicker-tick"], False), (["aggTrades-tick"], False)]
+    assert calls == [("BTCUSDT-PERP", "bookTicker"), ("BTCUSDT-PERP", "trades")]
+    assert engine.added == [(["bookTicker-tick"], False), (["trades-tick"], False)]

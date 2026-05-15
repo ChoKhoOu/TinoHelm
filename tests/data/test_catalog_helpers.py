@@ -224,29 +224,29 @@ class TestIntervalToNanoseconds:
 # ---------------------------------------------------------------------------
 
 class TestResolveCatalogPath:
-    def test_klines_goes_to_bar_category(self):
+    def test_klines_returns_base(self):
         p = resolve_catalog_path("/tmp/cat", "klines")
-        assert p == Path("/tmp/cat") / "bar" / "klines"
+        assert p == Path("/tmp/cat")
 
-    def test_mark_price_klines_falls_back_to_base(self):
+    def test_mark_price_klines_returns_base(self):
         p = resolve_catalog_path("/tmp/cat", "markPriceKlines")
         assert p == Path("/tmp/cat")
 
-    def test_index_price_klines_falls_back_to_base(self):
+    def test_index_price_klines_returns_base(self):
         p = resolve_catalog_path("/tmp/cat", "indexPriceKlines")
         assert p == Path("/tmp/cat")
 
-    def test_premium_index_klines_falls_back_to_base(self):
+    def test_premium_index_klines_returns_base(self):
         p = resolve_catalog_path("/tmp/cat", "premiumIndexKlines")
         assert p == Path("/tmp/cat")
 
-    def test_agg_trades_under_ticks(self):
+    def test_agg_trades_returns_base(self):
         p = resolve_catalog_path("/tmp/cat", "aggTrades")
-        assert p == Path("/tmp/cat") / "ticks" / "aggTrades"
+        assert p == Path("/tmp/cat")
 
-    def test_trades_under_ticks(self):
+    def test_trades_returns_base(self):
         p = resolve_catalog_path("/tmp/cat", "trades")
-        assert p == Path("/tmp/cat") / "ticks" / "trades"
+        assert p == Path("/tmp/cat")
 
     def test_none_returns_base(self):
         assert resolve_catalog_path("/tmp/cat", None) == Path("/tmp/cat")
@@ -258,14 +258,10 @@ class TestResolveCatalogPath:
         assert resolve_catalog_path("/tmp/cat", "noSuchType") == Path("/tmp/cat")
 
     def test_funding_rate_returns_base(self):
-        # fundingRate maps to "funding_rate" category — not in WRITABLE_CATEGORIES
-        # because catalog.py has no funding_rate writer. Fallthrough = base.
-        assert WRITE_CATEGORY["fundingRate"] not in WRITABLE_CATEGORIES
         assert resolve_catalog_path("/tmp/cat", "fundingRate") == Path("/tmp/cat")
 
-    def test_book_ticker_under_quotes(self):
-        assert WRITE_CATEGORY["bookTicker"] in WRITABLE_CATEGORIES
-        assert resolve_catalog_path("/tmp/cat", "bookTicker") == Path("/tmp/cat") / "quotes" / "bookTicker"
+    def test_book_ticker_returns_base(self):
+        assert resolve_catalog_path("/tmp/cat", "bookTicker") == Path("/tmp/cat")
 
     def test_book_depth_returns_base(self):
         assert resolve_catalog_path("/tmp/cat", "bookDepth") == Path("/tmp/cat")
@@ -275,11 +271,11 @@ class TestResolveCatalogPath:
 
     def test_accepts_path_input(self):
         p = resolve_catalog_path(Path("/tmp/cat"), "klines")
-        assert p == Path("/tmp/cat") / "bar" / "klines"
+        assert p == Path("/tmp/cat")
 
     def test_accepts_relative_string(self):
         p = resolve_catalog_path("./cat", "klines")
-        assert p == Path("./cat") / "bar" / "klines"
+        assert p == Path("./cat")
 
 
 # ---------------------------------------------------------------------------
@@ -724,25 +720,7 @@ class TestCatalogBackwardCompat:
     def test_interval_map_alias_is_same_object(self):
         assert catalog._INTERVAL_MAP is INTERVAL_MAP
 
-    def test_category_dir_alias_is_same_object(self):
-        assert catalog._CATEGORY_DIR is CATEGORY_DIR
-
-    def test_source_to_category_is_subset_of_write_category(self):
-        for src, cat in catalog._SOURCE_TO_CATEGORY.items():
-            assert WRITE_CATEGORY[src] == cat
-            assert cat in WRITABLE_CATEGORIES
-
-    def test_source_to_category_excludes_raw_non_writable(self):
-        # Any source type whose category is NOT writable by catalog must
-        # be absent from the compat map (e.g. fundingRate, metrics).
-        for src in catalog._SOURCE_TO_CATEGORY:
-            assert WRITE_CATEGORY[src] in WRITABLE_CATEGORIES
-        assert "fundingRate" not in catalog._SOURCE_TO_CATEGORY
-        assert catalog._SOURCE_TO_CATEGORY["bookTicker"] == "quote_tick"
-
     def test_resolve_catalog_path_reexported(self):
-        # Public re-export so callers (runner, pipeline, data API) can keep
-        # importing from catalog.
         assert catalog.resolve_catalog_path is resolve_catalog_path
 
     def test_interval_to_nanoseconds_wrapper(self):
@@ -750,8 +728,5 @@ class TestCatalogBackwardCompat:
         assert catalog._interval_to_nanoseconds("1h") == interval_to_nanoseconds("1h")
 
     def test_interval_to_nanoseconds_wrapper_rejects_unknown(self):
-        # The wrapper now delegates to interval_to_step_unit → ValueError.
-        # Previously the raw lookup would KeyError; the new behaviour is
-        # strictly more informative. Tests are the lock for this change.
         with pytest.raises(ValueError):
             catalog._interval_to_nanoseconds("7h")

@@ -220,8 +220,14 @@ def _split_fetch_date_ranges(
     return ranges
 
 
+_LEGACY_UPSTREAM_ALIASES: dict[str, str] = {
+    "aggTrades": "trades",
+}
+
+
 def _normalize_requested_data_type(data_type: str) -> str:
-    return _PHASE1_PUBLIC_TO_UPSTREAM.get(data_type, data_type)
+    normalized = _PHASE1_PUBLIC_TO_UPSTREAM.get(data_type, data_type)
+    return _LEGACY_UPSTREAM_ALIASES.get(normalized, normalized)
 
 
 def _public_data_type(data_type: str) -> str:

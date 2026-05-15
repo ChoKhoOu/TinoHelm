@@ -280,9 +280,8 @@ class TestCatalogCache:
     def test_try_load_bars_reuses_resolved_catalog_for_same_source_path(self, tmp_path, monkeypatch):
         """Repeated probes should not rebuild ParquetDataCatalog for same path."""
         import tinohelm.backtest.runner as runner_mod
-        import tinohelm.data.catalog as catalog_mod
 
-        resolved_path = tmp_path / "catalog" / "bar" / "klines"
+        catalog_path = tmp_path / "catalog"
         constructed_paths: list[str] = []
 
         class FakeCatalog:
@@ -292,31 +291,29 @@ class TestCatalogCache:
 
             def bars(self, *, bar_types, start, end):
                 assert bar_types == ["BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL"]
-                return [object()] if self.path == str(resolved_path) else []
+                return [object()]
 
-        monkeypatch.setattr(catalog_mod, "resolve_catalog_path", lambda base, source_type: resolved_path)
         monkeypatch.setattr(runner_mod, "ParquetDataCatalog", FakeCatalog)
 
         runner = BacktestRunner(
             strategy_path="x:X",
             config_path="x:XConfig",
-            catalog_path=tmp_path / "catalog",
+            catalog_path=catalog_path,
             symbol="BTCUSDT-PERP",
             interval="1m",
         )
 
         assert runner._try_load_bars("BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL")
         assert runner._try_load_bars("BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL")
-        assert constructed_paths == [str(resolved_path)]
+        assert constructed_paths == [str(catalog_path)]
 
     async def test_download_bars_invalidates_cached_empty_catalog_after_fetch(
         self, tmp_path, monkeypatch
     ):
         """A catalog cached before a fetch must not hide newly written parquet."""
         import tinohelm.backtest.runner as runner_mod
-        import tinohelm.data.catalog as catalog_mod
 
-        resolved_path = tmp_path / "catalog" / "bar" / "klines"
+        catalog_path = tmp_path / "catalog"
         constructed_paths: list[str] = []
         loaded = object()
 
@@ -327,15 +324,14 @@ class TestCatalogCache:
                 constructed_paths.append(path)
 
             def bars(self, *, bar_types, start, end):
-                return [loaded] if self.path == str(resolved_path) and self.generation > 0 else []
+                return [loaded] if self.generation > 0 else []
 
-        monkeypatch.setattr(catalog_mod, "resolve_catalog_path", lambda base, source_type: resolved_path)
         monkeypatch.setattr(runner_mod, "ParquetDataCatalog", FakeCatalog)
 
         runner = BacktestRunner(
             strategy_path="x:X",
             config_path="x:XConfig",
-            catalog_path=tmp_path / "catalog",
+            catalog_path=catalog_path,
             symbol="BTCUSDT-PERP",
             interval="1m",
         )
@@ -350,9 +346,8 @@ class TestCatalogCache:
 
         assert await runner._download_bars("BTCUSDT-PERP", "1m") == [loaded]
         assert constructed_paths == [
-            str(resolved_path),
-            str(tmp_path / "catalog"),
-            str(resolved_path),
+            str(catalog_path),
+            str(catalog_path),
         ]
 
 

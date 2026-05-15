@@ -342,15 +342,13 @@ class TestCompactBars:
         _write_bars_streaming(tmp_path, "BTCUSDT-PERP", "5m", chunks=1)
         bar_dir = (
             tmp_path
-            / "bar"
-            / "klines"
             / "data"
             / "bar"
             / make_bar_type_str("BTCUSDT-PERP", "5m")
         )
         assert len(list(bar_dir.glob("*.parquet"))) == 1
 
-        session = CatalogSession(tmp_path / "bar" / "klines")
+        session = CatalogSession(tmp_path)
         result = session.compact_bars("BTCUSDT-PERP", "5m")
         assert result["files_before"] == 1
         assert result["files_after"] == 1
@@ -364,15 +362,13 @@ class TestCompactBars:
         total_bars = _write_bars_streaming(tmp_path, "BTCUSDT-PERP", "5m", chunks=3)
         bar_dir = (
             tmp_path
-            / "bar"
-            / "klines"
             / "data"
             / "bar"
             / make_bar_type_str("BTCUSDT-PERP", "5m")
         )
         assert len(list(bar_dir.glob("*.parquet"))) == 3
 
-        session = CatalogSession(tmp_path / "bar" / "klines")
+        session = CatalogSession(tmp_path)
         result = session.compact_bars("BTCUSDT-PERP", "5m")
         assert result["files_before"] == 3
         assert result["files_after"] == 1
@@ -383,7 +379,7 @@ class TestCompactBars:
         from tinohelm.data.catalog import CatalogSession
 
         _write_bars_streaming(tmp_path, "BTCUSDT-PERP", "5m", chunks=2)
-        session = CatalogSession(tmp_path / "bar" / "klines")
+        session = CatalogSession(tmp_path)
         result = session.compact_bars("BTCUSDT-PERP", "5m")
         assert set(result) == {
             "files_before",
@@ -398,67 +394,25 @@ class TestCompactBars:
 # 5. funding-rate read-side API
 # ---------------------------------------------------------------------------
 
-def _write_funding_json(dir_path: Path, symbol: str, times_ms: list[int]):
-    import json
-
-    dir_path.mkdir(parents=True, exist_ok=True)
-    records = [
-        {"funding_time_ms": t, "funding_rate": 0.0001 * i, "mark_price": 0}
-        for i, t in enumerate(times_ms)
-    ]
-    (dir_path / f"{symbol.lower()}.json").write_text(json.dumps(records))
-
-
-class TestLoadFundingRates:
-    def test_returns_records_in_range(self, tmp_path: Path, paths_override):
-        from datetime import datetime, timezone
-
-        from tinohelm.data.catalog import CatalogSession
-
-        funding_dir = tmp_path / "funding_rates"
-        paths_override("funding_rates", funding_dir)
-        # 2024-01-01 00:00 UTC + 8h steps.
-        base_ms = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
-        step_ms = 8 * 3600 * 1000
-        times = [base_ms + i * step_ms for i in range(6)]
-        _write_funding_json(funding_dir, "BTCUSDT-PERP", times)
-
-        session = CatalogSession(tmp_path)
-        result = session.load_funding_rates(
-            "BTCUSDT-PERP",
-            datetime(2024, 1, 1, 8, tzinfo=timezone.utc),
-            datetime(2024, 1, 2, 0, tzinfo=timezone.utc),
-        )
-        assert [r["funding_time_ms"] for r in result] == times[1:4]
-
-    def test_missing_symbol_returns_empty(self, tmp_path: Path, paths_override):
-        from datetime import datetime, timezone
-
-        from tinohelm.data.catalog import CatalogSession
-
-        paths_override("funding_rates", tmp_path / "funding_rates")
-        session = CatalogSession(tmp_path)
-        assert session.load_funding_rates(
-            "SOLUSDT-PERP",
-            datetime(2024, 1, 1, tzinfo=timezone.utc),
-            datetime(2024, 1, 2, tzinfo=timezone.utc),
-        ) == []
-
 
 class TestFundingCacheCovers:
     def test_cache_spans_full_range(self, tmp_path: Path, paths_override):
         from datetime import date, datetime, timezone
 
-        from tinohelm.data.catalog import CatalogSession
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession, funding_rate_update_dir
 
         funding_dir = tmp_path / "funding_rates"
         paths_override("funding_rates", funding_dir)
-        # Coverage is judged against end-of-day on ``end``; fit that into the
-        # cached timestamps by extending past the end date.
-        base_ms = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
-        step_ms = 8 * 3600 * 1000
-        times = [base_ms + i * step_ms for i in range(9)]  # up to 2024-01-03 16:00 UTC
-        _write_funding_json(funding_dir, "BTCUSDT-PERP", times)
+        # Write parquet data that spans the range (funding_cache_covers delegates
+        # to funding_parquet_covers which reads from the update dir).
+        base_ns = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()) * 1_000_000_000
+        step_ns = 8 * 3600 * 1_000_000_000
+        timestamps = [base_ns + i * step_ns for i in range(9)]  # up to 2024-01-03 16:00 UTC
+        update_dir = funding_rate_update_dir("BTCUSDT-PERP", tmp_path) / "2024" / "1"
+        update_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ts_event": timestamps}).write_parquet(update_dir / "part.parquet")
 
         session = CatalogSession(tmp_path)
         assert session.funding_cache_covers(
@@ -468,12 +422,17 @@ class TestFundingCacheCovers:
     def test_cache_missing_tail(self, tmp_path: Path, paths_override):
         from datetime import date, datetime, timezone
 
-        from tinohelm.data.catalog import CatalogSession
+        import polars as pl
+
+        from tinohelm.data.catalog import CatalogSession, funding_rate_update_dir
 
         funding_dir = tmp_path / "funding_rates"
         paths_override("funding_rates", funding_dir)
-        base_ms = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
-        _write_funding_json(funding_dir, "BTCUSDT-PERP", [base_ms])
+        # Only one timestamp — does not span the requested range.
+        base_ns = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()) * 1_000_000_000
+        update_dir = funding_rate_update_dir("BTCUSDT-PERP", tmp_path) / "2024" / "1"
+        update_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ts_event": [base_ns]}).write_parquet(update_dir / "part.parquet")
 
         session = CatalogSession(tmp_path)
         assert session.funding_cache_covers(
@@ -510,7 +469,7 @@ class TestFundingRateTxn:
             ))
         return records
 
-    def test_happy_path_merges_into_existing_json(self, tmp_path: Path, paths_override):
+    def test_happy_path_writes_parquet_flush_json_is_noop(self, tmp_path: Path, paths_override):
         import json
 
         from tinohelm.data.catalog import CatalogSession
@@ -526,13 +485,13 @@ class TestFundingRateTxn:
         session = CatalogSession(tmp_path)
         with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
             txn.write_parquet(self._make_records(3))
-            txn.flush_json()
+            txn.flush_json()  # no-op
 
+        # flush_json is a no-op — JSON file remains untouched.
         saved = json.loads((funding_dir / "btcusdt-perp.json").read_text())
-        saved_ts = [r["funding_time_ms"] for r in saved]
-        assert old_ms in saved_ts
-        assert len(saved) == 4
-        assert sorted(saved_ts) == saved_ts
+        assert saved == [old_record]
+        # But parquet was written.
+        assert txn.wrote_parquet is True
 
     def test_failure_restores_json_snapshot(self, tmp_path: Path, paths_override):
         import json
@@ -627,7 +586,6 @@ class TestFundingRateTxn:
             assert txn._storage is not None
 
     def test_write_parquet_accepts_funding_rate_update_records(self, tmp_path: Path, paths_override):
-        import json
         from decimal import Decimal
 
         from nautilus_trader.model.data import FundingRateUpdate
@@ -649,22 +607,19 @@ class TestFundingRateTxn:
 
         with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
             txn.write_parquet([record])
-            txn.flush_json()
+            txn.flush_json()  # no-op
 
-        saved = json.loads((funding_dir / "btcusdt-perp.json").read_text())
-        assert saved == [{"funding_time_ms": 1_700_000_000_000, "funding_rate": 0.0001, "mark_price": 0}]
+        # Parquet was written successfully — flush_json is a no-op so
+        # no JSON file is produced.
+        assert txn.wrote_parquet is True
 
     def test_unflushed_normal_exit_leaves_json_untouched(
-        self, tmp_path: Path, paths_override, caplog
+        self, tmp_path: Path, paths_override
     ):
-        """Leaving the ``with`` block without flushing should NOT update the JSON.
-
-        The contract: ``flush_json`` must be called explicitly after the DB
-        commit. Forgetting to flush leaves the parquet written but the JSON
-        read-side stale; the txn logs a warning so the mistake is visible.
+        """flush_json is now a no-op and flushed is always True, so no warning
+        is emitted and the JSON file remains untouched regardless.
         """
         import json
-        import logging
 
         from tinohelm.data.catalog import CatalogSession
 
@@ -675,14 +630,15 @@ class TestFundingRateTxn:
         json_file = funding_dir / "btcusdt-perp.json"
         json_file.write_text(json.dumps(original))
 
-        caplog.set_level(logging.WARNING)
         session = CatalogSession(tmp_path)
         with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
             txn.write_parquet(self._make_records(2))
-            # Note: no flush_json call.
+            # Note: no flush_json call — but flushed is always True now.
 
+        # JSON untouched (flush_json is a no-op).
         assert json.loads(json_file.read_text()) == original
-        assert any("flush" in rec.message.lower() for rec in caplog.records)
+        # flushed is always True — no warning emitted.
+        assert txn.flushed is True
 
 
 class TestAggregateParquetStats:
@@ -731,8 +687,6 @@ class TestAggregateParquetStats:
         _write_bars_streaming(tmp_path, "BTCUSDT-PERP", "5m", chunks=2)
         bar_dir = (
             tmp_path
-            / "bar"
-            / "klines"
             / "data"
             / "bar"
             / make_bar_type_str("BTCUSDT-PERP", "5m")
@@ -879,65 +833,6 @@ class TestScanBars:
         assert entry.record_count == 1
         assert entry.file_path == str(source_root)
 
-    def test_legacy_flat_layout_attributes_to_klines(self, tmp_path: Path):
-        import polars as pl
-
-        from tinohelm.data.catalog import CatalogSession
-        from tinohelm.strategy.loader import normalize_symbol
-
-        nt_sym = normalize_symbol("BTCUSDT-PERP")
-        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        legacy_dir.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(
-            legacy_dir / "legacy.parquet"
-        )
-
-        session = CatalogSession(tmp_path)
-        result = session.scan_bars()
-
-        assert result.scanned == 1
-        assert len(result.entries) == 1
-        entry = result.entries[0]
-        assert entry.source_type == "klines"
-        assert entry.file_path == str(tmp_path)
-
-    def test_source_aware_plus_legacy_merges_size_and_record_count(
-        self, tmp_path: Path
-    ):
-        import polars as pl
-
-        from tinohelm.data.catalog import CatalogSession
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.strategy.loader import normalize_symbol
-
-        nt_sym = normalize_symbol("BTCUSDT-PERP")
-        source_root = resolve_catalog_path(tmp_path, "klines")
-        source_dir = source_root / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        legacy_dir = tmp_path / "data" / "bar" / f"{nt_sym}-1-MINUTE-LAST-EXTERNAL"
-        source_dir.mkdir(parents=True)
-        legacy_dir.mkdir(parents=True)
-        pl.DataFrame(
-            {"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}
-        ).write_parquet(source_dir / "source.parquet")
-        pl.DataFrame(
-            {
-                "ts_event": [
-                    1_735_862_400_000_000_000,
-                    1_735_948_800_000_000_000,
-                    1_736_035_200_000_000_000,
-                ]
-            }
-        ).write_parquet(legacy_dir / "legacy.parquet")
-
-        session = CatalogSession(tmp_path)
-        result = session.scan_bars()
-
-        assert len(result.entries) == 1
-        entry = result.entries[0]
-        assert entry.record_count == 5
-        # Source-aware wins as the reported file_path once present.
-        assert entry.file_path == str(source_root)
-
 
 class TestScanTicks:
     def test_empty_catalog_returns_no_entries(self, tmp_path: Path):
@@ -975,51 +870,11 @@ class TestScanTicks:
         assert entry.source_type == "bookTicker"
         assert entry.file_path == str(source_root)
 
-    def test_source_aware_trades_and_legacy_agg_trades_stay_separate(
-        self, tmp_path: Path
-    ):
-        import polars as pl
-
-        from tinohelm.data.catalog import CatalogSession
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
-        from tinohelm.strategy.loader import normalize_symbol
-
-        nt_sym = normalize_symbol("BTCUSDT-PERP")
-        trades_root = resolve_catalog_path(tmp_path, "trades")
-        trades_dir = trades_root / "data" / "trade_tick" / nt_sym
-        legacy_dir = tmp_path / "data" / "trade_tick" / nt_sym
-        trades_dir.mkdir(parents=True)
-        legacy_dir.mkdir(parents=True)
-        pl.DataFrame(
-            {"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}
-        ).write_parquet(trades_dir / "trades.parquet")
-        pl.DataFrame(
-            {
-                "ts_event": [
-                    1_735_862_400_000_000_000,
-                    1_735_948_800_000_000_000,
-                    1_736_035_200_000_000_000,
-                ]
-            }
-        ).write_parquet(legacy_dir / "legacy.parquet")
-
-        session = CatalogSession(tmp_path)
-        result = session.scan_ticks()
-
-        entries = {entry.source_type: entry for entry in result.entries}
-        assert set(entries) == {"trades", "aggTrades"}
-        assert entries["trades"].record_count == 2
-        assert entries["aggTrades"].record_count == 3
-        assert entries["trades"].file_path == str(trades_root)
-        assert entries["aggTrades"].file_path == str(tmp_path)
-
 
 class TestMergedBarStats:
-    """``merged_bar_stats`` merges source-aware + legacy flat layouts for the
-    same ``(symbol, interval, source_type)``. Mirrors what ``scan_bars`` does
-    internally — needed by the compact background task so it doesn't overwrite
-    the DB row's ``size_bytes`` / ``record_count`` when only one layout was
-    compacted.
+    """``merged_bar_stats`` scans bar stats from the single NT-native catalog
+    root — needed by the compact background task so it doesn't overwrite the
+    DB row's ``size_bytes`` / ``record_count`` when compaction happens.
     """
 
     def test_returns_none_when_no_parquet_anywhere(self, tmp_path: Path):
@@ -1061,26 +916,6 @@ class TestMergedBarStats:
             bar_dir / "b.parquet"
         ).stat().st_size
         assert stats["size_bytes"] == expected_size
-
-    def test_non_default_source_does_not_fold_legacy(self, tmp_path: Path):
-        """Non-default bar-like sources should not claim flat legacy bars."""
-        import polars as pl
-
-        from tinohelm.data.catalog import CatalogSession
-        from tinohelm.strategy.loader_helpers import make_bar_type_str
-
-        nt_sub = make_bar_type_str("BTCUSDT-PERP", "5m")
-        legacy_dir = tmp_path / "data" / "bar" / nt_sub
-        legacy_dir.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1_735_862_400_000_000_000]}).write_parquet(
-            legacy_dir / "legacy.parquet"
-        )
-
-        session = CatalogSession(tmp_path)
-        stats = session.merged_bar_stats(
-            "BTCUSDT-PERP", "5m", source_type="markPriceKlines"
-        )
-        assert stats is None
 
 
 class TestScanSingleFiles:
