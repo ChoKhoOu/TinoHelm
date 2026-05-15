@@ -1723,9 +1723,10 @@ def test_trade_tick_explicit_agg_trades_falls_through_after_pruned_root(tmp_path
 def test_trade_tick_overlap_dedupes_by_trade_id(tmp_path: Path) -> None:
     symbol = "BTCUSDT-PERP"
     ts_event = _T0_NS + 10 * 1_000_000_000
-    # Write ticks with trade_id — deduplication by trade_id keeps unique entries.
+    # Write two ticks with same trade_id — deduplication keeps only one.
     _write_trade_ticks(tmp_path, symbol, [
         {"ts_event": ts_event, "price": 100.0, "size": 2.0, "aggressor_side": "BUYER", "trade_id": 10},
+        {"ts_event": ts_event, "price": 101.0, "size": 9.0, "aggressor_side": "SELLER", "trade_id": 10},
     ])
     dl = DataLayer(Universe.from_symbols([symbol]), catalog_root=tmp_path)
 

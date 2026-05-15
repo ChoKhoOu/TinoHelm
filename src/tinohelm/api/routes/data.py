@@ -142,8 +142,8 @@ class DeleteRangeRequest(BaseModel):
 
 def _catalog_row_lock_key(row: Any) -> str:
     """Return the mutation lock key for one persisted catalog row."""
-    source_type = getattr(row, "source_type", None) or getattr(row, "data_type")
-    return catalog_lock_key(getattr(row, "symbol"), source_type, getattr(row, "interval", None))
+    source_type = getattr(row, "source_type", None) or _normalize_requested_data_type(row.data_type)
+    return catalog_lock_key(row.symbol, source_type, row.interval)
 
 
 def _clear_current_task_cancellation() -> None:
@@ -222,6 +222,8 @@ def _split_fetch_date_ranges(
 
 _LEGACY_UPSTREAM_ALIASES: dict[str, str] = {
     "aggTrades": "trades",
+    "agg_trades": "trades",
+    "trade": "trades",
 }
 
 
@@ -768,7 +770,7 @@ async def delete_catalog_entry(
 
     session = CatalogSession(str(get_active_catalog_root(settings)))
     was_cancelled = False
-    lock_key = _catalog_row_lock_key(row) if row is not None else catalog_lock_key(symbol, source_type or data_type, interval)
+    lock_key = _catalog_row_lock_key(row) if row is not None else catalog_lock_key(symbol, source_type or _normalize_requested_data_type(data_type), interval)
     async with hold_catalog_lock(lock_key):
         (deleted_files, freed_bytes), cancelled = await _await_critical_mutation(asyncio.to_thread(
             session.delete_storage,

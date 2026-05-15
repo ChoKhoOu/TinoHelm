@@ -90,7 +90,7 @@ All user data lives under `~/.tino/`: strategies, actors, data/catalog (Parquet)
 - NaN/Infinity crashes PostgreSQL JSON columns — always sanitize.
 - ParquetDataCatalog path: `{catalog_path}/data/bar/{bar_type_str}/`.
 - Bar `ts_init` must be the **closing time** of the bar.
-- FundingRate stored as JSON, not Parquet.
+- FundingRate stored as NT-native Parquet (`data/funding_rate_update/{instrument_id}/`).
 - Never hardcode tick/lot sizes — use `data/instruments.py` (cached from Binance API).
 
 ### Docker
