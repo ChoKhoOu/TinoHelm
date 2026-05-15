@@ -199,11 +199,11 @@ class _CompactStorage:
 
 
 class TestFetchBatchSplitting:
-    def test_agg_trades_multi_day_range_splits_by_configured_days(self):
+    def test_trades_multi_day_range_splits_by_configured_days(self):
         from datetime import date
 
         ranges = _split_fetch_date_ranges(
-            data_type="aggTrades",
+            data_type="trades",
             start=date(2024, 1, 1),
             end=date(2024, 1, 3),
             max_days_per_job=1,

@@ -208,7 +208,7 @@ def _split_fetch_date_ranges(
     max_days_per_job: int,
 ) -> list[tuple[date, date]]:
     """Split large tick-data requests into bounded inclusive date windows."""
-    if data_type not in ("trades", "aggTrades") or max_days_per_job <= 0:
+    if data_type != "trades" or max_days_per_job <= 0:
         return [(start, end)]
     ranges: list[tuple[date, date]] = []
     current = start
@@ -861,5 +861,5 @@ async def get_data_coverage(
             "size_bytes": entry.size_bytes,
         }
         for entry in summary.entries
-        if entry.symbol == symbol and entry.source_type in _PHASE1_UPSTREAM_TO_PUBLIC
+        if entry.symbol == symbol
     ]
