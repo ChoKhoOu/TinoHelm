@@ -83,7 +83,7 @@ class NodeController:
                 time.sleep(1)
 
     # ------------------------------------------------------------------
-    # Kill switch (backward compat — delegates to lifecycle_command)
+    # Kill switch (delegates to lifecycle_command)
     # ------------------------------------------------------------------
 
     _LEVEL_TO_ACTION = {1: "pause", 2: "flatten", 3: "shutdown"}

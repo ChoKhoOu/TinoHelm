@@ -451,194 +451,6 @@ class TestFundingCacheCovers:
         ) is False
 
 
-class TestFundingRateTxn:
-    def _make_records(self, n: int = 3):
-        from tinohelm.data.converters.funding_rate import BinanceFundingRate
-
-        records = []
-        base_ms = 1_700_000_000_000
-        for i in range(n):
-            ms = base_ms + i * 8 * 3600 * 1000
-            ns = ms * 1_000_000
-            records.append(BinanceFundingRate(
-                symbol="BTCUSDT-PERP",
-                funding_rate=0.0001 * (i + 1),
-                funding_time_ms=ms,
-                ts_event=ns,
-                ts_init=ns,
-            ))
-        return records
-
-    def test_happy_path_writes_parquet_flush_json_is_noop(self, tmp_path: Path, paths_override):
-        import json
-
-        from tinohelm.data.catalog import CatalogSession
-
-        funding_dir = tmp_path / "funding_rates"
-        funding_dir.mkdir()
-        paths_override("funding_rates", funding_dir)
-        # Seed JSON with one old record.
-        old_ms = 1_699_000_000_000
-        old_record = {"funding_time_ms": old_ms, "funding_rate": 0.00005, "mark_price": 0}
-        (funding_dir / "btcusdt-perp.json").write_text(json.dumps([old_record]))
-
-        session = CatalogSession(tmp_path)
-        with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
-            txn.write_parquet(self._make_records(3))
-            txn.flush_json()  # no-op
-
-        # flush_json is a no-op — JSON file remains untouched.
-        saved = json.loads((funding_dir / "btcusdt-perp.json").read_text())
-        assert saved == [old_record]
-        # But parquet was written.
-        assert txn.wrote_parquet is True
-
-    def test_failure_restores_json_snapshot(self, tmp_path: Path, paths_override):
-        import json
-
-        from tinohelm.data.catalog import CatalogSession
-
-        funding_dir = tmp_path / "funding_rates"
-        funding_dir.mkdir()
-        paths_override("funding_rates", funding_dir)
-        old_payload = [{"funding_time_ms": 1_699_000_000_000, "funding_rate": 0.00005, "mark_price": 0}]
-        json_file = funding_dir / "btcusdt-perp.json"
-        json_file.write_text(json.dumps(old_payload))
-
-        session = CatalogSession(tmp_path)
-        with pytest.raises(RuntimeError):
-            with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
-                txn.write_parquet(self._make_records(3))
-                raise RuntimeError("simulated DB failure")
-
-        # JSON was not flushed and the snapshot is restored unchanged.
-        assert json.loads(json_file.read_text()) == old_payload
-
-    def test_failure_on_new_symbol_leaves_no_json(self, tmp_path: Path, paths_override):
-        from tinohelm.data.catalog import CatalogSession
-
-        funding_dir = tmp_path / "funding_rates"
-        funding_dir.mkdir()
-        paths_override("funding_rates", funding_dir)
-
-        session = CatalogSession(tmp_path)
-        with pytest.raises(RuntimeError):
-            with session.funding_rate_transaction("SOLUSDT-PERP") as txn:
-                txn.write_parquet(self._make_records(3))
-                raise RuntimeError("simulated DB failure")
-
-        assert not (funding_dir / "solusdt-perp.json").exists()
-
-    def test_snapshot_read_failure_preserves_existing_file(
-        self, tmp_path: Path, paths_override, monkeypatch
-    ):
-        """If ``read_bytes`` fails on an existing JSON file, the snapshot must
-        NOT record ``existed=False`` — otherwise ``restore()`` would unlink the
-        real file when the transaction rolls back."""
-        import json
-
-        from tinohelm.data.catalog import CatalogSession
-
-        funding_dir = tmp_path / "funding_rates"
-        funding_dir.mkdir()
-        paths_override("funding_rates", funding_dir)
-        original = [{"funding_time_ms": 1_699_000_000_000, "funding_rate": 0.00005, "mark_price": 0}]
-        json_file = funding_dir / "btcusdt-perp.json"
-        json_file.write_text(json.dumps(original))
-
-        # Make every read_bytes call on THIS path fail — simulates a transient
-        # I/O issue that could otherwise mask the file's existence.
-        original_read_bytes = Path.read_bytes
-
-        def _fail_read(self):
-            if self == json_file:
-                raise OSError("simulated transient read failure")
-            return original_read_bytes(self)
-
-        monkeypatch.setattr(Path, "read_bytes", _fail_read)
-
-        session = CatalogSession(tmp_path)
-        with pytest.raises(Exception):
-            with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
-                # force the txn to believe it wrote parquet so restore() would
-                # reach unlink/write logic on rollback
-                txn._written_parquet = True
-                raise RuntimeError("force rollback")
-
-        # The real file must still exist after rollback.
-        monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
-        assert json_file.exists()
-        assert json.loads(json_file.read_text()) == original
-
-    def test_transaction_uses_resolved_storage(self, tmp_path: Path, paths_override):
-        """Session constructed without explicit storage must still hand the
-        resolved provider to the txn — otherwise funding parquet writes go to a
-        ``None`` backend on remote-configured sessions."""
-        from tinohelm.data.catalog import CatalogSession
-
-        funding_dir = tmp_path / "funding_rates"
-        funding_dir.mkdir()
-        paths_override("funding_rates", funding_dir)
-
-        session = CatalogSession(tmp_path)
-        assert session._storage is None  # sanity: explicit storage not injected
-        with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
-            assert txn._storage is not None
-
-    def test_write_parquet_accepts_funding_rate_update_records(self, tmp_path: Path, paths_override):
-        from decimal import Decimal
-
-        from nautilus_trader.model.data import FundingRateUpdate
-        from nautilus_trader.model.identifiers import InstrumentId
-        from tinohelm.data.catalog import CatalogSession
-
-        funding_dir = tmp_path / "funding_rates"
-        funding_dir.mkdir()
-        paths_override("funding_rates", funding_dir)
-
-        session = CatalogSession(tmp_path)
-        record = FundingRateUpdate(
-            InstrumentId.from_str("BTCUSDT-PERP.BINANCE"),
-            Decimal("0.0001"),
-            1_700_000_000_000_000_000,
-            1_700_000_000_000_000_000,
-            interval=480,
-        )
-
-        with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
-            txn.write_parquet([record])
-            txn.flush_json()  # no-op
-
-        # Parquet was written successfully — flush_json is a no-op so
-        # no JSON file is produced.
-        assert txn.wrote_parquet is True
-
-    def test_unflushed_normal_exit_leaves_json_untouched(
-        self, tmp_path: Path, paths_override
-    ):
-        """flush_json is now a no-op and flushed is always True, so no warning
-        is emitted and the JSON file remains untouched regardless.
-        """
-        import json
-
-        from tinohelm.data.catalog import CatalogSession
-
-        funding_dir = tmp_path / "funding_rates"
-        funding_dir.mkdir()
-        paths_override("funding_rates", funding_dir)
-        original = [{"funding_time_ms": 1_699_000_000_000, "funding_rate": 0.00005, "mark_price": 0}]
-        json_file = funding_dir / "btcusdt-perp.json"
-        json_file.write_text(json.dumps(original))
-
-        session = CatalogSession(tmp_path)
-        with session.funding_rate_transaction("BTCUSDT-PERP") as txn:
-            txn.write_parquet(self._make_records(2))
-            # Note: no flush_json call — but flushed is always True now.
-
-        # JSON untouched (flush_json is a no-op).
-        assert json.loads(json_file.read_text()) == original
-        # flushed is always True — no warning emitted.
-        assert txn.flushed is True
 
 
 class TestAggregateParquetStats:
@@ -1009,26 +821,28 @@ class TestFundingParquetCovers:
     def test_returns_true_when_parquet_spans_range(self, tmp_path: Path):
         from datetime import date, datetime, timezone
 
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
         from tinohelm.data.catalog import (
             CatalogSession,
-            write_funding_rate_parquet,
+            funding_rate_parquet_path,
         )
-        from tinohelm.data.converters.funding_rate import BinanceFundingRate
 
         base = datetime(2024, 1, 1, tzinfo=timezone.utc)
         base_ms = int(base.timestamp() * 1000)
-        records = []
+        ts_events = []
+        rates = []
         for i in range(5):
             ms = base_ms + i * 8 * 3600 * 1000
             ns = ms * 1_000_000
-            records.append(BinanceFundingRate(
-                symbol="BTCUSDT-PERP",
-                funding_rate=0.0001 * (i + 1),
-                funding_time_ms=ms,
-                ts_event=ns,
-                ts_init=ns,
-            ))
-        write_funding_rate_parquet(records, "BTCUSDT-PERP", tmp_path)
+            ts_events.append(ns)
+            rates.append(0.0001 * (i + 1))
+
+        path = funding_rate_parquet_path("BTCUSDT-PERP", tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        table = pa.table({"ts_event": pa.array(ts_events, type=pa.int64()), "funding_rate": pa.array(rates, type=pa.float64())})
+        pq.write_table(table, str(path))
 
         session = CatalogSession(tmp_path)
         assert session.funding_parquet_covers(

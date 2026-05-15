@@ -110,68 +110,14 @@ async def _count_queued_jobs(factory, model_cls) -> int:
     return int(count or 0)
 
 
-async def backfill_legacy_batch_ids(factory) -> int:
-    """Assign ``batch_id`` to every pre-#163 ``DataFetchJob`` row.
-
-    Legacy rows written before the ``batch_id`` column existed arrive with
-    ``batch_id IS NULL``. The new scheduler (#164/#165) tolerates that via
-    ``COALESCE(batch_id, job_id)`` but loses the "these were one submission"
-    hint — every legacy row becomes its own FetchBatch and original grouping
-    is gone.
-
-    PRD #162 decisions #23–#24 resolve that by grouping legacy rows under a
-    rule-based, deterministic key: rows sharing ``created_at`` (the closest
-    proxy for "same submission" after-the-fact, since a fetch-batch insert
-    commits all rows under one server-side ``now()``) receive one shared
-    batch_id. Rows whose ``created_at`` is unique still get a batch_id —
-    they become single-job FetchBatches, matching how the new scheduler
-    already treats backtest-triggered standalone fetches.
-
-    Returns the number of rows touched so callers can log rollout coverage.
-    Running it a second time is a no-op.
-    """
-    from uuid import uuid4 as _uuid4
-
-    async with factory() as db:
-        result = await db.execute(
-            select(DataFetchJob.created_at, func.count(DataFetchJob.id))
-            .where(DataFetchJob.batch_id.is_(None))
-            .group_by(DataFetchJob.created_at)
-            .order_by(DataFetchJob.created_at.asc())
-        )
-        groups = result.all()
-        if not groups:
-            return 0
-
-        # One UPDATE per distinct created_at — typically G ≪ N for legacy
-        # backlog, since a fetch-batch submission shares one server-side
-        # ``now()``. The ``batch_id IS NULL`` guard keeps the rewrite
-        # idempotent and leaves any post-#163 row untouched.
-        touched = 0
-        for created_at, group_size in groups:
-            batch_id = str(_uuid4())
-            await db.execute(
-                update(DataFetchJob)
-                .where(DataFetchJob.batch_id.is_(None))
-                .where(DataFetchJob.created_at == created_at)
-                .values(batch_id=batch_id)
-            )
-            touched += int(group_size or 0)
-        await db.commit()
-    return touched
-
-
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     """Startup recovery for the DB-driven fetch scheduler.
 
-    After #164 Redis no longer holds job_ids, so there is nothing to
-    "re-enqueue" per job. Recovery does three things:
+    Recovery does two things:
 
     1. Flip every ``status='running'`` row back to ``queued`` — whoever
        was in flight when the process died re-enters the runnable pool.
-    2. Clear the legacy Redis list so any stale job_id tokens left over
-       from the pre-#164 scheduler are discarded.
-    3. If any queued work exists, push a single ``WAKE_TOKEN`` so the
+    2. If any queued work exists, push a single ``WAKE_TOKEN`` so the
        first idle consumer immediately drains the backlog. No wake is
        needed when the DB is empty — new fetch requests will push their
        own wake tokens as they arrive.
@@ -185,34 +131,7 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     factory = get_session_factory()
     recovered = await _flip_running_to_queued(factory, DataFetchJob)
 
-    # #166: adopt any legacy pre-#163 backlog into the new scheduler model
-    # by backfilling ``batch_id`` on rows still carrying NULL. We do this
-    # *before* clearing the legacy Redis list so a mid-migration crash
-    # leaves the wake signal in place — the next startup will retry
-    # backfill and re-assert scheduler ownership rather than silently
-    # losing both.
-    try:
-        adopted = await backfill_legacy_batch_ids(factory)
-    except Exception:
-        logger.exception(
-            "Legacy batch_id backfill failed; continuing with startup. "
-            "Untouched NULL batch_id rows still schedule as single-job batches."
-        )
-        adopted = 0
-    if adopted:
-        logger.info(
-            "Adopted %d legacy DataFetchJob row(s) into the new scheduler "
-            "by grouping on shared created_at",
-            adopted,
-        )
-
     queued_count = await _count_queued_jobs(factory, DataFetchJob)
-
-    # Purge any legacy Redis backlog — scheduling truth is now the DB.
-    try:
-        await rds.delete(QUEUE_KEY)
-    except Exception:
-        logger.warning("Failed to clear legacy %s list on startup", QUEUE_KEY, exc_info=True)
 
     if queued_count:
         await _shared_enqueue_job(rds, QUEUE_KEY, WAKE_TOKEN)

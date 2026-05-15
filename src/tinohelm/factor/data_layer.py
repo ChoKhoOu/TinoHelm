@@ -3,7 +3,7 @@
 Design
 ------
 - Reads bar Parquet directly with column projection to avoid NT Bar object materialisation.
-- Reads funding_rate from NT ``FundingRateUpdate`` parquet first, then falls back to the legacy JSON cache when needed.
+- Reads funding_rate from NT ``FundingRateUpdate`` parquet.
 - Parallel per-symbol loading via ``ThreadPoolExecutor``.
 - Time alignment: non-bar sources (funding_rate) are forward-filled onto the bar index.
   funding_rate timestamps are shifted by +1ns before ffill to implement strict
@@ -53,7 +53,6 @@ For funding_rate, ``"8h"`` is the canonical value.
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections import defaultdict
@@ -939,9 +938,6 @@ class DataLayer:
     catalog_root:
         Path to the NautilusTrader ``ParquetDataCatalog`` root.  Defaults to
         ``~/.tino/data/catalog``.
-    funding_dir:
-        Path to the funding-rate JSON directory.  Defaults to
-        ``~/.tino/data/funding_rates``.  Each file is ``{symbol.lower()}.json``.
     max_workers:
         Thread-pool size for parallel symbol loading.  Default: 4.
     """
@@ -955,7 +951,6 @@ class DataLayer:
     ) -> None:
         self._universe = universe
         self._catalog_root = Path(catalog_root) if catalog_root is not None else paths.get("catalog")
-        self._funding_dir = Path(funding_dir) if funding_dir is not None else paths.get("funding_rates")
         self._max_workers = max_workers
         from tinohelm.data.storage import get_catalog_storage
         self._storage = get_catalog_storage(catalog_root=self._catalog_root)
@@ -2441,7 +2436,7 @@ class DataLayer:
         )
 
     # ------------------------------------------------------------------
-    # Funding-rate reader (prefers Parquet; falls back to JSON)
+    # Funding-rate reader (NT FundingRateUpdate parquet)
     # ------------------------------------------------------------------
 
     def _load_funding_rate(
@@ -2450,36 +2445,10 @@ class DataLayer:
         start: datetime | None,
         end: datetime | None,
     ) -> pl.DataFrame:
-        """Read funding-rate data for a symbol, preferring NT parquet over JSON."""
-        frame = self._load_funding_rate_parquet(symbol, start, end)
-        if frame is not None and not frame.is_empty():
-            if start is not None and end is not None:
-                from tinohelm.data.catalog import CatalogSession
-
-                session = CatalogSession(_catalog_base_root(self._catalog_root), storage=self._storage)
-                if session.funding_parquet_covers(symbol, start.date(), end.date()):
-                    return frame
-            json_frame = self._load_funding_rate_json(symbol, start, end)
-            if json_frame.is_empty():
-                return frame
-            merged = pl.concat([json_frame, frame]).sort("ts")
-            merged = merged.unique(subset=["ts"], keep="last")
-            return merged.sort("ts")
-        json_frame = self._load_funding_rate_json(symbol, start, end)
-        if not json_frame.is_empty():
-            return json_frame
-        return frame if frame is not None else _empty_series_frame()
-
-    def _load_funding_rate_parquet(
-        self,
-        symbol: str,
-        start: datetime | None,
-        end: datetime | None,
-    ) -> "pl.DataFrame | None":
-        """Try to load funding-rate data from NT updates, then legacy parquet."""
+        """Read funding-rate data for a symbol from NT FundingRateUpdate parquet."""
         from nautilus_trader.model.data import FundingRateUpdate
         from nautilus_trader.model.identifiers import InstrumentId
-        from tinohelm.data.catalog import _catalog_for_root, read_funding_rate_parquet
+        from tinohelm.data.catalog import _catalog_for_root
 
         catalog_root = _catalog_base_root(self._catalog_root)
         catalog = _catalog_for_root(catalog_root, self._storage)
@@ -2502,46 +2471,7 @@ class DataLayer:
             frame = _build_series_frame(timestamps, values)
             return _filter_time_range(frame, start, end)
 
-        legacy = read_funding_rate_parquet(symbol, catalog_root)
-        if legacy is None or legacy.empty:
-            return _empty_series_frame()
-        timestamps = [_ns_to_datetime(int(ts_ns)) for ts_ns in legacy["ts_event"]]
-        values = [float(rate) for rate in legacy["funding_rate"]]
-        frame = _build_series_frame(timestamps, values)
-        return _filter_time_range(frame, start, end)
-
-    def _load_funding_rate_json(
-        self,
-        symbol: str,
-        start: datetime | None,
-        end: datetime | None,
-    ) -> pl.DataFrame:
-        """Read funding-rate JSON for a symbol (legacy fallback path).
-
-        Reads from ``{funding_dir}/{symbol.lower()}.json`` (configured at
-        DataLayer construction time). Time-range filtering applied when start
-        or end is provided (when any time boundary exists).
-        """
-        path = self._funding_dir / f"{symbol.lower()}.json"
-        if not path.exists():
-            logger.debug("No funding-rate JSON for %s at %s", symbol, path)
-            return _empty_series_frame()
-
-        try:
-            with open(path) as fh:
-                records = json.load(fh)
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Cannot read funding rate JSON for %s", symbol, exc_info=True)
-            return _empty_series_frame()
-
-        if not isinstance(records, list) or not records:
-            return _empty_series_frame()
-
-        timestamps = [_ms_to_datetime(int(r["funding_time_ms"])) for r in records]
-        values = [float(r["funding_rate"]) for r in records]
-        frame = _build_series_frame(timestamps, values)
-
-        return _filter_time_range(frame, start, end)
+        return _empty_series_frame()
 
     # ------------------------------------------------------------------
     # Time alignment
@@ -2857,12 +2787,6 @@ def _ns_to_datetime(ns: int) -> datetime:
     base = datetime(1970, 1, 1) + timedelta(seconds=seconds)
     return base.replace(microsecond=micros)
 
-
-def _ms_to_datetime(ms: int) -> datetime:
-    """Convert milliseconds-since-epoch to a tz-naive ``datetime``."""
-    seconds, remainder_ms = divmod(int(ms), 1_000)
-    base = datetime(1970, 1, 1) + timedelta(seconds=seconds)
-    return base.replace(microsecond=remainder_ms * 1_000)
 
 
 def _filter_time_range(

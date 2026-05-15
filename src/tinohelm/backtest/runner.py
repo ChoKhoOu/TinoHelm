@@ -36,7 +36,7 @@ from tinohelm.backtest.runner_helpers import (
     compute_bar_progress_fields,
     compute_warmup_adjusted_start,
     extract_benchmark_daily_closes,
-    interval_to_minutes as _interval_to_minutes,  # noqa: F401 - backward-compatible shim
+    interval_to_minutes as _interval_to_minutes,
     resolve_symbols_intervals,
 )
 from tinohelm.strategy.loader import (
@@ -208,7 +208,6 @@ class BacktestRunner:
         else:
             self.intervals = []
 
-        # Backward compat aliases
         self.symbol = self.symbols[0] if self.symbols else ""
         self.interval = self.intervals[0] if self.intervals else ""
 
@@ -422,15 +421,11 @@ class BacktestRunner:
         token = str(data_type).strip()
         mapping = {
             "bookTicker": "bookTicker",
-            "book_ticker": "bookTicker",
-            "bookticker": "bookTicker",
             "quote_tick": "bookTicker",
-            "quotes": "bookTicker",
             "trades": "trades",
             "trade_tick": "trades",
-            "trade": "trades",
         }
-        return mapping.get(token) or mapping.get(token.lower())
+        return mapping.get(token)
 
     def _load_replay_data_from_catalog(self, symbol: str, source_type: str) -> list:
         """Cache-first load optional QuoteTick/TradeTick replay data."""
@@ -525,24 +520,12 @@ class BacktestRunner:
     def _try_load_bars(self, bar_type_str: str, source_type: str = "klines") -> list | None:
         """Load bars from the resolved catalog path for a specific source_type.
 
-        Only searches the exact source_type path + legacy base path.
         Different kline types (klines, markPriceKlines, indexPriceKlines,
         premiumIndexKlines) are distinct datasets and must NOT be mixed.
         """
-
-        # 1. Resolved source_type path (new layout)
         logical_root = self._logical_root_for_source(source_type)
         try:
             cat = self._catalog_for_path(logical_root)
-            bars = cat.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
-            if bars:
-                return bars
-        except Exception:
-            pass
-
-        # 2. Legacy base path fallback
-        try:
-            cat = self._catalog_for_path(self.catalog_path)
             bars = cat.bars(bar_types=[bar_type_str], start=self.start, end=self.end)
             if bars:
                 return bars

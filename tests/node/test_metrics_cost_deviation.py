@@ -1,20 +1,9 @@
 """Tests for MetricsActor commission deviation monitoring logic.
 
-Naming history
---------------
-The event was originally named ``signal.cost.deviation`` and the config
-field ``cost_model_fee_bps_per_side``.  Both have been renamed (PR #140
-follow-up):
-
-  - ``signal.cost.deviation`` → ``signal.commission.deviation`` (canonical)
-  - ``cost_model_fee_bps_per_side`` → ``expected_commission_bps_per_side``
-  - payload keys ``expected_bps`` / ``actual_bps`` →
-    ``expected_commission_bps`` / ``actual_commission_bps`` + new
-    ``metric: "commission_only"`` field
-
-The legacy names are kept for one release cycle as deprecated aliases so
-existing subscribers / tooling don't immediately break.  Tests below
-exercise both the canonical and deprecated paths.
+The canonical event name is ``signal.commission.deviation``.  The config
+field is ``expected_commission_bps_per_side``.  Payload keys are
+``expected_commission_bps`` / ``actual_commission_bps`` with a
+``metric: "commission_only"`` discriminator.
 
 NT Actor is a Cython extension class that cannot be instantiated in
 isolation.  We use a stub pattern (same as ``tests/actors/test_risk_guard.py``)
@@ -65,10 +54,7 @@ class _MetricsActorStub:
     def _check_commission_deviation(self, fill_event: object) -> None:
         """Exact copy of MetricsActor._check_commission_deviation."""
         from tinohelm.node.actors._utils import redis_publish
-        from tinohelm.node.topics import (
-            SIGNAL_COMMISSION_DEVIATION,
-            SIGNAL_COST_DEVIATION,
-        )
+        from tinohelm.node.topics import SIGNAL_COMMISSION_DEVIATION
 
         try:
             commission = float(getattr(fill_event, "commission").as_double())
@@ -95,22 +81,12 @@ class _MetricsActorStub:
             "actual_commission_bps": round(actual_commission_bps, 6),
             "deviation_bps": round(deviation_bps, 6),
             "ts_ns": getattr(fill_event, "ts_init", 0),
-            # DEPRECATED legacy aliases.
-            "expected_bps": self._expected_commission_bps,
-            "actual_bps": round(actual_commission_bps, 6),
         }
 
         redis_publish(
             self._redis,
             self._node_type,
             SIGNAL_COMMISSION_DEVIATION,
-            payload,
-        )
-        # DEPRECATED dual-publish for one release cycle.
-        redis_publish(
-            self._redis,
-            self._node_type,
-            SIGNAL_COST_DEVIATION,
             payload,
         )
 
@@ -174,11 +150,9 @@ class TestCommissionDeviationPublishesWhenExceeded:
         fill = _make_fill(commission=1.0, quantity=1.0, last_px=100.0)
         actor._check_commission_deviation(fill)
 
-        # Two publish calls: canonical + deprecated alias
-        assert actor._redis.publish.call_count == 2
+        assert actor._redis.publish.call_count == 1
         channels = _published_channels(actor)
         assert "tino:sandbox:signal.commission.deviation" in channels
-        assert "tino:sandbox:signal.cost.deviation" in channels
 
         payload = _first_payload(actor)
         assert payload["metric"] == "commission_only"
@@ -201,17 +175,15 @@ class TestCommissionDeviationPublishesWhenExceeded:
         assert payload["instrument_id"] == "ETHUSDT-PERP.BINANCE"
         assert payload["ts_ns"] == 999
 
-    def test_payload_contains_legacy_aliases(self):
-        """DEPRECATED legacy keys ``expected_bps``/``actual_bps`` still present
-        for one release cycle so existing subscribers don't break."""
+    def test_payload_does_not_contain_legacy_aliases(self):
+        """Legacy keys ``expected_bps``/``actual_bps`` have been removed."""
         actor = _MetricsActorStub(expected_commission_bps=5.0, deviation_threshold_bps=5.0)
         fill = _make_fill(commission=1.0, quantity=1.0, last_px=100.0)
         actor._check_commission_deviation(fill)
 
         payload = _first_payload(actor)
-        # Legacy aliases must equal the canonical commission fields.
-        assert payload["expected_bps"] == payload["expected_commission_bps"]
-        assert payload["actual_bps"] == payload["actual_commission_bps"]
+        assert "expected_bps" not in payload
+        assert "actual_bps" not in payload
 
 
 class TestCommissionDeviationSilentWhenWithinThreshold:
@@ -270,8 +242,7 @@ class TestCommissionDeviationEdgeCases:
         # actual = 0 bps, deviation = 10.0 > 5.0 → publish
         fill = _make_fill(commission=0.0, quantity=1.0, last_px=1000.0)
         actor._check_commission_deviation(fill)
-        # Canonical + deprecated alias.
-        assert actor._redis.publish.call_count == 2
+        assert actor._redis.publish.call_count == 1
 
 
 class TestCommissionDeviationNodeTypeInChannel:
@@ -305,19 +276,15 @@ class TestCommissionDeviationNodeTypeInChannel:
         assert "signal.commission.deviation" in warning_msg
 
 
-class TestDeprecatedCostDeviationStillPublished:
-    """During the deprecation window MetricsActor must dual-publish to both
-    ``signal.commission.deviation`` (canonical) and ``signal.cost.deviation``
-    (legacy) so subscribers still listening on the old name keep working.
-    """
+class TestNoDualPublish:
+    """After legacy removal, only the canonical channel is published."""
 
-    def test_legacy_channel_dual_published(self):
+    def test_only_canonical_channel_published(self):
         actor = _MetricsActorStub(node_type="sandbox", expected_commission_bps=5.0, deviation_threshold_bps=1.0)
         fill = _make_fill(commission=1.0, quantity=1.0, last_px=100.0)  # 100 bps
         actor._check_commission_deviation(fill)
 
         channels = _published_channels(actor)
-        # Both canonical and deprecated alias must be present.
         assert "tino:sandbox:signal.commission.deviation" in channels
-        assert "tino:sandbox:signal.cost.deviation" in channels
-        assert actor._redis.publish.call_count == 2
+        assert "tino:sandbox:signal.cost.deviation" not in channels
+        assert actor._redis.publish.call_count == 1

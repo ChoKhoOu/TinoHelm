@@ -174,25 +174,9 @@ def kline_row_to_dict(row: list[Any], *, include_volume: bool) -> dict[str, Any]
     return out
 
 
-def agg_trade_row_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Transform a Binance ``/fapi/v1/aggTrades`` row into downstream shape."""
-    return {
-        "agg_id": row["a"],
-        "price": row["p"],
-        "quantity": row["q"],
-        "timestamp_ms": row["T"],
-        "is_buyer_maker": row["m"],
-    }
-
-
 def advance_cursor_after_kline(last_close_time_ms: int) -> int:
     """Next-page ``startTime`` after a kline batch (strictly after last close)."""
     return last_close_time_ms + 1
-
-
-def advance_cursor_after_agg_trade(last_ts_ms: int) -> int:
-    """Next-page ``startTime`` after an aggTrades batch (strictly after last ts)."""
-    return last_ts_ms + 1
 
 
 # ---------------------------------------------------------------------------

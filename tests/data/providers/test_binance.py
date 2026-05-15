@@ -30,7 +30,6 @@ from tinohelm.data.providers import binance as mod
 from tinohelm.data.providers.binance import (
     BINANCE_FUTURES_BASE,
     BINANCE_FUTURES_TESTNET,
-    fetch_agg_trades,
     fetch_index_price_klines,
     fetch_klines,
     fetch_mark_price_klines,
@@ -406,131 +405,16 @@ class TestFetchIndexPriceKlines:
 
 
 # ---------------------------------------------------------------------------
-# fetch_agg_trades
-# ---------------------------------------------------------------------------
-
-
-class TestFetchAggTrades:
-    async def test_single_page_returns_five_keys(self, start_end):
-        raw = {"a": 12345, "p": "50000.00", "q": "0.001", "T": 1_700_000_000_000, "m": True}
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/fapi/v1/aggTrades"
-            return httpx.Response(200, json=[raw])
-
-        with _mock_transport(handler):
-            out = await fetch_agg_trades("BTCUSDT-PERP", *start_end)
-
-        assert len(out) == 1
-        assert out[0] == {
-            "agg_id": 12345,
-            "price": "50000.00",
-            "quantity": "0.001",
-            "timestamp_ms": 1_700_000_000_000,
-            "is_buyer_maker": True,
-        }
-
-    async def test_empty_response_breaks(self, start_end):
-        async def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json=[])
-
-        with _mock_transport(handler):
-            out = await fetch_agg_trades("BTCUSDT-PERP", *start_end)
-
-        assert out == []
-
-    async def test_pagination_advances_by_last_trade_ts_plus_1(self, start_end):
-        """Agg trades cursor = last["T"] + 1, not last["T"] + some_interval."""
-        captured_starts: list[int] = []
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            captured_starts.append(int(request.url.params["startTime"]))
-            if len(captured_starts) == 1:
-                return httpx.Response(
-                    200,
-                    json=[
-                        {"a": 1, "p": "1", "q": "1", "T": 1_700_000_000_100, "m": True},
-                        {"a": 2, "p": "1", "q": "1", "T": 1_700_000_000_200, "m": False},
-                    ],
-                )
-            return httpx.Response(200, json=[])
-
-        with _mock_transport(handler):
-            await fetch_agg_trades("BTCUSDT-PERP", *start_end, limit=2)
-
-        assert len(captured_starts) == 2
-        assert captured_starts[1] == 1_700_000_000_200 + 1
-
-    async def test_strips_symbol_suffix(self, start_end):
-        captured: dict[str, Any] = {}
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            captured.update(dict(request.url.params))
-            return httpx.Response(200, json=[])
-
-        with _mock_transport(handler):
-            await fetch_agg_trades("BTCUSDT-PERP", *start_end)
-
-        assert captured["symbol"] == "BTCUSDT"
-
-    async def test_low_sleep_is_agg_trades_baseline(self, start_end):
-        """Agg trades endpoint uses 0.3s low_sleep (vs klines 0.5s)."""
-        pages = {"n": 0}
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            pages["n"] += 1
-            if pages["n"] == 1:
-                return httpx.Response(
-                    200,
-                    json=[
-                        {"a": 1, "p": "1", "q": "1", "T": 100, "m": True},
-                        {"a": 2, "p": "1", "q": "1", "T": 200, "m": False},
-                    ],
-                    headers={"X-MBX-USED-WEIGHT-1M": "50"},
-                )
-            return httpx.Response(200, json=[])
-
-        with patch("tinohelm.data.providers.binance.asyncio.sleep", new=AsyncMock()) as sleep_mock:
-            with _mock_transport(handler):
-                await fetch_agg_trades("BTCUSDT-PERP", *start_end, limit=2)
-
-        sleep_values = [call.args[0] for call in sleep_mock.call_args_list]
-        assert 0.3 in sleep_values
-        assert 0.5 not in sleep_values  # must NOT use klines baseline
-
-    async def test_retry_on_429_then_success(self, start_end):
-        calls = {"n": 0}
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            calls["n"] += 1
-            if calls["n"] < 2:
-                return httpx.Response(429)
-            return httpx.Response(
-                200,
-                json=[{"a": 1, "p": "1", "q": "1", "T": 100, "m": False}],
-            )
-
-        with _mock_transport(handler):
-            out = await fetch_agg_trades("BTCUSDT-PERP", *start_end)
-
-        assert len(out) == 1
-        assert calls["n"] == 2
-
-
-# ---------------------------------------------------------------------------
 # Shared invariants
 # ---------------------------------------------------------------------------
 
 
 class TestKlinesFamilyConstants:
-    def test_low_sleep_constants_distinct(self):
-        """Different endpoints keep their own throttle baselines."""
+    def test_low_sleep_constant(self):
         assert mod._KLINES_LOW_SLEEP == 0.5
-        assert mod._AGG_TRADES_LOW_SLEEP == 0.3
 
-    def test_progress_intervals(self):
+    def test_progress_interval(self):
         assert mod._KLINES_PROGRESS_EVERY == 15_000
-        assert mod._AGG_TRADES_PROGRESS_EVERY == 50_000
 
     def test_interval_ms_table_sanity(self):
         """Exported table is referenced by upstream consumers — pin its shape."""
@@ -539,15 +423,13 @@ class TestKlinesFamilyConstants:
         assert mod.INTERVAL_MS["1d"] == 86_400_000
 
 
-class TestLegacyEntryPointsPreserved:
-    """Backwards compatibility: the four public coroutines stay importable
-    with their historical names and positional-arg signatures."""
+class TestPublicEntryPoints:
+    """The three public klines coroutines stay importable."""
 
-    def test_all_four_fetch_functions_exported(self):
+    def test_fetch_functions_exported(self):
         assert callable(fetch_klines)
         assert callable(fetch_mark_price_klines)
         assert callable(fetch_index_price_klines)
-        assert callable(fetch_agg_trades)
 
     def test_legacy_generic_helper_removed(self):
         """_fetch_klines_generic was the legacy pre-refactor shared helper."""

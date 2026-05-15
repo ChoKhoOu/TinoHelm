@@ -15,10 +15,7 @@ from nautilus_trader.core.message import Event
 
 from tinohelm.node.actors._utils import redis_publish, ts_ns_to_iso
 from tinohelm.node.actors.serialize import build_equity_snapshot
-from tinohelm.node.topics import (
-    SIGNAL_COMMISSION_DEVIATION,
-    SIGNAL_COST_DEVIATION,  # DEPRECATED: dual-publish for one release cycle
-)
+from tinohelm.node.topics import SIGNAL_COMMISSION_DEVIATION
 
 
 class MetricsActorConfig(ActorConfig):
@@ -150,9 +147,7 @@ class MetricsActor(Actor):
         ``metric: "commission_only"`` to make this scope explicit on the wire.
 
         Publishes to:
-          - ``tino:{node_type}:signal.commission.deviation`` (canonical)
-          - ``tino:{node_type}:signal.cost.deviation`` (DEPRECATED alias —
-            removed after one release cycle).
+          - ``tino:{node_type}:signal.commission.deviation``
 
         Parameters
         ----------
@@ -184,23 +179,12 @@ class MetricsActor(Actor):
             "actual_commission_bps": round(actual_commission_bps, 6),
             "deviation_bps": round(deviation_bps, 6),
             "ts_ns": getattr(fill_event, "ts_init", 0),
-            # DEPRECATED legacy aliases — kept for one release cycle so existing
-            # subscribers keep working.  New code must read the *_commission_bps fields.
-            "expected_bps": self._expected_commission_bps,
-            "actual_bps": round(actual_commission_bps, 6),
         }
 
         redis_publish(
             self._redis,
             self._node_type,
             SIGNAL_COMMISSION_DEVIATION,
-            payload,
-        )
-        # DEPRECATED dual-publish: removed after one release cycle.
-        redis_publish(
-            self._redis,
-            self._node_type,
-            SIGNAL_COST_DEVIATION,
             payload,
         )
 

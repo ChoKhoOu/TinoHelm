@@ -72,7 +72,7 @@ def _queue_payload_from_run(run: FactorRun) -> str:
 
 
 def _run_id_from_queue_payload(raw: str) -> str | None:
-    """Extract a run id from either full JSON queue payload or legacy UUID."""
+    """Extract a run id from a JSON queue payload."""
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
@@ -172,10 +172,9 @@ async def _process_job(job_payload: str, redis_url: str) -> None:
     Parameters
     ----------
     job_payload:
-        JSON string popped from ``tino:factor:queue``.  May be the
-        ``run_id`` UUID directly (legacy path) or the full JSON payload
-        described in the module docstring.  When it is a plain UUID, the
-        worker loads the config from the DB ``FactorRun.config`` column.
+        JSON string popped from ``tino:factor:queue``.  The full JSON
+        payload described in the module docstring.  The worker loads the
+        config from the DB ``FactorRun.config`` column.
     redis_url:
         Redis connection URL forwarded from ``start_factor_worker()``.
     """

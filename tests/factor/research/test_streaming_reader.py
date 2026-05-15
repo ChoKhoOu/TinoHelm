@@ -6,14 +6,17 @@ from pathlib import Path
 import polars as pl
 
 from tinohelm.factor.research.reader import ResearchDataRequest, ResearchParquetReader
+from tinohelm.strategy.loader_helpers import make_bar_type_str
 
 
 def test_research_reader_uses_lazy_scan_and_streaming_collect(tmp_path: Path, monkeypatch) -> None:
+    bar_dir = tmp_path / "data" / "bar" / make_bar_type_str("BTCUSDT", "1m")
+    bar_dir.mkdir(parents=True)
     pl.DataFrame({
         "ts_event": [datetime(2024, 1, 1), datetime(2024, 1, 1, 0, 1)],
         "symbol": ["BTCUSDT", "BTCUSDT"],
         "close": [100.0, 101.0],
-    }).write_parquet(tmp_path / "bars.parquet")
+    }).write_parquet(bar_dir / "bars.parquet")
 
     original_scan = pl.scan_parquet
     original_collect = pl.LazyFrame.collect

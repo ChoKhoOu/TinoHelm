@@ -642,9 +642,8 @@ class VisionDownloader:
 
     async def execute_task(self, task: DownloadTask) -> Path | VisionCsvPayload:
         """Execute one download task without staging fresh raw ZIP/CSV files."""
-        # Backward-compatible incremental skip: leave existing raw CSVs path-
-        # backed so chunked converters can stream them instead of reading the
-        # whole file into memory up front.
+        # Incremental skip: reuse existing raw CSVs so chunked converters can
+        # stream them instead of re-downloading.
         if task.dest_path.exists() and task.dest_path.stat().st_size > 0:
             logger.debug("Skip (csv exists): %s", task.dest_path.name)
             return task.dest_path

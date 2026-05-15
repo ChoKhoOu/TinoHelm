@@ -710,23 +710,11 @@ class TestMergeBars:
 
 
 # ---------------------------------------------------------------------------
-# 8. Backward-compatibility with ``tinohelm.data.catalog``
+# 8. Re-exports from ``tinohelm.data.catalog``
 # ---------------------------------------------------------------------------
 
-class TestCatalogBackwardCompat:
-    """Pin the alias identities so a future rename in helpers can't leave
-    a stale local copy living on in ``catalog.py``.
-    """
-    def test_interval_map_alias_is_same_object(self):
-        assert catalog._INTERVAL_MAP is INTERVAL_MAP
+class TestCatalogReExports:
+    """Verify that catalog re-exports canonical helpers from catalog_helpers."""
 
     def test_resolve_catalog_path_reexported(self):
         assert catalog.resolve_catalog_path is resolve_catalog_path
-
-    def test_interval_to_nanoseconds_wrapper(self):
-        assert catalog._interval_to_nanoseconds("5m") == interval_to_nanoseconds("5m")
-        assert catalog._interval_to_nanoseconds("1h") == interval_to_nanoseconds("1h")
-
-    def test_interval_to_nanoseconds_wrapper_rejects_unknown(self):
-        with pytest.raises(ValueError):
-            catalog._interval_to_nanoseconds("7h")

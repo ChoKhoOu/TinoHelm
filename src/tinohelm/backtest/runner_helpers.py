@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 # Timeframes ordered from lowest to highest for composite source resolution.
 # This is the canonical priority list; ``BacktestRunner`` re-exports it as
-# ``_TIMEFRAME_PRIORITY`` for backward compatibility.
+# ``_TIMEFRAME_PRIORITY``.
 TIMEFRAME_PRIORITY: tuple[str, ...] = (
     "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d",
 )
