@@ -1382,7 +1382,7 @@ class BinanceVisionPipeline:
         return count, fps
 
     def _chunk_rows_for(self, data_type: str) -> int:
-        if data_type == "aggTrades":
+        if data_type in {"aggTrades", "trades"}:
             return self._agg_trades_chunk_rows
         return self._chunk_rows
 
