@@ -1504,7 +1504,7 @@ class TestDeleteCatalogEntry:
 
         monkeypatch.setattr(CatalogSession, "delete_storage", fake_delete_storage)
 
-        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "bar", "1m"))
+        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", "klines", "1m"))
         await lock.acquire()
         try:
             task = asyncio.create_task(delete_catalog_entry(catalog_id, db=db, settings=settings))
@@ -1572,16 +1572,17 @@ class TestDeleteCatalogEntry:
         db.commit.assert_awaited_once()
 
     @pytest.mark.parametrize(
-        ("row_data_type", "row_interval"),
+        ("row_data_type", "row_interval", "lock_data_type"),
         [
-            ("funding_rate", "8h"),
-            ("order_book_delta", "tick"),
+            ("funding_rate", "8h", "fundingRate"),
+            ("order_book_delta", "tick", "order_book_delta"),
         ],
     )
     async def test_delete_waits_on_non_bar_catalog_lock(
         self,
         row_data_type: str,
         row_interval: str,
+        lock_data_type: str,
         tmp_path: Path,
         monkeypatch,
     ):
@@ -1616,7 +1617,7 @@ class TestDeleteCatalogEntry:
 
         monkeypatch.setattr(CatalogSession, "delete_storage", fake_delete_storage)
 
-        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", row_data_type, row_interval))
+        lock = get_catalog_lock(catalog_lock_key("BTCUSDT-PERP", lock_data_type, row_interval))
         await lock.acquire()
         try:
             task = asyncio.create_task(delete_catalog_entry(catalog_id, db=db, settings=settings))
