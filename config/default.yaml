@@ -28,9 +28,9 @@ data:
   job_concurrency: 4
   convert_workers: 1
   chunk_rows: 1000000
-  agg_trades_chunk_rows: 500000
+  tick_chunk_rows: 500000
   csv_queue_maxsize: 1
-  agg_trades_max_days_per_job: 1
+  tick_max_days_per_job: 1
 
 backtest:
   max_concurrent: 4
