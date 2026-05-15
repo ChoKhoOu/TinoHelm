@@ -22,11 +22,11 @@ class TestResolveCatalogPath:
         session = CatalogSession(tmp_path)
         assert session.resolve_catalog_path(None) == tmp_path
 
-    def test_klines_returns_bar_category(self, tmp_path: Path):
+    def test_klines_returns_base(self, tmp_path: Path):
         from tinohelm.data.catalog import CatalogSession
 
         session = CatalogSession(tmp_path)
-        assert session.resolve_catalog_path("klines") == tmp_path / "bar" / "klines"
+        assert session.resolve_catalog_path("klines") == tmp_path
 
     def test_funding_rate_returns_base(self, tmp_path: Path):
         from tinohelm.data.catalog import CatalogSession
@@ -55,49 +55,18 @@ def _write_dummy_parquet(dir_path: Path) -> Path:
 
 
 class TestResolveBarCatalogPath:
-    def test_returns_resolved_path_when_new_layout_files_exist(self, tmp_path: Path):
+    def test_always_returns_catalog_root(self, tmp_path: Path):
         from tinohelm.data.catalog import CatalogSession
-        from tinohelm.strategy.loader_helpers import make_bar_type_str
-
-        # New layout: files under base/bar/klines/data/bar/<bar_type>/
-        bar_dir = (
-            tmp_path
-            / "bar"
-            / "klines"
-            / "data"
-            / "bar"
-            / make_bar_type_str("BTCUSDT-PERP", "5m")
-        )
-        _write_dummy_parquet(bar_dir)
-
-        session = CatalogSession(tmp_path)
-        resolved = session.resolve_bar_catalog_path("klines", "BTCUSDT-PERP", "5m")
-        assert resolved == tmp_path / "bar" / "klines"
-
-    def test_falls_back_to_base_when_only_legacy_files_exist(self, tmp_path: Path):
-        from tinohelm.data.catalog import CatalogSession
-        from tinohelm.strategy.loader_helpers import make_bar_type_str
-
-        # Legacy layout: files directly under base/data/bar/<bar_type>/
-        legacy_dir = tmp_path / "data" / "bar" / make_bar_type_str("BTCUSDT-PERP", "5m")
-        _write_dummy_parquet(legacy_dir)
 
         session = CatalogSession(tmp_path)
         resolved = session.resolve_bar_catalog_path("klines", "BTCUSDT-PERP", "5m")
         assert resolved == tmp_path
 
-    def test_no_fallback_for_non_default_source(self, tmp_path: Path):
+    def test_ignores_source_type(self, tmp_path: Path):
         from tinohelm.data.catalog import CatalogSession
-        from tinohelm.strategy.loader_helpers import make_bar_type_str
-
-        # Only the legacy default source (klines) may claim flat bar layout.
-        legacy_dir = tmp_path / "data" / "bar" / make_bar_type_str("BTCUSDT-PERP", "5m")
-        _write_dummy_parquet(legacy_dir)
 
         session = CatalogSession(tmp_path)
-        resolved = session.resolve_bar_catalog_path(
-            "markPriceKlines", "BTCUSDT-PERP", "5m"
-        )
+        resolved = session.resolve_bar_catalog_path("markPriceKlines", "BTCUSDT-PERP", "5m")
         assert resolved == tmp_path
 
 
@@ -123,14 +92,7 @@ class TestDeleteStorageBar:
         from tinohelm.data.catalog import CatalogSession
         from tinohelm.strategy.loader_helpers import make_bar_type_str
 
-        bar_dir = (
-            tmp_path
-            / "bar"
-            / "klines"
-            / "data"
-            / "bar"
-            / make_bar_type_str("BTCUSDT-PERP", "5m")
-        )
+        bar_dir = tmp_path / "data" / "bar" / make_bar_type_str("BTCUSDT-PERP", "5m")
         bar_dir.mkdir(parents=True)
         p1 = bar_dir / "a.parquet"
         p2 = bar_dir / "b.parquet"
@@ -149,28 +111,6 @@ class TestDeleteStorageBar:
         assert not p1.exists()
         assert not p2.exists()
 
-    def test_legacy_default_source_deletes_both_roots(self, tmp_path: Path):
-        """source_type=='klines' (the legacy default) scans resolved+base paths."""
-        from tinohelm.data.catalog import CatalogSession
-        from tinohelm.strategy.loader_helpers import make_bar_type_str
-
-        bar_type = make_bar_type_str("BTCUSDT-PERP", "5m")
-        new_dir = tmp_path / "bar" / "klines" / "data" / "bar" / bar_type
-        legacy_dir = tmp_path / "data" / "bar" / bar_type
-        for d in (new_dir, legacy_dir):
-            d.mkdir(parents=True)
-            (d / "a.parquet").write_bytes(b"x" * 20)
-
-        session = CatalogSession(tmp_path)
-        deleted, freed = session.delete_storage(
-            symbol="BTCUSDT-PERP",
-            data_type="bar",
-            interval="5m",
-            source_type="klines",
-        )
-        assert deleted == 2
-        assert freed == 40
-
 
 class TestDeleteStorageTicks:
     def test_deletes_trade_tick_files(self, tmp_path: Path):
@@ -178,7 +118,7 @@ class TestDeleteStorageTicks:
         from tinohelm.strategy.loader_helpers import normalize_symbol
 
         nt_sym = normalize_symbol("BTCUSDT-PERP")
-        tick_dir = tmp_path / "ticks" / "aggTrades" / "data" / "trade_tick" / nt_sym
+        tick_dir = tmp_path / "data" / "trade_tick" / nt_sym
         tick_dir.mkdir(parents=True)
         (tick_dir / "t.parquet").write_bytes(b"z" * 33)
 
@@ -187,7 +127,7 @@ class TestDeleteStorageTicks:
             symbol="BTCUSDT-PERP",
             data_type="trade_tick",
             interval="tick",
-            source_type="aggTrades",
+            source_type="trades",
         )
         assert deleted == 1
         assert freed == 33
@@ -197,7 +137,7 @@ class TestDeleteStorageTicks:
         from tinohelm.strategy.loader_helpers import normalize_symbol
 
         nt_sym = normalize_symbol("BTCUSDT-PERP")
-        tick_dir = tmp_path / "quotes" / "bookTicker" / "data" / "quote_tick" / nt_sym
+        tick_dir = tmp_path / "data" / "quote_tick" / nt_sym
         tick_dir.mkdir(parents=True)
         (tick_dir / "q.parquet").write_bytes(b"q" * 17)
 
@@ -1091,22 +1031,18 @@ class TestMergedBarStats:
             is None
         )
 
-    def test_merges_source_aware_and_legacy_counts(self, tmp_path: Path):
+    def test_counts_all_files_in_single_root(self, tmp_path: Path):
         import polars as pl
 
         from tinohelm.data.catalog import CatalogSession
-        from tinohelm.data.catalog_helpers import resolve_catalog_path
         from tinohelm.strategy.loader_helpers import make_bar_type_str
 
         nt_sub = make_bar_type_str("BTCUSDT-PERP", "5m")
-        source_root = resolve_catalog_path(tmp_path, "klines")
-        source_dir = source_root / "data" / "bar" / nt_sub
-        legacy_dir = tmp_path / "data" / "bar" / nt_sub
-        source_dir.mkdir(parents=True)
-        legacy_dir.mkdir(parents=True)
+        bar_dir = tmp_path / "data" / "bar" / nt_sub
+        bar_dir.mkdir(parents=True)
         pl.DataFrame(
             {"ts_event": [1_735_689_600_000_000_000, 1_735_776_000_000_000_000]}
-        ).write_parquet(source_dir / "source.parquet")
+        ).write_parquet(bar_dir / "a.parquet")
         pl.DataFrame(
             {
                 "ts_event": [
@@ -1115,14 +1051,14 @@ class TestMergedBarStats:
                     1_736_035_200_000_000_000,
                 ]
             }
-        ).write_parquet(legacy_dir / "legacy.parquet")
+        ).write_parquet(bar_dir / "b.parquet")
 
         session = CatalogSession(tmp_path)
         stats = session.merged_bar_stats("BTCUSDT-PERP", "5m", source_type="klines")
         assert stats is not None
         assert stats["record_count"] == 5
-        expected_size = (source_dir / "source.parquet").stat().st_size + (
-            legacy_dir / "legacy.parquet"
+        expected_size = (bar_dir / "a.parquet").stat().st_size + (
+            bar_dir / "b.parquet"
         ).stat().st_size
         assert stats["size_bytes"] == expected_size
 

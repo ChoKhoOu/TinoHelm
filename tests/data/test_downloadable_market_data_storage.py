@@ -45,10 +45,10 @@ class _BookDepth:
     ts_init: int
 
 
-def test_book_ticker_has_source_aware_quote_root() -> None:
+def test_book_ticker_resolves_to_base_path() -> None:
     assert WRITE_CATEGORY["bookTicker"] == "quote_tick"
     assert "quote_tick" in WRITABLE_CATEGORIES
-    assert resolve_catalog_path("/tmp/cat", "bookTicker") == Path("/tmp/cat") / "quotes" / "bookTicker"
+    assert resolve_catalog_path("/tmp/cat", "bookTicker") == Path("/tmp/cat")
 
 
 def test_write_objects_dispatches_book_ticker_to_quote_writer(monkeypatch, tmp_path: Path) -> None:
@@ -124,8 +124,6 @@ def test_clean_overlapping_parquet_handles_quote_tick_category(monkeypatch, tmp_
     quote_file = (
         tmp_path
         / "catalog"
-        / "quotes"
-        / "bookTicker"
         / "data"
         / "quote_tick"
         / "BTCUSDT-PERP.BINANCE"
