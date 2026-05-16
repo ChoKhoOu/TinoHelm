@@ -45,6 +45,7 @@ function timeAgo(iso: string | null): string {
 function accentColor(status: string): string {
   if (status === "running") return "var(--info)";
   if (status === "completed") return "var(--suc)";
+  if (status === "partial_completed") return "var(--warn)";
   if (status === "failed") return "var(--dan)";
   return "var(--t3)";
 }
@@ -106,8 +107,9 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
     prevActiveRef.current = currentActive;
   }, [jobs]);
 
-  const active = jobs.filter((j) => j.status === "running" || j.status === "queued");
-  const recent = jobs.filter((j) => j.status !== "running" && j.status !== "queued").slice(0, 10);
+  const isActive = (s: string) => s === "running" || s === "queued";
+  const active = jobs.filter((j) => isActive(j.status));
+  const recent = jobs.filter((j) => !isActive(j.status)).slice(0, 10);
   const sorted = [...active, ...recent];
 
   return (
@@ -146,10 +148,10 @@ function JobRow({ job }: { job: DataFetchJob }) {
     job.interval && job.interval !== "tick" && job.interval !== "—"
       ? ` · ${job.interval}`
       : "";
-  const timeStr =
-    job.status === "completed" || job.status === "failed"
-      ? timeAgo(job.completed_at)
-      : timeAgo(job.created_at);
+  const isTerminal = job.status === "completed" || job.status === "partial_completed" || job.status === "failed";
+  const timeStr = isTerminal
+    ? timeAgo(job.completed_at)
+    : timeAgo(job.created_at);
 
   return (
     <div
@@ -191,6 +193,11 @@ function JobRow({ job }: { job: DataFetchJob }) {
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
             <StatusBadge status="done">✓ 完成</StatusBadge>
             {job.message && <div className="text-[.62rem] text-muted-foreground max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{job.message}</div>}
+          </div>
+        ) : job.status === "partial_completed" ? (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+            <StatusBadge status="warning">◐ 部分完成</StatusBadge>
+            {job.message && <div className="text-[.62rem] text-qds-warning max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{job.message}</div>}
           </div>
         ) : job.status === "failed" ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>

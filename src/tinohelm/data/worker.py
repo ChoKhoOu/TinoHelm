@@ -23,6 +23,7 @@ from tinohelm.core.async_queue_worker import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_PARTIAL_COMPLETED,
     STATUS_QUEUED,
     STATUS_RUNNING,
     TimeThrottle,
@@ -220,6 +221,7 @@ async def _load_queued_job(factory, job_id: str):
 _BUCKET_STARTED_STATUSES = (
     STATUS_RUNNING,
     STATUS_COMPLETED,
+    STATUS_PARTIAL_COMPLETED,
     STATUS_FAILED,
     STATUS_CANCELLED,
 )
@@ -568,13 +570,22 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
             lock.release()
 
         async def _complete_success() -> bool:
+            if result.partial:
+                terminal_status = STATUS_PARTIAL_COMPLETED
+                msg = f"Partial: {result.objects_count} objects (tail unavailable, last={result.last_available_date})"
+                event_type = "data.fetch.partial"
+            else:
+                terminal_status = STATUS_COMPLETED
+                msg = f"Done: {result.objects_count} objects"
+                event_type = "data.fetch.completed"
+
             updated = await _guarded_terminal_update(
                 factory,
                 job_id,
                 {
-                    "status": STATUS_COMPLETED,
+                    "status": terminal_status,
                     "progress": 100,
-                    "message": f"Done: {result.objects_count} objects",
+                    "message": msg,
                     "completed_at": datetime.now(timezone.utc),
                 },
             )
@@ -582,18 +593,21 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 return False
 
             logger.info(
-                "Data-fetch job %s completed: %s %s — %d objects",
-                job_id, symbol, data_type, result.objects_count,
+                "Data-fetch job %s %s: %s %s — %d objects",
+                job_id, terminal_status, symbol, data_type, result.objects_count,
             )
 
-            # Publish completion event → EventBridge → WS → toast
-            await rds.publish("tino:data:events", json.dumps({
-                "type": "data.fetch.completed",
+            # Publish completion/partial event → EventBridge → WS → toast
+            event_payload = {
+                "type": event_type,
                 "job_id": job_id,
                 "symbol": symbol,
                 "data_type": data_type,
                 "objects_count": result.objects_count,
-            }))
+            }
+            if result.partial and result.last_available_date:
+                event_payload["last_available_date"] = result.last_available_date.isoformat()
+            await rds.publish("tino:data:events", json.dumps(event_payload))
             return True
 
         updated, terminal_update_was_cancelled = await _await_preserving_cancellation(
@@ -763,29 +777,41 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
             lock.release()
 
         async def _complete_success() -> bool:
+            if result.partial:
+                terminal_status = STATUS_PARTIAL_COMPLETED
+                msg = f"Partial: {result.objects_count} objects (tail unavailable, last={result.last_available_date})"
+                event_type = "data.fetch.partial"
+            else:
+                terminal_status = STATUS_COMPLETED
+                msg = f"Done: {result.objects_count} objects"
+                event_type = "data.fetch.completed"
+
             updated = await _guarded_terminal_update(
                 factory,
                 job_id,
                 {
-                    "status": STATUS_COMPLETED,
+                    "status": terminal_status,
                     "progress": 100,
-                    "message": f"Done: {result.objects_count} objects",
+                    "message": msg,
                     "completed_at": datetime.now(timezone.utc),
                 },
             )
             if not updated:
                 return False
             logger.info(
-                "Data-fetch job %s completed: %s %s — %d objects",
-                job_id, symbol, data_type, result.objects_count,
+                "Data-fetch job %s %s: %s %s — %d objects",
+                job_id, terminal_status, symbol, data_type, result.objects_count,
             )
-            await rds.publish("tino:data:events", json.dumps({
-                "type": "data.fetch.completed",
+            event_payload = {
+                "type": event_type,
                 "job_id": job_id,
                 "symbol": symbol,
                 "data_type": data_type,
                 "objects_count": result.objects_count,
-            }))
+            }
+            if result.partial and result.last_available_date:
+                event_payload["last_available_date"] = result.last_available_date.isoformat()
+            await rds.publish("tino:data:events", json.dumps(event_payload))
             return True
 
         updated, terminal_cancelled = await _await_preserving_cancellation(

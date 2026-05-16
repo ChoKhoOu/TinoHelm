@@ -5,6 +5,7 @@
  * 1. ROUTING_TABLE entries for factor.*
  * 2. shouldDedupe() — dedupeKey, window, cache behaviour
  * 3. formatToastMessage() — factor.completed / factor.failed copy
+ * 4. data.fetch.partial routing and formatting (#192)
  */
 
 import { describe, it, expect } from 'vitest';
@@ -140,5 +141,55 @@ describe('formatToastMessage — factor.failed', () => {
     const event = makeEvent({ error: undefined });
     const { description } = formatToastMessage('factor.failed', event);
     expect(description).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ROUTING_TABLE — data.fetch.partial (#192)
+// ---------------------------------------------------------------------------
+
+describe('ROUTING_TABLE — data.fetch.partial', () => {
+  it('routes to toast with type warning', () => {
+    const route = ROUTING_TABLE['data.fetch.partial'];
+    expect(route).toBeDefined();
+    expect(route?.channel).toBe('toast');
+    expect(route?.type).toBe('warning');
+  });
+
+  it('dedupeKey extracts job_id', () => {
+    const route = ROUTING_TABLE['data.fetch.partial'];
+    const event = { job_id: 'abc-123', symbol: 'BTCUSDT-PERP', data_type: 'klines' };
+    expect(route?.dedupeKey?.(event)).toBe('abc-123');
+  });
+
+  it('data.fetch.partial is treated as terminal (not silent)', () => {
+    const route = ROUTING_TABLE['data.fetch.partial'];
+    expect(route?.channel).not.toBe('silent');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatToastMessage — data.fetch.partial (#192)
+// ---------------------------------------------------------------------------
+
+describe('formatToastMessage — data.fetch.partial', () => {
+  it('title includes symbol and data_type with 部分完成', () => {
+    const event = { symbol: 'BTCUSDT-PERP', data_type: 'klines', last_available_date: '2026-05-15' };
+    const { title } = formatToastMessage('data.fetch.partial', event);
+    expect(title).toContain('BTCUSDT-PERP');
+    expect(title).toContain('klines');
+    expect(title).toContain('部分完成');
+  });
+
+  it('description includes last_available_date when present', () => {
+    const event = { symbol: 'BTCUSDT-PERP', data_type: 'klines', last_available_date: '2026-05-15' };
+    const { description } = formatToastMessage('data.fetch.partial', event);
+    expect(description).toContain('2026-05-15');
+  });
+
+  it('description has fallback when last_available_date is absent', () => {
+    const event = { symbol: 'BTCUSDT-PERP', data_type: 'klines' };
+    const { description } = formatToastMessage('data.fetch.partial', event);
+    expect(description).toContain('尾部');
   });
 });

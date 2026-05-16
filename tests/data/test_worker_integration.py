@@ -60,7 +60,7 @@ def stub_pipeline(monkeypatch):
         async def ingest(self, *, progress_cb, **kwargs):
             calls.append(kwargs)
             await progress_cb(100, "done")
-            return SimpleNamespace(objects_count=1)
+            return SimpleNamespace(objects_count=1, partial=False, last_available_date=None)
 
     monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _Stub)
     return calls

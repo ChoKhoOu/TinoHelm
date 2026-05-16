@@ -691,8 +691,8 @@ class BacktestRunner:
                         logger.error("DataFetchJob %s disappeared", job_id)
                         return False
 
-                    if job.status == "completed":
-                        logger.info("Data fetch completed: %s %s — %s", sym, ivl, job.message)
+                    if job.status in ("completed", "partial_completed"):
+                        logger.info("Data fetch %s: %s %s — %s", job.status, sym, ivl, job.message)
                         return True
                     if job.status in ("failed", "cancelled"):
                         logger.warning("Data fetch %s: %s %s — %s", job.status, sym, ivl, job.error)
