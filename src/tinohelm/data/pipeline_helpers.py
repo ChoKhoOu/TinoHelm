@@ -282,7 +282,7 @@ def classify_download_failures(
     *,
     failed_indices: dict[int, BaseException],
     success_indices: set[int],
-    task_dates: list[date],
+    task_dates: list[date | None],
     tolerance_days: int = 3,
 ) -> DownloadFailureClassification:
     """Classify download failures as partial completion or hard failure.
@@ -292,6 +292,7 @@ def classify_download_failures(
     2. All failed tasks form a trailing suffix (contiguous from the end).
     3. Every failed task's date is within ``tolerance_days`` of UTC today.
     4. Every failure is a 404 (not a transport/server error).
+    5. Every failed task has a parseable date (None → hard failure).
     """
     if not failed_indices:
         return DownloadFailureClassification(is_partial=False)
@@ -300,7 +301,7 @@ def classify_download_failures(
         return DownloadFailureClassification(is_partial=False)
 
     total = len(task_dates)
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
     cutoff = today - timedelta(days=tolerance_days)
 
     # Check all failures are 404s
@@ -326,6 +327,8 @@ def classify_download_failures(
     tolerated_dates: list[date] = []
     for idx in failed_sorted:
         task_date = task_dates[idx]
+        if task_date is None:
+            return DownloadFailureClassification(is_partial=False)
         if task_date <= cutoff:
             return DownloadFailureClassification(is_partial=False)
         tolerated_dates.append(task_date)

@@ -1791,16 +1791,14 @@ class BinanceVisionPipeline:
         return kwargs
 
     @staticmethod
-    def _extract_task_dates(tasks) -> list[date]:
+    def _extract_task_dates(tasks) -> list[date | None]:
         """Extract the coverage date from each DownloadTask for failure classification."""
         from tinohelm.data.pipeline_helpers import parse_vision_coverage_end
 
-        dates: list[date] = []
+        dates: list[date | None] = []
         for task in tasks:
             stem = task.dest_path.stem if hasattr(task, "dest_path") else ""
             d = parse_vision_coverage_end(task.granularity, stem)
-            if d is None:
-                d = date.today()
             dates.append(d)
         return dates
 
