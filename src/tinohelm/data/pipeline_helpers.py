@@ -247,3 +247,94 @@ def csv_has_header(first_line: str) -> bool:
     if first_char.isspace():
         return False
     return not first_char.isdigit()
+
+
+# ---------------------------------------------------------------------------
+# Download failure classification (partial completion support, #190)
+# ---------------------------------------------------------------------------
+
+class DownloadFailureClassification:
+    """Result of classifying download failures as partial or hard failure."""
+    __slots__ = ("is_partial", "last_success_date", "tolerated_dates")
+
+    def __init__(
+        self,
+        is_partial: bool,
+        last_success_date: date | None = None,
+        tolerated_dates: list[date] | None = None,
+    ) -> None:
+        self.is_partial = is_partial
+        self.last_success_date = last_success_date
+        self.tolerated_dates = tolerated_dates or []
+
+
+def _is_404_error(exc: BaseException) -> bool:
+    """Return True if the exception represents an HTTP 404."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        status = getattr(resp, "status_code", None)
+        return status == 404
+    msg = str(exc).lower()
+    return "404" in msg and "not found" in msg
+
+
+def classify_download_failures(
+    *,
+    failed_indices: dict[int, BaseException],
+    success_indices: set[int],
+    task_dates: list[date],
+    tolerance_days: int = 3,
+) -> DownloadFailureClassification:
+    """Classify download failures as partial completion or hard failure.
+
+    Partial completion is granted only when ALL of:
+    1. At least one task succeeded (we have some data).
+    2. All failed tasks form a trailing suffix (contiguous from the end).
+    3. Every failed task's date is within ``tolerance_days`` of UTC today.
+    4. Every failure is a 404 (not a transport/server error).
+    """
+    if not failed_indices:
+        return DownloadFailureClassification(is_partial=False)
+
+    if not success_indices:
+        return DownloadFailureClassification(is_partial=False)
+
+    total = len(task_dates)
+    today = date.today()
+    cutoff = today - timedelta(days=tolerance_days)
+
+    # Check all failures are 404s
+    for exc in failed_indices.values():
+        if not _is_404_error(exc):
+            return DownloadFailureClassification(is_partial=False)
+
+    # Check failures form a trailing suffix
+    failed_sorted = sorted(failed_indices.keys())
+    first_failed = failed_sorted[0]
+
+    # All indices from first_failed to end must be failures
+    for idx in range(first_failed, total):
+        if idx not in failed_indices:
+            return DownloadFailureClassification(is_partial=False)
+
+    # All indices before first_failed must be successes
+    for idx in range(first_failed):
+        if idx not in success_indices:
+            return DownloadFailureClassification(is_partial=False)
+
+    # Check every failed date is within the tolerance window
+    tolerated_dates: list[date] = []
+    for idx in failed_sorted:
+        task_date = task_dates[idx]
+        if task_date <= cutoff:
+            return DownloadFailureClassification(is_partial=False)
+        tolerated_dates.append(task_date)
+
+    last_success_idx = first_failed - 1
+    last_success_date = task_dates[last_success_idx] if last_success_idx >= 0 else None
+
+    return DownloadFailureClassification(
+        is_partial=True,
+        last_success_date=last_success_date,
+        tolerated_dates=tolerated_dates,
+    )

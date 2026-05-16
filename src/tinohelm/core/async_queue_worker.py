@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
+STATUS_PARTIAL_COMPLETED = "partial_completed"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 

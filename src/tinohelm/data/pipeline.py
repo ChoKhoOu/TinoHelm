@@ -31,6 +31,7 @@ from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
     INTERVAL_CONVENTION,
     WRITE_CATEGORY,
+    classify_download_failures,
     compute_chunk_subprogress,
     compute_stage_pct,
     csv_has_header,
@@ -77,6 +78,8 @@ class IngestResult:
     start: date | None = None
     end: date | None = None
     skipped: bool = False
+    partial: bool = False
+    last_available_date: date | None = None
 
 
 @dataclass
@@ -974,19 +977,44 @@ class BinanceVisionPipeline:
             _rollback_once()
             raise
 
+        is_partial = False
+        partial_last_date: date | None = None
         if download_errors or convert_errors:
-            _rollback_once()
-            parts: list[str] = []
-            first_exc: Exception | None = None
-            if download_errors:
-                first_url, first_exc = download_errors[0]
-                parts.append(f"download failed for {first_url}: {first_exc}")
-            if convert_errors:
-                first_name, exc = convert_errors[0]
-                first_exc = first_exc or exc
-                parts.append(f"conversion failed for {first_name}: {exc}")
-            await _progress(100, "Failed")
-            raise RuntimeError("; ".join(parts)) from first_exc
+            # Check if failures qualify as partial completion (#190):
+            # Only download-only failures with trailing 404s in UTC last 3 days
+            if download_errors and not convert_errors and total_objects > 0:
+                task_dates = self._extract_task_dates(tasks)
+                classification = classify_download_failures(
+                    failed_indices=download_failed_indices,
+                    success_indices=download_success_indices,
+                    task_dates=task_dates,
+                    tolerance_days=3,
+                )
+                if classification.is_partial:
+                    is_partial = True
+                    partial_last_date = classification.last_success_date
+                    logger.info(
+                        "Data-fetch partial completion for %s %s: "
+                        "trailing %d day(s) unavailable (within tolerance), "
+                        "last available = %s",
+                        symbol, data_type,
+                        len(classification.tolerated_dates),
+                        partial_last_date,
+                    )
+
+            if not is_partial:
+                _rollback_once()
+                parts: list[str] = []
+                first_exc: Exception | None = None
+                if download_errors:
+                    first_url, first_exc = download_errors[0]
+                    parts.append(f"download failed for {first_url}: {first_exc}")
+                if convert_errors:
+                    first_name, exc = convert_errors[0]
+                    first_exc = first_exc or exc
+                    parts.append(f"conversion failed for {first_name}: {exc}")
+                await _progress(100, "Failed")
+                raise RuntimeError("; ".join(parts)) from first_exc
 
         if total_objects <= 0:
             _rollback_once()
@@ -1026,13 +1054,14 @@ class BinanceVisionPipeline:
                     interval,
                     data_type,
                 )
+                catalog_commit_end = partial_last_date if is_partial and partial_last_date else end
                 cleanup_guard.record_catalog_commit(
                     symbol=symbol,
                     data_type=resolve_db_category(data_type),
                     interval=resolve_db_interval(data_type, interval),
                     source_type=data_type,
                     start=start,
-                    end=end,
+                    end=catalog_commit_end,
                     file_path=str(resolve_catalog_path(self.catalog_path, data_type)),
                     record_count=record_count,
                     size_bytes=written_size,
@@ -1048,8 +1077,9 @@ class BinanceVisionPipeline:
                 logger.exception("Failed to persist ingest rollback DB-commit intent")
                 raise
         post_commit_was_cancelled = False
+        catalog_end = partial_last_date if is_partial and partial_last_date else end
         update_task = asyncio.create_task(self._update_db_catalog(
-            symbol, data_type, interval, start, end,
+            symbol, data_type, interval, start, catalog_end,
             record_count=record_count,
             size_bytes=written_size,
             source_type=data_type,
@@ -1089,7 +1119,10 @@ class BinanceVisionPipeline:
             )
 
         try:
-            await _progress(100, f"Done: {total_objects} objects")
+            if is_partial:
+                await _progress(100, f"Partial: {total_objects} objects (tail unavailable, last={partial_last_date})")
+            else:
+                await _progress(100, f"Done: {total_objects} objects")
         except asyncio.CancelledError:
             _clear_current_task_cancellation()
             post_commit_was_cancelled = True
@@ -1100,6 +1133,7 @@ class BinanceVisionPipeline:
                 data_type,
             )
 
+        effective_end = partial_last_date if is_partial and partial_last_date else end
         result = IngestResult(
             symbol=symbol,
             data_type=data_type,
@@ -1107,7 +1141,9 @@ class BinanceVisionPipeline:
             files_written=len(all_file_paths),
             file_paths=all_file_paths,
             start=start,
-            end=end,
+            end=effective_end,
+            partial=is_partial,
+            last_available_date=partial_last_date if is_partial else None,
         )
         if post_commit_was_cancelled:
             _recancel_current_task()
@@ -1753,6 +1789,20 @@ class BinanceVisionPipeline:
             kwargs["bar_type"] = bar_type
 
         return kwargs
+
+    @staticmethod
+    def _extract_task_dates(tasks) -> list[date]:
+        """Extract the coverage date from each DownloadTask for failure classification."""
+        from tinohelm.data.pipeline_helpers import parse_vision_coverage_end
+
+        dates: list[date] = []
+        for task in tasks:
+            stem = task.dest_path.stem if hasattr(task, "dest_path") else ""
+            d = parse_vision_coverage_end(task.granularity, stem)
+            if d is None:
+                d = date.today()
+            dates.append(d)
+        return dates
 
     def _catalog_storage_stats(
         self,

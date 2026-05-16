@@ -36,6 +36,9 @@ export type WsEventPayload = {
   // release cycle so transitional payloads keep working.
   expected_bps?: number;
   actual_bps?: number;
+  // partial completion events
+  last_available_date?: string;
+  objects_count?: number;
   [key: string]: unknown;
 };
 
@@ -65,6 +68,7 @@ export const ROUTING_TABLE: Record<string, RouteConfig> = {
   "backtest.failed":      { channel: "toast", type: "error",   dedupeKey: (e) => e.run_id ?? e.id ?? "" },
   "backtest.cancelled":   { channel: "toast", type: "warning", dedupeKey: (e) => e.run_id ?? e.id ?? "" },
   "data.fetch.completed": { channel: "toast", type: "success", dedupeKey: (e) => e.job_id ?? "" },
+  "data.fetch.partial":   { channel: "toast", type: "warning", dedupeKey: (e) => e.job_id ?? "" },
   "data.fetch.failed":    { channel: "toast", type: "error",   dedupeKey: (e) => e.job_id ?? "" },
   "factor.completed":     { channel: "toast", type: "success", dedupeKey: (e) => e.run_id ?? "" },
   "factor.failed":        { channel: "toast", type: "error",   dedupeKey: (e) => e.run_id ?? "" },
@@ -137,6 +141,11 @@ export function formatToastMessage(eventType: string, event: object): { title: s
     }
     case "data.fetch.completed":
       return { title: `${e.symbol ?? ""} ${e.data_type ?? ""} 拉取完成` };
+    case "data.fetch.partial":
+      return {
+        title: `${e.symbol ?? ""} ${e.data_type ?? ""} 部分完成`,
+        description: e.last_available_date ? `数据截至 ${e.last_available_date}（尾部暂未发布）` : "尾部数据暂未发布",
+      };
     case "data.fetch.failed":
       return { title: `${e.symbol ?? ""} ${e.data_type ?? ""} 拉取失败`, description: e.error ?? undefined };
     case "factor.completed": {

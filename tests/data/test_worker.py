@@ -764,8 +764,8 @@ def _make_session_factory(*, initial_job, commit_spy=None):
     return factory, calls
 
 
-def _fake_pipeline_result(objects_count: int = 42) -> SimpleNamespace:
-    return SimpleNamespace(objects_count=objects_count)
+def _fake_pipeline_result(objects_count: int = 42, partial: bool = False, last_available_date=None) -> SimpleNamespace:
+    return SimpleNamespace(objects_count=objects_count, partial=partial, last_available_date=last_available_date)
 
 
 class _FakePipeline:
