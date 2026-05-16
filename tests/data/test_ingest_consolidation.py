@@ -9,7 +9,6 @@ Covers:
 from __future__ import annotations
 
 from datetime import date, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -146,6 +145,95 @@ class TestExpandGapsToDays:
         result = expand_gaps_to_days(gaps)
         assert len(result) == 1
         assert result[0] == (date(2025, 1, 15), date(2025, 1, 15))
+
+
+class TestGapBackfillIntegration:
+    """_detect_and_backfill_gaps triggers re-download for missing date ranges."""
+
+    def test_no_gaps_skips_backfill(self, tmp_path):
+        """When catalog has contiguous intervals, no backfill triggered."""
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument
+        from tinohelm.data.pipeline import BinanceVisionPipeline
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        # Write contiguous bars (no gap)
+        base_ts = 1_700_000_000_000_000_000
+        minute_ns = 60_000_000_000
+        bars = []
+        for i in range(60):
+            ts = base_ts + i * minute_ns
+            bar = Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(100.0),
+                high=instrument.make_price(101.0),
+                low=instrument.make_price(99.0),
+                close=instrument.make_price(100.5),
+                volume=instrument.make_qty(1000.0),
+                ts_event=ts,
+                ts_init=ts,
+            )
+            bars.append(bar)
+        catalog.write_data(bars, skip_disjoint_check=True)
+
+        pipe = BinanceVisionPipeline(catalog_path=tmp_path)
+        backfill_dates = pipe._detect_gaps_for_backfill(
+            "BTCUSDT-PERP", "klines", "1m"
+        )
+        assert backfill_dates == []
+
+    def test_detects_gap_and_returns_date_ranges(self, tmp_path):
+        """When catalog has a gap, returns the date ranges needing backfill."""
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument
+        from tinohelm.data.pipeline import BinanceVisionPipeline
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        # Write bars for Jan 15, then skip Jan 16, write Jan 17
+        minute_ns = 60_000_000_000
+        # Jan 15 00:00 UTC
+        jan15_start = 1_736_899_200_000_000_000
+        # Jan 17 00:00 UTC
+        jan17_start = 1_737_072_000_000_000_000
+
+        for day_start in (jan15_start, jan17_start):
+            bars = []
+            for i in range(60):  # 1 hour of bars
+                ts = day_start + i * minute_ns
+                bar = Bar(
+                    bar_type=bar_type,
+                    open=instrument.make_price(100.0),
+                    high=instrument.make_price(101.0),
+                    low=instrument.make_price(99.0),
+                    close=instrument.make_price(100.5),
+                    volume=instrument.make_qty(1000.0),
+                    ts_event=ts,
+                    ts_init=ts,
+                )
+                bars.append(bar)
+            catalog.write_data(bars, skip_disjoint_check=True)
+
+        pipe = BinanceVisionPipeline(catalog_path=tmp_path)
+        backfill_dates = pipe._detect_gaps_for_backfill(
+            "BTCUSDT-PERP", "klines", "1m"
+        )
+        # Gap between Jan 15 01:00 and Jan 17 00:00 → only Jan 16 needs backfill
+        assert len(backfill_dates) == 1
+        start_d, end_d = backfill_dates[0]
+        assert start_d == date(2025, 1, 16)
+        assert end_d == date(2025, 1, 16)
 
 
 class TestConsolidateAndOrganize:
