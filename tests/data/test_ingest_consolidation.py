@@ -96,14 +96,14 @@ class TestExpandGapsToDays:
         from tinohelm.data.pipeline_helpers import expand_gaps_to_days
 
         # Gap from 2025-01-14 23:59 to 2025-01-18 00:01
-        # Should expand to cover 2025-01-15 through 2025-01-17
+        # start_day: 23:59 is not midnight → ceil to 2025-01-15
+        # end_day: 00:01 is not midnight → include 2025-01-18 (partial day needs data)
         gap_start_ns = 1_736_899_140_000_000_000  # 2025-01-14 23:59:00 UTC
         gap_end_ns = 1_737_158_460_000_000_000  # 2025-01-18 00:01:00 UTC
         gaps = [(gap_start_ns, gap_end_ns)]
         result = expand_gaps_to_days(gaps)
         assert len(result) == 1
-        # Expand: ceil start to next day = 2025-01-15, floor end to prev day = 2025-01-17
-        assert result[0] == (date(2025, 1, 15), date(2025, 1, 17))
+        assert result[0] == (date(2025, 1, 15), date(2025, 1, 18))
 
     def test_gap_exact_day_boundaries(self):
         from tinohelm.data.pipeline_helpers import expand_gaps_to_days

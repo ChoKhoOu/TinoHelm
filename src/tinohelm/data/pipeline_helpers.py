@@ -255,10 +255,9 @@ def expand_gaps_to_days(gaps: list[tuple[int, int]]) -> list[tuple[date, date]]:
     Logic:
     - Start date: if gap_start is at midnight, that full day is missing. Otherwise,
       ceil to the next day (the partial day has data from the preceding file).
-    - End date: always the day *before* the gap_end's calendar date. The file at
-      gap_end already covers its day (even if only partially), and consolidation
-      will merge any intra-day fragments. This avoids redundant downloads of days
-      that already have partial coverage.
+    - End date: if gap_end is at midnight, the day before (that day already has
+      full coverage from midnight). Otherwise, gap_end's calendar date itself
+      (the hours before gap_end on that day have no data and need downloading).
 
     Exception: when the computed end_day < start_day (sub-day gap where both
     surrounding files cover parts of the same day), we fall back to the single
@@ -282,7 +281,13 @@ def expand_gaps_to_days(gaps: list[tuple[int, int]]) -> list[tuple[date, date]]:
         )
         start_day = start_dt.date() if is_start_midnight else start_dt.date() + timedelta(days=1)
 
-        end_day = end_dt.date() - timedelta(days=1)
+        is_end_midnight = (
+            end_dt.hour == 0
+            and end_dt.minute == 0
+            and end_dt.second == 0
+            and end_dt.microsecond == 0
+        )
+        end_day = end_dt.date() - timedelta(days=1) if is_end_midnight else end_dt.date()
 
         if end_day < start_day:
             start_day = start_dt.date()

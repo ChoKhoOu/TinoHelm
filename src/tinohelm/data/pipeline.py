@@ -486,11 +486,12 @@ class BinanceVisionPipeline:
             await _progress(96, "Updating catalog database...")
         except asyncio.CancelledError:
             raise
-        unique_paths = set(all_file_paths)
         try:
-            written_size = self._written_file_size(unique_paths) if unique_paths else None
+            record_count_from_disk, written_size = self._catalog_storage_stats(
+                symbol, data_type, interval, data_type
+            )
         except Exception:
-            logger.warning("Failed to stat written catalog files", exc_info=True)
+            logger.warning("Failed to stat consolidated catalog files", exc_info=True)
             written_size = None
         record_count = total_objects if total_objects > 0 else None
         ingest_run_id = uuid4().hex
