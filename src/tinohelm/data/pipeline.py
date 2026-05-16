@@ -514,6 +514,8 @@ class BinanceVisionPipeline:
                             "Gap backfill download failed: %s", dl_exc,
                         )
                         continue
+                    if not csv_path:
+                        continue
                     try:
                         n, fps = await asyncio.to_thread(
                             self._convert_one_file,
