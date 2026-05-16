@@ -57,14 +57,11 @@ def get_converter(data_type: str) -> Converter:
 
 # 导入所有 converter 模块以触发注册
 from tinohelm.data.converters import (  # noqa: E402, F401
-    book_depth,
     book_ticker,
     funding_rate,
     index_price,
     klines,
-    liquidation,
     mark_price,
-    metrics,
     premium_index,
     trades,
 )

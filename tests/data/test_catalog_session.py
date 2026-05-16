@@ -152,41 +152,6 @@ class TestDeleteStorageTicks:
         assert freed == 17
 
 
-class TestDeleteStorageSingleFileCategories:
-    def test_deletes_metrics_file(self, tmp_path: Path):
-        from tinohelm.data.catalog import CatalogSession, metrics_parquet_path
-
-        path = metrics_parquet_path("BTCUSDT-PERP", tmp_path)
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b"m" * 25)
-
-        session = CatalogSession(tmp_path)
-        deleted, freed = session.delete_storage(
-            symbol="BTCUSDT-PERP",
-            data_type="metrics",
-            interval="5m",
-        )
-        assert deleted == 1
-        assert freed == 25
-        assert not path.exists()
-
-    def test_deletes_order_book_delta_file(self, tmp_path: Path):
-        from tinohelm.data.catalog import CatalogSession, book_depth_parquet_path
-
-        path = book_depth_parquet_path("BTCUSDT-PERP", tmp_path)
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b"d" * 13)
-
-        session = CatalogSession(tmp_path)
-        deleted, freed = session.delete_storage(
-            symbol="BTCUSDT-PERP",
-            data_type="order_book_delta",
-            interval="tick",
-        )
-        assert deleted == 1
-        assert freed == 13
-
-
 class TestDeleteStorageDirectUpdates:
     def test_deletes_mark_price_update_files_recursively(self, tmp_path: Path):
         from tinohelm.data.catalog import CatalogSession, mark_price_update_dir
@@ -467,8 +432,8 @@ class TestAggregateParquetStats:
         assert stats is None
 
     def test_funding_rate_scoped_to_single_symbol(self, tmp_path: Path):
-        """metrics / order_book_delta / funding_rate share a parent dir — the session
-        must only count the requested symbol's parquet.
+        """funding_rate symbols share a parent dir — the session must only
+        count the requested symbol's parquet.
         """
         from tinohelm.data.catalog import CatalogSession, funding_rate_parquet_path
 
@@ -732,9 +697,7 @@ class TestMergedBarStats:
 
 class TestScanSingleFiles:
     """``scan_single_files`` covers the per-symbol Parquet categories that share
-    a parent dir: funding_rate, metrics, order_book_delta. These never got
-    scanned by the pre-PR2 route loop either, but the session is the right
-    place to add the missing discovery — single source of scan truth.
+    a parent dir (funding_rate).
     """
 
     def test_empty_catalog_returns_no_entries(self, tmp_path: Path):
@@ -767,44 +730,6 @@ class TestScanSingleFiles:
             assert entry.source_type == "fundingRate"
             assert entry.record_count == 1
 
-    def test_metrics_parquet_produces_entry(self, tmp_path: Path):
-        import polars as pl
-
-        from tinohelm.data.catalog import CatalogSession, metrics_parquet_path
-
-        path = metrics_parquet_path("BTCUSDT-PERP", tmp_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(path)
-
-        session = CatalogSession(tmp_path)
-        result = session.scan_single_files()
-
-        metrics_entries = [e for e in result.entries if e.data_type == "metrics"]
-        assert len(metrics_entries) == 1
-        entry = metrics_entries[0]
-        assert entry.symbol == "BTCUSDT-PERP"
-        assert entry.source_type == "metrics"
-        assert entry.interval == "tick"
-        assert entry.record_count == 1
-
-    def test_order_book_delta_parquet_produces_entry(self, tmp_path: Path):
-        import polars as pl
-
-        from tinohelm.data.catalog import CatalogSession, book_depth_parquet_path
-
-        path = book_depth_parquet_path("BTCUSDT-PERP", tmp_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({"ts_event": [1_735_689_600_000_000_000]}).write_parquet(path)
-
-        session = CatalogSession(tmp_path)
-        result = session.scan_single_files()
-
-        obd_entries = [e for e in result.entries if e.data_type == "order_book_delta"]
-        assert len(obd_entries) == 1
-        entry = obd_entries[0]
-        assert entry.symbol == "BTCUSDT-PERP"
-        assert entry.source_type == "bookDepth"
-        assert entry.interval == "tick"
 
 
 class TestFundingParquetCovers:

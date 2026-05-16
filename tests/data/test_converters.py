@@ -26,11 +26,11 @@ class TestConverterRegistry:
         with pytest.raises(ValueError, match="Unknown data_type"):
             get_converter("nonexistent_xyz")
 
-    def test_all_10_types_registered(self):
+    def test_all_7_types_registered(self):
         expected = {
             "klines", "markPriceKlines", "indexPriceKlines", "premiumIndexKlines",
             "trades", "fundingRate",
-            "bookTicker", "bookDepth", "liquidationSnapshot", "metrics",
+            "bookTicker",
         }
         assert expected == set(CONVERTER_REGISTRY.keys())
 

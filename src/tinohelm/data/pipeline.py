@@ -857,16 +857,6 @@ class BinanceVisionPipeline:
             )
             return paths
 
-        elif category == "metrics":
-            from tinohelm.data.catalog import write_metrics_parquet
-            path = write_metrics_parquet(objects, symbol, self.catalog_path, storage=self._storage)
-            return [str(path)]
-
-        elif category == "order_book_delta":
-            from tinohelm.data.catalog import write_book_depth_parquet
-            path = write_book_depth_parquet(objects, symbol, self.catalog_path, storage=self._storage)
-            return [str(path)]
-
         else:
             raise RuntimeError(
                 f"No catalog writer for data_type={data_type!r} (category={category!r})"
@@ -883,14 +873,13 @@ class BinanceVisionPipeline:
         """Run NT-native consolidation after streaming writes complete.
 
         All NT-native data types (bar, trade_tick, quote_tick, mark_price,
-        index_price, funding_rate) are consolidated. Custom single-file types
-        (metrics, order_book_delta) already deduplicate on write.
+        index_price, funding_rate) are consolidated.
         """
         from tinohelm.data.catalog import _catalog_for_root, consolidate_and_organize
         from tinohelm.data.pipeline_helpers import resolve_write_category
 
         category = resolve_write_category(data_type)
-        if category in ("metrics", "order_book_delta", "liquidation", "custom"):
+        if category == "custom":
             return
 
         catalog = _catalog_for_root(self.catalog_path, self._storage)
@@ -1148,14 +1137,6 @@ class BinanceVisionPipeline:
         from tinohelm.strategy.loader_helpers import make_bar_type_str, normalize_symbol
 
         category = resolve_write_category(data_type)
-        if category == "metrics":
-            from tinohelm.data.catalog import metrics_parquet_path
-
-            return metrics_parquet_path(symbol, self.catalog_path)
-        if category == "order_book_delta":
-            from tinohelm.data.catalog import book_depth_parquet_path
-
-            return book_depth_parquet_path(symbol, self.catalog_path)
         if category == "funding_rate":
             from tinohelm.data.catalog import funding_rate_update_dir
 
@@ -1285,7 +1266,7 @@ class BinanceVisionPipeline:
                     existing.start_date = min(existing.start_date, start)
                     existing.end_date = max(existing.end_date, end)
                     if (
-                        write_category in {"metrics", "order_book_delta", "funding_rate"}
+                        write_category == "funding_rate"
                         or data_type in {"markPriceKlines", "indexPriceKlines"}
                     ):
                         storage_record_count, storage_size_bytes = self._catalog_storage_stats(

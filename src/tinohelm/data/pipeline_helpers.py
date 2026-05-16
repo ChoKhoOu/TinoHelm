@@ -33,9 +33,6 @@ WRITE_CATEGORY: Mapping[str, str] = MappingProxyType({
     "trades": "trade_tick",
     "bookTicker": "quote_tick",
     "fundingRate": "funding_rate",
-    "bookDepth": "order_book_delta",
-    "liquidationSnapshot": "liquidation",
-    "metrics": "metrics",
 })
 
 # Idempotent write-category inputs used by DB/catalog rows. Keep these out of
@@ -46,9 +43,8 @@ CANONICAL_WRITE_CATEGORIES: frozenset[str] = frozenset({
     "trade_tick",
     "quote_tick",
     "funding_rate",
-    "order_book_delta",
-    "liquidation",
-    "metrics",
+    "mark_price",
+    "index_price",
 })
 
 # Mapping: data_type → DB ``interval`` column convention when the user did
@@ -57,9 +53,6 @@ INTERVAL_CONVENTION: Mapping[str, str] = MappingProxyType({
     "trades": "tick",
     "bookTicker": "tick",
     "fundingRate": "8h",
-    "bookDepth": "tick",
-    "liquidationSnapshot": "tick",
-    "metrics": "5m",
 })
 
 

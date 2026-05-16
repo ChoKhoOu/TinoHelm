@@ -91,15 +91,15 @@ class TestCanonicalMappings:
         assert WRITE_CATEGORY["trades"] == "trade_tick"
         assert WRITE_CATEGORY["bookTicker"] == "quote_tick"
         assert WRITE_CATEGORY["fundingRate"] == "funding_rate"
-        assert WRITE_CATEGORY["bookDepth"] == "order_book_delta"
-        assert WRITE_CATEGORY["liquidationSnapshot"] == "liquidation"
-        assert WRITE_CATEGORY["metrics"] == "metrics"
-        assert len(WRITE_CATEGORY) == 9
+        assert "bookDepth" not in WRITE_CATEGORY
+        assert "liquidationSnapshot" not in WRITE_CATEGORY
+        assert "metrics" not in WRITE_CATEGORY
+        assert len(WRITE_CATEGORY) == 6
 
     def test_write_categories_are_idempotent_but_not_source_type_keys(self):
         assert CANONICAL_WRITE_CATEGORIES == frozenset({
             "bar", "trade_tick", "quote_tick", "funding_rate",
-            "order_book_delta", "liquidation", "metrics",
+            "mark_price", "index_price",
         })
         for category in CANONICAL_WRITE_CATEGORIES:
             assert resolve_write_category(category) == category
@@ -107,15 +107,13 @@ class TestCanonicalMappings:
         # WRITE_CATEGORY remains a source_type map used by resolve_catalog_path;
         # canonical categories must not create synthetic roots like ticks/trade_tick.
         assert "trade_tick" not in WRITE_CATEGORY
-        assert "order_book_delta" not in WRITE_CATEGORY
 
     def test_interval_convention_canonical_keys(self):
         assert INTERVAL_CONVENTION["trades"] == "tick"
         assert INTERVAL_CONVENTION["bookTicker"] == "tick"
         assert INTERVAL_CONVENTION["fundingRate"] == "8h"
-        assert INTERVAL_CONVENTION["bookDepth"] == "tick"
-        assert INTERVAL_CONVENTION["liquidationSnapshot"] == "tick"
-        assert INTERVAL_CONVENTION["metrics"] == "5m"
+        assert "bookDepth" not in INTERVAL_CONVENTION
+        assert "metrics" not in INTERVAL_CONVENTION
 
     def test_progress_band_constants(self):
         assert DOWNLOAD_PROGRESS_BASE == 5

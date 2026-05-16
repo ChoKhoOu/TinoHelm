@@ -200,7 +200,7 @@ class TestBoundedCsvConversion:
             object(),
             {"symbol": "BTCUSDT-PERP"},
             "BTCUSDT-PERP",
-            "metrics",
+            "trades",
             None,
             False,
         )
@@ -208,7 +208,7 @@ class TestBoundedCsvConversion:
         assert count == 1
         assert paths == ["memory://catalog/file.parquet"]
         p._write_objects.assert_called_once_with(
-            ["object-1"], "BTCUSDT-PERP", "metrics", None, merge=False,
+            ["object-1"], "BTCUSDT-PERP", "trades", None, merge=False,
         )
 
     def test_chunked_conversion_reads_csv_payload_in_chunks(self, tmp_path: Path):
@@ -286,65 +286,6 @@ class TestIngestEarlyFailClosed:
         update_catalog.assert_not_awaited()
 
 class TestCatalogStorageStats:
-    def test_remote_single_file_metrics_write_passes_storage_for_in_memory_upload(self, tmp_path: Path, monkeypatch):
-        from tinohelm.data.catalog import metrics_parquet_path
-
-        symbol = "BTCUSDT-PERP"
-        path = metrics_parquet_path(symbol, tmp_path)
-        uploaded: list[tuple[Path, bytes]] = []
-
-        class RemoteStorage:
-            provider = "s3"
-            catalog_root = tmp_path
-
-            def upload_bytes(self, logical_path, payload):
-                uploaded.append((Path(logical_path), payload))
-                return "s3://bucket/catalog/metrics.parquet"
-
-            def upload_path(self, local_path, *, logical_path=None):  # pragma: no cover - must not be called
-                raise AssertionError("remote metrics writes must not upload a local staged file")
-
-        def fake_write_metrics(records, write_symbol, catalog_root, storage=None):
-            assert records == [object_marker]
-            assert write_symbol == symbol
-            assert Path(catalog_root) == tmp_path
-            assert storage is p._storage
-            assert not path.exists()
-            storage.upload_bytes(path, b"merged-in-memory")
-            return path
-
-        object_marker = object()
-        monkeypatch.setattr("tinohelm.data.catalog.write_metrics_parquet", fake_write_metrics)
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-        p._storage = RemoteStorage()
-        p.catalog_path = str(tmp_path)
-
-        result = p._write_objects([object_marker], symbol, "metrics", None)
-
-        assert result == [str(path)]
-        assert uploaded == [(path, b"merged-in-memory")]
-        assert not path.exists()
-
-    def test_written_file_size_uses_remote_storage_iter_files(self, tmp_path: Path):
-        from tinohelm.data.catalog import metrics_parquet_path
-
-        symbol = "BTCUSDT-PERP"
-        path = metrics_parquet_path(symbol, tmp_path)
-
-        class RemoteStorage:
-            provider = "s3"
-
-            def iter_files(self, prefix, *, suffix="", recursive=True):
-                assert Path(prefix) == path
-                assert suffix == ".parquet"
-                assert recursive is False
-                return iter([SimpleNamespace(path=path, size=123)])
-
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-        p._storage = RemoteStorage()
-
-        assert p._written_file_size({str(path)}) == 123
-
     def test_trade_tick_stats_sum_all_parquet_files_in_source_path(self, tmp_path: Path):
         from tinohelm.data.catalog import resolve_catalog_path
         from tinohelm.strategy.loader_helpers import normalize_symbol
@@ -377,30 +318,6 @@ class TestCatalogStorageStats:
 
         assert p._catalog_storage_stats(symbol, "trades", None, "trades") == (None, expected_size)
 
-    def test_metrics_stats_count_rows_from_single_file_path(self, tmp_path: Path):
-        from tinohelm.data.catalog import metrics_parquet_path
-
-        symbol = "BTCUSDT-PERP"
-        path = metrics_parquet_path(symbol, tmp_path)
-        path.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1, 2, 3], "open_interest": [10.0, 11.0, 12.0]}).write_parquet(path)
-
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-
-        assert p._catalog_storage_stats(symbol, "metrics", None, "metrics") == (3, path.stat().st_size)
-
-    def test_book_depth_stats_count_rows_from_single_file_path(self, tmp_path: Path):
-        from tinohelm.data.catalog import book_depth_parquet_path
-
-        symbol = "BTCUSDT-PERP"
-        path = book_depth_parquet_path(symbol, tmp_path)
-        path.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1, 2], "percentage": [0.05, 0.10], "depth": [100.0, 200.0]}).write_parquet(path)
-
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-
-        assert p._catalog_storage_stats(symbol, "bookDepth", None, "bookDepth") == (2, path.stat().st_size)
-        assert p._catalog_storage_stats(symbol, "order_book_delta", None, "order_book_delta") == (2, path.stat().st_size)
 
 
 class TestUpdateDbCatalog:
@@ -652,248 +569,6 @@ class TestUpdateDbCatalog:
         assert fake_session.row.start_date == replacement_day
         assert fake_session.row.end_date == replacement_day
         assert fake_session.row.record_count == 2
-
-    def test_metrics_overlapping_update_refreshes_single_file_stats(self, tmp_path: Path):
-        from tinohelm.data.catalog import metrics_parquet_path
-        from tinohelm.db.models import DataCatalog
-
-        class FakeSession:
-            def __init__(self):
-                self.row = None
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def execute(self, stmt):
-                return SimpleNamespace(scalar_one_or_none=lambda: self.row)
-
-            def add(self, row):
-                self.row = row
-
-            async def commit(self):
-                pass
-
-        symbol = "BTCUSDT-PERP"
-        path = metrics_parquet_path(symbol, tmp_path)
-        path.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1, 2, 3], "open_interest": [10.0, 11.0, 12.0]}).write_parquet(path)
-
-        fake_session = FakeSession()
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-
-        with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
-            asyncio.run(p._update_db_catalog(
-                symbol, "metrics", None,
-                date(2025, 1, 2), date(2025, 1, 3),
-                record_count=1, size_bytes=1, source_type="metrics",
-            ))
-            asyncio.run(p._update_db_catalog(
-                symbol, "metrics", None,
-                date(2025, 1, 3), date(2025, 1, 4),
-                record_count=1, size_bytes=1, source_type="metrics",
-            ))
-
-        assert isinstance(fake_session.row, DataCatalog)
-        assert fake_session.row.start_date == date(2025, 1, 2)
-        assert fake_session.row.end_date == date(2025, 1, 4)
-        assert fake_session.row.record_count == 3
-        assert fake_session.row.size_bytes == path.stat().st_size
-
-    def test_book_depth_overlapping_update_refreshes_single_file_stats(self, tmp_path: Path):
-        from tinohelm.data.catalog import book_depth_parquet_path
-        from tinohelm.db.models import DataCatalog
-
-        class FakeSession:
-            def __init__(self):
-                self.row = None
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def execute(self, stmt):
-                return SimpleNamespace(scalar_one_or_none=lambda: self.row)
-
-            def add(self, row):
-                self.row = row
-
-            async def commit(self):
-                pass
-
-        symbol = "BTCUSDT-PERP"
-        path = book_depth_parquet_path(symbol, tmp_path)
-        path.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1, 2], "percentage": [0.05, 0.10], "depth": [100.0, 200.0]}).write_parquet(path)
-
-        fake_session = FakeSession()
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-
-        with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
-            asyncio.run(p._update_db_catalog(
-                symbol, "bookDepth", None,
-                date(2025, 1, 2), date(2025, 1, 3),
-                record_count=1, size_bytes=1, source_type="bookDepth",
-            ))
-            asyncio.run(p._update_db_catalog(
-                symbol, "bookDepth", None,
-                date(2025, 1, 3), date(2025, 1, 4),
-                record_count=1, size_bytes=1, source_type="bookDepth",
-            ))
-
-        assert isinstance(fake_session.row, DataCatalog)
-        assert fake_session.row.start_date == date(2025, 1, 2)
-        assert fake_session.row.end_date == date(2025, 1, 4)
-        assert fake_session.row.record_count == 2
-        assert fake_session.row.size_bytes == path.stat().st_size
-
-    def test_order_book_delta_overlapping_update_refreshes_single_file_stats(self, tmp_path: Path):
-        from tinohelm.data.catalog import book_depth_parquet_path
-        from tinohelm.db.models import DataCatalog
-
-        class FakeSession:
-            def __init__(self):
-                self.row = None
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def execute(self, stmt):
-                return SimpleNamespace(scalar_one_or_none=lambda: self.row)
-
-            def add(self, row):
-                self.row = row
-
-            async def commit(self):
-                pass
-
-        symbol = "BTCUSDT-PERP"
-        path = book_depth_parquet_path(symbol, tmp_path)
-        path.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1, 2], "percentage": [0.05, 0.10], "depth": [100.0, 200.0]}).write_parquet(path)
-
-        fake_session = FakeSession()
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-
-        with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
-            asyncio.run(p._update_db_catalog(
-                symbol, "order_book_delta", None,
-                date(2025, 1, 2), date(2025, 1, 3),
-                record_count=1, size_bytes=1, source_type="order_book_delta",
-            ))
-            asyncio.run(p._update_db_catalog(
-                symbol, "order_book_delta", None,
-                date(2025, 1, 3), date(2025, 1, 4),
-                record_count=1, size_bytes=1, source_type="order_book_delta",
-            ))
-
-        assert isinstance(fake_session.row, DataCatalog)
-        assert fake_session.row.data_type == "order_book_delta"
-        assert fake_session.row.start_date == date(2025, 1, 2)
-        assert fake_session.row.end_date == date(2025, 1, 4)
-        assert fake_session.row.record_count == 2
-        assert fake_session.row.size_bytes == path.stat().st_size
-
-    def test_metrics_disjoint_update_refreshes_single_file_stats(self, tmp_path: Path):
-        from tinohelm.data.catalog import metrics_parquet_path
-        from tinohelm.db.models import DataCatalog
-
-        class FakeSession:
-            def __init__(self):
-                self.row = None
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def execute(self, stmt):
-                return SimpleNamespace(scalar_one_or_none=lambda: self.row)
-
-            def add(self, row):
-                self.row = row
-
-            async def commit(self):
-                pass
-
-        symbol = "BTCUSDT-PERP"
-        path = metrics_parquet_path(symbol, tmp_path)
-        path.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1, 2, 3], "open_interest": [10.0, 11.0, 12.0]}).write_parquet(path)
-
-        fake_session = FakeSession()
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-
-        with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
-            asyncio.run(p._update_db_catalog(
-                symbol, "metrics", None,
-                date(2025, 1, 2), date(2025, 1, 2),
-                record_count=1, size_bytes=path.stat().st_size, source_type="metrics",
-            ))
-            asyncio.run(p._update_db_catalog(
-                symbol, "metrics", None,
-                date(2025, 1, 4), date(2025, 1, 4),
-                record_count=1, size_bytes=path.stat().st_size, source_type="metrics",
-            ))
-
-        assert isinstance(fake_session.row, DataCatalog)
-        assert fake_session.row.record_count == 3
-        assert fake_session.row.size_bytes == path.stat().st_size
-
-    def test_book_depth_disjoint_update_refreshes_single_file_stats(self, tmp_path: Path):
-        from tinohelm.data.catalog import book_depth_parquet_path
-        from tinohelm.db.models import DataCatalog
-
-        class FakeSession:
-            def __init__(self):
-                self.row = None
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def execute(self, stmt):
-                return SimpleNamespace(scalar_one_or_none=lambda: self.row)
-
-            def add(self, row):
-                self.row = row
-
-            async def commit(self):
-                pass
-
-        symbol = "BTCUSDT-PERP"
-        path = book_depth_parquet_path(symbol, tmp_path)
-        path.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_event": [1, 2], "percentage": [0.05, 0.10], "depth": [100.0, 200.0]}).write_parquet(path)
-
-        fake_session = FakeSession()
-        p = BinanceVisionPipeline(catalog_path=tmp_path)
-
-        with patch("tinohelm.db.session.get_session_factory", return_value=lambda: fake_session):
-            asyncio.run(p._update_db_catalog(
-                symbol, "bookDepth", None,
-                date(2025, 1, 2), date(2025, 1, 2),
-                record_count=1, size_bytes=path.stat().st_size, source_type="bookDepth",
-            ))
-            asyncio.run(p._update_db_catalog(
-                symbol, "bookDepth", None,
-                date(2025, 1, 4), date(2025, 1, 4),
-                record_count=1, size_bytes=path.stat().st_size, source_type="bookDepth",
-            ))
-
-        assert isinstance(fake_session.row, DataCatalog)
-        assert fake_session.row.record_count == 2
-        assert fake_session.row.size_bytes == path.stat().st_size
 
     def test_mark_price_disjoint_update_refreshes_direct_update_stats(self, tmp_path: Path):
         from nautilus_trader.model.data import MarkPriceUpdate

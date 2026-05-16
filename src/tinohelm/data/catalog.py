@@ -292,11 +292,9 @@ _UPDATE_SCAN_SPECS: tuple[tuple[str, str, str, str], ...] = (
 # Single-file-per-symbol Parquet categories: one parquet sitting in a shared
 # parent dir, named ``{symbol.lower()}.parquet``. Interval is a sentinel
 # string because these categories don't have a time-bucket: funding rates
-# land on Binance's 8h schedule, metrics / bookDepth are per-tick snapshots.
+# land on Binance's 8h schedule.
 _SINGLE_FILE_SCAN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("funding_rate", "fundingRate", "8h"),
-    ("metrics", "metrics", "tick"),
-    ("order_book_delta", "bookDepth", "tick"),
 )
 
 
@@ -351,8 +349,6 @@ class CatalogSession:
           the category (e.g. ``klines`` for ``bar``), the base path (flat layout)
           is also scanned and removed — this preserves the double-delete behaviour
           introduced when we migrated from flat to source-aware layouts.
-        - ``metrics`` / ``order_book_delta``: single parquet file at the canonical
-          per-symbol path.
         - ``funding_rate``: both the primary parquet and the read-side JSON cache
           at ``~/.tino/data/funding_rates/{symbol}.json``.
         """
@@ -373,10 +369,6 @@ class CatalogSession:
             return self._delete_parquet_dirs([mark_price_update_dir(symbol, self.catalog_path)])
         if data_type == "index_price":
             return self._delete_parquet_dirs([index_price_update_dir(symbol, self.catalog_path)])
-        if data_type == "metrics":
-            return self._delete_parquet_files([metrics_parquet_path(symbol, self.catalog_path)])
-        if data_type == "order_book_delta":
-            return self._delete_parquet_files([book_depth_parquet_path(symbol, self.catalog_path)])
         if data_type == "funding_rate":
             return self._delete_funding_rate(symbol)
         logger.warning("No storage handler for data_type=%r, removing DB row only", data_type)
@@ -569,11 +561,8 @@ class CatalogSession:
     def scan_single_files(self) -> ScanResult:
         """Discover per-symbol Parquet files for single-file categories.
 
-        Covers ``funding_rate`` / ``metrics`` / ``order_book_delta`` — each
-        lives at a canonical path keyed by ``symbol.lower()``. These were
-        silently missed by the pre-PR2 route scan; lifting the discovery into
-        the session closes that gap without re-scattering data-type knowledge
-        across call sites.
+        Covers ``funding_rate`` — lives at a canonical path keyed by
+        ``symbol.lower()``.
         """
         merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         scanned = 0
@@ -634,10 +623,6 @@ class CatalogSession:
         sentinel = "scan"
         if data_type == "funding_rate":
             return funding_rate_parquet_path(sentinel, self.catalog_path).parent
-        if data_type == "metrics":
-            return metrics_parquet_path(sentinel, self.catalog_path).parent
-        if data_type == "order_book_delta":
-            return book_depth_parquet_path(sentinel, self.catalog_path).parent
         return None
 
     @staticmethod
@@ -852,9 +837,9 @@ class CatalogSession:
         """Yield storage objects for one catalog row's parquet files.
 
         For directory-backed categories (bar/trade_tick/quote_tick) this walks
-        the target dir. For single-file categories (metrics / order_book_delta /
-        funding_rate) the target is already a concrete parquet path shared
-        between symbols in its parent dir, so we only return that one object.
+        the target dir. For single-file categories (funding_rate) the target
+        is already a concrete parquet path shared between symbols in its parent
+        dir, so we only return that one object.
         """
         storage = self.storage
         target = self._parquet_dir_for(symbol, data_type, interval, source_type)
@@ -892,10 +877,6 @@ class CatalogSession:
             return self.catalog_path / "data" / "bar" / make_bar_type_str(symbol, interval)
         if data_type in {"trade_tick", "quote_tick"}:
             return self.catalog_path / "data" / data_type / normalize_symbol(symbol)
-        if data_type == "metrics":
-            return metrics_parquet_path(symbol, self.catalog_path)
-        if data_type == "order_book_delta":
-            return book_depth_parquet_path(symbol, self.catalog_path)
         if data_type == "funding_rate":
             update_dir = funding_rate_update_dir(symbol, self.catalog_path)
             if _iter_catalog_files(self.storage, update_dir, recursive=True):
@@ -1563,111 +1544,6 @@ def book_depth_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
     return Path(catalog_root) / "book_depth" / "bookDepth" / "data" / "book_depth" / f"{symbol.lower()}.parquet"
 
 
-def _write_raw_records_parquet(
-    records: list,
-    out_path: Path,
-    rows: list[dict[str, Any]],
-    dedupe_subset: list[str],
-    storage: Any | None = None,
-) -> Path:
-    import fcntl
-    import os
-    import tempfile
-    from io import BytesIO
-
-    import polars as pl
-
-    frame = pl.DataFrame(rows)
-    if not _is_remote_storage(storage):
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = _catalog_write_lock_path(out_path, storage)
-    with lock_path.open("a+b") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            if _is_remote_storage(storage):
-                try:
-                    exists = storage.exists(out_path)
-                except FileNotFoundError:
-                    exists = False
-                if exists:
-                    try:
-                        existing_bytes = storage.read_bytes(out_path)
-                    except FileNotFoundError:
-                        existing_bytes = None
-                    else:
-                        frame = pl.concat([
-                            pl.read_parquet(BytesIO(existing_bytes)),
-                            frame,
-                        ], how="diagonal_relaxed")
-                frame = frame.sort(dedupe_subset).unique(
-                    subset=dedupe_subset,
-                    keep="last",
-                    maintain_order=True,
-                )
-                buf = BytesIO()
-                frame.write_parquet(buf)
-                storage.upload_bytes(out_path, buf.getvalue())
-                logger.info("Wrote %d raw rows to remote %s", len(records), out_path)
-                return out_path
-
-            if out_path.exists():
-                try:
-                    frame = pl.concat([pl.read_parquet(out_path), frame], how="diagonal_relaxed")
-                except Exception as exc:
-                    raise RuntimeError(f"failed to read existing raw parquet at {out_path}") from exc
-            frame = frame.sort(dedupe_subset).unique(
-                subset=dedupe_subset,
-                keep="last",
-                maintain_order=True,
-            )
-            fd, tmp_name = tempfile.mkstemp(prefix=f".{out_path.name}.", suffix=".tmp", dir=out_path.parent)
-            os.close(fd)
-            tmp_path = Path(tmp_name)
-            try:
-                frame.write_parquet(tmp_path)
-                os.replace(tmp_path, out_path)
-            finally:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    logger.info("Wrote %d raw rows to %s", len(records), out_path)
-    return out_path
-
-
-def write_metrics_parquet(records: list, symbol: str, catalog_root: str | Path, storage: Any | None = None) -> Path:
-    """Write BinanceMetrics dataclass records as source-aware raw Parquet."""
-    rows: list[dict[str, Any]] = []
-    for record in records:
-        open_interest = float(getattr(record, "open_interest"))
-        rows.append({
-            "symbol": str(getattr(record, "symbol", symbol)),
-            "ts_event": int(getattr(record, "ts_event")),
-            "ts_init": int(getattr(record, "ts_init", getattr(record, "ts_event"))),
-            "open_interest": open_interest,
-            "sum_open_interest": open_interest,
-            "open_interest_value": float(getattr(record, "open_interest_value")),
-            "toptrader_long_short_ratio_count": float(getattr(record, "toptrader_long_short_ratio_count", 0.0)),
-            "toptrader_long_short_ratio_sum": float(getattr(record, "toptrader_long_short_ratio_sum", 0.0)),
-            "global_long_short_ratio": float(getattr(record, "global_long_short_ratio", 0.0)),
-            "taker_long_short_vol_ratio": float(getattr(record, "taker_long_short_vol_ratio", 0.0)),
-        })
-    return _write_raw_records_parquet(records, metrics_parquet_path(symbol, catalog_root), rows, ["ts_event"], storage=storage)
-
-
-def write_book_depth_parquet(records: list, symbol: str, catalog_root: str | Path, storage: Any | None = None) -> Path:
-    """Write BinanceBookDepth dataclass records as source-aware raw Parquet."""
-    rows: list[dict[str, Any]] = []
-    for record in records:
-        rows.append({
-            "symbol": str(getattr(record, "symbol", symbol)),
-            "ts_event": int(getattr(record, "ts_event")),
-            "ts_init": int(getattr(record, "ts_init", getattr(record, "ts_event"))),
-            "percentage": float(getattr(record, "percentage")),
-            "depth": float(getattr(record, "depth")),
-            "notional": float(getattr(record, "notional")),
-        })
-    return _write_raw_records_parquet(records, book_depth_parquet_path(symbol, catalog_root), rows, ["ts_event", "percentage"], storage=storage)
 
 
 def read_metrics_parquet(symbol: str, catalog_root: str | Path) -> "pl.DataFrame | None":
