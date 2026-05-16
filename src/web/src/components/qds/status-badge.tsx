@@ -5,6 +5,8 @@ export type StatusKind =
   | "running"
   | "done"
   | "completed"
+  | "partial_completed"
+  | "warning"
   | "failed"
   | "queued"
   | "paused"
@@ -14,42 +16,48 @@ export type StatusKind =
   | "cancelled";
 
 const LABEL_MAP_ZH: Record<StatusKind, string> = {
-  running:    "运行中",
-  done:       "已完成",
-  completed:  "已完成",
-  failed:     "失败",
-  queued:     "排队中",
-  paused:     "已暂停",
-  flattening: "平仓中",
-  starting:   "启动中",
-  cancelling: "取消中",
-  cancelled:  "已取消",
+  running:           "运行中",
+  done:              "已完成",
+  completed:         "已完成",
+  partial_completed: "部分完成",
+  warning:           "警告",
+  failed:            "失败",
+  queued:            "排队中",
+  paused:            "已暂停",
+  flattening:        "平仓中",
+  starting:          "启动中",
+  cancelling:        "取消中",
+  cancelled:         "已取消",
 };
 
 const LABEL_MAP_EN: Record<StatusKind, string> = {
-  running:    "Running",
-  done:       "Done",
-  completed:  "Completed",
-  failed:     "Failed",
-  queued:     "Queued",
-  paused:     "Paused",
-  flattening: "Flattening",
-  starting:   "Starting",
-  cancelling: "Cancelling",
-  cancelled:  "Cancelled",
+  running:           "Running",
+  done:              "Done",
+  completed:         "Completed",
+  partial_completed: "Partial",
+  warning:           "Warning",
+  failed:            "Failed",
+  queued:            "Queued",
+  paused:            "Paused",
+  flattening:        "Flattening",
+  starting:          "Starting",
+  cancelling:        "Cancelling",
+  cancelled:         "Cancelled",
 };
 
 const COLOR_MAP: Record<StatusKind, string> = {
-  running:    "bg-primary/10 text-primary",
-  done:       "bg-qds-success-dim text-qds-success",
-  completed:  "bg-qds-success-dim text-qds-success",
-  failed:     "bg-qds-danger-dim text-qds-danger",
-  queued:     "bg-secondary text-muted-foreground",
-  paused:     "bg-secondary text-muted-foreground",
-  flattening: "bg-qds-info-dim text-qds-info",
-  starting:   "bg-qds-info-dim text-qds-info",
-  cancelling: "bg-secondary text-muted-foreground",
-  cancelled:  "bg-secondary text-muted-foreground",
+  running:           "bg-primary/10 text-primary",
+  done:              "bg-qds-success-dim text-qds-success",
+  completed:         "bg-qds-success-dim text-qds-success",
+  partial_completed: "bg-qds-warning-dim text-qds-warning",
+  warning:           "bg-qds-warning-dim text-qds-warning",
+  failed:            "bg-qds-danger-dim text-qds-danger",
+  queued:            "bg-secondary text-muted-foreground",
+  paused:            "bg-secondary text-muted-foreground",
+  flattening:        "bg-qds-info-dim text-qds-info",
+  starting:          "bg-qds-info-dim text-qds-info",
+  cancelling:        "bg-secondary text-muted-foreground",
+  cancelled:         "bg-secondary text-muted-foreground",
 };
 
 const FALLBACK_COLOR = "bg-secondary text-muted-foreground";

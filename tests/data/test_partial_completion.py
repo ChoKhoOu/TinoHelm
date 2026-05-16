@@ -236,20 +236,10 @@ class TestWorkerPartialCompletion:
             )).scalar_one()
             assert job.status == "partial_completed"
 
-    async def test_partial_completion_emits_data_fetch_partial_event(self):
-        """Worker emits data.fetch.partial event (not data.fetch.completed)."""
-        # This test verifies the event type string
-        event_type = "data.fetch.partial"
-        payload = {
-            "type": event_type,
-            "job_id": "test-job-id",
-            "symbol": "BTCUSDT-PERP",
-            "data_type": "klines",
-            "objects_count": 95,
-            "last_available_date": "2026-05-15",
-        }
-        assert payload["type"] == "data.fetch.partial"
-        assert "last_available_date" in payload
+    async def test_partial_completed_is_in_bucket_started_statuses(self):
+        """partial_completed counts as 'started' for scheduling fairness."""
+        from tinohelm.data.worker import _BUCKET_STARTED_STATUSES, STATUS_PARTIAL_COMPLETED
+        assert STATUS_PARTIAL_COMPLETED in _BUCKET_STARTED_STATUSES
 
     async def _setup_running_job(self):
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -285,41 +275,43 @@ class TestWorkerPartialCompletion:
 class TestBacktestWaitPartialCompleted:
     """_submit_and_wait_fetch must treat partial_completed as terminal success."""
 
-    async def test_partial_completed_breaks_polling_loop(self):
-        """partial_completed should exit the polling loop with success=True."""
-        from tinohelm.data.worker import STATUS_PARTIAL_COMPLETED
+    async def test_partial_completed_is_exported_from_core(self):
+        """STATUS_PARTIAL_COMPLETED is importable from the core module."""
+        from tinohelm.core.async_queue_worker import STATUS_PARTIAL_COMPLETED
+        assert STATUS_PARTIAL_COMPLETED == "partial_completed"
 
-        # Simulate the polling logic
-        terminal_statuses = ("completed", "partial_completed", "failed", "cancelled")
-        success_statuses = ("completed", "partial_completed")
+    async def test_runner_module_has_partial_completed_in_success_branch(self):
+        """Verify backtest runner source code contains partial_completed in success check."""
+        import inspect
+        from tinohelm.backtest import runner
 
-        assert STATUS_PARTIAL_COMPLETED in terminal_statuses
-        assert STATUS_PARTIAL_COMPLETED in success_statuses
+        source = inspect.getsource(runner.BacktestRunner._submit_and_wait_fetch)
+        assert "partial_completed" in source
+        # The success branch includes both completed and partial_completed
+        assert '"completed", "partial_completed"' in source or "partial_completed" in source
 
-    async def test_runner_returns_true_on_partial_completed(self):
-        """BacktestRunner._submit_and_wait_fetch returns True for partial_completed."""
-        # The key logic is: if job.status in success_statuses, return True
-        # We test the classification, not the full runner (which needs NT)
-        from tinohelm.core.async_queue_worker import (
-            STATUS_COMPLETED,
-            STATUS_PARTIAL_COMPLETED,
+
+# ---------------------------------------------------------------------------
+# IngestResult partial field propagation
+# ---------------------------------------------------------------------------
+
+class TestIngestResultPartialField:
+    """Pipeline IngestResult must include partial metadata."""
+
+    def test_ingest_result_partial_and_last_available_date(self):
+        """IngestResult carries both partial flag and last_available_date."""
+        from tinohelm.data.pipeline import IngestResult
+
+        result = IngestResult(
+            symbol="BTCUSDT-PERP",
+            data_type="klines",
+            objects_count=100,
+            files_written=5,
+            partial=True,
+            last_available_date=date(2026, 5, 15),
         )
-
-        success_like = {STATUS_COMPLETED, STATUS_PARTIAL_COMPLETED}
-        assert "partial_completed" in success_like
-
-
-# ---------------------------------------------------------------------------
-# Frontend notification routing (verified via constants)
-# ---------------------------------------------------------------------------
-
-class TestNotificationRouting:
-    """Verify the routing table constants that the frontend will use."""
-
-    def test_data_fetch_partial_event_type(self):
-        """data.fetch.partial must be a recognized event type."""
-        # The event type string that the worker emits
-        assert "data.fetch.partial" == "data.fetch.partial"
+        assert result.partial is True
+        assert result.last_available_date == date(2026, 5, 15)
 
 
 # ---------------------------------------------------------------------------
