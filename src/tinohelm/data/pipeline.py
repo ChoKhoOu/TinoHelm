@@ -515,11 +515,13 @@ class BinanceVisionPipeline:
                         )
                         continue
                     try:
-                        n, fps = self._convert_one_file(
+                        n, fps = await asyncio.to_thread(
+                            self._convert_one_file,
                             csv_path, converter, instrument, kwargs,
                             symbol, data_type, interval, True,
                         )
                         total_objects += n
+                        all_file_paths.extend(fps)
                     except Exception as conv_exc:
                         logger.warning(
                             "Gap backfill convert failed: %s", conv_exc,
