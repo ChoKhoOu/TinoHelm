@@ -14,9 +14,7 @@ without the heavy framework dependencies.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -29,14 +27,10 @@ from tinohelm.data.converters import get_converter
 from tinohelm.data.downloader import VisionCsvPayload, VisionDownloader, _KLINES_TYPES
 from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
-    INTERVAL_CONVENTION,
-    WRITE_CATEGORY,
     classify_download_failures,
     compute_chunk_subprogress,
     compute_stage_pct,
     csv_has_header,
-    date_end_ns,
-    date_start_ns,
     resolve_db_category,
     resolve_db_interval,
     resolve_write_category,
@@ -57,12 +51,6 @@ def _timestamp_stat_to_ns(value: Any) -> int:
         return int(dt.timestamp() * 1_000_000_000)
     return int(value)
 
-_WRITE_CATEGORY = WRITE_CATEGORY
-_INTERVAL_CONVENTION = INTERVAL_CONVENTION
-
-# Backwards-compatible fallback; runtime chunking is settings-driven.
-_CHUNK_SIZE = 1_000_000
-_ROLLBACK_MANIFEST = "manifest.json"
 
 CsvSource = Path | VisionCsvPayload
 
@@ -81,537 +69,6 @@ class IngestResult:
     partial: bool = False
     last_available_date: date | None = None
 
-
-@dataclass
-class _CleanupBackup:
-    original_path: Path
-    backup_path: Path
-
-
-class _ParquetCleanupGuard:
-    """Rollback handle for overlapping parquet files removed before ingest writes."""
-
-    def __init__(
-        self,
-        storage: Any,
-        rollback_prefix: Path,
-        *,
-        target_dir: Path | None = None,
-        preserved_paths: set[Path] | None = None,
-        original_paths: set[Path] | None = None,
-    ) -> None:
-        self._storage = storage
-        self._rollback_prefix = rollback_prefix
-        self._target_dir = Path(target_dir) if target_dir is not None else None
-        self._preserved_paths = {Path(p) for p in preserved_paths or set()}
-        self._original_paths = {Path(p) for p in original_paths or set()}
-        self._backups: list[_CleanupBackup] = []
-        self._catalog_commit: dict[str, Any] | None = None
-        self._active = True
-
-    def add_backup(self, original_path: Path, backup_path: Path) -> None:
-        original = Path(original_path)
-        self._original_paths.add(original)
-        self._backups.append(
-            _CleanupBackup(original_path=original, backup_path=Path(backup_path))
-        )
-
-    def _manifest_payload(self, *, resolved: bool = False) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "complete": True,
-            "resolved": resolved,
-            "rollback_prefix": str(self._rollback_prefix),
-            "target_dir": str(self._target_dir) if self._target_dir is not None else None,
-            "preserved_paths": sorted(str(path) for path in self._preserved_paths),
-            "original_paths": sorted(str(path) for path in self._original_paths),
-            "catalog_commit": self._catalog_commit,
-            "backups": [
-                {
-                    "original_path": str(backup.original_path),
-                    "backup_path": str(backup.backup_path),
-                }
-                for backup in self._backups
-            ],
-        }
-
-    def _write_manifest(self, payload: dict[str, Any]) -> None:
-        manifest_path = self._rollback_prefix / _ROLLBACK_MANIFEST
-        temp_path = self._rollback_prefix / f".{_ROLLBACK_MANIFEST}.{uuid4().hex}.tmp"
-        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
-        if getattr(self._storage, "provider", "local") == "local":
-            temp_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_bytes(encoded)
-            temp_path.replace(manifest_path)
-            return
-
-        self._storage.upload_bytes(temp_path, encoded)
-        try:
-            self._storage.copy_path(temp_path, manifest_path)
-        finally:
-            try:
-                self._storage.delete_path(temp_path)
-            except Exception:
-                logger.warning("Failed to delete temporary rollback manifest %s", temp_path, exc_info=True)
-
-    def persist_manifest(self) -> None:
-        """Persist enough rollback metadata for crash recovery before delete."""
-        self._write_manifest(self._manifest_payload(resolved=False))
-
-    def mark_resolved(self) -> None:
-        """Mark rollback metadata as already handled before best-effort cleanup."""
-        self._write_manifest(self._manifest_payload(resolved=True))
-
-    def record_catalog_commit(
-        self,
-        *,
-        symbol: str,
-        data_type: str,
-        interval: str,
-        source_type: str | None,
-        start: date,
-        end: date,
-        file_path: str,
-        record_count: int | None,
-        size_bytes: int | None,
-        pre_update_row: dict[str, Any] | None,
-        ingest_run_id: str,
-    ) -> None:
-        """Persist the intended DB catalog commit without resolving rollback.
-
-        Startup recovery uses this as proof material: if the process crashes
-        after the DB commit but before ``discard()``, recovery can verify the
-        catalog row and avoid restoring old parquet over a committed ingest. If
-        the DB row is absent or stale, the same manifest remains unresolved and
-        recovery restores the backups.
-        """
-        self._catalog_commit = {
-            "symbol": symbol,
-            "data_type": data_type,
-            "interval": interval,
-            "source_type": source_type,
-            "start_date": start.isoformat(),
-            "end_date": end.isoformat(),
-            "file_path": file_path,
-            "record_count": record_count,
-            "size_bytes": size_bytes,
-            "pre_update_row": pre_update_row,
-            "ingest_run_id": ingest_run_id,
-        }
-        self._write_manifest(self._manifest_payload(resolved=False))
-
-    @property
-    def backups(self) -> list[_CleanupBackup]:
-        return list(self._backups)
-
-    def delete_current_outputs(self, file_paths: list[str] | set[str]) -> None:
-        """Delete parquet files produced by the current failed ingest attempt."""
-        from tinohelm.data.storage import delete_prefix
-
-        seen: set[Path] = set()
-        delete_failures: list[Path] = []
-        for raw_path in file_paths:
-            path = Path(raw_path)
-            if path in seen or path in self._preserved_paths:
-                continue
-            seen.add(path)
-            try:
-                delete_prefix(self._storage, path)
-            except Exception:
-                delete_failures.append(path)
-                logger.warning("Failed to delete current-run parquet %s", path, exc_info=True)
-
-        if self._target_dir is None:
-            if delete_failures:
-                raise RuntimeError(f"failed to delete current-run parquet: {delete_failures}")
-            return
-        try:
-            active_objects = list(
-                self._storage.iter_files(self._target_dir, suffix=".parquet", recursive=False)
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"failed to list current-run parquet under {self._target_dir}"
-            ) from exc
-
-        for obj in active_objects:
-            path = Path(obj.path)
-            if path in self._preserved_paths or path in seen:
-                continue
-            try:
-                delete_prefix(self._storage, path)
-            except Exception:
-                delete_failures.append(path)
-                logger.warning("Failed to delete current-run parquet %s", path, exc_info=True)
-        if delete_failures:
-            raise RuntimeError(f"failed to delete current-run parquet: {delete_failures}")
-
-    def restore(self, *, discard: bool = True) -> None:
-        """Restore backed-up objects to their original logical paths."""
-        if not self._active:
-            return
-        restore_failures: list[tuple[Path, Path, BaseException]] = []
-        for backup in reversed(self._backups):
-            try:
-                self._storage.copy_path(backup.backup_path, backup.original_path)
-            except BaseException as exc:
-                restore_failures.append((backup.backup_path, backup.original_path, exc))
-        if restore_failures:
-            detail = ", ".join(
-                f"{src} -> {dest}: {exc}" for src, dest, exc in restore_failures
-            )
-            raise RuntimeError(f"failed to restore rollback parquet backups: {detail}") from restore_failures[0][2]
-        if discard:
-            self.discard(best_effort=True)
-
-    def discard(self, *, best_effort: bool = False) -> None:
-        """Drop rollback copies after the replacement is known-good."""
-        if not self._active:
-            return
-        if not self._backups and self._target_dir is None:
-            self._active = False
-            return
-        try:
-            try:
-                self.mark_resolved()
-            except Exception:
-                if best_effort:
-                    logger.warning(
-                        "Failed to mark rollback parquet backups resolved under %s",
-                        self._rollback_prefix,
-                        exc_info=True,
-                    )
-                else:
-                    raise
-            if getattr(self._storage, "provider", "local") != "local":
-                from tinohelm.data.storage import delete_prefix
-
-                delete_prefix(self._storage, self._rollback_prefix)
-            else:
-                shutil.rmtree(self._rollback_prefix, ignore_errors=True)
-                try:
-                    self._rollback_prefix.parent.rmdir()
-                except OSError:
-                    pass
-        except Exception:
-            if best_effort:
-                logger.warning(
-                    "Failed to discard rollback parquet backups under %s",
-                    self._rollback_prefix,
-                    exc_info=True,
-                )
-                return
-            raise
-        self._active = False
-
-
-def _catalog_row_to_snapshot(row: Any | None) -> dict[str, Any] | None:
-    """Normalize a DataCatalog row into JSON-stable fields for recovery checks."""
-    if row is None:
-        return None
-    return {
-        "symbol": row.symbol,
-        "data_type": row.data_type,
-        "interval": row.interval,
-        "source_type": row.source_type,
-        "start_date": row.start_date.isoformat(),
-        "end_date": row.end_date.isoformat(),
-        "file_path": row.file_path,
-        "record_count": row.record_count,
-        "size_bytes": row.size_bytes,
-        "last_ingest_id": getattr(row, "last_ingest_id", None),
-    }
-
-
-def _catalog_snapshot_matches(current: dict[str, Any] | None, expected: Any) -> bool:
-    if current is None:
-        return expected is None
-    if expected is None or not isinstance(expected, dict):
-        return False
-    expected_snapshot = {
-        "symbol": expected.get("symbol"),
-        "data_type": expected.get("data_type"),
-        "interval": expected.get("interval"),
-        "source_type": expected.get("source_type"),
-        "start_date": expected.get("start_date"),
-        "end_date": expected.get("end_date"),
-        "file_path": expected.get("file_path"),
-        "record_count": expected.get("record_count"),
-        "size_bytes": expected.get("size_bytes"),
-    }
-    if "last_ingest_id" in expected:
-        expected_snapshot["last_ingest_id"] = expected.get("last_ingest_id")
-    else:
-        current = {key: value for key, value in current.items() if key != "last_ingest_id"}
-    return current == expected_snapshot
-
-
-def _parse_catalog_commit_payload(commit_payload: Any) -> dict[str, Any] | None:
-    """Validate rollback manifest DB commit witness payload."""
-    if not isinstance(commit_payload, dict):
-        return None
-    if "pre_update_row" not in commit_payload:
-        return None
-    try:
-        ingest_run_id = commit_payload.get("ingest_run_id")
-        if not ingest_run_id:
-            return None
-        source_type = commit_payload.get("source_type")
-        return {
-            "symbol": str(commit_payload["symbol"]),
-            "data_type": str(commit_payload["data_type"]),
-            "interval": str(commit_payload["interval"]),
-            "source_type": str(source_type) if source_type is not None else None,
-            "start": date.fromisoformat(str(commit_payload["start_date"])),
-            "end": date.fromisoformat(str(commit_payload["end_date"])),
-            "file_path": str(commit_payload["file_path"]),
-            "ingest_run_id": str(ingest_run_id),
-            "pre_update_row": commit_payload.get("pre_update_row"),
-        }
-    except Exception:
-        return None
-
-
-async def _catalog_commit_current_snapshot(parsed: dict[str, Any]) -> dict[str, Any] | None:
-    from sqlalchemy import select
-    from tinohelm.db.models import DataCatalog
-    from tinohelm.db.session import get_session_factory
-
-    factory = get_session_factory()
-    async with factory() as session:
-        stmt = select(DataCatalog).where(
-            DataCatalog.symbol == parsed["symbol"],
-            DataCatalog.data_type == parsed["data_type"],
-            DataCatalog.interval == parsed["interval"],
-        )
-        if parsed["source_type"] is None:
-            stmt = stmt.where(DataCatalog.source_type.is_(None))
-        else:
-            stmt = stmt.where(DataCatalog.source_type == parsed["source_type"])
-        row = (await session.execute(stmt)).scalar_one_or_none()
-    return _catalog_row_to_snapshot(row)
-
-
-def _catalog_commit_matches_current_snapshot(
-    current: dict[str, Any] | None,
-    parsed: dict[str, Any],
-) -> bool:
-    if current is None:
-        return False
-    if current.get("last_ingest_id") != parsed["ingest_run_id"]:
-        return False
-    if current["file_path"] != parsed["file_path"]:
-        return False
-    if date.fromisoformat(current["start_date"]) > parsed["start"]:
-        return False
-    if date.fromisoformat(current["end_date"]) < parsed["end"]:
-        return False
-    return True
-
-
-def _catalog_commit_supersedes_manifest(
-    current: dict[str, Any] | None,
-    parsed: dict[str, Any],
-) -> bool:
-    if current is None:
-        return False
-    current_token = current.get("last_ingest_id")
-    if not current_token or current_token == parsed["ingest_run_id"]:
-        return False
-    return not _catalog_snapshot_matches(current, parsed.get("pre_update_row"))
-
-
-async def _catalog_commit_is_persisted_async(commit_payload: Any) -> bool:
-    """Return True only when the DB row carries this ingest's exact commit token."""
-    parsed = _parse_catalog_commit_payload(commit_payload)
-    if parsed is None:
-        return False
-    current = await _catalog_commit_current_snapshot(parsed)
-    return _catalog_commit_matches_current_snapshot(current, parsed)
-
-
-def _catalog_commit_is_persisted(commit_payload: Any) -> bool:
-    """Synchronous wrapper for non-startup recovery callers and tests."""
-    return asyncio.run(_catalog_commit_is_persisted_async(commit_payload))
-
-
-async def _catalog_commit_is_superseded_async(commit_payload: Any) -> bool:
-    parsed = _parse_catalog_commit_payload(commit_payload)
-    if parsed is None:
-        return False
-    current = await _catalog_commit_current_snapshot(parsed)
-    return _catalog_commit_supersedes_manifest(current, parsed)
-
-
-async def _catalog_commit_should_discard_rollback_async(commit_payload: Any) -> bool:
-    if await _catalog_commit_is_persisted_async(commit_payload):
-        return True
-    return await _catalog_commit_is_superseded_async(commit_payload)
-
-
-def _catalog_commit_should_discard_rollback(commit_payload: Any) -> bool:
-    if _catalog_commit_is_persisted(commit_payload):
-        return True
-    return asyncio.run(_catalog_commit_is_superseded_async(commit_payload))
-
-
-def _rollback_manifest_objects(active_storage: Any, rollback_root: Path) -> list[Any]:
-    return [
-        obj for obj in active_storage.iter_files(rollback_root, suffix=".json", recursive=True)
-        if Path(obj.path).name == _ROLLBACK_MANIFEST
-    ]
-
-
-def _read_rollback_manifest(active_storage: Any, manifest_obj: Any) -> dict[str, Any]:
-    try:
-        payload = json.loads(active_storage.read_bytes(manifest_obj).decode("utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"failed to read ingest rollback manifest {manifest_obj.path}") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"failed to read ingest rollback manifest {manifest_obj.path}")
-    return payload
-
-
-def _discard_rollback_prefix(active_storage: Any, rollback_prefix: Path) -> None:
-    from tinohelm.data.storage import delete_prefix
-
-    if getattr(active_storage, "provider", "local") != "local":
-        delete_prefix(active_storage, rollback_prefix)
-        return
-    shutil.rmtree(rollback_prefix, ignore_errors=True)
-    try:
-        rollback_prefix.parent.rmdir()
-    except OSError:
-        pass
-
-
-def _restore_rollback_payload(active_storage: Any, manifest_obj: Any, payload: dict[str, Any]) -> int:
-    from tinohelm.data.storage import delete_prefix
-
-    try:
-        backups = payload.get("backups") or []
-        rollback_prefix = Path(payload.get("rollback_prefix") or Path(manifest_obj.path).parent)
-        target_dir_raw = payload.get("target_dir")
-        target_dir = Path(target_dir_raw) if target_dir_raw else None
-        preserved_paths = {Path(path) for path in payload.get("preserved_paths") or []}
-        original_paths = {Path(path) for path in payload.get("original_paths") or []}
-    except Exception as exc:
-        raise RuntimeError(f"failed to read ingest rollback manifest {manifest_obj.path}") from exc
-
-    restored_paths = {Path(entry["original_path"]) for entry in backups}
-    restored = 0
-    try:
-        for entry in reversed(backups):
-            active_storage.copy_path(Path(entry["backup_path"]), Path(entry["original_path"]))
-            restored += 1
-        if target_dir is not None and payload.get("complete") is True:
-            keep_paths = restored_paths | preserved_paths | original_paths
-            for obj in list(active_storage.iter_files(target_dir, suffix=".parquet", recursive=False)):
-                active_path = Path(obj.path)
-                if active_path in keep_paths:
-                    continue
-                delete_prefix(active_storage, active_path)
-    except Exception as exc:
-        raise RuntimeError(
-            f"failed to restore ingest rollback backups from {manifest_obj.path}"
-        ) from exc
-
-    _discard_rollback_prefix(active_storage, rollback_prefix)
-    return restored
-
-
-def recover_pending_ingest_rollbacks(
-    catalog_path: str | Path,
-    *,
-    storage: Any | None = None,
-) -> int:
-    """Restore crash-stranded ingest rollback backups before new mutations."""
-    from tinohelm.data.storage import get_catalog_storage
-
-    catalog_root = Path(catalog_path)
-    active_storage = storage or get_catalog_storage(catalog_root=catalog_root)
-    rollback_root = catalog_root / ".ingest-rollback"
-    manifests = _rollback_manifest_objects(active_storage, rollback_root)
-    restored = 0
-    for manifest_obj in manifests:
-        payload = _read_rollback_manifest(active_storage, manifest_obj)
-        rollback_prefix = Path(payload.get("rollback_prefix") or Path(manifest_obj.path).parent)
-
-        if payload.get("resolved") is True:
-            try:
-                _discard_rollback_prefix(active_storage, rollback_prefix)
-            except Exception:
-                logger.warning(
-                    "Failed to discard resolved ingest rollback prefix %s",
-                    rollback_prefix,
-                    exc_info=True,
-                )
-            continue
-
-        catalog_commit = payload.get("catalog_commit")
-        if catalog_commit and _catalog_commit_should_discard_rollback(catalog_commit):
-            try:
-                _discard_rollback_prefix(active_storage, rollback_prefix)
-            except Exception:
-                logger.warning(
-                    "Failed to discard committed ingest rollback prefix %s",
-                    rollback_prefix,
-                    exc_info=True,
-                )
-            continue
-
-        restored += _restore_rollback_payload(active_storage, manifest_obj, payload)
-
-    if restored:
-        logger.warning("Restored %d parquet object(s) from pending ingest rollback", restored)
-    return restored
-
-
-async def recover_pending_ingest_rollbacks_async(
-    catalog_path: str | Path,
-    *,
-    storage: Any | None = None,
-) -> int:
-    """Async startup recovery; DB witness checks stay on the current event loop."""
-    from tinohelm.data.storage import get_catalog_storage
-
-    catalog_root = Path(catalog_path)
-    active_storage = storage or await asyncio.to_thread(get_catalog_storage, catalog_root=catalog_root)
-    rollback_root = catalog_root / ".ingest-rollback"
-    manifests = await asyncio.to_thread(_rollback_manifest_objects, active_storage, rollback_root)
-    restored = 0
-    for manifest_obj in manifests:
-        payload = await asyncio.to_thread(_read_rollback_manifest, active_storage, manifest_obj)
-        rollback_prefix = Path(payload.get("rollback_prefix") or Path(manifest_obj.path).parent)
-
-        if payload.get("resolved") is True:
-            try:
-                await asyncio.to_thread(_discard_rollback_prefix, active_storage, rollback_prefix)
-            except Exception:
-                logger.warning(
-                    "Failed to discard resolved ingest rollback prefix %s",
-                    rollback_prefix,
-                    exc_info=True,
-                )
-            continue
-
-        catalog_commit = payload.get("catalog_commit")
-        if catalog_commit and await _catalog_commit_should_discard_rollback_async(catalog_commit):
-            try:
-                await asyncio.to_thread(_discard_rollback_prefix, active_storage, rollback_prefix)
-            except Exception:
-                logger.warning(
-                    "Failed to discard committed ingest rollback prefix %s",
-                    rollback_prefix,
-                    exc_info=True,
-                )
-            continue
-
-        restored += await asyncio.to_thread(_restore_rollback_payload, active_storage, manifest_obj, payload)
-
-    if restored:
-        logger.warning("Restored %d parquet object(s) from pending ingest rollback", restored)
-    return restored
 
 
 class BinanceVisionPipeline:
@@ -729,7 +186,6 @@ class BinanceVisionPipeline:
         kwargs = self._build_converter_kwargs(
             data_type, symbol, interval, instrument,
         )
-        cleanup_guard = self._clean_overlapping_parquet(symbol, data_type, interval, start, end)
 
         # 3. Pipelined download → convert (overlap via asyncio.Queue)
         dl_concurrency = self.downloader.concurrency
@@ -742,8 +198,6 @@ class BinanceVisionPipeline:
         convert_done = 0
         total_objects = 0
         all_file_paths: list[str] = []
-        preexisting_output_paths = self._catalog_current_paths(symbol, data_type, interval, data_type)
-        rollback_done = False
         download_errors: list[tuple[str, Exception]] = []
         download_success_indices: set[int] = set()
         download_failed_indices: dict[int, Exception] = {}
@@ -840,24 +294,12 @@ class BinanceVisionPipeline:
                     if task.done():
                         return task.result()
 
-        def _rollback_once() -> None:
-            nonlocal rollback_done
-            if rollback_done:
-                return
-            rollback_done = True
-            self._rollback_failed_ingest(
-                cleanup_guard,
-                all_file_paths,
-                preexisting_output_paths,
-            )
-
         try:
             await _progress(
                 DOWNLOAD_PROGRESS_BASE,
                 f"Downloading {len(tasks)} file(s) (×{dl_concurrency}, convert ×{n_converters})...",
             )
         except asyncio.CancelledError:
-            _rollback_once()
             raise
 
         async def _download_one(index: int, task):
@@ -974,7 +416,6 @@ class BinanceVisionPipeline:
                 asyncio.gather(*pipeline_tasks, return_exceptions=True)
             )
             await _await_ignoring_cancellation(_drain_pending_convert_futures())
-            _rollback_once()
             raise
 
         is_partial = False
@@ -1003,7 +444,6 @@ class BinanceVisionPipeline:
                     )
 
             if not is_partial:
-                _rollback_once()
                 parts: list[str] = []
                 first_exc: Exception | None = None
                 if download_errors:
@@ -1017,65 +457,39 @@ class BinanceVisionPipeline:
                 raise RuntimeError("; ".join(parts)) from first_exc
 
         if total_objects <= 0:
-            _rollback_once()
             await _progress(100, "Failed")
             raise RuntimeError(
                 f"{symbol} {data_type} converted 0 objects from {len(tasks)} downloaded file(s)"
             )
 
-        # 4. Update DB catalog
+        # 4. Consolidate + Deduplicate + Organize by period
+        try:
+            await _progress(92, "Consolidating and deduplicating...")
+        except asyncio.CancelledError:
+            raise
+        try:
+            await asyncio.to_thread(
+                self._consolidate_catalog_data, symbol, data_type, interval
+            )
+        except Exception:
+            logger.warning(
+                "Consolidation failed for %s %s; data is written but not consolidated",
+                symbol, data_type, exc_info=True,
+            )
+
+        # 5. Update DB catalog
         try:
             await _progress(96, "Updating catalog database...")
         except asyncio.CancelledError:
-            _rollback_once()
             raise
-        # Compute size_bytes from written files
         unique_paths = set(all_file_paths)
         try:
             written_size = self._written_file_size(unique_paths) if unique_paths else None
         except Exception:
-            _rollback_once()
-            await _progress(100, "Failed")
-            logger.exception("Failed to stat written catalog files")
-            raise
-        if task_cancelled := asyncio.current_task():
-            if task_cancelled.cancelling():
-                _rollback_once()
-                raise asyncio.CancelledError
+            logger.warning("Failed to stat written catalog files", exc_info=True)
+            written_size = None
         record_count = total_objects if total_objects > 0 else None
         ingest_run_id = uuid4().hex
-        if cleanup_guard is not None:
-            try:
-                from tinohelm.data.catalog import resolve_catalog_path
-
-                pre_update_row = await self._read_db_catalog_snapshot(
-                    symbol,
-                    data_type,
-                    interval,
-                    data_type,
-                )
-                catalog_commit_end = partial_last_date if is_partial and partial_last_date else end
-                cleanup_guard.record_catalog_commit(
-                    symbol=symbol,
-                    data_type=resolve_db_category(data_type),
-                    interval=resolve_db_interval(data_type, interval),
-                    source_type=data_type,
-                    start=start,
-                    end=catalog_commit_end,
-                    file_path=str(resolve_catalog_path(self.catalog_path, data_type)),
-                    record_count=record_count,
-                    size_bytes=written_size,
-                    pre_update_row=pre_update_row,
-                    ingest_run_id=ingest_run_id,
-                )
-            except asyncio.CancelledError:
-                _rollback_once()
-                raise
-            except Exception:
-                _rollback_once()
-                await _progress(100, "Failed")
-                logger.exception("Failed to persist ingest rollback DB-commit intent")
-                raise
         post_commit_was_cancelled = False
         catalog_end = partial_last_date if is_partial and partial_last_date else end
         update_task = asyncio.create_task(self._update_db_catalog(
@@ -1093,23 +507,17 @@ class BinanceVisionPipeline:
             try:
                 await _await_ignoring_cancellation(update_task)
             except asyncio.CancelledError:
-                _rollback_once()
                 await _progress(100, "Failed")
                 logger.exception("DB catalog update was cancelled before commit")
                 raise
             except Exception:
-                _rollback_once()
                 await _progress(100, "Failed")
                 logger.exception("Failed to update DB catalog")
                 raise
         except Exception:
-            _rollback_once()
             await _progress(100, "Failed")
             logger.exception("Failed to update DB catalog")
             raise
-
-        if cleanup_guard is not None:
-            cleanup_guard.discard(best_effort=True)
 
         if post_commit_was_cancelled:
             logger.info(
@@ -1149,84 +557,6 @@ class BinanceVisionPipeline:
             _recancel_current_task()
         return result
 
-    def _rollback_failed_ingest(
-        self,
-        cleanup_guard: _ParquetCleanupGuard | None,
-        file_paths: list[str],
-        preexisting_paths: set[Path] | None = None,
-    ) -> None:
-        """Remove current-run outputs, then restore old overlapping parquet."""
-        if cleanup_guard is not None:
-            delete_exc: BaseException | None = None
-            try:
-                cleanup_guard.delete_current_outputs(file_paths)
-            except BaseException as exc:
-                delete_exc = exc
-                logger.warning(
-                    "Failed to delete current-run outputs during ingest rollback",
-                    exc_info=True,
-                )
-
-            try:
-                cleanup_guard.restore(discard=delete_exc is None)
-            except BaseException as restore_exc:
-                if delete_exc is not None:
-                    raise RuntimeError(
-                        "rollback failed to restore old parquet after current-output deletion also failed"
-                    ) from restore_exc
-                raise
-
-            if delete_exc is not None:
-                raise RuntimeError(
-                    "rollback restored old parquet but failed to delete some current-run outputs"
-                ) from delete_exc
-            return
-        self._delete_written_paths(file_paths, preserve=preexisting_paths)
-
-    def _delete_written_paths(
-        self,
-        file_paths: list[str] | set[str],
-        *,
-        preserve: set[Path] | None = None,
-    ) -> None:
-        """Delete current-run outputs when no cleanup guard exists."""
-        from tinohelm.data.storage import delete_prefix
-
-        preserved = {Path(p) for p in preserve or set()}
-        seen: set[Path] = set()
-        delete_failures: list[Path] = []
-        for raw_path in file_paths:
-            path = Path(raw_path)
-            if path in seen or path in preserved:
-                continue
-            seen.add(path)
-            try:
-                delete_prefix(self._storage, path)
-            except Exception:
-                delete_failures.append(path)
-                logger.warning("Failed to delete current-run parquet %s", path, exc_info=True)
-        if delete_failures:
-            raise RuntimeError(f"failed to delete current-run parquet: {delete_failures}")
-
-    def _catalog_current_paths(
-        self,
-        symbol: str,
-        data_type: str,
-        interval: str | None,
-        source_type: str | None,
-    ) -> set[Path]:
-        """Snapshot existing parquet paths for rollback-safe no-guard writers."""
-        target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
-        if target_dir is None:
-            return set()
-        try:
-            return {
-                Path(obj.path)
-                for obj in self._storage.iter_files(target_dir, suffix=".parquet", recursive=True)
-            }
-        except Exception:
-            logger.warning("Failed to snapshot catalog paths under %s", target_dir, exc_info=True)
-            return set()
 
 
     def ingest_sync(self, **kwargs) -> IngestResult:
@@ -1540,130 +870,43 @@ class BinanceVisionPipeline:
 
 
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _clean_overlapping_parquet(
+    def _consolidate_catalog_data(
         self,
         symbol: str,
         data_type: str,
         interval: str | None,
-        start: date,
-        end: date,
-    ) -> _ParquetCleanupGuard | None:
-        """Delete overlapping parquet only after creating rollback copies.
+    ) -> None:
+        """Run NT-native consolidation after streaming writes complete."""
+        from tinohelm.data.catalog import _catalog_for_root, consolidate_and_organize
+        from tinohelm.data.pipeline_helpers import resolve_write_category
 
-        Streaming writes need old overlapping files out of the target directory so
-        NT can return newly written files deterministically.  The destructive
-        delete is guarded by catalog-local rollback copies; if any later ingest
-        phase fails, the caller restores this guard before surfacing failure.
-        """
         category = resolve_write_category(data_type)
-        if data_type in {"markPriceKlines", "indexPriceKlines", "fundingRate"}:
-            target_dir = self._catalog_item_dir(symbol, data_type, interval, data_type)
-            if target_dir is None:
-                return None
-        elif category == "bar" and interval:
-            from tinohelm.data.catalog import _make_bar_type, _make_instrument, resolve_catalog_path
+        if category not in ("bar", "trade_tick", "quote_tick"):
+            return
+
+        catalog = _catalog_for_root(self.catalog_path, self._storage)
+
+        if category == "bar":
+            from nautilus_trader.model.data import Bar
+            from tinohelm.data.catalog import _make_bar_type, _make_instrument
+
             inst = _make_instrument(symbol)
             bar_type = _make_bar_type(inst.id, interval)
-            resolved = resolve_catalog_path(self.catalog_path, data_type)
-            target_dir = Path(resolved) / "data" / "bar" / str(bar_type)
-        elif category in {"trade_tick", "quote_tick"}:
-            from tinohelm.data.catalog import resolve_catalog_path
-            inst = self._get_instrument(symbol)
-            resolved = resolve_catalog_path(self.catalog_path, data_type)
-            nt_category = "quote_tick" if category == "quote_tick" else "trade_tick"
-            target_dir = Path(resolved) / "data" / nt_category / str(inst.id)
-        elif category in {"metrics", "order_book_delta", "funding_rate"}:
-            target_path = self._catalog_item_dir(symbol, data_type, interval, data_type)
-            if target_path is None:
-                return None
-            rollback_prefix = Path(self.catalog_path) / ".ingest-rollback" / uuid4().hex
-            guard = _ParquetCleanupGuard(
-                self._storage,
-                rollback_prefix,
-                target_dir=target_path,
-            )
-            try:
-                if self._storage.exists(target_path):
-                    if target_path.suffix == ".parquet":
-                        backup_path = rollback_prefix / target_path.name
-                        self._storage.copy_path(target_path, backup_path)
-                        guard.add_backup(target_path, backup_path)
-                    else:
-                        backup_dir = rollback_prefix / target_path.name
-                        for original_path in self._storage.iter_files(target_path, suffix=".parquet", recursive=False):
-                            backup_path = backup_dir / original_path.path.name
-                            self._storage.copy_path(original_path.path, backup_path)
-                            guard.add_backup(original_path.path, backup_path)
-            except FileNotFoundError:
-                pass
-            except Exception:
-                guard.restore()
-                raise
-            guard.persist_manifest()
-            return guard
-        else:
-            return None  # unsupported data types have no catalog cleanup target
+            consolidate_and_organize(catalog, Bar, str(bar_type))
+        elif category == "trade_tick":
+            from nautilus_trader.model.data import TradeTick
+            from tinohelm.strategy.loader_helpers import normalize_symbol
 
-        from tinohelm.data.storage import delete_prefix
+            consolidate_and_organize(catalog, TradeTick, normalize_symbol(symbol))
+        elif category == "quote_tick":
+            from nautilus_trader.model.data import QuoteTick
+            from tinohelm.strategy.loader_helpers import normalize_symbol
 
-        recursive = data_type in {"markPriceKlines", "indexPriceKlines", "fundingRate"}
-        parquet_objects = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=recursive))
+            consolidate_and_organize(catalog, QuoteTick, normalize_symbol(symbol))
 
-        start_ns = date_start_ns(start)
-        end_ns = date_end_ns(end)
-        overlapping: list[Any] = []
-
-        for obj in parquet_objects:
-            try:
-                time_range = self._parquet_time_range(obj, storage=self._storage)
-            except TypeError:
-                # Backward-compat for tests/callers monkeypatching the old
-                # one-argument helper signature.
-                time_range = self._parquet_time_range(obj.path)
-            if time_range is None:
-                # Cannot determine range — replace conservatively, but keep rollback.
-                overlapping.append(obj)
-                continue
-            file_min, file_max = time_range
-            if file_max >= start_ns and file_min < end_ns:
-                overlapping.append(obj)
-
-        rollback_prefix = Path(self.catalog_path) / ".ingest-rollback" / uuid4().hex
-        preserved_paths = {Path(obj.path) for obj in parquet_objects if obj not in overlapping}
-        original_paths = {Path(obj.path) for obj in parquet_objects}
-        guard = _ParquetCleanupGuard(
-            self._storage,
-            rollback_prefix,
-            target_dir=target_dir,
-            preserved_paths=preserved_paths,
-            original_paths=original_paths,
-        )
-        guard.persist_manifest()
-        if not overlapping:
-            return guard
-
-        try:
-            for obj in overlapping:
-                original_path = Path(obj.path)
-                backup_path = rollback_prefix / original_path.relative_to(target_dir)
-                self._storage.copy_path(original_path, backup_path)
-                guard.add_backup(original_path, backup_path)
-            guard.persist_manifest()
-            for obj in overlapping:
-                delete_prefix(self._storage, Path(obj.path))
-        except Exception:
-            guard.restore()
-            raise
-
-        logger.info(
-            "Cleaned %d overlapping parquet file(s) in %s for [%s, %s] with rollback",
-            len(overlapping), target_dir, start, end,
-        )
-        return guard
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _parquet_time_range(path_or_object, storage=None) -> tuple[int, int] | None:

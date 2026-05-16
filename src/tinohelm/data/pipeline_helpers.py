@@ -233,6 +233,78 @@ def parse_vision_coverage_end(granularity: str, stem: str) -> date | None:
 # CSV header sniffing
 # ---------------------------------------------------------------------------
 
+def detect_gaps(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Detect gaps in a sorted list of (start_ns, end_ns) intervals.
+
+    Parameters
+    ----------
+    intervals:
+        Sorted list of (start, end) nanosecond tuples as returned by
+        ``ParquetDataCatalog.get_intervals()``.
+
+    Returns
+    -------
+    List of (gap_start_ns, gap_end_ns) tuples where data is missing.
+    Adjacent intervals (end == next start) are not considered gaps.
+    """
+    gaps: list[tuple[int, int]] = []
+    for i in range(1, len(intervals)):
+        prev_end = intervals[i - 1][1]
+        curr_start = intervals[i][0]
+        if curr_start > prev_end:
+            gaps.append((prev_end, curr_start))
+    return gaps
+
+
+def expand_gaps_to_days(gaps: list[tuple[int, int]]) -> list[tuple[date, date]]:
+    """Expand nanosecond-level gaps to day-aligned date ranges for Binance Vision.
+
+    Logic:
+    - Start date: the calendar day containing gap_start. If gap_start is not at
+      midnight, ceil to the next day (because the partial day's data is already
+      in the preceding file). If gap_start IS at midnight, that day is fully missing.
+    - End date: the last calendar day with missing data. If gap_end is exactly at
+      midnight of day D, then D-1 is the last missing day. Otherwise, the day
+      containing gap_end is the last missing day (partial day needs re-download).
+
+    Exception: when start_day would exceed end_day (gap is within a single partial
+    day where both surrounding files already cover part of it), we still produce
+    that single day to ensure the gap can be filled by re-downloading.
+
+    This aligns with Binance Vision's daily/monthly CSV granularity.
+    """
+    if not gaps:
+        return []
+
+    result: list[tuple[date, date]] = []
+    for gap_start_ns, gap_end_ns in gaps:
+        start_dt = datetime.fromtimestamp(gap_start_ns / 1_000_000_000, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(gap_end_ns / 1_000_000_000, tz=timezone.utc)
+
+        is_start_midnight = (
+            start_dt.hour == 0
+            and start_dt.minute == 0
+            and start_dt.second == 0
+            and start_dt.microsecond == 0
+        )
+        start_day = start_dt.date() if is_start_midnight else start_dt.date() + timedelta(days=1)
+
+        is_end_midnight = (
+            end_dt.hour == 0
+            and end_dt.minute == 0
+            and end_dt.second == 0
+            and end_dt.microsecond == 0
+        )
+        end_day = end_dt.date() - timedelta(days=1) if is_end_midnight else end_dt.date() - timedelta(days=1)
+
+        if end_day < start_day:
+            start_day = start_dt.date()
+            end_day = start_day
+
+        result.append((start_day, end_day))
+    return result
+
+
 def csv_has_header(first_line: str) -> bool:
     """Return True if a CSV's first line looks like a text header.
 

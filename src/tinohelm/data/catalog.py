@@ -21,7 +21,6 @@ from tinohelm.data.catalog_helpers import (
     interval_to_nt_suffix,
     interval_to_step_unit,
     is_ohlc_valid,
-    merge_bars,
     ns_to_iso,
     nt_suffix_to_interval,
     resolve_catalog_path,
@@ -1322,18 +1321,14 @@ def write_bars(
     symbol: str,
     interval: str,
     catalog_path: str | Path,
-    merge: bool = True,
+    merge: bool = False,
     source_type: str | None = None,
     storage: Any | None = None,
 ) -> list[Path]:
     """Write pre-converted NT Bar objects to Parquet catalog.
 
-    When *merge* is True (default), reads existing bars, deduplicates,
-    deletes old parquet files, then writes everything in one write_data()
-    call — satisfying NT's disjoint-interval constraint.
-
-    When *merge* is False (streaming mode), writes directly without
-    reading existing data.  Caller must clean old files beforehand.
+    Uses write_data(skip_disjoint_check=True) for all writes. Deduplication
+    and consolidation are handled by the post-write consolidate_and_organize step.
 
     Returns list of written file paths.
     """
@@ -1347,109 +1342,18 @@ def write_bars(
     bar_type = _make_bar_type(instrument.id, interval)
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)
 
-    existing_files_to_delete: list[Path] = []
-    existing_objects_to_delete: list[Any] = []
-    merged_existing_bars = False
-    if merge:
-        # Merge with existing bars if present (incremental update case)
-        try:
-            if _is_remote_storage(storage):
-                existing_objects_to_delete = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
-                existing_files_to_delete = [obj.path for obj in existing_objects_to_delete]
-                existing_bars = []
-                if existing_objects_to_delete:
-                    catalog = _catalog_for_root(catalog_path, storage)
-                    existing_bars = catalog.bars(bar_types=[str(bar_type)])
-                    if not existing_bars:
-                        raise RuntimeError(
-                            f"Remote catalog has parquet objects but no readable bars for {symbol} {interval}"
-                        )
-            else:
-                catalog = _catalog_for_root(catalog_path, storage)
-                existing_bars = catalog.bars(bar_types=[str(bar_type)])
-            if existing_bars:
-                # Track old files — they will be deleted AFTER the merged write
-                # succeeds, so a crash between write and delete leaves the old
-                # data intact (at worst we have duplicate bars, not missing ones).
-                if not _is_remote_storage(storage):
-                    existing_files_to_delete = _iter_catalog_files(storage, bar_dir, recursive=False)
-
-                existing_count = len(existing_bars)
-                bars = merge_bars(existing_bars, bars)
-                merged_existing_bars = True
-                logger.info("Merged %d existing + %d new bars = %d total",
-                            existing_count, len(bars) - existing_count, len(bars))
-        except Exception:
-            if _is_remote_storage(storage):
-                raise
-            logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
-
-    if _is_remote_storage(storage) and merged_existing_bars:
-        from uuid import uuid4
-
-        from tinohelm.data.storage import delete_prefix, promote_objects_with_rollback
-
-        catalog = _catalog_for_root(catalog_path, storage)
-        catalog.write_data([instrument])
-
-        temp_catalog_path = catalog_path / ".merge" / f"{bar_type}-{uuid4().hex}"
-        rollback_prefix = catalog_path / ".merge-rollback" / f"{bar_type}-{uuid4().hex}"
-        try:
-            temp_catalog = _catalog_for_root(temp_catalog_path, storage)
-            temp_catalog.write_data([instrument])
-            temp_catalog.write_data(bars, skip_disjoint_check=True)
-            temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
-            temp_objects = list(storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False))
-            if not temp_objects:
-                raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
-
-            promote_objects_with_rollback(
-                storage,
-                temp_objects,
-                bar_dir,
-                existing_objects_to_delete,
-                rollback_prefix=rollback_prefix,
-            )
-        finally:
-            try:
-                delete_prefix(storage, temp_catalog_path)
-            except Exception:
-                logger.warning("Failed to clean temporary remote merge prefix %s", temp_catalog_path, exc_info=True)
-
-        written_files = _iter_catalog_files(storage, bar_dir, recursive=False)
-        if not written_files:
-            raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
-        logger.info("Wrote %d bars to remote catalog at %s", len(bars), catalog_path)
-        return written_files
+    existing = {str(p) for p in _iter_catalog_files(storage, bar_dir, recursive=False)}
 
     catalog = _catalog_for_root(catalog_path, storage)
     catalog.write_data([instrument])
-    # When merge=False (streaming mode), multiple files accumulate in the same
-    # directory within one ingest session.  NT uses P.closed() intervals so two
-    # files sharing a boundary nanosecond are treated as overlapping.  TinoHelm
-    # manages file lifecycle via _clean_overlapping_parquet, so it is safe to
-    # skip the disjoint check for append writes.
-    # When merge=True, skip_disjoint_check=True so the write succeeds even
-    # while old files still exist on disk (they are deleted afterwards).
     catalog.write_data(bars, skip_disjoint_check=True)
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
 
-    current_files = set(_iter_catalog_files(storage, bar_dir, recursive=False))
-    if not current_files:
-        raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
-
-    # Delete old parquet files AFTER the merged write has succeeded.  Skip any
-    # same-name output path; deleting by path after a rewrite can remove the
-    # freshly written parquet.
-    for old_file in existing_files_to_delete:
-        if old_file in current_files:
-            continue
-        if _is_remote_storage(storage):
-            storage.delete_path(old_file)
-        elif old_file.exists():
-            old_file.unlink()
-
-    return _iter_catalog_files(storage, bar_dir, recursive=False)
+    current = sorted({str(p) for p in _iter_catalog_files(storage, bar_dir, recursive=False)})
+    written = sorted(set(current) - existing)
+    if bars and not current:
+        raise RuntimeError(f"Bar write for {symbol} {interval} produced no parquet files under {bar_dir}")
+    return [Path(p) for p in (written or current)]
 
 
 def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
@@ -1810,6 +1714,46 @@ def funding_rate_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
     """
     return Path(catalog_root) / "data" / "funding_rate" / f"{symbol.lower()}.parquet"
 
+
+
+def consolidate_and_organize(
+    catalog,
+    data_cls: type,
+    identifier: str | None = None,
+) -> None:
+    """Consolidate and organize data using NT-native operations.
+
+    1. consolidate_data(deduplicate=True) — merge all fragments, remove dupes
+    2. consolidate_data_by_period(period=1w) — split into weekly files
+       (only when data spans more than one week)
+
+    Note: ensure_contiguous_files=False because NT's contiguity check requires
+    file timestamps to differ by exactly 1ns, which doesn't hold for bar data
+    (bars have step-width intervals). Data-level contiguity is guaranteed by
+    the gap detection + backfill step that runs before this function.
+    """
+    import pandas as pd
+
+    catalog.consolidate_data(
+        data_cls=data_cls,
+        identifier=identifier,
+        deduplicate=True,
+        ensure_contiguous_files=False,
+    )
+
+    intervals = catalog.get_intervals(data_cls, identifier)
+    if not intervals:
+        return
+
+    total_span_ns = intervals[-1][1] - intervals[0][0]
+    one_week_ns = 7 * 24 * 3600 * 1_000_000_000
+    if total_span_ns > one_week_ns:
+        catalog.consolidate_data_by_period(
+            data_cls=data_cls,
+            identifier=identifier,
+            period=pd.Timedelta(weeks=1),
+            ensure_contiguous_files=False,
+        )
 
 
 def read_funding_rate_parquet(

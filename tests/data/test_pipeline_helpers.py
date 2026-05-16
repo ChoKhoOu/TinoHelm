@@ -464,18 +464,3 @@ class TestCsvHasHeader:
 # 12. Cross-reference: helpers consumed by pipeline.py with same semantics
 # ---------------------------------------------------------------------------
 
-class TestCrossReferenceWithPipeline:
-    """Sanity-check that the pipeline module re-exports the helpers."""
-
-    def test_pipeline_module_uses_canonical_aliases(self):
-        # Avoid importing the heavy pipeline module just to read constants;
-        # use importlib + sys.modules check.
-        if "tinohelm.data.pipeline" not in sys.modules:
-            try:
-                import tinohelm.data.pipeline  # noqa: F401
-            except Exception:
-                pytest.skip("pipeline module unavailable in this env")
-        mod = sys.modules.get("tinohelm.data.pipeline")
-        assert mod is not None
-        assert mod._WRITE_CATEGORY is WRITE_CATEGORY
-        assert mod._INTERVAL_CONVENTION is INTERVAL_CONVENTION
