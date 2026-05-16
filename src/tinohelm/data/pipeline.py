@@ -880,12 +880,17 @@ class BinanceVisionPipeline:
         data_type: str,
         interval: str | None,
     ) -> None:
-        """Run NT-native consolidation after streaming writes complete."""
+        """Run NT-native consolidation after streaming writes complete.
+
+        All NT-native data types (bar, trade_tick, quote_tick, mark_price,
+        index_price, funding_rate) are consolidated. Custom single-file types
+        (metrics, order_book_delta) already deduplicate on write.
+        """
         from tinohelm.data.catalog import _catalog_for_root, consolidate_and_organize
         from tinohelm.data.pipeline_helpers import resolve_write_category
 
         category = resolve_write_category(data_type)
-        if category not in ("bar", "trade_tick", "quote_tick"):
+        if category in ("metrics", "order_book_delta", "liquidation", "custom"):
             return
 
         catalog = _catalog_for_root(self.catalog_path, self._storage)
@@ -907,6 +912,21 @@ class BinanceVisionPipeline:
             from tinohelm.strategy.loader_helpers import normalize_symbol
 
             consolidate_and_organize(catalog, QuoteTick, normalize_symbol(symbol))
+        elif category == "mark_price":
+            from nautilus_trader.model.data import MarkPriceUpdate
+            from tinohelm.strategy.loader_helpers import normalize_symbol
+
+            consolidate_and_organize(catalog, MarkPriceUpdate, normalize_symbol(symbol))
+        elif category == "index_price":
+            from nautilus_trader.model.data import IndexPriceUpdate
+            from tinohelm.strategy.loader_helpers import normalize_symbol
+
+            consolidate_and_organize(catalog, IndexPriceUpdate, normalize_symbol(symbol))
+        elif category == "funding_rate":
+            from nautilus_trader.model.data import FundingRateUpdate
+            from tinohelm.strategy.loader_helpers import normalize_symbol
+
+            consolidate_and_organize(catalog, FundingRateUpdate, normalize_symbol(symbol))
 
     # ------------------------------------------------------------------
     # Helpers
