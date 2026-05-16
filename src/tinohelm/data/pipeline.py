@@ -528,7 +528,8 @@ class BinanceVisionPipeline:
                         logger.warning(
                             "Gap backfill convert failed: %s", conv_exc,
                         )
-                    self._cleanup_raw_file(csv_path)
+                    finally:
+                        self._cleanup_raw_file(csv_path)
 
             # Re-consolidate after backfill writes
             post_consolidation_ok = True
