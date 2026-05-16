@@ -335,6 +335,8 @@ def classify_download_failures(
 
     last_success_idx = first_failed - 1
     last_success_date = task_dates[last_success_idx] if last_success_idx >= 0 else None
+    if last_success_date is None:
+        return DownloadFailureClassification(is_partial=False)
 
     return DownloadFailureClassification(
         is_partial=True,

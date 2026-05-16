@@ -171,6 +171,24 @@ class TestTailFourOhFourTolerance:
         )
         assert result.is_partial is False
 
+    def test_classify_none_last_success_date_is_hard_failure(self):
+        """If last success task date is None, fall back to hard failure."""
+        from tinohelm.data.pipeline_helpers import classify_download_failures
+
+        today = _utc_today()
+        # First task has unparseable date (None), second fails
+        task_dates = [None, today]
+        failed_indices = {1: _mock_404_exc()}
+        success_indices = {0}
+
+        result = classify_download_failures(
+            failed_indices=failed_indices,
+            success_indices=success_indices,
+            task_dates=task_dates,
+            tolerance_days=3,
+        )
+        assert result.is_partial is False
+
 
 # ---------------------------------------------------------------------------
 # IngestResult partial flag
