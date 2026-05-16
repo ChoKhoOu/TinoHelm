@@ -471,11 +471,15 @@ class BinanceVisionPipeline:
             await asyncio.to_thread(
                 self._consolidate_catalog_data, symbol, data_type, interval
             )
-        except Exception:
-            logger.warning(
-                "Consolidation failed for %s %s; data is written but not consolidated",
+        except Exception as consolidation_exc:
+            logger.error(
+                "Consolidation failed for %s %s; data is written but fragmented/duplicated",
                 symbol, data_type, exc_info=True,
             )
+            await _progress(100, f"Consolidation failed: {consolidation_exc}")
+            raise RuntimeError(
+                f"Data written successfully but consolidation failed for {symbol} {data_type}: {consolidation_exc}"
+            ) from consolidation_exc
 
         # 5. Update DB catalog
         try:

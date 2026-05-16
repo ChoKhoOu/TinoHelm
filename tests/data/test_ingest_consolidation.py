@@ -98,7 +98,7 @@ class TestExpandGapsToDays:
         # Gap from 2025-01-14 23:59 to 2025-01-18 00:01
         # Should expand to cover 2025-01-15 through 2025-01-17
         gap_start_ns = 1_736_899_140_000_000_000  # 2025-01-14 23:59:00 UTC
-        gap_end_ns = 1_737_158_460_000_000_000  # 2025-01-17 12:01:00 UTC
+        gap_end_ns = 1_737_158_460_000_000_000  # 2025-01-18 00:01:00 UTC
         gaps = [(gap_start_ns, gap_end_ns)]
         result = expand_gaps_to_days(gaps)
         assert len(result) == 1
