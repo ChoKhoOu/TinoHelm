@@ -12,11 +12,15 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +48,7 @@ class TestTailFourOhFourTolerance:
         """Trailing daily 404s within last 3 UTC days → partial, not failure."""
         from tinohelm.data.pipeline_helpers import classify_download_failures
 
-        today = date.today()
+        today = _utc_today()
         total_tasks = 10
         # Last 2 tasks (today and yesterday) are 404s — trailing suffix
         failed_indices = {8: _mock_404_exc(), 9: _mock_404_exc()}
@@ -64,7 +68,7 @@ class TestTailFourOhFourTolerance:
         """A 404 in the middle of the range is a hard failure."""
         from tinohelm.data.pipeline_helpers import classify_download_failures
 
-        today = date.today()
+        today = _utc_today()
         total_tasks = 10
         # Task index 5 (middle of range) is a 404
         failed_indices = {5: _mock_404_exc()}
@@ -83,7 +87,7 @@ class TestTailFourOhFourTolerance:
         """Trailing 404 older than 3 UTC days → hard failure."""
         from tinohelm.data.pipeline_helpers import classify_download_failures
 
-        today = date.today()
+        today = _utc_today()
         # All tasks are 5+ days old — trailing 404 is outside window
         task_dates = [today - timedelta(days=15 - i) for i in range(10)]
         failed_indices = {9: _mock_404_exc()}
@@ -101,7 +105,7 @@ class TestTailFourOhFourTolerance:
         """Non-404 errors (e.g. 500) are always hard failures."""
         from tinohelm.data.pipeline_helpers import classify_download_failures
 
-        today = date.today()
+        today = _utc_today()
         task_dates = [today - timedelta(days=2 - i) for i in range(3)]
         failed_indices = {2: _mock_500_exc()}
         success_indices = {0, 1}
@@ -118,7 +122,7 @@ class TestTailFourOhFourTolerance:
         """If no tasks succeeded at all, it's a hard failure regardless."""
         from tinohelm.data.pipeline_helpers import classify_download_failures
 
-        today = date.today()
+        today = _utc_today()
         task_dates = [today - timedelta(days=2 - i) for i in range(3)]
         failed_indices = {0: _mock_404_exc(), 1: _mock_404_exc(), 2: _mock_404_exc()}
         success_indices = set()
@@ -135,7 +139,7 @@ class TestTailFourOhFourTolerance:
         """IngestResult for partial completion has accurate end date."""
         from tinohelm.data.pipeline_helpers import classify_download_failures
 
-        today = date.today()
+        today = _utc_today()
         task_dates = [today - timedelta(days=4 - i) for i in range(5)]
         # Last 2 days failed (within tolerance)
         failed_indices = {3: _mock_404_exc(), 4: _mock_404_exc()}
@@ -149,6 +153,23 @@ class TestTailFourOhFourTolerance:
         )
         assert result.is_partial is True
         assert result.last_success_date == task_dates[2]
+
+    def test_classify_none_date_is_hard_failure(self):
+        """Failed task with unparseable date (None) → hard failure."""
+        from tinohelm.data.pipeline_helpers import classify_download_failures
+
+        today = _utc_today()
+        task_dates = [today - timedelta(days=2), today - timedelta(days=1), None]
+        failed_indices = {2: _mock_404_exc()}
+        success_indices = {0, 1}
+
+        result = classify_download_failures(
+            failed_indices=failed_indices,
+            success_indices=success_indices,
+            task_dates=task_dates,
+            tolerance_days=3,
+        )
+        assert result.is_partial is False
 
 
 # ---------------------------------------------------------------------------
