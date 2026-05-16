@@ -148,7 +148,7 @@ class TestExpandGapsToDays:
 
 
 class TestGapBackfillIntegration:
-    """_detect_and_backfill_gaps triggers re-download for missing date ranges."""
+    """_detect_gaps_for_backfill returns day ranges needing re-download."""
 
     def test_no_gaps_skips_backfill(self, tmp_path):
         """When catalog has contiguous intervals, no backfill triggered."""

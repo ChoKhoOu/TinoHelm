@@ -529,21 +529,24 @@ class BinanceVisionPipeline:
                     self._cleanup_raw_file(csv_path)
 
             # Re-consolidate after backfill writes
+            post_consolidation_ok = True
             try:
                 await asyncio.to_thread(
                     self._consolidate_catalog_data, symbol, data_type, interval
                 )
             except Exception:
+                post_consolidation_ok = False
                 logger.warning("Post-backfill consolidation failed", exc_info=True)
 
-            remaining_gaps = await asyncio.to_thread(
-                self._detect_gaps_for_backfill, symbol, data_type, interval
-            )
-            if remaining_gaps:
-                logger.warning(
-                    "%d gap(s) remain after backfill for %s %s (source data may be missing)",
-                    len(remaining_gaps), symbol, data_type,
+            if post_consolidation_ok:
+                remaining_gaps = await asyncio.to_thread(
+                    self._detect_gaps_for_backfill, symbol, data_type, interval
                 )
+                if remaining_gaps:
+                    logger.warning(
+                        "%d gap(s) remain after backfill for %s %s (source data may be missing)",
+                        len(remaining_gaps), symbol, data_type,
+                    )
 
         # 6. Update DB catalog
         try:
