@@ -624,11 +624,6 @@ class TestRecoverInterruptedJobs:
         monkeypatch.setattr(dw, "_flip_running_to_queued", _fake_flip)
         monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=9))
         monkeypatch.setattr(dw, "get_session_factory", lambda: factory_marker)
-        monkeypatch.setattr(
-            dw,
-            "_recover_pending_ingest_rollbacks_on_startup",
-            AsyncMock(return_value=0),
-        )
         rds = AsyncMock()
         count = await dw.recover_interrupted_jobs(rds)
 
@@ -641,11 +636,6 @@ class TestRecoverInterruptedJobs:
         monkeypatch.setattr(dw, "_flip_running_to_queued", AsyncMock(return_value=3))
         monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=12))
         monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
-        monkeypatch.setattr(
-            dw,
-            "_recover_pending_ingest_rollbacks_on_startup",
-            AsyncMock(return_value=0),
-        )
 
         rds = AsyncMock()
         await dw.recover_interrupted_jobs(rds)
@@ -659,50 +649,12 @@ class TestRecoverInterruptedJobs:
         monkeypatch.setattr(dw, "_flip_running_to_queued", AsyncMock(return_value=0))
         monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=0))
         monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
-        monkeypatch.setattr(
-            dw,
-            "_recover_pending_ingest_rollbacks_on_startup",
-            AsyncMock(return_value=0),
-        )
 
         rds = AsyncMock()
         await dw.recover_interrupted_jobs(rds)
 
         rds.lpush.assert_not_awaited()
 
-    async def test_startup_rollback_recovery_keeps_db_check_on_current_event_loop(
-        self, monkeypatch, tmp_path
-    ):
-        storage = SimpleNamespace(catalog_root=tmp_path / "catalog")
-        settings = SimpleNamespace(paths=SimpleNamespace(catalog=storage.catalog_root))
-        calls: dict = {}
-
-        async def fake_recover(catalog_path, *, storage):
-            calls["loop"] = asyncio.get_running_loop()
-            calls["catalog_path"] = catalog_path
-            calls["storage"] = storage
-            return 3
-
-        async def fail_to_thread(*_args, **_kwargs):
-            raise AssertionError("startup rollback recovery must not run inside asyncio.to_thread")
-
-        monkeypatch.setattr(dw, "get_settings", lambda: settings)
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda **_kwargs: storage)
-        monkeypatch.setattr(
-            "tinohelm.data.pipeline.recover_pending_ingest_rollbacks_async",
-            fake_recover,
-            raising=False,
-        )
-        monkeypatch.setattr(dw.asyncio, "to_thread", fail_to_thread)
-
-        restored = await dw._recover_pending_ingest_rollbacks_on_startup()
-
-        assert restored == 3
-        assert calls == {
-            "loop": asyncio.get_running_loop(),
-            "catalog_path": storage.catalog_root,
-            "storage": storage,
-        }
 
 
 # ---------------------------------------------------------------------------

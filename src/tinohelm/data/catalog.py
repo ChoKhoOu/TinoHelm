@@ -21,7 +21,6 @@ from tinohelm.data.catalog_helpers import (
     interval_to_nt_suffix,
     interval_to_step_unit,
     is_ohlc_valid,
-    merge_bars,
     ns_to_iso,
     nt_suffix_to_interval,
     resolve_catalog_path,
@@ -293,11 +292,9 @@ _UPDATE_SCAN_SPECS: tuple[tuple[str, str, str, str], ...] = (
 # Single-file-per-symbol Parquet categories: one parquet sitting in a shared
 # parent dir, named ``{symbol.lower()}.parquet``. Interval is a sentinel
 # string because these categories don't have a time-bucket: funding rates
-# land on Binance's 8h schedule, metrics / bookDepth are per-tick snapshots.
+# land on Binance's 8h schedule.
 _SINGLE_FILE_SCAN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("funding_rate", "fundingRate", "8h"),
-    ("metrics", "metrics", "tick"),
-    ("order_book_delta", "bookDepth", "tick"),
 )
 
 
@@ -352,8 +349,6 @@ class CatalogSession:
           the category (e.g. ``klines`` for ``bar``), the base path (flat layout)
           is also scanned and removed — this preserves the double-delete behaviour
           introduced when we migrated from flat to source-aware layouts.
-        - ``metrics`` / ``order_book_delta``: single parquet file at the canonical
-          per-symbol path.
         - ``funding_rate``: both the primary parquet and the read-side JSON cache
           at ``~/.tino/data/funding_rates/{symbol}.json``.
         """
@@ -374,10 +369,6 @@ class CatalogSession:
             return self._delete_parquet_dirs([mark_price_update_dir(symbol, self.catalog_path)])
         if data_type == "index_price":
             return self._delete_parquet_dirs([index_price_update_dir(symbol, self.catalog_path)])
-        if data_type == "metrics":
-            return self._delete_parquet_files([metrics_parquet_path(symbol, self.catalog_path)])
-        if data_type == "order_book_delta":
-            return self._delete_parquet_files([book_depth_parquet_path(symbol, self.catalog_path)])
         if data_type == "funding_rate":
             return self._delete_funding_rate(symbol)
         logger.warning("No storage handler for data_type=%r, removing DB row only", data_type)
@@ -570,11 +561,8 @@ class CatalogSession:
     def scan_single_files(self) -> ScanResult:
         """Discover per-symbol Parquet files for single-file categories.
 
-        Covers ``funding_rate`` / ``metrics`` / ``order_book_delta`` — each
-        lives at a canonical path keyed by ``symbol.lower()``. These were
-        silently missed by the pre-PR2 route scan; lifting the discovery into
-        the session closes that gap without re-scattering data-type knowledge
-        across call sites.
+        Covers ``funding_rate`` — lives at a canonical path keyed by
+        ``symbol.lower()``.
         """
         merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         scanned = 0
@@ -635,10 +623,6 @@ class CatalogSession:
         sentinel = "scan"
         if data_type == "funding_rate":
             return funding_rate_parquet_path(sentinel, self.catalog_path).parent
-        if data_type == "metrics":
-            return metrics_parquet_path(sentinel, self.catalog_path).parent
-        if data_type == "order_book_delta":
-            return book_depth_parquet_path(sentinel, self.catalog_path).parent
         return None
 
     @staticmethod
@@ -853,9 +837,9 @@ class CatalogSession:
         """Yield storage objects for one catalog row's parquet files.
 
         For directory-backed categories (bar/trade_tick/quote_tick) this walks
-        the target dir. For single-file categories (metrics / order_book_delta /
-        funding_rate) the target is already a concrete parquet path shared
-        between symbols in its parent dir, so we only return that one object.
+        the target dir. For single-file categories (funding_rate) the target
+        is already a concrete parquet path shared between symbols in its parent
+        dir, so we only return that one object.
         """
         storage = self.storage
         target = self._parquet_dir_for(symbol, data_type, interval, source_type)
@@ -893,10 +877,6 @@ class CatalogSession:
             return self.catalog_path / "data" / "bar" / make_bar_type_str(symbol, interval)
         if data_type in {"trade_tick", "quote_tick"}:
             return self.catalog_path / "data" / data_type / normalize_symbol(symbol)
-        if data_type == "metrics":
-            return metrics_parquet_path(symbol, self.catalog_path)
-        if data_type == "order_book_delta":
-            return book_depth_parquet_path(symbol, self.catalog_path)
         if data_type == "funding_rate":
             update_dir = funding_rate_update_dir(symbol, self.catalog_path)
             if _iter_catalog_files(self.storage, update_dir, recursive=True):
@@ -1322,18 +1302,14 @@ def write_bars(
     symbol: str,
     interval: str,
     catalog_path: str | Path,
-    merge: bool = True,
+    merge: bool = False,
     source_type: str | None = None,
     storage: Any | None = None,
 ) -> list[Path]:
     """Write pre-converted NT Bar objects to Parquet catalog.
 
-    When *merge* is True (default), reads existing bars, deduplicates,
-    deletes old parquet files, then writes everything in one write_data()
-    call — satisfying NT's disjoint-interval constraint.
-
-    When *merge* is False (streaming mode), writes directly without
-    reading existing data.  Caller must clean old files beforehand.
+    Uses write_data(skip_disjoint_check=True) for all writes. Deduplication
+    and consolidation are handled by the post-write consolidate_and_organize step.
 
     Returns list of written file paths.
     """
@@ -1347,109 +1323,18 @@ def write_bars(
     bar_type = _make_bar_type(instrument.id, interval)
     bar_dir = catalog_path / "data" / "bar" / str(bar_type)
 
-    existing_files_to_delete: list[Path] = []
-    existing_objects_to_delete: list[Any] = []
-    merged_existing_bars = False
-    if merge:
-        # Merge with existing bars if present (incremental update case)
-        try:
-            if _is_remote_storage(storage):
-                existing_objects_to_delete = list(storage.iter_files(bar_dir, suffix=".parquet", recursive=False))
-                existing_files_to_delete = [obj.path for obj in existing_objects_to_delete]
-                existing_bars = []
-                if existing_objects_to_delete:
-                    catalog = _catalog_for_root(catalog_path, storage)
-                    existing_bars = catalog.bars(bar_types=[str(bar_type)])
-                    if not existing_bars:
-                        raise RuntimeError(
-                            f"Remote catalog has parquet objects but no readable bars for {symbol} {interval}"
-                        )
-            else:
-                catalog = _catalog_for_root(catalog_path, storage)
-                existing_bars = catalog.bars(bar_types=[str(bar_type)])
-            if existing_bars:
-                # Track old files — they will be deleted AFTER the merged write
-                # succeeds, so a crash between write and delete leaves the old
-                # data intact (at worst we have duplicate bars, not missing ones).
-                if not _is_remote_storage(storage):
-                    existing_files_to_delete = _iter_catalog_files(storage, bar_dir, recursive=False)
-
-                existing_count = len(existing_bars)
-                bars = merge_bars(existing_bars, bars)
-                merged_existing_bars = True
-                logger.info("Merged %d existing + %d new bars = %d total",
-                            existing_count, len(bars) - existing_count, len(bars))
-        except Exception:
-            if _is_remote_storage(storage):
-                raise
-            logger.warning("Failed to read existing bars for %s %s, writing fresh", symbol, interval, exc_info=True)
-
-    if _is_remote_storage(storage) and merged_existing_bars:
-        from uuid import uuid4
-
-        from tinohelm.data.storage import delete_prefix, promote_objects_with_rollback
-
-        catalog = _catalog_for_root(catalog_path, storage)
-        catalog.write_data([instrument])
-
-        temp_catalog_path = catalog_path / ".merge" / f"{bar_type}-{uuid4().hex}"
-        rollback_prefix = catalog_path / ".merge-rollback" / f"{bar_type}-{uuid4().hex}"
-        try:
-            temp_catalog = _catalog_for_root(temp_catalog_path, storage)
-            temp_catalog.write_data([instrument])
-            temp_catalog.write_data(bars, skip_disjoint_check=True)
-            temp_bar_dir = temp_catalog_path / "data" / "bar" / str(bar_type)
-            temp_objects = list(storage.iter_files(temp_bar_dir, suffix=".parquet", recursive=False))
-            if not temp_objects:
-                raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
-
-            promote_objects_with_rollback(
-                storage,
-                temp_objects,
-                bar_dir,
-                existing_objects_to_delete,
-                rollback_prefix=rollback_prefix,
-            )
-        finally:
-            try:
-                delete_prefix(storage, temp_catalog_path)
-            except Exception:
-                logger.warning("Failed to clean temporary remote merge prefix %s", temp_catalog_path, exc_info=True)
-
-        written_files = _iter_catalog_files(storage, bar_dir, recursive=False)
-        if not written_files:
-            raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
-        logger.info("Wrote %d bars to remote catalog at %s", len(bars), catalog_path)
-        return written_files
+    existing = {str(p) for p in _iter_catalog_files(storage, bar_dir, recursive=False)}
 
     catalog = _catalog_for_root(catalog_path, storage)
     catalog.write_data([instrument])
-    # When merge=False (streaming mode), multiple files accumulate in the same
-    # directory within one ingest session.  NT uses P.closed() intervals so two
-    # files sharing a boundary nanosecond are treated as overlapping.  TinoHelm
-    # manages file lifecycle via _clean_overlapping_parquet, so it is safe to
-    # skip the disjoint check for append writes.
-    # When merge=True, skip_disjoint_check=True so the write succeeds even
-    # while old files still exist on disk (they are deleted afterwards).
     catalog.write_data(bars, skip_disjoint_check=True)
     logger.info("Wrote %d bars to catalog at %s", len(bars), catalog_path)
 
-    current_files = set(_iter_catalog_files(storage, bar_dir, recursive=False))
-    if not current_files:
-        raise RuntimeError(f"Merged write produced no parquet files for {symbol} {interval}")
-
-    # Delete old parquet files AFTER the merged write has succeeded.  Skip any
-    # same-name output path; deleting by path after a rewrite can remove the
-    # freshly written parquet.
-    for old_file in existing_files_to_delete:
-        if old_file in current_files:
-            continue
-        if _is_remote_storage(storage):
-            storage.delete_path(old_file)
-        elif old_file.exists():
-            old_file.unlink()
-
-    return _iter_catalog_files(storage, bar_dir, recursive=False)
+    current = sorted({str(p) for p in _iter_catalog_files(storage, bar_dir, recursive=False)})
+    written = sorted(set(current) - existing)
+    if bars and not current:
+        raise RuntimeError(f"Bar write for {symbol} {interval} produced no parquet files under {bar_dir}")
+    return [Path(p) for p in (written or current)]
 
 
 def compact_bars(symbol: str, interval: str, catalog_path: str | Path) -> dict:
@@ -1659,111 +1544,6 @@ def book_depth_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
     return Path(catalog_root) / "book_depth" / "bookDepth" / "data" / "book_depth" / f"{symbol.lower()}.parquet"
 
 
-def _write_raw_records_parquet(
-    records: list,
-    out_path: Path,
-    rows: list[dict[str, Any]],
-    dedupe_subset: list[str],
-    storage: Any | None = None,
-) -> Path:
-    import fcntl
-    import os
-    import tempfile
-    from io import BytesIO
-
-    import polars as pl
-
-    frame = pl.DataFrame(rows)
-    if not _is_remote_storage(storage):
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = _catalog_write_lock_path(out_path, storage)
-    with lock_path.open("a+b") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            if _is_remote_storage(storage):
-                try:
-                    exists = storage.exists(out_path)
-                except FileNotFoundError:
-                    exists = False
-                if exists:
-                    try:
-                        existing_bytes = storage.read_bytes(out_path)
-                    except FileNotFoundError:
-                        existing_bytes = None
-                    else:
-                        frame = pl.concat([
-                            pl.read_parquet(BytesIO(existing_bytes)),
-                            frame,
-                        ], how="diagonal_relaxed")
-                frame = frame.sort(dedupe_subset).unique(
-                    subset=dedupe_subset,
-                    keep="last",
-                    maintain_order=True,
-                )
-                buf = BytesIO()
-                frame.write_parquet(buf)
-                storage.upload_bytes(out_path, buf.getvalue())
-                logger.info("Wrote %d raw rows to remote %s", len(records), out_path)
-                return out_path
-
-            if out_path.exists():
-                try:
-                    frame = pl.concat([pl.read_parquet(out_path), frame], how="diagonal_relaxed")
-                except Exception as exc:
-                    raise RuntimeError(f"failed to read existing raw parquet at {out_path}") from exc
-            frame = frame.sort(dedupe_subset).unique(
-                subset=dedupe_subset,
-                keep="last",
-                maintain_order=True,
-            )
-            fd, tmp_name = tempfile.mkstemp(prefix=f".{out_path.name}.", suffix=".tmp", dir=out_path.parent)
-            os.close(fd)
-            tmp_path = Path(tmp_name)
-            try:
-                frame.write_parquet(tmp_path)
-                os.replace(tmp_path, out_path)
-            finally:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    logger.info("Wrote %d raw rows to %s", len(records), out_path)
-    return out_path
-
-
-def write_metrics_parquet(records: list, symbol: str, catalog_root: str | Path, storage: Any | None = None) -> Path:
-    """Write BinanceMetrics dataclass records as source-aware raw Parquet."""
-    rows: list[dict[str, Any]] = []
-    for record in records:
-        open_interest = float(getattr(record, "open_interest"))
-        rows.append({
-            "symbol": str(getattr(record, "symbol", symbol)),
-            "ts_event": int(getattr(record, "ts_event")),
-            "ts_init": int(getattr(record, "ts_init", getattr(record, "ts_event"))),
-            "open_interest": open_interest,
-            "sum_open_interest": open_interest,
-            "open_interest_value": float(getattr(record, "open_interest_value")),
-            "toptrader_long_short_ratio_count": float(getattr(record, "toptrader_long_short_ratio_count", 0.0)),
-            "toptrader_long_short_ratio_sum": float(getattr(record, "toptrader_long_short_ratio_sum", 0.0)),
-            "global_long_short_ratio": float(getattr(record, "global_long_short_ratio", 0.0)),
-            "taker_long_short_vol_ratio": float(getattr(record, "taker_long_short_vol_ratio", 0.0)),
-        })
-    return _write_raw_records_parquet(records, metrics_parquet_path(symbol, catalog_root), rows, ["ts_event"], storage=storage)
-
-
-def write_book_depth_parquet(records: list, symbol: str, catalog_root: str | Path, storage: Any | None = None) -> Path:
-    """Write BinanceBookDepth dataclass records as source-aware raw Parquet."""
-    rows: list[dict[str, Any]] = []
-    for record in records:
-        rows.append({
-            "symbol": str(getattr(record, "symbol", symbol)),
-            "ts_event": int(getattr(record, "ts_event")),
-            "ts_init": int(getattr(record, "ts_init", getattr(record, "ts_event"))),
-            "percentage": float(getattr(record, "percentage")),
-            "depth": float(getattr(record, "depth")),
-            "notional": float(getattr(record, "notional")),
-        })
-    return _write_raw_records_parquet(records, book_depth_parquet_path(symbol, catalog_root), rows, ["ts_event", "percentage"], storage=storage)
 
 
 def read_metrics_parquet(symbol: str, catalog_root: str | Path) -> "pl.DataFrame | None":
@@ -1810,6 +1590,46 @@ def funding_rate_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
     """
     return Path(catalog_root) / "data" / "funding_rate" / f"{symbol.lower()}.parquet"
 
+
+
+def consolidate_and_organize(
+    catalog,
+    data_cls: type,
+    identifier: str | None = None,
+) -> None:
+    """Consolidate and organize data using NT-native operations.
+
+    1. consolidate_data(deduplicate=True) — merge all fragments, remove dupes
+    2. consolidate_data_by_period(period=1w) — split into weekly files
+       (only when data spans more than one week)
+
+    Note: ensure_contiguous_files=False because NT's contiguity check requires
+    file timestamps to differ by exactly 1ns, which doesn't hold for bar data
+    (bars have step-width intervals). Data-level contiguity is guaranteed by
+    the gap detection + backfill step that runs before this function.
+    """
+    import pandas as pd
+
+    catalog.consolidate_data(
+        data_cls=data_cls,
+        identifier=identifier,
+        deduplicate=True,
+        ensure_contiguous_files=False,
+    )
+
+    intervals = catalog.get_intervals(data_cls, identifier)
+    if not intervals:
+        return
+
+    total_span_ns = intervals[-1][1] - intervals[0][0]
+    one_week_ns = 7 * 24 * 3600 * 1_000_000_000
+    if total_span_ns > one_week_ns:
+        catalog.consolidate_data_by_period(
+            data_cls=data_cls,
+            identifier=identifier,
+            period=pd.Timedelta(weeks=1),
+            ensure_contiguous_files=False,
+        )
 
 
 def read_funding_rate_parquet(

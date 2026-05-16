@@ -47,9 +47,7 @@ DATA_TYPE_AVAILABILITY: dict[str, tuple[bool, bool]] = {
     "markPriceKlines":      (True,  True),
     "premiumIndexKlines":   (True,  True),
     "fundingRate":          (False, True),   # monthly only
-    "bookDepth":            (True,  False),  # daily only
     # "liquidationSnapshot" — not available on data.binance.vision (verified 2026-04)
-    "metrics":              (True,  False),  # daily only
 }
 
 # klines-family types have an extra {interval} path segment in the URL

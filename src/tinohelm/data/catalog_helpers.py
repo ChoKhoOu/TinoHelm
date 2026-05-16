@@ -84,9 +84,7 @@ CATEGORY_DIR: Mapping[str, str] = MappingProxyType({
 
 # Write categories that ``catalog.write_bars`` / ``write_trade_ticks`` /
 # ``write_quote_ticks`` know how to produce via Nautilus ParquetDataCatalog.
-# Non-NT raw datasets such as ``funding_rate``, ``order_book_delta``,
-# ``liquidation`` and ``metrics`` are written by source-specific Parquet/JSON
-# helpers and therefore fall through to the base path in ``resolve_catalog_path``.
+# All data types use NT-native Parquet format via ``ParquetDataCatalog``.
 WRITABLE_CATEGORIES: frozenset[str] = frozenset(CATEGORY_DIR.keys())
 
 
