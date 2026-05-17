@@ -1524,7 +1524,8 @@ class TestWorkerLifecycle:
         captured = {}
 
         class _Result:
-            rowcount = 1
+            def all(self):
+                return []
 
         class _DB:
             async def __aenter__(self):
@@ -1549,6 +1550,45 @@ class TestWorkerLifecycle:
         assert captured.get("committed") is True
         assert "started_at" in captured["stmt"]
         assert "created_at" not in captured["stmt"]
+
+    async def test_orphan_sweeper_publishes_failed_events(self, monkeypatch):
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        fake_rds = AsyncMock()
+        fake_rds.close = AsyncMock()
+
+        class _Result:
+            def all(self):
+                return [SimpleNamespace(job_id="job-1", symbol="BTCUSDT", data_type="klines")]
+
+        class _DB:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, _stmt):
+                return _Result()
+
+            async def commit(self):
+                return None
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: lambda: _DB())
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+        monkeypatch.setattr(dw, "get_settings", lambda: SimpleNamespace(redis=SimpleNamespace(url="redis://x")))
+        monkeypatch.setattr(dw, "_utcnow_naive", lambda: datetime(2026, 1, 1, 12, 10, 0))
+
+        count = await dw._sweep_orphan_running_jobs()
+
+        assert count == 1
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-1"
+        fake_rds.close.assert_awaited_once()
 
     async def test_stop_cancels_running_task(self, monkeypatch):
         async def _fake_consumer(*_a, **_k):

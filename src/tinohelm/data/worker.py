@@ -1054,6 +1054,7 @@ async def _sweep_orphan_running_jobs() -> int:
     """
     factory = get_session_factory()
     cutoff = _utcnow_naive() - timedelta(seconds=_ORPHAN_RUNNING_THRESHOLD)
+    failure_error = "Marked failed by orphan sweeper: job exceeded running time threshold"
     async with factory() as db:
         result = await db.execute(
             update(DataFetchJob)
@@ -1063,15 +1064,31 @@ async def _sweep_orphan_running_jobs() -> int:
             .where(DataFetchJob.started_at < cutoff)
             .values(
                 status=STATUS_FAILED,
-                error="Marked failed by orphan sweeper: job exceeded running time threshold",
+                error=failure_error,
                 started_at=None,
                 completed_at=_utcnow_naive(),
             )
+            .returning(DataFetchJob.job_id, DataFetchJob.symbol, DataFetchJob.data_type)
         )
+        swept_rows = result.all()
         await db.commit()
-    count = result.rowcount or 0
+    count = len(swept_rows)
     if count:
         logger.warning("Orphan sweeper marked %d stale running job(s) as failed", count)
+        rds = aioredis.from_url(get_settings().redis.url, decode_responses=True)
+        try:
+            for row in swept_rows:
+                await rds.publish("tino:data:events", json.dumps({
+                    "type": "data.fetch.failed",
+                    "job_id": row.job_id,
+                    "symbol": row.symbol,
+                    "data_type": row.data_type,
+                    "error": failure_error[:200],
+                }))
+        except Exception:
+            logger.exception("Failed to publish orphan sweep failure events")
+        finally:
+            await rds.close()
     return count
 
 
