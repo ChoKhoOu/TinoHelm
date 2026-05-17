@@ -49,9 +49,7 @@ pub enum DataCmd {
     /// List available data catalog
     List,
     /// Show data info for a symbol
-    Info {
-        symbol: String,
-    },
+    Info { symbol: String },
     /// Consolidate stored data for a symbol/interval
     Consolidate {
         /// Symbol (e.g., BTCUSDT-PERP)
@@ -118,13 +116,9 @@ pub enum JobsCmd {
     /// List active/recent fetch jobs
     List,
     /// Get status of a specific job
-    Get {
-        job_id: String,
-    },
+    Get { job_id: String },
     /// Cancel a running job
-    Cancel {
-        job_id: String,
-    },
+    Cancel { job_id: String },
 }
 
 fn is_bar_data_type(data_type: &str) -> bool {
@@ -223,7 +217,10 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
                     for item in &items {
                         let sym = item.get("symbol").and_then(|v| v.as_str()).unwrap_or("?");
                         let ivl = item.get("interval").and_then(|v| v.as_str()).unwrap_or("?");
-                        let start_d = item.get("start_date").and_then(|v| v.as_str()).unwrap_or("-");
+                        let start_d = item
+                            .get("start_date")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-");
                         let end_d = item.get("end_date").and_then(|v| v.as_str()).unwrap_or("-");
                         t.row(&[&accent(sym), ivl, start_d, end_d]);
                     }
@@ -336,7 +333,10 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             yes,
         } => {
             if !yes {
-                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm delete-range"), format);
+                crate::output::print_error(
+                    &anyhow::anyhow!("use --yes to confirm delete-range"),
+                    format,
+                );
                 std::process::exit(1);
             }
             let body = serde_json::json!({
@@ -346,7 +346,13 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
                 "end": end,
             });
             let resp = client
-                .request_json(reqwest::Method::POST, "/api/data/delete-range", &[], Some(body), &[])
+                .request_json(
+                    reqwest::Method::POST,
+                    "/api/data/delete-range",
+                    &[],
+                    Some(body),
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),
@@ -363,7 +369,13 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             }
             let body = serde_json::json!({"symbol": symbol});
             let resp = client
-                .request_json(reqwest::Method::DELETE, &format!("/api/data/{}", symbol), &[], Some(body), &[])
+                .request_json(
+                    reqwest::Method::DELETE,
+                    &format!("/api/data/{}", symbol),
+                    &[],
+                    Some(body),
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),

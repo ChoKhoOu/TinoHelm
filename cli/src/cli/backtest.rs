@@ -422,8 +422,8 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
             let mx = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let rng = if mx > mn { mx - mn } else { 1.0 };
             let spark_chars = [
-                '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
-                '\u{2587}', '\u{2588}',
+                '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+                '\u{2588}',
             ];
             let target = values.len().min(58);
             let step = (values.len() / target).max(1);
@@ -553,7 +553,10 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                     kv("Run ID", &accent(&resp.run_id), 12);
                     kv("Strategy", &strategy, 12);
                     println!();
-                    println!("    Track: {}", dim(&format!("tino backtest wait {}", resp.run_id)));
+                    println!(
+                        "    Track: {}",
+                        dim(&format!("tino backtest wait {}", resp.run_id))
+                    );
                     println!();
                     Ok(())
                 }
@@ -670,11 +673,7 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                 elapsed += poll_interval;
             }
             println!();
-            eprintln!(
-                "  {} after {}s",
-                "Timeout".with(NEG).bold(),
-                timeout,
-            );
+            eprintln!("  {} after {}s", "Timeout".with(NEG).bold(), timeout,);
             std::process::exit(1);
         }
         BacktestCmd::Cancel { run_id } => {
@@ -686,7 +685,10 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             match format {
                 OutputFormat::Json => print_json(&json_data),
                 OutputFormat::Text => {
-                    println!("  Cancelled {}", accent(&data.run_id[..8.min(data.run_id.len())]));
+                    println!(
+                        "  Cancelled {}",
+                        accent(&data.run_id[..8.min(data.run_id.len())])
+                    );
                     Ok(())
                 }
             }
@@ -696,7 +698,10 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             match format {
                 OutputFormat::Json => print_json(&data),
                 OutputFormat::Text => {
-                    println!("  Deleted backtest {}", accent(&run_id[..8.min(run_id.len())]));
+                    println!(
+                        "  Deleted backtest {}",
+                        accent(&run_id[..8.min(run_id.len())])
+                    );
                     Ok(())
                 }
             }
@@ -713,7 +718,11 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                 OutputFormat::Text => {
                     header("Backtest Comparison");
                     divider(50);
-                    println!("  A: {}  vs  B: {}", accent(&id1[..8.min(id1.len())]), accent(&id2[..8.min(id2.len())]));
+                    println!(
+                        "  A: {}  vs  B: {}",
+                        accent(&id1[..8.min(id1.len())]),
+                        accent(&id2[..8.min(id2.len())])
+                    );
                     println!();
                     Ok(())
                 }
@@ -734,7 +743,13 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                 "end_date": end,
             });
             let resp = client
-                .request_json(reqwest::Method::POST, "/api/backtest/estimate", &[], Some(body), &[])
+                .request_json(
+                    reqwest::Method::POST,
+                    "/api/backtest/estimate",
+                    &[],
+                    Some(body),
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),
@@ -920,7 +935,10 @@ async fn dispatch_artifacts(
             match format {
                 OutputFormat::Json => print_json(&resp.body),
                 OutputFormat::Text => {
-                    header(&format!("Artifacts for {}", accent(&run_id[..8.min(run_id.len())])));
+                    header(&format!(
+                        "Artifacts for {}",
+                        accent(&run_id[..8.min(run_id.len())])
+                    ));
                     println!("  {}", serde_json::to_string_pretty(&resp.body)?);
                     println!();
                     Ok(())
@@ -945,7 +963,11 @@ async fn dispatch_artifacts(
             match format {
                 OutputFormat::Json => print_json(&data),
                 OutputFormat::Text => {
-                    println!("  Downloaded {} ({} bytes)", accent(&output_path), resp.bytes.len());
+                    println!(
+                        "  Downloaded {} ({} bytes)",
+                        accent(&output_path),
+                        resp.bytes.len()
+                    );
                     Ok(())
                 }
             }

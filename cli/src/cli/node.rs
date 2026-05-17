@@ -207,7 +207,10 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) ->
                         println!("  No nodes configured.");
                     } else {
                         for (mode, info) in &nodes {
-                            let st = info.get("status").and_then(|v| v.as_str()).unwrap_or("stopped");
+                            let st = info
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("stopped");
                             println!(
                                 "  {} {}  {}",
                                 node_badge(st),
@@ -273,11 +276,20 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) ->
         NodeCmd::PaperConfig { command } => dispatch_paper_config(command, client, format).await,
         NodeCmd::PaperReset { yes } => {
             if !yes {
-                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm paper trading reset"), format);
+                crate::output::print_error(
+                    &anyhow::anyhow!("use --yes to confirm paper trading reset"),
+                    format,
+                );
                 std::process::exit(1);
             }
             let resp = client
-                .request_json(reqwest::Method::POST, "/api/node/paper/reset", &[], None, &[])
+                .request_json(
+                    reqwest::Method::POST,
+                    "/api/node/paper/reset",
+                    &[],
+                    None,
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),
@@ -289,7 +301,13 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) ->
         }
         NodeCmd::DataStatus => {
             let resp = client
-                .request_json(reqwest::Method::GET, "/api/node/data-status", &[], None, &[])
+                .request_json(
+                    reqwest::Method::GET,
+                    "/api/node/data-status",
+                    &[],
+                    None,
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),
@@ -301,7 +319,13 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) ->
         }
         NodeCmd::Subscriptions => {
             let resp = client
-                .request_json(reqwest::Method::GET, "/api/node/subscriptions", &[], None, &[])
+                .request_json(
+                    reqwest::Method::GET,
+                    "/api/node/subscriptions",
+                    &[],
+                    None,
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),
@@ -378,7 +402,10 @@ async fn dispatch_lifecycle(
             yes,
         } => {
             if !yes {
-                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm flatten"), format);
+                crate::output::print_error(
+                    &anyhow::anyhow!("use --yes to confirm flatten"),
+                    format,
+                );
                 std::process::exit(1);
             }
             let result = client
@@ -418,7 +445,10 @@ async fn dispatch_lifecycle(
         }
         LifecycleCmd::Shutdown { mode, yes } => {
             if !yes {
-                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm shutdown"), format);
+                crate::output::print_error(
+                    &anyhow::anyhow!("use --yes to confirm shutdown"),
+                    format,
+                );
                 std::process::exit(1);
             }
             let result = client.lifecycle_command("shutdown", &mode, None).await?;
@@ -520,7 +550,10 @@ async fn dispatch_portfolio(
         }
         PortfolioCmd::FlattenStop { name, mode, yes } => {
             if !yes {
-                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm flatten-stop for portfolio '{}'", name), format);
+                crate::output::print_error(
+                    &anyhow::anyhow!("use --yes to confirm flatten-stop for portfolio '{}'", name),
+                    format,
+                );
                 std::process::exit(1);
             }
             let resp = client.flatten_stop_portfolio(&name, &mode).await?;
@@ -544,7 +577,13 @@ async fn dispatch_risk_limits(
         RiskLimitsCmd::Get { mode } => {
             let query = [("mode".to_string(), mode)];
             let resp = client
-                .request_json(reqwest::Method::GET, "/api/node/risk-limits", &query, None, &[])
+                .request_json(
+                    reqwest::Method::GET,
+                    "/api/node/risk-limits",
+                    &query,
+                    None,
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),
@@ -571,7 +610,13 @@ async fn dispatch_risk_limits(
                 body["max_leverage"] = serde_json::json!(v);
             }
             let resp = client
-                .request_json(reqwest::Method::POST, "/api/node/risk-limits", &[], Some(body), &[])
+                .request_json(
+                    reqwest::Method::POST,
+                    "/api/node/risk-limits",
+                    &[],
+                    Some(body),
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),
@@ -592,7 +637,13 @@ async fn dispatch_paper_config(
     match cmd {
         PaperConfigCmd::Get => {
             let resp = client
-                .request_json(reqwest::Method::GET, "/api/node/paper/config", &[], None, &[])
+                .request_json(
+                    reqwest::Method::GET,
+                    "/api/node/paper/config",
+                    &[],
+                    None,
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),
@@ -611,7 +662,13 @@ async fn dispatch_paper_config(
                 body["leverage"] = serde_json::json!(v);
             }
             let resp = client
-                .request_json(reqwest::Method::POST, "/api/node/paper/config", &[], Some(body), &[])
+                .request_json(
+                    reqwest::Method::POST,
+                    "/api/node/paper/config",
+                    &[],
+                    Some(body),
+                    &[],
+                )
                 .await?;
             match format {
                 OutputFormat::Json => print_json(&resp.body),

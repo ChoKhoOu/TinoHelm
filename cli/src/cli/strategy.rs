@@ -90,11 +90,7 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: OutputFormat
                     for s in &strategies {
                         let stype = s.strategy_type.as_deref().unwrap_or("single");
                         let cls = s.strategy_class.as_deref().unwrap_or("-");
-                        t.row(&[
-                            &bold(&accent(&s.name[..20.min(s.name.len())])),
-                            stype,
-                            cls,
-                        ]);
+                        t.row(&[&bold(&accent(&s.name[..20.min(s.name.len())])), stype, cls]);
                     }
                     t.footer();
                     println!("    {} strategies", strategies.len());
@@ -111,11 +107,7 @@ pub async fn dispatch(cmd: StrategyCmd, client: &ApiClient, format: OutputFormat
                     header(&format!("Strategy: {}", accent(&s.name)));
                     divider(50);
                     kv("Name", &bold(&s.name), 16);
-                    kv(
-                        "Type",
-                        s.strategy_type.as_deref().unwrap_or("single"),
-                        16,
-                    );
+                    kv("Type", s.strategy_type.as_deref().unwrap_or("single"), 16);
                     kv(
                         "Strategy Class",
                         s.strategy_class.as_deref().unwrap_or("-"),

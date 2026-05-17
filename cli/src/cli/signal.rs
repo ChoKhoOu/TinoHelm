@@ -67,7 +67,13 @@ pub async fn dispatch(cmd: SignalCmd, client: &ApiClient, format: OutputFormat) 
                 include_deprecated.to_string(),
             )];
             call_and_print(
-                client, format, Method::GET, "/api/signal/list", query, None, vec![],
+                client,
+                format,
+                Method::GET,
+                "/api/signal/list",
+                query,
+                None,
+                vec![],
                 "signal.list",
             )
             .await
@@ -75,7 +81,13 @@ pub async fn dispatch(cmd: SignalCmd, client: &ApiClient, format: OutputFormat) 
         SignalCmd::Run(args) => {
             let body = body_required(args)?;
             call_and_print(
-                client, format, Method::POST, "/api/signal/run", vec![], Some(body), vec![],
+                client,
+                format,
+                Method::POST,
+                "/api/signal/run",
+                vec![],
+                Some(body),
+                vec![],
                 "signal.run",
             )
             .await
@@ -97,7 +109,13 @@ pub async fn dispatch(cmd: SignalCmd, client: &ApiClient, format: OutputFormat) 
                 query.push(("signal_name".to_string(), name));
             }
             call_and_print(
-                client, format, Method::GET, "/api/signal/runs", query, None, vec![],
+                client,
+                format,
+                Method::GET,
+                "/api/signal/runs",
+                query,
+                None,
+                vec![],
                 "signal.runs",
             )
             .await
@@ -105,7 +123,13 @@ pub async fn dispatch(cmd: SignalCmd, client: &ApiClient, format: OutputFormat) 
         SignalCmd::Report { run_id } => {
             let path = format!("/api/signal/report/{run_id}");
             call_and_print(
-                client, format, Method::GET, &path, vec![], None, vec![],
+                client,
+                format,
+                Method::GET,
+                &path,
+                vec![],
+                None,
+                vec![],
                 "signal.report",
             )
             .await
@@ -113,7 +137,13 @@ pub async fn dispatch(cmd: SignalCmd, client: &ApiClient, format: OutputFormat) 
         SignalCmd::Cancel { run_id } => {
             let path = format!("/api/signal/cancel/{run_id}");
             call_and_print(
-                client, format, Method::POST, &path, vec![], None, vec![],
+                client,
+                format,
+                Method::POST,
+                &path,
+                vec![],
+                None,
+                vec![],
                 "signal.cancel",
             )
             .await
@@ -127,7 +157,13 @@ pub async fn dispatch(cmd: SignalCmd, client: &ApiClient, format: OutputFormat) 
                 body["metrics"] = serde_json::json!(metrics);
             }
             call_and_print(
-                client, format, Method::POST, "/api/signal/compare", vec![], Some(body), vec![],
+                client,
+                format,
+                Method::POST,
+                "/api/signal/compare",
+                vec![],
+                Some(body),
+                vec![],
                 "signal.compare",
             )
             .await
@@ -142,7 +178,13 @@ pub async fn dispatch(cmd: SignalCmd, client: &ApiClient, format: OutputFormat) 
                 query.push(("strategy_class".to_string(), strategy_class));
             }
             call_and_print(
-                client, format, Method::GET, &path, query, None, vec![],
+                client,
+                format,
+                Method::GET,
+                &path,
+                query,
+                None,
+                vec![],
                 "signal.export",
             )
             .await

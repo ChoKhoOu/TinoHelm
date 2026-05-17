@@ -18,9 +18,10 @@ fn factor_explore_rejects_flags_with_body() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "cannot be used with",
-        ).or(predicate::str::contains("mutually exclusive")));
+        .stderr(
+            predicate::str::contains("cannot be used with")
+                .or(predicate::str::contains("mutually exclusive")),
+        );
 }
 
 #[test]

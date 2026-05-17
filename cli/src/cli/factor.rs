@@ -154,21 +154,39 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         }
         FactorCmd::Universes => {
             call_and_print(
-                client, format, Method::GET, "/api/factor/universes", vec![], None, vec![],
+                client,
+                format,
+                Method::GET,
+                "/api/factor/universes",
+                vec![],
+                None,
+                vec![],
                 "factor.universes",
             )
             .await
         }
         FactorCmd::Symbols => {
             call_and_print(
-                client, format, Method::GET, "/api/factor/symbols", vec![], None, vec![],
+                client,
+                format,
+                Method::GET,
+                "/api/factor/symbols",
+                vec![],
+                None,
+                vec![],
                 "factor.symbols",
             )
             .await
         }
         FactorCmd::Capabilities => {
             call_and_print(
-                client, format, Method::GET, "/api/factor/capabilities", vec![], None, vec![],
+                client,
+                format,
+                Method::GET,
+                "/api/factor/capabilities",
+                vec![],
+                None,
+                vec![],
                 "factor.capabilities",
             )
             .await
@@ -176,7 +194,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         FactorCmd::Explore(args) => {
             let body = api_body_required(args)?;
             call_and_print(
-                client, format, Method::POST, "/api/factor/explore", vec![], Some(body), vec![],
+                client,
+                format,
+                Method::POST,
+                "/api/factor/explore",
+                vec![],
+                Some(body),
+                vec![],
                 "factor.explore",
             )
             .await
@@ -184,7 +208,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         FactorCmd::Run(args) => {
             let body = api_body_required(args)?;
             call_and_print(
-                client, format, Method::POST, "/api/factor/run", vec![], Some(body), vec![],
+                client,
+                format,
+                Method::POST,
+                "/api/factor/run",
+                vec![],
+                Some(body),
+                vec![],
                 "factor.run",
             )
             .await
@@ -195,7 +225,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
                 query.push(("factor_name".to_string(), name));
             }
             call_and_print(
-                client, format, Method::GET, "/api/factor/runs", query, None, vec![],
+                client,
+                format,
+                Method::GET,
+                "/api/factor/runs",
+                query,
+                None,
+                vec![],
                 "factor.runs",
             )
             .await
@@ -218,7 +254,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
                 query.push(("fields".to_string(), fields));
             }
             call_and_print(
-                client, format, Method::GET, &path, query, None, vec![],
+                client,
+                format,
+                Method::GET,
+                &path,
+                query,
+                None,
+                vec![],
                 "factor.report",
             )
             .await
@@ -226,7 +268,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         FactorCmd::Cancel { run_id } => {
             let path = format!("/api/factor/cancel/{run_id}");
             call_and_print(
-                client, format, Method::POST, &path, vec![], None, vec![],
+                client,
+                format,
+                Method::POST,
+                &path,
+                vec![],
+                None,
+                vec![],
                 "factor.cancel",
             )
             .await
@@ -241,7 +289,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
                 body["template"] = serde_json::Value::String(template);
             }
             call_and_print(
-                client, format, Method::POST, "/api/factor/create", vec![], Some(body), vec![],
+                client,
+                format,
+                Method::POST,
+                "/api/factor/create",
+                vec![],
+                Some(body),
+                vec![],
                 "factor.create",
             )
             .await
@@ -249,7 +303,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         FactorCmd::ParamsGrid(args) => {
             let body = api_body_required(args)?;
             call_and_print(
-                client, format, Method::POST, "/api/factor/params_grid", vec![], Some(body), vec![],
+                client,
+                format,
+                Method::POST,
+                "/api/factor/params_grid",
+                vec![],
+                Some(body),
+                vec![],
                 "factor.params_grid",
             )
             .await
@@ -257,7 +317,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         FactorCmd::Compare(args) => {
             let body = compare_body(args)?;
             call_and_print(
-                client, format, Method::POST, "/api/factor/compare", vec![], Some(body), vec![],
+                client,
+                format,
+                Method::POST,
+                "/api/factor/compare",
+                vec![],
+                Some(body),
+                vec![],
                 "factor.compare",
             )
             .await
@@ -274,7 +340,13 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
                 "n_bootstrap": n_bootstrap,
             });
             call_and_print(
-                client, format, Method::POST, "/api/factor/compare/multi", vec![], Some(body), vec![],
+                client,
+                format,
+                Method::POST,
+                "/api/factor/compare/multi",
+                vec![],
+                Some(body),
+                vec![],
                 "factor.compare_multi",
             )
             .await
@@ -288,9 +360,8 @@ fn body_required(args: BodyArgs) -> Result<serde_json::Value> {
 }
 
 fn api_body_required(args: ApiBodyArgs) -> Result<serde_json::Value> {
-    let has_body_input = args.body_args.body.is_some()
-        || args.body_args.body_file.is_some()
-        || args.body_args.stdin;
+    let has_body_input =
+        args.body_args.body.is_some() || args.body_args.body_file.is_some() || args.body_args.stdin;
     let has_typed_flags = args.factor.is_some()
         || args.universe.is_some()
         || args.start.is_some()

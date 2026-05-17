@@ -37,4 +37,3 @@ pub fn print_error(err: &anyhow::Error, format: OutputFormat) {
         }
     }
 }
-
