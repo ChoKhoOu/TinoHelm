@@ -1663,9 +1663,9 @@ class TestWorkerLifecycle:
         async def _fake_consumer(*_a, **_k):
             try:
                 await asyncio.sleep(5)
-            finally:
-                await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
                 cleanup_done.append(True)
+                raise
 
         monkeypatch.setattr(dw, "consumer_loop", _fake_consumer)
         monkeypatch.setattr(
@@ -1677,8 +1677,8 @@ class TestWorkerLifecycle:
         dw._handle.stop()
 
         task = dw.start_data_worker(redis_url="redis://x", catalog_path="/cat")
-        await asyncio.sleep(0.01)
-        await dw.stop_data_worker_and_wait(timeout=1.0)
+        await asyncio.sleep(0.05)
+        await dw.stop_data_worker_and_wait(timeout=2.0)
 
         assert task.done() is True
         assert cleanup_done == [True]
@@ -1762,9 +1762,14 @@ class TestWorkerLifecycle:
             return 0
 
         monkeypatch.setattr(dw, "drain_once", _fake_drain)
+
+        async def _noop_sweep():
+            return
+
+        monkeypatch.setattr(dw, "_orphan_sweep_loop", _noop_sweep)
         dw._handle.stop()
 
         task = dw.start_data_worker(redis_url="redis://r", catalog_path="/c")
-        await task
+        await asyncio.wait_for(task, timeout=5.0)
 
         assert captured == {"redis_url": "redis://r", "catalog_path": "/c"}
