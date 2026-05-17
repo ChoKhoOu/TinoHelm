@@ -27,6 +27,9 @@ serde_yaml = "0.9"
 # Error handling
 anyhow = "1"
 
+# URL encoding for path segments
+urlencoding = "2"
+
 # Config paths
 dirs = "6"
 

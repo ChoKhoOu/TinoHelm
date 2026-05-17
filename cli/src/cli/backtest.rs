@@ -159,6 +159,9 @@ pub enum BacktestCmd {
         /// Auto-poll progress until done
         #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
         poll: bool,
+        /// Max seconds to wait when polling (0 = no limit)
+        #[arg(long, default_value = "3600")]
+        timeout: u64,
     },
     /// Check optimization run status
     #[command(name = "optimize-status")]
@@ -781,6 +784,7 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             capital,
             leverage,
             poll,
+            timeout,
         } => {
             let param_ranges = if params.is_empty() {
                 None
@@ -821,15 +825,27 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             }
 
             if format.is_json() {
+                let poll_interval = 3u64;
+                let mut elapsed = 0u64;
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
+                    elapsed += poll_interval;
                     let sd = client.optimize_status(opt_id).await?;
                     if matches!(sd.status.as_str(), "completed" | "failed" | "error") {
                         if sd.status == "completed" {
                             let result = client.optimize_result(opt_id).await?;
                             return print_json(&result);
                         }
-                        return print_json(&sd);
+                        print_json(&sd)?;
+                        std::process::exit(1);
+                    }
+                    if timeout > 0 && elapsed >= timeout {
+                        print_json(&serde_json::json!({
+                            "optimization_id": opt_id,
+                            "status": "timeout",
+                            "timeout_sec": timeout,
+                        }))?;
+                        std::process::exit(1);
                     }
                 }
             }
@@ -845,8 +861,11 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                 return Ok(());
             }
 
+            let poll_interval = 3u64;
+            let mut elapsed = 0u64;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
+                elapsed += poll_interval;
                 let sd = client.optimize_status(opt_id).await?;
                 let st = &sd.status;
                 let done = sd.trials_completed.unwrap_or(0);
@@ -876,6 +895,11 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                         std::process::exit(1);
                     }
                     break;
+                }
+                if timeout > 0 && elapsed >= timeout {
+                    println!();
+                    eprintln!("  {} after {}s", "Timeout".with(NEG).bold(), timeout);
+                    std::process::exit(1);
                 }
             }
 
@@ -950,7 +974,8 @@ async fn dispatch_artifacts(
             filename,
             output,
         } => {
-            let path = format!("/api/backtest/{}/artifacts/{}", run_id, filename);
+            let encoded_filename = urlencoding::encode(&filename);
+            let path = format!("/api/backtest/{}/artifacts/{}", run_id, encoded_filename);
             let resp = client
                 .request_bytes(reqwest::Method::GET, &path, &[], None, &[])
                 .await?;
