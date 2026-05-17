@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -1592,44 +1593,82 @@ def funding_rate_parquet_path(symbol: str, catalog_root: str | Path) -> Path:
 
 
 
+def _affected_intervals(
+    intervals: list[tuple[int, int]],
+    start_ns: int,
+    end_ns: int,
+) -> list[tuple[int, int]]:
+    """Return existing file intervals that overlap with [start_ns, end_ns]."""
+    return [(s, e) for s, e in intervals if s <= end_ns and e >= start_ns]
+
+
 def consolidate_and_organize(
     catalog,
     data_cls: type,
     identifier: str | None = None,
+    start: "date | None" = None,
+    end: "date | None" = None,
 ) -> None:
-    """Consolidate and organize data using NT-native operations.
+    """Consolidate and deduplicate data into periodic parquet files.
 
-    1. consolidate_data(deduplicate=True) — merge all fragments, remove dupes
-    2. consolidate_data_by_period(period=1w) — split into weekly files
-       (only when data spans more than one week)
+    When *start*/*end* are provided (incremental mode), finds existing files
+    whose time ranges overlap with [start, end], then merges those files plus
+    new fragments into a single deduped file. Files outside the range are
+    untouched. Note: incremental mode does NOT call consolidate_data_by_period
+    because NT's implementation deletes ALL directory files (not just those in
+    the start/end range), making it unsafe for partial use.
 
-    Note: ensure_contiguous_files=False because NT's contiguity check requires
-    file timestamps to differ by exactly 1ns, which doesn't hold for bar data
-    (bars have step-width intervals). Data-level contiguity is guaranteed by
-    the gap detection + backfill step that runs before this function.
+    Without *start*/*end* (full mode), all data is first merged into a single
+    file (with dedup), then split into periodic files via consolidate_data_by_period.
+    This handles the case where fragments span period boundaries.
     """
     import pandas as pd
-
-    catalog.consolidate_data(
-        data_cls=data_cls,
-        identifier=identifier,
-        deduplicate=True,
-        ensure_contiguous_files=False,
-    )
 
     intervals = catalog.get_intervals(data_cls, identifier)
     if not intervals:
         return
 
-    total_span_ns = intervals[-1][1] - intervals[0][0]
     one_week_ns = 7 * 24 * 3600 * 1_000_000_000
-    if total_span_ns > one_week_ns:
-        catalog.consolidate_data_by_period(
+
+    if start is not None and end is not None:
+        from datetime import datetime, timedelta, timezone
+
+        start_ns = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        next_day = end + timedelta(days=1)
+        end_ns = int(datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000) - 1
+        affected = _affected_intervals(intervals, start_ns, end_ns)
+        if affected:
+            merge_start = min(s for s, _ in affected)
+            merge_end = max(e for _, e in affected)
+        else:
+            merge_start = start_ns
+            merge_end = end_ns
+        catalog.consolidate_data(
             data_cls=data_cls,
             identifier=identifier,
-            period=pd.Timedelta(weeks=1),
+            start=merge_start,
+            end=merge_end,
+            deduplicate=True,
             ensure_contiguous_files=False,
         )
+    else:
+        catalog.consolidate_data(
+            data_cls=data_cls,
+            identifier=identifier,
+            deduplicate=True,
+            ensure_contiguous_files=False,
+        )
+        intervals = catalog.get_intervals(data_cls, identifier)
+        if not intervals:
+            return
+        total_span_ns = intervals[-1][1] - intervals[0][0]
+        if total_span_ns > one_week_ns:
+            catalog.consolidate_data_by_period(
+                data_cls=data_cls,
+                identifier=identifier,
+                period=pd.Timedelta(weeks=1),
+                ensure_contiguous_files=False,
+            )
 
 
 def read_funding_rate_parquet(
