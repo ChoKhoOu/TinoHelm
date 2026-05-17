@@ -1422,5 +1422,5 @@ class TestCatalogStorageCoverageInvalidatesCache:
 
         result = p._catalog_storage_coverage("BTCUSDT-PERP", "klines", "1m", "klines")
 
-        mock_fs.invalidate_cache.assert_called_once()
+        mock_fs.invalidate_cache.assert_called_once_with()
         assert result is None  # no files → None

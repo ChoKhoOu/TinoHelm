@@ -1052,8 +1052,9 @@ class BinanceVisionPipeline:
         genuinely absent or the file was removed by a concurrent consolidation
         (stale dircache). Auth and other I/O failures propagate.
         """
-        import errno
         import pyarrow.parquet as pq
+
+        _S3FS_ETAG_MISMATCH_ERRNO = 16  # s3fs uses errno 16 for stale ETag, unrelated to POSIX EBUSY
 
         if storage is not None and getattr(storage, "provider", "local") != "local":
             try:
@@ -1063,7 +1064,7 @@ class BinanceVisionPipeline:
             except FileNotFoundError:
                 return None
             except OSError as exc:
-                if exc.errno == errno.EBUSY:
+                if exc.errno == _S3FS_ETAG_MISMATCH_ERRNO:
                     return None
                 raise
 
@@ -1237,10 +1238,11 @@ class BinanceVisionPipeline:
         if target_dir is None:
             return None
         # Consolidation uses a separate s3fs instance that may have deleted/rewritten
-        # files. Invalidate our dircache so iter_files sees the current state.
+        # files. Invalidate the entire dircache (not just target_dir) because
+        # iter_files uses recursive=True and subdirectory caches may also be stale.
         fs = getattr(self._storage, "fs", None)
         if fs is not None and hasattr(fs, "invalidate_cache"):
-            fs.invalidate_cache(str(target_dir))
+            fs.invalidate_cache()
         paths = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=True))
         if not paths:
             return None
