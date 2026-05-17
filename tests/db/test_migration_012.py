@@ -113,6 +113,7 @@ def _reset_database_to_pre_012() -> None:
                 await conn.execute(text("ALTER TABLE data_catalog DROP COLUMN IF EXISTS last_ingest_id"))
                 await conn.execute(text("DROP INDEX IF EXISTS ix_data_fetch_jobs_batch_id"))
                 await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS batch_id"))
+                await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS started_at"))
 
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
@@ -194,10 +195,10 @@ def ensure_at_head():
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_upgrade_version_is_head(engine, ensure_at_head):
-    """After upgrade head, alembic_version must be '014'."""
+    """After upgrade head, alembic_version must be '015'."""
     async with engine.connect() as conn:
         ver = await _get_version(conn)
-    assert ver == "014", f"Expected version 014, got {ver}"
+    assert ver == "015", f"Expected version 015, got {ver}"
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -281,6 +282,19 @@ async def test_data_fetch_jobs_batch_id_column_and_index(engine, ensure_at_head)
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_data_fetch_jobs_started_at_column_nullable(engine, ensure_at_head):
+    """015 adds nullable ``started_at`` to data_fetch_jobs for running-age tracking."""
+    async with engine.connect() as conn:
+        cols = await _get_table_columns(conn, "data_fetch_jobs")
+        nullable_map = await _get_nullable_cols(conn, "data_fetch_jobs")
+
+    assert "started_at" in cols, "015 must add started_at column to data_fetch_jobs"
+    assert nullable_map.get("started_at") is True, (
+        "started_at must be nullable so queued/terminal jobs can clear it"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_progress_stage_nullable_signal_runs(engine, ensure_at_head):
     """signal_runs.progress_stage must be nullable."""
     async with engine.connect() as conn:
@@ -357,7 +371,9 @@ async def test_upgrade_after_downgrade_idempotent(engine, ensure_at_head):
         ver = await _get_version(conn)
         found = await _get_indexes(conn)
         catalog_cols = await _get_table_columns(conn, "data_catalog")
+        data_fetch_cols = await _get_table_columns(conn, "data_fetch_jobs")
 
-    assert ver == "014"
+    assert ver == "015"
     assert found == EXPECTED_INDEXES
     assert "last_ingest_id" in catalog_cols
+    assert "started_at" in data_fetch_cols

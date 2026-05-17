@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as aioredis
 from sqlalchemy import Integer, String, and_, bindparam, func, select, update
@@ -47,6 +47,14 @@ QUEUE_KEY = "tino:data:queue"
 WAKE_TOKEN = "wake"
 PROGRESS_THROTTLE_INTERVAL = 2.0
 LOCK_BUSY_REQUEUE_DELAY = 1.0
+_TERMINAL_UPDATE_RETRIES = 3
+_TERMINAL_UPDATE_BACKOFF = 1.0
+_ORPHAN_SWEEP_INTERVAL = 120.0  # seconds between sweeps
+_ORPHAN_RUNNING_THRESHOLD = 600  # seconds — running job older than this is orphaned
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # Returned by ``claim_next_queued_job`` to distinguish "row was claimed but
 # is no longer runnable" (e.g. cancelled between the atomic UPDATE and the
@@ -94,6 +102,7 @@ async def _flip_running_to_queued(factory, model_cls) -> int:
                 status=STATUS_QUEUED,
                 progress=0,
                 message="Recovered after restart",
+                started_at=None,
             )
         )
         await db.commit()
@@ -349,6 +358,7 @@ async def claim_next_queued_job(factory):
                 progress=0,
                 message="Starting...",
                 error=None,
+                started_at=_utcnow_naive(),
                 completed_at=None,
             )
             .returning(DataFetchJob.job_id)
@@ -383,6 +393,7 @@ async def _claim_queued_job(factory, job_id: str):
                 progress=0,
                 message="Starting...",
                 error=None,
+                started_at=_utcnow_naive(),
                 completed_at=None,
             )
         )
@@ -415,15 +426,29 @@ async def _try_acquire_catalog_lock(lock_key: str):
 
 
 async def _guarded_terminal_update(factory, job_id: str, values: dict) -> bool:
-    async with factory() as db:
-        result = await db.execute(
-            update(DataFetchJob)
-            .where(DataFetchJob.job_id == job_id)
-            .where(DataFetchJob.status == STATUS_RUNNING)
-            .values(**values)
-        )
-        await db.commit()
-    return _rowcount(result) == 1
+    attempt = 0
+    while True:
+        try:
+            async with factory() as db:
+                result = await db.execute(
+                    update(DataFetchJob)
+                    .where(DataFetchJob.job_id == job_id)
+                    .where(DataFetchJob.status == STATUS_RUNNING)
+                    .values(**values)
+                )
+                await db.commit()
+            return _rowcount(result) == 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            attempt += 1
+            if attempt >= _TERMINAL_UPDATE_RETRIES:
+                raise
+            logger.warning(
+                "Terminal update for job %s failed (attempt %d/%d), retrying",
+                job_id, attempt, _TERMINAL_UPDATE_RETRIES, exc_info=True,
+            )
+            await asyncio.sleep(_TERMINAL_UPDATE_BACKOFF * (2 ** (attempt - 1)))
 
 
 async def _guarded_queued_failure_update(factory, job_id: str, values: dict) -> bool:
@@ -573,7 +598,8 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     "status": terminal_status,
                     "progress": 100,
                     "message": msg,
-                    "completed_at": datetime.now(timezone.utc),
+                    "started_at": None,
+                    "completed_at": _utcnow_naive(),
                 },
             )
             if not updated:
@@ -632,7 +658,8 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.now(timezone.utc),
+                        "started_at": None,
+                        "completed_at": _utcnow_naive(),
                     },
                 )
                 if updated:
@@ -652,7 +679,8 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.now(timezone.utc),
+                        "started_at": None,
+                        "completed_at": _utcnow_naive(),
                     },
                 )
                 if updated:
@@ -687,7 +715,7 @@ async def _revert_claimed_to_queued(factory, job_id: str) -> None:
             update(DataFetchJob)
             .where(DataFetchJob.job_id == job_id)
             .where(DataFetchJob.status == STATUS_RUNNING)
-            .values(status=STATUS_QUEUED, progress=0, message="Deferred: catalog lock busy")
+            .values(status=STATUS_QUEUED, progress=0, message="Deferred: catalog lock busy", started_at=None)
         )
         await db.commit()
 
@@ -780,7 +808,8 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     "status": terminal_status,
                     "progress": 100,
                     "message": msg,
-                    "completed_at": datetime.now(timezone.utc),
+                    "started_at": None,
+                    "completed_at": _utcnow_naive(),
                 },
             )
             if not updated:
@@ -815,6 +844,31 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
         return True
 
     except asyncio.CancelledError:
+        _clear_current_task_cancellation()
+        failure_error = "Cancelled during execution"
+        try:
+            async with factory() as db:
+                await db.execute(
+                    update(DataFetchJob)
+                    .where(DataFetchJob.job_id == job_id)
+                    .where(DataFetchJob.status == STATUS_RUNNING)
+                    .values(
+                        status=STATUS_FAILED,
+                        error=failure_error,
+                        started_at=None,
+                        completed_at=_utcnow_naive(),
+                    )
+                )
+                await db.commit()
+            await rds.publish("tino:data:events", json.dumps({
+                "type": "data.fetch.failed",
+                "job_id": job_id,
+                "symbol": symbol,
+                "data_type": data_type,
+                "error": failure_error,
+            }))
+        except Exception:
+            logger.warning("Failed to mark cancelled job %s as failed", job_id, exc_info=True)
         raise
     except Exception as exc:
         failure_error = str(exc)
@@ -827,7 +881,8 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.now(timezone.utc),
+                        "started_at": None,
+                        "completed_at": _utcnow_naive(),
                     },
                 )
                 if updated:
@@ -959,6 +1014,10 @@ def start_data_worker(redis_url: str, catalog_path: str) -> asyncio.Task:
             )
             for idx in range(concurrency)
         ]
+        sweep_task = asyncio.create_task(
+            _orphan_sweep_loop(), name="data-fetch-orphan-sweeper"
+        )
+        tasks.append(sweep_task)
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -996,3 +1055,61 @@ async def stop_data_worker_and_wait(timeout: float = 30.0) -> None:
         )
     except Exception:
         logger.exception("Data-fetch worker failed during shutdown")
+
+
+async def _sweep_orphan_running_jobs() -> int:
+    """Fail jobs stuck in running state beyond the threshold.
+
+    Catches the case where a terminal update failed despite retries
+    (e.g. prolonged DB outage) and the worker moved on.
+    """
+    factory = get_session_factory()
+    cutoff = _utcnow_naive() - timedelta(seconds=_ORPHAN_RUNNING_THRESHOLD)
+    failure_error = "Marked failed by orphan sweeper: job exceeded running time threshold"
+    async with factory() as db:
+        result = await db.execute(
+            update(DataFetchJob)
+            .where(DataFetchJob.status == STATUS_RUNNING)
+            .where(DataFetchJob.started_at.isnot(None))
+            .where(DataFetchJob.completed_at.is_(None))
+            .where(DataFetchJob.started_at < cutoff)
+            .values(
+                status=STATUS_FAILED,
+                error=failure_error,
+                started_at=None,
+                completed_at=_utcnow_naive(),
+            )
+            .returning(DataFetchJob.job_id, DataFetchJob.symbol, DataFetchJob.data_type)
+        )
+        swept_rows = result.all()
+        await db.commit()
+    count = len(swept_rows)
+    if count:
+        logger.warning("Orphan sweeper marked %d stale running job(s) as failed", count)
+        rds = aioredis.from_url(get_settings().redis.url, decode_responses=True)
+        try:
+            for row in swept_rows:
+                await rds.publish("tino:data:events", json.dumps({
+                    "type": "data.fetch.failed",
+                    "job_id": row.job_id,
+                    "symbol": row.symbol,
+                    "data_type": row.data_type,
+                    "error": failure_error[:200],
+                }))
+        except Exception:
+            logger.exception("Failed to publish orphan sweep failure events")
+        finally:
+            await rds.close()
+    return count
+
+
+async def _orphan_sweep_loop() -> None:
+    """Background loop that periodically sweeps orphan running jobs."""
+    while True:
+        await asyncio.sleep(_ORPHAN_SWEEP_INTERVAL)
+        try:
+            await _sweep_orphan_running_jobs()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Orphan sweep iteration failed")

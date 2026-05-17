@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -233,6 +234,7 @@ class TestClaimNextQueuedJob:
         claimed_job = SimpleNamespace(
             job_id=picked_job_id,
             status="running",
+            started_at=datetime(2025, 1, 1, 12, 0, 0),
             symbol="BTCUSDT",
             data_type="klines",
             interval="1m",
@@ -265,6 +267,7 @@ class TestClaimNextQueuedJob:
         got = await dw.claim_next_queued_job(factory)
 
         assert got is claimed_job
+        assert got.started_at is not None
         # The claim statement must atomically flip queued → running — i.e. the
         # WHERE clause must be gated on status='queued' so two racing consumers
         # can't both claim the same row.
@@ -1513,6 +1516,132 @@ class TestWorkerLifecycle:
                 await task
             except asyncio.CancelledError:
                 pass
+
+    async def test_orphan_sweeper_uses_started_at_not_created_at(self, monkeypatch):
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        captured = {}
+
+        class _Result:
+            def all(self):
+                return []
+
+        class _DB:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, stmt):
+                captured["stmt"] = str(stmt)
+                return _Result()
+
+            async def commit(self):
+                captured["committed"] = True
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: lambda: _DB())
+        monkeypatch.setattr(dw, "datetime", SimpleNamespace(now=lambda _tz=None: datetime(2026, 1, 1, 12, 0, 0)))
+        monkeypatch.setattr(dw, "_ORPHAN_RUNNING_THRESHOLD", 600)
+
+        await dw._sweep_orphan_running_jobs()
+
+        assert captured.get("committed") is True
+        assert "started_at" in captured["stmt"]
+        assert "created_at" not in captured["stmt"]
+
+    async def test_orphan_sweeper_publishes_failed_events(self, monkeypatch):
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        fake_rds = AsyncMock()
+        fake_rds.close = AsyncMock()
+
+        class _Result:
+            def all(self):
+                return [SimpleNamespace(job_id="job-1", symbol="BTCUSDT", data_type="klines")]
+
+        class _DB:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, _stmt):
+                return _Result()
+
+            async def commit(self):
+                return None
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: lambda: _DB())
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+        monkeypatch.setattr(dw, "get_settings", lambda: SimpleNamespace(redis=SimpleNamespace(url="redis://x")))
+        monkeypatch.setattr(dw, "_utcnow_naive", lambda: datetime(2026, 1, 1, 12, 10, 0))
+
+        count = await dw._sweep_orphan_running_jobs()
+
+        assert count == 1
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-1"
+        fake_rds.close.assert_awaited_once()
+
+    async def test_cancelled_claimed_job_publishes_failed_event(self, monkeypatch):
+        job = SimpleNamespace(
+            job_id="job-cancelled-running",
+            symbol="BTCUSDT",
+            data_type="klines",
+            interval="1m",
+            start_date="2025-01-01",
+            end_date="2025-01-02",
+            asset_class="um",
+        )
+
+        fake_rds = AsyncMock()
+        fake_rds.close = AsyncMock()
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+
+        class _DB:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, _stmt):
+                result = MagicMock()
+                result.rowcount = 1
+                return result
+
+            async def commit(self):
+                return None
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: lambda: _DB())
+
+        import tinohelm.data.pipeline as pkg_pipeline
+
+        class _CancellingPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _CancellingPipeline)
+
+        with pytest.raises(asyncio.CancelledError):
+            await dw._process_claimed_job(job, "redis://x", "/cat")
+
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-cancelled-running"
+        assert payload["error"] == "Cancelled during execution"
 
     async def test_stop_cancels_running_task(self, monkeypatch):
         async def _fake_consumer(*_a, **_k):
