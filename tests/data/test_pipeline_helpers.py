@@ -186,6 +186,31 @@ class TestResolveDbCategory:
 # 5. resolve_db_interval — three-tier precedence
 # ---------------------------------------------------------------------------
 
+class TestMissingDateSliceHelpers:
+    def test_requested_range_fully_covered_yields_no_missing_slices(self):
+        from tinohelm.data.pipeline_helpers import missing_date_slices_from_intervals
+
+        assert missing_date_slices_from_intervals(
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 3),
+            intervals=[
+                (date_start_ns(date(2024, 1, 1)), date_end_ns(date(2024, 1, 3)) - 1),
+            ],
+        ) == []
+
+    def test_requested_range_with_internal_gap_yields_only_gap_slice(self):
+        from tinohelm.data.pipeline_helpers import missing_date_slices_from_intervals
+
+        assert missing_date_slices_from_intervals(
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+            intervals=[
+                (date_start_ns(date(2024, 1, 1)), date_end_ns(date(2024, 1, 10)) - 1),
+                (date_start_ns(date(2024, 1, 12)), date_end_ns(date(2024, 1, 20)) - 1),
+            ],
+        ) == [(date(2024, 1, 11), date(2024, 1, 11))]
+
+
 class TestResolveDbInterval:
     def test_explicit_interval_wins(self):
         assert resolve_db_interval("klines", "5m") == "5m"

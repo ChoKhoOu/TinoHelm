@@ -1180,6 +1180,248 @@ class TestFundingRateCacheShortCircuit:
         # Empty cache means we fall through to plan_downloads as before.
         mock_dl.plan_downloads.assert_called_once()
 
+
+class TestTradeTickCoverageShortCircuit:
+    def test_ingest_skips_when_trade_tick_catalog_covers_range(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [],
+        )
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+
+        mock_dl = MagicMock()
+        mock_dl.plan_downloads.side_effect = AssertionError(
+            "plan_downloads must not run when trade_tick catalog covers range"
+        )
+        p.downloader = mock_dl
+
+        async def _noop(*a, **kw):
+            pass
+
+        with patch.object(p, "_update_db_catalog", side_effect=_noop):
+            result = asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="trades",
+                start=date(2024, 1, 5),
+                end=date(2024, 1, 20),
+            ))
+
+        assert result.skipped is True
+        assert result.objects_count == 0
+        mock_dl.plan_downloads.assert_not_called()
+
+    def test_ingest_trade_tick_partial_coverage_plans_only_missing_slice(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        planned_ranges: list[tuple[date, date]] = []
+        consolidate_ranges: list[tuple[date | None, date | None]] = []
+
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [
+                (date(2024, 1, 11), date(2024, 1, 11)),
+            ],
+        )
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **kwargs):
+                planned_ranges.append((kwargs["start"], kwargs["end"]))
+                return [
+                    SimpleNamespace(
+                        url="https://example.com/day.zip",
+                        checksum_url="https://example.com/day.zip.CHECKSUM",
+                        dest_path=Path("BTCUSDT-trades-2024-01-11.csv"),
+                        zip_path=Path("BTCUSDT-trades-2024-01-11.zip"),
+                        granularity="daily",
+                    )
+                ]
+
+            async def execute_task(self, task):
+                return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                return None
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        monkeypatch.setattr(p, "_write_objects", lambda *args, **kwargs: ["/catalog/ticks/trades/day.parquet"])
+        monkeypatch.setattr(p, "_cleanup_raw_file", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(p, "_detect_gaps_for_backfill", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(p, "_catalog_storage_stats", lambda *_args, **_kwargs: (1, 1))
+        async def _noop_update(*a, **kw):
+            return None
+        monkeypatch.setattr(p, "_update_db_catalog", _noop_update)
+        monkeypatch.setattr(
+            p,
+            "_consolidate_catalog_data",
+            lambda symbol, data_type, interval, start, end: consolidate_ranges.append((start, end)),
+        )
+
+        result = asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+        ))
+
+        assert result.skipped is False
+        assert planned_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
+        assert consolidate_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
+
+    def test_ingest_trade_tick_multiple_missing_slices_plan_each_slice(self, monkeypatch: pytest.MonkeyPatch):
+        planned_ranges: list[tuple[date, date]] = []
+        consolidate_ranges: list[tuple[date | None, date | None]] = []
+
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [
+                (date(2024, 1, 11), date(2024, 1, 11)),
+                (date(2024, 1, 15), date(2024, 1, 15)),
+            ],
+        )
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **kwargs):
+                planned_ranges.append((kwargs["start"], kwargs["end"]))
+                day = kwargs["start"].isoformat()
+                return [
+                    SimpleNamespace(
+                        url=f"https://example.com/{day}.zip",
+                        checksum_url=f"https://example.com/{day}.zip.CHECKSUM",
+                        dest_path=Path(f"BTCUSDT-trades-{day}.csv"),
+                        zip_path=Path(f"BTCUSDT-trades-{day}.zip"),
+                        granularity="daily",
+                    )
+                ]
+
+            async def execute_task(self, task):
+                return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                return None
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        monkeypatch.setattr(p, "_write_objects", lambda *args, **kwargs: ["/catalog/ticks/trades/day.parquet"])
+        monkeypatch.setattr(p, "_cleanup_raw_file", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(p, "_detect_gaps_for_backfill", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(p, "_catalog_storage_stats", lambda *_args, **_kwargs: (1, 1))
+        async def _noop_update(*a, **kw):
+            return None
+        monkeypatch.setattr(p, "_update_db_catalog", _noop_update)
+        monkeypatch.setattr(
+            p,
+            "_consolidate_catalog_data",
+            lambda symbol, data_type, interval, start, end: consolidate_ranges.append((start, end)),
+        )
+
+        result = asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+        ))
+
+        assert result.skipped is False
+        assert planned_ranges == [
+            (date(2024, 1, 11), date(2024, 1, 11)),
+            (date(2024, 1, 15), date(2024, 1, 15)),
+        ]
+        assert consolidate_ranges == [(date(2024, 1, 11), date(2024, 1, 15))]
+
+    def test_ingest_trade_tick_does_not_backfill_gaps_outside_requested_missing_slices(self, monkeypatch: pytest.MonkeyPatch):
+        planned_ranges: list[tuple[date, date]] = []
+
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [
+                (date(2024, 1, 11), date(2024, 1, 11)),
+            ],
+        )
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **kwargs):
+                planned_ranges.append((kwargs["start"], kwargs["end"]))
+                day = kwargs["start"].isoformat()
+                return [
+                    SimpleNamespace(
+                        url=f"https://example.com/{day}.zip",
+                        checksum_url=f"https://example.com/{day}.zip.CHECKSUM",
+                        dest_path=Path(f"BTCUSDT-trades-{day}.csv"),
+                        zip_path=Path(f"BTCUSDT-trades-{day}.zip"),
+                        granularity="daily",
+                    )
+                ]
+
+            async def execute_task(self, task):
+                return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
+
+        class Converter:
+            supports_chunked = False
+
+            def validate_schema(self, df):
+                return None
+
+            def convert(self, df, instrument, **kwargs):
+                return [SimpleNamespace(ts_init=1)]
+
+        p.downloader = Downloader()
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        monkeypatch.setattr(p, "_write_objects", lambda *args, **kwargs: ["/catalog/ticks/trades/day.parquet"])
+        monkeypatch.setattr(p, "_cleanup_raw_file", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            p,
+            "_detect_gaps_for_backfill",
+            lambda *_args, **_kwargs: [(date(2024, 1, 30), date(2024, 1, 30))],
+        )
+        monkeypatch.setattr(p, "_catalog_storage_stats", lambda *_args, **_kwargs: (1, 1))
+        async def _noop_update(*a, **kw):
+            return None
+        monkeypatch.setattr(p, "_update_db_catalog", _noop_update)
+        monkeypatch.setattr(p, "_consolidate_catalog_data", lambda *args, **kwargs: None)
+
+        asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+        ))
+
+        assert planned_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
+
     def test_ingest_runs_when_funding_cache_has_gap(
         self, monkeypatch: pytest.MonkeyPatch,
     ):

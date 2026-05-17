@@ -893,6 +893,31 @@ class CatalogSession:
         """Delegate to parquet coverage check — legacy JSON cache removed."""
         return self.funding_parquet_covers(symbol, start, end)
 
+    def missing_date_slices(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        start: date,
+        end: date,
+        *,
+        source_type: str | None = None,
+    ) -> list[tuple[date, date]]:
+        from nautilus_trader.model.data import TradeTick
+        from tinohelm.data.pipeline_helpers import missing_date_slices_from_intervals
+        from tinohelm.strategy.loader_helpers import normalize_symbol
+
+        if data_type != "trades":
+            return [(start, end)]
+
+        catalog = _catalog_for_root(self.catalog_path, self.storage)
+        intervals = catalog.get_intervals(TradeTick, normalize_symbol(symbol))
+        return missing_date_slices_from_intervals(
+            start=start,
+            end=end,
+            intervals=intervals,
+        )
+
     def funding_rate_parquet_path(self, symbol: str) -> Path:
         """Return the primary funding-rate Parquet path for ``symbol``."""
         return funding_rate_parquet_path(symbol, self.catalog_path)

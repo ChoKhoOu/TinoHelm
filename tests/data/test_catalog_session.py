@@ -732,6 +732,22 @@ class TestScanSingleFiles:
 
 
 
+class TestTradeTickMissingDateSlices:
+    def test_returns_full_range_when_trade_tick_missing(self, tmp_path: Path):
+        from datetime import date
+
+        from tinohelm.data.catalog import CatalogSession
+
+        session = CatalogSession(tmp_path)
+        assert session.missing_date_slices(
+            "BTCUSDT-PERP",
+            "trades",
+            None,
+            date(2024, 1, 1),
+            date(2024, 1, 3),
+        ) == [(date(2024, 1, 1), date(2024, 1, 3))]
+
+
 class TestFundingParquetCovers:
     def test_returns_false_when_parquet_missing(self, tmp_path: Path):
         from datetime import date

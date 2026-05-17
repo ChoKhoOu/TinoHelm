@@ -55,6 +55,23 @@ class _FetchBatchDb:
     async def commit(self):
         pass
 
+    async def execute(self, stmt):
+        class _Result:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def scalars(self):
+                class _Scalars:
+                    def __init__(self, rows):
+                        self._rows = rows
+
+                    def all(self):
+                        return list(self._rows)
+
+                return _Scalars(self._rows)
+
+        return _Result(self.jobs)
+
 
 class _FakeS3File(BytesIO):
     def __init__(self, payload: bytes) -> None:
@@ -436,6 +453,173 @@ class TestFetchBatchSplitting:
         assert result["jobs"][0]["db_interval"] == "tick"
         assert db.jobs[0].data_type == "indexPriceKlines"
         assert db.jobs[0].interval is None
+        enqueue.assert_awaited_once_with(rds, "job-1")
+
+    def test_fetch_batch_trade_tick_full_coverage_returns_zero_jobs(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        from tinohelm.data.catalog import CatalogSession
+
+        monkeypatch.setattr(
+            CatalogSession,
+            "missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [],
+            raising=False,
+        )
+        monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        db = _FetchBatchDb()
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=[],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+            data_type="trade_tick",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(body, db, rds))
+
+        assert result["count"] == 0
+        assert result["job_ids"] == []
+        assert result["jobs"] == []
+        assert db.jobs == []
+        enqueue.assert_not_awaited()
+
+    def test_fetch_batch_trade_tick_partial_coverage_enqueues_only_missing_slice(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        from tinohelm.data.catalog import CatalogSession
+
+        monkeypatch.setattr(
+            CatalogSession,
+            "missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [
+                (date(2024, 1, 11), date(2024, 1, 11)),
+            ],
+            raising=False,
+        )
+        db = _FetchBatchDb()
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=[],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+            data_type="trade_tick",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(body, db, rds))
+
+        assert result["count"] == 1
+        assert result["jobs"] == [
+            {
+                "job_id": "job-1",
+                "data_type": "trade_tick",
+                "db_interval": "tick",
+                "interval": None,
+                "start": "2024-01-11",
+                "end": "2024-01-11",
+            }
+        ]
+        assert db.jobs[0].start_date == date(2024, 1, 11)
+        assert db.jobs[0].end_date == date(2024, 1, 11)
+        enqueue.assert_awaited_once_with(rds, "job-1")
+
+    def test_fetch_batch_trade_tick_skips_slice_already_queued_or_running(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        from tinohelm.data.catalog import CatalogSession
+
+        monkeypatch.setattr(
+            CatalogSession,
+            "missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [
+                (date(2024, 1, 11), date(2024, 1, 11)),
+            ],
+            raising=False,
+        )
+        monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        db = _FetchBatchDb()
+        db.jobs.append(SimpleNamespace(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            interval=None,
+            start_date=date(2024, 1, 11),
+            end_date=date(2024, 1, 11),
+            status="queued",
+            job_id="existing-job",
+        ))
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=[],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+            data_type="trade_tick",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(body, db, rds))
+
+        assert result["count"] == 0
+        assert result["job_ids"] == []
+        assert result["jobs"] == []
+        assert len(db.jobs) == 1
+        enqueue.assert_not_awaited()
+
+    def test_fetch_batch_trade_tick_active_slice_subtraction_preserves_other_gaps(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        from tinohelm.data.catalog import CatalogSession
+
+        monkeypatch.setattr(
+            CatalogSession,
+            "missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [
+                (date(2024, 1, 11), date(2024, 1, 11)),
+                (date(2024, 1, 15), date(2024, 1, 15)),
+            ],
+            raising=False,
+        )
+        monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        db = _FetchBatchDb()
+        db.jobs.append(SimpleNamespace(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            interval=None,
+            start_date=date(2024, 1, 11),
+            end_date=date(2024, 1, 11),
+            status="running",
+            job_id="existing-job",
+        ))
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=[],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+            data_type="trade_tick",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(body, db, rds))
+
+        assert result["count"] == 1
+        assert result["jobs"][0]["start"] == "2024-01-15"
+        assert result["jobs"][0]["end"] == "2024-01-15"
+        assert len(db.jobs) == 2
         enqueue.assert_awaited_once_with(rds, "job-1")
 
 
