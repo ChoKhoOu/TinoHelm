@@ -1049,15 +1049,24 @@ class BinanceVisionPipeline:
         """Read min/max timestamp from parquet row-group statistics.
 
         Returns ``(min_ts_ns, max_ts_ns)`` or ``None`` if timestamp statistics are
-        genuinely absent. I/O, auth, and parse failures propagate so callers do
-        not treat unreadable remote objects as safely replaceable unknown ranges.
+        genuinely absent or the file was removed by a concurrent consolidation
+        (stale dircache). Auth and other I/O failures propagate.
         """
         import pyarrow.parquet as pq
 
+        _S3FS_ETAG_MISMATCH_ERRNO = 16  # s3fs uses errno 16 for stale ETag, unrelated to POSIX EBUSY
+
         if storage is not None and getattr(storage, "provider", "local") != "local":
-            with storage.open_input_file(path_or_object) as fh:
-                pf = pq.ParquetFile(fh)
-                return BinanceVisionPipeline._parquet_file_time_range(pf)
+            try:
+                with storage.open_input_file(path_or_object) as fh:
+                    pf = pq.ParquetFile(fh)
+                    return BinanceVisionPipeline._parquet_file_time_range(pf)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                if exc.errno == _S3FS_ETAG_MISMATCH_ERRNO:
+                    return None
+                raise
 
         path = path_or_object.path if hasattr(path_or_object, "path") else path_or_object
         pf = pq.ParquetFile(str(Path(path)))
@@ -1228,6 +1237,12 @@ class BinanceVisionPipeline:
         target_dir = self._catalog_item_dir(symbol, data_type, interval, source_type)
         if target_dir is None:
             return None
+        # Consolidation uses a separate s3fs instance that may have deleted/rewritten
+        # files. Invalidate the entire dircache (not just target_dir) because
+        # iter_files uses recursive=True and subdirectory caches may also be stale.
+        fs = getattr(self._storage, "fs", None)
+        if fs is not None and hasattr(fs, "invalidate_cache"):
+            fs.invalidate_cache()
         paths = list(self._storage.iter_files(target_dir, suffix=".parquet", recursive=True))
         if not paths:
             return None
