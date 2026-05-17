@@ -10,7 +10,7 @@ use output::OutputFormat;
 #[derive(Parser)]
 #[command(
     name = "tino",
-    about = "TinoHelm — LLM-first CLI for local and remote trading/research control",
+    about = "TinoHelm — typed subcommand CLI for quantitative trading control",
     arg_required_else_help = true,
     disable_help_subcommand = true
 )]
@@ -23,8 +23,8 @@ struct Cli {
     #[arg(long, global = true)]
     api_key: Option<String>,
 
-    /// Output format: text for humans, json for raw API JSON, llm for stable envelope.
-    #[arg(short, long, global = true, value_enum, default_value_t = OutputFormat::Text)]
+    /// Output format: json (default, machine-readable) or text (human-friendly).
+    #[arg(short, long, global = true, value_enum, default_value_t = OutputFormat::Json)]
     format: OutputFormat,
 
     #[command(subcommand)]
@@ -38,12 +38,7 @@ enum Commands {
         #[command(subcommand)]
         command: cli::auth::AuthCmd,
     },
-    /// Generic API caller; covers every FastAPI operation immediately.
-    Api {
-        #[command(subcommand)]
-        command: cli::api::ApiCmd,
-    },
-    /// Show version.
+    /// Show CLI + API + factor engine versions.
     Version,
     /// Backtest management.
     Backtest {
@@ -80,6 +75,11 @@ enum Commands {
         #[command(subcommand)]
         command: cli::universe::UniverseCmd,
     },
+    /// Trading positions, fills, orders, and analytics.
+    Trading {
+        #[command(subcommand)]
+        command: cli::trading::TradingCmd,
+    },
 }
 
 fn command_requires_api_client(command: &Commands) -> bool {
@@ -96,44 +96,16 @@ fn command_resolves_api_key(command: &Commands) -> bool {
         )
 }
 
-fn command_label(command: &Commands) -> &'static str {
-    match command {
-        Commands::Auth { .. } => "auth",
-        Commands::Api { .. } => "api",
-        Commands::Version => "version",
-        Commands::Backtest { .. } => "backtest",
-        Commands::Strategy { .. } => "strategy",
-        Commands::Data { .. } => "data",
-        Commands::Node { .. } => "node",
-        Commands::Factor { .. } => "factor",
-        Commands::Signal { .. } => "signal",
-        Commands::Universe { .. } => "universe",
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli_args = Cli::parse();
     let format = cli_args.format;
-    let command_name = command_label(&cli_args.command);
     let cfg = if command_resolves_api_key(&cli_args.command) {
         match config::Config::load(cli_args.api_url.as_deref(), cli_args.api_key.as_deref()) {
             Ok(cfg) => cfg,
             Err(err) => {
-                if format.is_machine() {
-                    let fallback_cfg = config::Config::load_url_only(cli_args.api_url.as_deref());
-                    print_machine_error(
-                        format,
-                        envelope_error_from_anyhow(&err),
-                        output::EnvelopeMeta::new(
-                            command_name,
-                            &fallback_cfg.api_url,
-                            fallback_cfg.auth_label(),
-                        ),
-                    )?;
-                    std::process::exit(1);
-                }
-                return Err(err);
+                output::print_error(&err, format);
+                std::process::exit(1);
             }
         }
     } else {
@@ -157,135 +129,66 @@ async fn main() -> anyhow::Result<()> {
         }};
     }
 
-    let (command_name, result): (&'static str, anyhow::Result<()>) = match cli_args.command {
-        Commands::Auth { command } => ("auth", cli::auth::dispatch(command, &cfg, format)),
-        Commands::Api { command } => (
-            "api",
-            dispatch_with_client!(client, cli::api::dispatch(command, client, format).await),
-        ),
+    let result: anyhow::Result<()> = match cli_args.command {
+        Commands::Auth { command } => cli::auth::dispatch(command, &cfg, format),
         Commands::Version => {
-            let git_sha = option_env!("GIT_SHA")
-                .or(option_env!("VERGEN_GIT_SHA"))
-                .or(option_env!("TINO_GIT_SHA"));
-            let build_time = option_env!("BUILD_TIME")
-                .or(option_env!("VERGEN_BUILD_TIMESTAMP"))
-                .or(option_env!("TINO_BUILD_TIME"));
             let data = serde_json::json!({
-                "name": "tino",
                 "cli_version": env!("CARGO_PKG_VERSION"),
-                "version": env!("CARGO_PKG_VERSION"),
-                "description": env!("CARGO_PKG_DESCRIPTION"),
-                "api_version_endpoint": "/api/version",
-                "factor_version_endpoint": "/api/factor/version",
-                "factor_capabilities_endpoint": "/api/factor/capabilities",
-                "cli_package_path": env!("CARGO_MANIFEST_DIR"),
-                "git_sha": git_sha,
-                "build_time": build_time,
-                "tui": false,
+                "git_sha": option_env!("GIT_SHA").or(option_env!("TINO_GIT_SHA")),
+                "build_time": option_env!("BUILD_TIME").or(option_env!("TINO_BUILD_TIME")),
             });
-            let result = match format {
-                OutputFormat::Llm => output::print_llm_success(
-                    data,
-                    output::EnvelopeMeta::new("version", &cfg.api_url, cfg.auth_label()),
-                ),
+            match format {
                 OutputFormat::Json => output::print_json(&data),
                 OutputFormat::Text => {
-                    println!("  TinoHelm v{}", env!("CARGO_PKG_VERSION"));
-                    println!("  LLM-first CLI; TUI removed");
+                    println!("tino v{}", env!("CARGO_PKG_VERSION"));
                     Ok(())
                 }
-            };
-            ("version", result)
+            }
         }
-        Commands::Backtest { command } => (
-            "backtest",
+        Commands::Backtest { command } => {
             dispatch_with_client!(
                 client,
                 cli::backtest::dispatch(command, client, format).await
-            ),
-        ),
-        Commands::Strategy { command } => (
-            "strategy",
+            )
+        }
+        Commands::Strategy { command } => {
             dispatch_with_client!(
                 client,
                 cli::strategy::dispatch(command, client, format).await
-            ),
-        ),
-        Commands::Data { command } => (
-            "data",
-            dispatch_with_client!(client, cli::data::dispatch(command, client, format).await),
-        ),
-        Commands::Node { command } => (
-            "node",
-            dispatch_with_client!(client, cli::node::dispatch(command, client, format).await),
-        ),
-        Commands::Factor { command } => (
-            "factor",
-            dispatch_with_client!(client, cli::factor::dispatch(command, client, format).await),
-        ),
-        Commands::Signal { command } => (
-            "signal",
-            dispatch_with_client!(client, cli::signal::dispatch(command, client, format).await),
-        ),
-        Commands::Universe { command } => (
-            "universe",
+            )
+        }
+        Commands::Data { command } => {
+            dispatch_with_client!(client, cli::data::dispatch(command, client, format).await)
+        }
+        Commands::Node { command } => {
+            dispatch_with_client!(client, cli::node::dispatch(command, client, format).await)
+        }
+        Commands::Factor { command } => {
+            dispatch_with_client!(client, cli::factor::dispatch(command, client, format).await)
+        }
+        Commands::Signal { command } => {
+            dispatch_with_client!(client, cli::signal::dispatch(command, client, format).await)
+        }
+        Commands::Universe { command } => {
             dispatch_with_client!(
                 client,
                 cli::universe::dispatch(command, client, format).await
-            ),
-        ),
+            )
+        }
+        Commands::Trading { command } => {
+            dispatch_with_client!(
+                client,
+                cli::trading::dispatch(command, client, format).await
+            )
+        }
     };
 
     if let Err(err) = result {
-        if format.is_machine() {
-            print_machine_error(
-                format,
-                envelope_error_from_anyhow(&err),
-                output::EnvelopeMeta::new(command_name, &cfg.api_url, cfg.auth_label()),
-            )?;
-            std::process::exit(1);
-        }
-        return Err(err);
+        output::print_error(&err, format);
+        std::process::exit(1);
     }
 
     Ok(())
-}
-
-fn envelope_error_from_anyhow(err: &anyhow::Error) -> output::EnvelopeError {
-    if let Some(http) = err.downcast_ref::<api::ApiHttpError>() {
-        let details = api::extract_api_error_details(&http.body);
-        return output::EnvelopeError {
-            code: details.code,
-            kind: "http".to_string(),
-            message: details.message,
-            status_code: Some(http.status_code),
-            body: Some(http.body.clone()),
-        };
-    }
-
-    output::EnvelopeError {
-        code: None,
-        kind: "command".to_string(),
-        message: err.to_string(),
-        status_code: None,
-        body: None,
-    }
-}
-
-fn print_machine_error(
-    format: OutputFormat,
-    error: output::EnvelopeError,
-    meta: output::EnvelopeMeta<'_>,
-) -> anyhow::Result<()> {
-    if format == OutputFormat::Llm {
-        output::print_llm_error(error, meta)
-    } else {
-        output::print_json(&serde_json::json!({
-            "ok": false,
-            "error": error,
-            "meta": meta,
-        }))
-    }
 }
 
 #[cfg(test)]
@@ -318,12 +221,5 @@ mod tests {
             command: cli::auth::AuthCmd::Logout,
         }));
         assert!(!command_resolves_api_key(&Commands::Version));
-    }
-
-    #[test]
-    fn api_backed_commands_require_api_client() {
-        assert!(command_requires_api_client(&Commands::Api {
-            command: cli::api::ApiCmd::Routes { filter: None },
-        }));
     }
 }

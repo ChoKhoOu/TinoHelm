@@ -35,7 +35,6 @@ pub enum SignalCmd {
     /// Compare 2+ completed signal runs.
     Compare {
         run_ids: Vec<String>,
-        /// Metric to include. Repeatable. Default server metrics are used when omitted.
         #[arg(long = "metric")]
         metrics: Vec<String>,
     },

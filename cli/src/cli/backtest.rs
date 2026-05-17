@@ -1,13 +1,11 @@
-use crate::cli::style::{LONG_COLOR, NEG, POS, SHORT_COLOR};
+use crate::cli::style::{NEG, POS};
 use anyhow::Result;
 use clap::Subcommand;
 use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
-use crate::output::{
-    print_json, print_llm_error, print_llm_success, EnvelopeError, EnvelopeMeta, OutputFormat,
-};
+use crate::output::{print_json, OutputFormat};
 use crate::types::{BacktestRunRequest, OptimizeRequest};
 
 #[derive(Subcommand)]
@@ -75,6 +73,40 @@ pub enum BacktestCmd {
         /// Run ID (full or short prefix)
         run_id: String,
     },
+    /// Delete a backtest run
+    Delete {
+        /// Run ID
+        run_id: String,
+    },
+    /// Compare two backtest runs
+    Compare {
+        /// First run ID
+        id1: String,
+        /// Second run ID
+        id2: String,
+    },
+    /// Estimate backtest duration
+    Estimate {
+        /// Strategy name
+        strategy: String,
+        /// Symbol
+        #[arg(long)]
+        symbol: String,
+        /// Interval
+        #[arg(long, default_value = "5m")]
+        interval: String,
+        /// Start date
+        #[arg(long)]
+        start: String,
+        /// End date
+        #[arg(long)]
+        end: String,
+    },
+    /// Backtest artifacts management
+    Artifacts {
+        #[command(subcommand)]
+        command: ArtifactsCmd,
+    },
     /// Run hyperparameter optimization
     Optimize {
         /// Strategy name
@@ -127,6 +159,9 @@ pub enum BacktestCmd {
         /// Auto-poll progress until done
         #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
         poll: bool,
+        /// Max seconds to wait when polling (0 = no limit)
+        #[arg(long, default_value = "3600")]
+        timeout: u64,
     },
     /// Check optimization run status
     #[command(name = "optimize-status")]
@@ -149,6 +184,25 @@ pub enum BacktestCmd {
         /// Filter by strategy name
         #[arg(long)]
         strategy: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ArtifactsCmd {
+    /// List artifacts for a backtest run
+    List {
+        /// Run ID
+        run_id: String,
+    },
+    /// Download a specific artifact
+    Get {
+        /// Run ID
+        run_id: String,
+        /// Artifact filename
+        filename: String,
+        /// Output path
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 
@@ -189,8 +243,6 @@ fn parse_param_range(s: &str) -> std::result::Result<(String, serde_json::Value)
     Ok((name, spec))
 }
 
-// ── JSON helpers ─────────────────────────────────────────────────────────
-
 fn jf64(v: &serde_json::Value, key: &str) -> Option<f64> {
     v.get(key).and_then(|x| x.as_f64())
 }
@@ -214,8 +266,6 @@ fn jdisplay(v: &serde_json::Value, key: &str) -> String {
     }
 }
 
-// ── Status card ──────────────────────────────────────────────────────────
-
 fn print_status_card(data: &crate::types::BacktestRunStatus, run_id: &str) {
     let st = &data.status;
     let pct = data.progress_pct.unwrap_or(0);
@@ -232,7 +282,6 @@ fn print_status_card(data: &crate::types::BacktestRunStatus, run_id: &str) {
         println!("      {}", progress_bar(pct, 30));
     }
 
-    // Summary for completed runs
     if st == "completed" {
         if let Some(ref result) = data.result {
             let stats = result.get("statistics").unwrap_or(&serde_json::Value::Null);
@@ -273,15 +322,12 @@ fn print_status_card(data: &crate::types::BacktestRunStatus, run_id: &str) {
     println!();
 }
 
-// ── Result report (box-drawn) ────────────────────────────────────────────
-
 fn print_result_report(data: &serde_json::Value, run_id: &str) {
     let r = data.get("result").unwrap_or(data);
     let null = serde_json::Value::Null;
     let stats = r.get("statistics").unwrap_or(&null);
 
     if !stats.is_object() {
-        // No statistics, fall back to raw JSON
         println!("{}", serde_json::to_string_pretty(data).unwrap_or_default());
         return;
     }
@@ -295,14 +341,6 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
         .get("trade_log")
         .and_then(|v| v.as_array())
         .unwrap_or(&empty_vec);
-    let monthly = r
-        .get("monthly_returns")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty_vec);
-    let drawdowns = r
-        .get("drawdown_periods")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty_vec);
 
     let pnl = jf64(stats, "total_pnl");
     let ret = jf64(stats, "total_return_pct");
@@ -312,8 +350,6 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
 
     println!();
     bx.top();
-
-    // ── Header ──
     let title = format!(
         "  BACKTEST REPORT  {}",
         accent(&run_id[..8.min(run_id.len())])
@@ -321,7 +357,6 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
     bx.line(&bold(&title));
     bx.mid();
 
-    // ── Hero: PnL ──
     bx.line(&format!(
         "  PnL: {} USDT  ({}%)     Balance: {}",
         color_value(pnl, "+.2f"),
@@ -330,7 +365,6 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
     ));
     bx.mid();
 
-    // ── Risk Metrics ──
     bx.line(&bold("  Risk Metrics"));
     bx.pair(
         "Sharpe",
@@ -344,15 +378,8 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
         "Max Drawdown",
         &format_value(jf64(stats, "max_drawdown"), ".2f", "%"),
     );
-    bx.pair(
-        "Volatility",
-        &format_value(jf64(stats, "returns_volatility"), ".2f", ""),
-        "Ann. Return",
-        &format_value(jf64(stats, "annual_return"), ".2f", "%"),
-    );
     bx.mid();
 
-    // ── Trade Statistics ──
     bx.line(&bold("  Trade Statistics"));
     let total_trades = ju64(stats, "total_trades").unwrap_or(0);
     let w_trades = ju64(stats, "winning_trades").unwrap_or(0);
@@ -376,8 +403,6 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
             "  [{}]  {}W {}L  WR: {}",
             bar, w_trades, l_trades, wr_str,
         ));
-    } else {
-        bx.line(&muted("  No closed trades"));
     }
 
     bx.pair(
@@ -386,69 +411,7 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
         "Expectancy",
         &color_value(jf64(stats, "expectancy"), "+.2f"),
     );
-    bx.pair(
-        "Largest Win",
-        &color_value(jf64(stats, "largest_win"), "+.2f"),
-        "Largest Loss",
-        &color_value(jf64(stats, "largest_loss"), "+.2f"),
-    );
-    bx.pair(
-        "Avg Win",
-        &format_value(jf64(stats, "avg_win"), ".2f", ""),
-        "Avg Loss",
-        &format_value(jf64(stats, "avg_loss"), ".2f", ""),
-    );
-    bx.pair(
-        "W/L Ratio",
-        &format_value(jf64(stats, "avg_win_loss_ratio"), ".2f", ""),
-        "Streaks",
-        &format!(
-            "{}W / {}L",
-            ju64(stats, "winning_streak").unwrap_or(0),
-            ju64(stats, "losing_streak").unwrap_or(0),
-        ),
-    );
-    bx.mid();
 
-    // ── Position ──
-    bx.line(&bold("  Position"));
-    let long_pct = jf64(stats, "long_pct");
-    let short_pct = jf64(stats, "short_pct");
-    if let (Some(lp), Some(sp)) = (long_pct, short_pct) {
-        let bar_w: usize = 28;
-        let l_fill = (bar_w as f64 * lp) as usize;
-        let s_fill = bar_w.saturating_sub(l_fill);
-        let dir_bar = format!(
-            "{}{}",
-            "\u{2588}".repeat(l_fill).with(LONG_COLOR),
-            "\u{2588}".repeat(s_fill).with(SHORT_COLOR),
-        );
-        bx.line(&format!(
-            "  [{}]  Long {:.0}% / Short {:.0}%",
-            dir_bar,
-            lp * 100.0,
-            sp * 100.0,
-        ));
-    }
-
-    bx.pair(
-        "Avg Hold",
-        jstr(stats, "avg_holding_time"),
-        "Total Fees",
-        &format_value(jf64(stats, "total_fees"), ".4f", ""),
-    );
-    bx.pair(
-        "Orders",
-        &ju64(stats, "total_orders")
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        "Filled",
-        &ju64(stats, "filled_orders")
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-    );
-
-    // ── Equity Curve Sparkline ──
     if equity_curve.len() >= 2 {
         let values: Vec<f64> = equity_curve
             .iter()
@@ -476,78 +439,19 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
                 })
                 .collect();
             bx.line(&format!("  {}", spark.cyan()));
-            let low_s = format!("Low: {:.2}", mn);
-            let high_s = format!("High: {:.2}", mx);
-            let gap = 58usize.saturating_sub(low_s.len() + high_s.len());
-            bx.line(&format!(
-                "  {}{}{}",
-                muted(&low_s),
-                " ".repeat(gap),
-                muted(&high_s),
-            ));
         }
     }
 
-    // ── Monthly Returns ──
-    if !monthly.is_empty() {
-        bx.mid();
-        bx.line(&bold("  Monthly Returns"));
-        for m in monthly {
-            let period = jstr(m, "period");
-            if let Some(ret_m) = jf64(m, "return_pct") {
-                let bar_len = (ret_m.abs() * 5.0).min(30.0) as usize;
-                let bar_vis = if ret_m >= 0.0 {
-                    format!("{}", "+".repeat(bar_len).with(POS))
-                } else {
-                    format!("{}", "-".repeat(bar_len).with(NEG))
-                };
-                bx.line(&format!(
-                    "  {:>10}  {:>8}%  {}",
-                    period,
-                    color_value(Some(ret_m), "+.2f"),
-                    bar_vis,
-                ));
-            }
-        }
-    }
-
-    // ── Drawdown Periods ──
-    if !drawdowns.is_empty() {
-        bx.mid();
-        bx.line(&bold("  Notable Drawdowns"));
-        for dd in drawdowns.iter().take(5) {
-            let dd_pct = jf64(dd, "max_drawdown_pct");
-            let start_d = &jstr(dd, "start")[..10.min(jstr(dd, "start").len())];
-            let dur = jstr(dd, "duration_days");
-            let rec = ju64(dd, "recovery_days");
-            let rec_s = rec
-                .map(|r| format!("rec {}d", r))
-                .unwrap_or_else(|| "no recovery".to_string());
-            bx.line(&format!(
-                "  {}  {:>8}%  {}d  {}",
-                start_d,
-                color_value(dd_pct, "+.2f"),
-                dur,
-                muted(&rec_s),
-            ));
-        }
-    }
-
-    // ── Top Trades ──
     if trade_log.len() > 1 {
         bx.mid();
         bx.line(&bold("  Top Trades (by PnL)"));
-
         let mut sorted_trades: Vec<&serde_json::Value> = trade_log.iter().collect();
         sorted_trades.sort_by(|a, b| {
             let pa = trade_pnl(a);
             let pb = trade_pnl(b);
             pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal)
         });
-
         let top_n = sorted_trades.len().min(3);
-
-        // Best trades
         for t in sorted_trades.iter().take(top_n) {
             let side = match jstr(t, "side") {
                 "1" | "BUY" | "LONG" => "LONG",
@@ -563,26 +467,6 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
                 color_value(Some(pnl_t), "+.2f"),
             ));
         }
-
-        // Worst trades
-        for t in sorted_trades.iter().rev().take(top_n) {
-            let pnl_t = trade_pnl(t);
-            if pnl_t < 0.0 {
-                let side = if jstr(t, "side") == "1" {
-                    "LONG"
-                } else {
-                    "SHORT"
-                };
-                let qty = jstr(t, "quantity");
-                bx.line(&format!(
-                    "  {} {:5}  qty={}  pnl={}",
-                    "-".with(NEG),
-                    side,
-                    qty,
-                    color_value(Some(pnl_t), "+.2f"),
-                ));
-            }
-        }
     }
 
     bx.bot();
@@ -590,7 +474,6 @@ fn print_result_report(data: &serde_json::Value, run_id: &str) {
 }
 
 fn trade_pnl(t: &serde_json::Value) -> f64 {
-    // Try as number first (JSON numeric), then as string ("114.60 USDT")
     if let Some(v) = t.get("realized_pnl").and_then(|v| v.as_f64()) {
         return v;
     }
@@ -600,8 +483,6 @@ fn trade_pnl(t: &serde_json::Value) -> f64 {
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.0)
 }
-
-// ── Dispatch ─────────────────────────────────────────────────────────────
 
 pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
     match cmd {
@@ -663,181 +544,118 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             };
 
             let resp = client.run_backtest(&req).await?;
-            if format.is_machine() {
-                let data = serde_json::json!({
-                    "run_id": resp.run_id,
-                    "status": resp.status
-                });
-                return print_backtest_machine(format, client, "backtest.run", data);
+            let data = serde_json::json!({
+                "run_id": resp.run_id,
+                "status": resp.status
+            });
+            match format {
+                OutputFormat::Json => print_json(&data),
+                OutputFormat::Text => {
+                    header("Backtest Submitted");
+                    divider(50);
+                    kv("Run ID", &accent(&resp.run_id), 12);
+                    kv("Strategy", &strategy, 12);
+                    println!();
+                    println!(
+                        "    Track: {}",
+                        dim(&format!("tino backtest wait {}", resp.run_id))
+                    );
+                    println!();
+                    Ok(())
+                }
             }
-
-            let sym_display = if symbols.is_empty() {
-                "(portfolio)".to_string()
-            } else {
-                symbols.join(", ")
-            };
-
-            let rid = &resp.run_id;
-            header("Backtest Submitted");
-            divider(50);
-            kv("Run ID", &accent(rid), 12);
-            kv("Strategy", &strategy, 12);
-            let ivl_display = interval.as_deref().unwrap_or("(portfolio)");
-            kv("Symbol", &sym_display, 12);
-            kv("Interval", ivl_display, 12);
-            kv("Period", &format!("{} ~ {}", start, end), 12);
-            println!();
-            println!("    Track: {}", dim(&format!("tino backtest wait {}", rid)));
-            println!();
         }
         BacktestCmd::List => {
             let data = client.list_backtests().await?;
-            if format.is_machine() {
-                return print_backtest_machine(format, client, "backtest.list", data.runs);
+            match format {
+                OutputFormat::Json => print_json(&data.runs),
+                OutputFormat::Text => {
+                    let t = Table::new(&[
+                        ("ID", 8, "left"),
+                        ("Strategy", 16, "left"),
+                        ("Symbol", 14, "left"),
+                        ("Status", 10, "right"),
+                        ("PnL", 10, "right"),
+                    ]);
+                    t.header();
+                    for r in &data.runs {
+                        let id = &r.run_id[..8.min(r.run_id.len())];
+                        let strat = r.strategy_name.as_deref().unwrap_or("?");
+                        let pnl = r
+                            .result_summary
+                            .as_ref()
+                            .and_then(|s| s.get("total_pnl").and_then(|v| v.as_f64()))
+                            .map(|v| color_value(Some(v), "+.2f"))
+                            .unwrap_or_else(|| muted("-"));
+                        t.row(&[
+                            &accent(id),
+                            &strat[..16.min(strat.len())],
+                            &r.symbol[..14.min(r.symbol.len())],
+                            &color_status(&r.status),
+                            &pnl,
+                        ]);
+                    }
+                    t.footer();
+                    Ok(())
+                }
             }
-
-            let t = Table::new(&[
-                ("ID", 8, "left"),
-                ("Strategy", 16, "left"),
-                ("Symbol", 14, "left"),
-                ("Ivl", 4, "right"),
-                ("Period", 23, "left"),
-                ("Status", 10, "right"),
-                ("Trades", 6, "right"),
-                ("PnL", 10, "right"),
-                ("Ret%", 8, "right"),
-                ("Sharpe", 7, "right"),
-                ("WinRate", 7, "right"),
-            ]);
-            t.header();
-
-            for r in &data.runs {
-                let id = &r.run_id[..8.min(r.run_id.len())];
-                let strat = r.strategy_name.as_deref().unwrap_or("?");
-                let period = format!("{} ~ {}", r.start_date, r.end_date);
-                let summary = r.result_summary.as_ref();
-
-                let trades = summary
-                    .and_then(|s| s.get("total_trades").and_then(|v| v.as_u64()))
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| muted("-"));
-                let pnl = summary
-                    .and_then(|s| s.get("total_pnl").and_then(|v| v.as_f64()))
-                    .map(|v| color_value(Some(v), "+.2f"))
-                    .unwrap_or_else(|| muted("-"));
-                let ret_pct = summary
-                    .and_then(|s| s.get("total_return_pct").and_then(|v| v.as_f64()))
-                    .map(|v| color_value(Some(v), "+.2f"))
-                    .unwrap_or_else(|| muted("-"));
-                let sharpe = summary
-                    .and_then(|s| s.get("sharpe_ratio").and_then(|v| v.as_f64()))
-                    .map(|v| format!("{:.2}", v))
-                    .unwrap_or_else(|| muted("-"));
-                let win_rate = summary
-                    .and_then(|s| s.get("win_rate").and_then(|v| v.as_f64()))
-                    .map(|v| format!("{:.1}%", v * 100.0))
-                    .unwrap_or_else(|| muted("-"));
-
-                let strat_display = bold(&strat[..16.min(strat.len())]);
-                let sym_display = accent(&r.symbol[..14.min(r.symbol.len())]);
-                let ivl_display = format!("{}", r.interval.as_str().yellow());
-
-                let status_display = if let Some(pct) = r.progress_pct {
-                    format!("{}", format!("{}%", pct).cyan())
-                } else {
-                    color_status(&r.status)
-                };
-
-                t.row(&[
-                    &accent(id),
-                    &strat_display,
-                    &sym_display,
-                    &ivl_display,
-                    &period,
-                    &status_display,
-                    &trades,
-                    &pnl,
-                    &ret_pct,
-                    &sharpe,
-                    &win_rate,
-                ]);
-            }
-            t.footer();
         }
         BacktestCmd::Result { run_id } => {
             let data = client.get_result(&run_id).await?;
-            if format.is_machine() {
-                return print_backtest_machine(format, client, "backtest.result", data);
+            match format {
+                OutputFormat::Json => print_json(&data),
+                OutputFormat::Text => {
+                    print_result_report(&data, &run_id);
+                    Ok(())
+                }
             }
-            print_result_report(&data, &run_id);
         }
         BacktestCmd::Status { run_id } => {
             let data = client.get_status(&run_id).await?;
-            if format.is_machine() {
-                let data = serde_json::json!({
-                    "run_id": data.run_id,
-                    "status": data.status,
-                    "progress_pct": data.progress_pct,
-                    "error": data.error,
-                });
-                return print_backtest_machine(format, client, "backtest.status", data);
+            let json_data = serde_json::json!({
+                "run_id": data.run_id,
+                "status": data.status,
+                "progress_pct": data.progress_pct,
+                "error": data.error,
+            });
+            match format {
+                OutputFormat::Json => print_json(&json_data),
+                OutputFormat::Text => {
+                    print_status_card(&data, &run_id);
+                    Ok(())
+                }
             }
-            print_status_card(&data, &run_id);
         }
         BacktestCmd::Wait { run_id, timeout } => {
             use std::io::Write;
-
             let mut elapsed = 0u64;
             let poll_interval = 2u64;
 
-            if format.is_machine() {
-                let mut last_status = String::from("unknown");
-                while elapsed < timeout {
+            if format.is_json() {
+                loop {
                     let data = client.get_status(&run_id).await?;
                     let st = data.status.clone();
-                    last_status = st.clone();
                     if matches!(st.as_str(), "completed" | "failed" | "error" | "cancelled") {
-                        if st == "completed" {
-                            print_backtest_machine(
-                                format,
-                                client,
-                                "backtest.wait",
-                                serde_json::json!(data),
-                            )?;
-                            return Ok(());
+                        print_json(&serde_json::json!(data))?;
+                        if st != "completed" {
+                            std::process::exit(1);
                         }
-                        print_backtest_error_machine(
-                            format,
-                            client,
-                            "backtest.wait",
-                            "backtest_failed",
-                            format!("Backtest finished with status '{st}'"),
-                            serde_json::json!(data),
-                        )?;
+                        return Ok(());
+                    }
+                    if elapsed >= timeout {
+                        print_json(&serde_json::json!({
+                            "run_id": run_id,
+                            "status": "timeout",
+                            "timeout_sec": timeout,
+                        }))?;
                         std::process::exit(1);
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
                     elapsed += poll_interval;
                 }
-                print_backtest_error_machine(
-                    format,
-                    client,
-                    "backtest.wait",
-                    "backtest_timeout",
-                    format!("Backtest did not finish within {timeout}s"),
-                    serde_json::json!({
-                        "run_id": run_id,
-                        "status": "timeout",
-                        "last_status": last_status,
-                        "timeout_sec": timeout,
-                    }),
-                )?;
-                std::process::exit(1);
             }
 
             println!();
-            let mut last_status = String::from("unknown");
-
             while elapsed < timeout {
                 let data = client.get_status(&run_id).await?;
                 let st = &data.status;
@@ -845,7 +663,6 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
 
                 print!("\r{}", inline_progress(pct, st, elapsed, 20));
                 std::io::stdout().flush()?;
-                last_status = st.clone();
 
                 if matches!(st.as_str(), "completed" | "failed" | "error" | "cancelled") {
                     println!();
@@ -858,34 +675,97 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                 tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
                 elapsed += poll_interval;
             }
-
             println!();
-            eprintln!(
-                "  {} after {}s. Last status: {}",
-                "Timeout".with(NEG).bold(),
-                timeout,
-                last_status,
-            );
+            eprintln!("  {} after {}s", "Timeout".with(NEG).bold(), timeout,);
             std::process::exit(1);
         }
         BacktestCmd::Cancel { run_id } => {
             let data = client.cancel_backtest(&run_id).await?;
-            if format.is_machine() {
-                let data = serde_json::json!({
-                    "run_id": data.run_id,
-                    "status": data.status,
-                });
-                return print_backtest_machine(format, client, "backtest.cancel", data);
+            let json_data = serde_json::json!({
+                "run_id": data.run_id,
+                "status": data.status,
+            });
+            match format {
+                OutputFormat::Json => print_json(&json_data),
+                OutputFormat::Text => {
+                    println!(
+                        "  Cancelled {}",
+                        accent(&data.run_id[..8.min(data.run_id.len())])
+                    );
+                    Ok(())
+                }
             }
-            println!();
-            println!(
-                "  {} Cancelled {} ({})",
-                status_badge("cancelled"),
-                accent(&data.run_id[..8.min(data.run_id.len())]),
-                color_status(&data.status),
-            );
-            println!();
         }
+        BacktestCmd::Delete { run_id } => {
+            let data = client.delete_backtest(&run_id).await?;
+            match format {
+                OutputFormat::Json => print_json(&data),
+                OutputFormat::Text => {
+                    println!(
+                        "  Deleted backtest {}",
+                        accent(&run_id[..8.min(run_id.len())])
+                    );
+                    Ok(())
+                }
+            }
+        }
+        BacktestCmd::Compare { id1, id2 } => {
+            let r1 = client.get_result(&id1).await?;
+            let r2 = client.get_result(&id2).await?;
+            let comparison = serde_json::json!({
+                "run_a": { "run_id": id1, "result": r1 },
+                "run_b": { "run_id": id2, "result": r2 },
+            });
+            match format {
+                OutputFormat::Json => print_json(&comparison),
+                OutputFormat::Text => {
+                    header("Backtest Comparison");
+                    divider(50);
+                    println!(
+                        "  A: {}  vs  B: {}",
+                        accent(&id1[..8.min(id1.len())]),
+                        accent(&id2[..8.min(id2.len())])
+                    );
+                    println!();
+                    Ok(())
+                }
+            }
+        }
+        BacktestCmd::Estimate {
+            strategy,
+            symbol,
+            interval,
+            start,
+            end,
+        } => {
+            let body = serde_json::json!({
+                "strategy": strategy,
+                "symbol": symbol,
+                "interval": interval,
+                "start_date": start,
+                "end_date": end,
+            });
+            let resp = client
+                .request_json(
+                    reqwest::Method::POST,
+                    "/api/backtest/estimate",
+                    &[],
+                    Some(body),
+                    &[],
+                )
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    header("Backtest Estimate");
+                    divider(50);
+                    println!("  {}", serde_json::to_string_pretty(&resp.body)?);
+                    println!();
+                    Ok(())
+                }
+            }
+        }
+        BacktestCmd::Artifacts { command } => dispatch_artifacts(command, client, format).await,
         BacktestCmd::Optimize {
             strategy,
             symbol,
@@ -904,6 +784,7 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             capital,
             leverage,
             poll,
+            timeout,
         } => {
             let param_ranges = if params.is_empty() {
                 None
@@ -934,12 +815,39 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             let resp = client.optimize_backtest(&req).await?;
             let opt_id = resp.optimization_id;
 
-            if format.is_machine() {
-                let data = serde_json::json!({
-                    "optimization_id": opt_id,
-                    "status": resp.status,
-                });
-                return print_backtest_machine(format, client, "backtest.optimize", data);
+            let data = serde_json::json!({
+                "optimization_id": opt_id,
+                "status": resp.status,
+            });
+
+            if format.is_json() && !poll {
+                return print_json(&data);
+            }
+
+            if format.is_json() {
+                let poll_interval = 3u64;
+                let mut elapsed = 0u64;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
+                    elapsed += poll_interval;
+                    let sd = client.optimize_status(opt_id).await?;
+                    if matches!(sd.status.as_str(), "completed" | "failed" | "error") {
+                        if sd.status == "completed" {
+                            let result = client.optimize_result(opt_id).await?;
+                            return print_json(&result);
+                        }
+                        print_json(&sd)?;
+                        std::process::exit(1);
+                    }
+                    if timeout > 0 && elapsed >= timeout {
+                        print_json(&serde_json::json!({
+                            "optimization_id": opt_id,
+                            "status": "timeout",
+                            "timeout_sec": timeout,
+                        }))?;
+                        std::process::exit(1);
+                    }
+                }
             }
 
             header("Optimization Started");
@@ -947,25 +855,22 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             kv("ID", &accent(&opt_id.to_string()), 12);
             kv("Trials", &trials.to_string(), 12);
             kv("Fitness", &fitness, 12);
-            kv("Sampler", &sampler, 12);
-            if walk_forward > 0 {
-                kv("Walk-Forward", &format!("{} folds", walk_forward), 12);
-            }
             println!();
 
             if !poll {
                 return Ok(());
             }
 
-            // Poll progress
+            let poll_interval = 3u64;
+            let mut elapsed = 0u64;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
+                elapsed += poll_interval;
                 let sd = client.optimize_status(opt_id).await?;
                 let st = &sd.status;
                 let done = sd.trials_completed.unwrap_or(0);
                 let total = sd.total_trials.unwrap_or(trials);
                 let best = sd.best_value;
-                let pruned = sd.pruned_trials.unwrap_or(0);
 
                 let pct = done.saturating_mul(100).checked_div(total).unwrap_or(0);
                 let bar_w: u32 = 30;
@@ -975,181 +880,123 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
                     "=".repeat(filled as usize),
                     "-".repeat((bar_w - filled) as usize),
                 );
-
                 let best_s = best
                     .map(|b| format!("  best={}", color_value(Some(b), ".4f")))
                     .unwrap_or_default();
-                let pruned_s = if pruned > 0 {
-                    format!("  pruned={}", pruned)
-                } else {
-                    String::new()
-                };
 
                 use std::io::Write;
-                print!(
-                    "\r  [{}] {}/{} ({}%){}{}  ",
-                    bar, done, total, pct, best_s, pruned_s
-                );
+                print!("\r  [{}] {}/{} ({}%){}", bar, done, total, pct, best_s);
                 std::io::stdout().flush()?;
 
                 if matches!(st.as_str(), "completed" | "failed" | "error") {
                     println!();
                     if st != "completed" {
-                        println!("  {}", "FAILED".with(NEG).bold());
-                        let sd_json = serde_json::to_string_pretty(&serde_json::json!({
-                            "status": st, "trials_completed": done,
-                        }))?;
-                        println!("{}", sd_json);
+                        eprintln!("  Optimization {}", st);
                         std::process::exit(1);
                     }
                     break;
                 }
+                if timeout > 0 && elapsed >= timeout {
+                    println!();
+                    eprintln!("  {} after {}s", "Timeout".with(NEG).bold(), timeout);
+                    std::process::exit(1);
+                }
             }
 
-            // Fetch and display result
             let result_data = client.optimize_result(opt_id).await?;
             print_optimize_result(&result_data);
+            Ok(())
         }
         BacktestCmd::OptimizeStatus { opt_id } => {
             let sd = client.optimize_status(opt_id).await?;
-            if format.is_machine() {
-                return print_backtest_machine(format, client, "backtest.optimize_status", sd);
+            match format {
+                OutputFormat::Json => print_json(&sd),
+                OutputFormat::Text => {
+                    println!(
+                        "  {} Optimization {}  {}",
+                        status_badge(&sd.status),
+                        accent(&opt_id.to_string()),
+                        color_status(&sd.status),
+                    );
+                    Ok(())
+                }
             }
-            let st = &sd.status;
-            let done = sd.trials_completed.unwrap_or(0);
-            let total = sd.total_trials.unwrap_or(0);
-            let best = sd.best_value;
-
-            println!();
-            println!(
-                "  {} Optimization {}  {}",
-                status_badge(st),
-                accent(&opt_id.to_string()),
-                color_status(st),
-            );
-            println!(
-                "      Trials: {}/{}  Best: {}",
-                done,
-                total,
-                best.map(|b| color_value(Some(b), ".4f"))
-                    .unwrap_or_else(|| muted("-")),
-            );
-            println!();
         }
         BacktestCmd::OptimizeResult { opt_id } => {
             let data = client.optimize_result(opt_id).await?;
-            if format.is_machine() {
-                return print_backtest_machine(format, client, "backtest.optimize_result", data);
+            match format {
+                OutputFormat::Json => print_json(&data),
+                OutputFormat::Text => {
+                    print_optimize_result(&data);
+                    Ok(())
+                }
             }
-            print_optimize_result(&data);
         }
         BacktestCmd::OptimizeList { limit, strategy } => {
             let data = client.optimize_list(limit, strategy.as_deref()).await?;
-            if format.is_machine() {
-                return print_backtest_machine(format, client, "backtest.optimize_list", data);
+            match format {
+                OutputFormat::Json => print_json(&data),
+                OutputFormat::Text => {
+                    println!("{}", serde_json::to_string_pretty(&data)?);
+                    Ok(())
+                }
             }
-
-            let empty_vec = vec![];
-            let runs = if data.is_array() {
-                data.as_array().unwrap_or(&empty_vec)
-            } else {
-                data.get("runs")
-                    .and_then(|v| v.as_array())
-                    .unwrap_or(&empty_vec)
-            };
-
-            if runs.is_empty() {
-                println!("No optimization runs found.");
-                return Ok(());
-            }
-
-            let t = Table::new(&[
-                ("ID", 6, "right"),
-                ("Strategy", 16, "left"),
-                ("Symbol", 14, "left"),
-                ("Trials", 8, "right"),
-                ("Fitness", 8, "left"),
-                ("Status", 10, "right"),
-                ("Best", 10, "right"),
-                ("Done", 6, "right"),
-            ]);
-            t.header();
-
-            for r in runs {
-                let id = r
-                    .get("optimization_id")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v.to_string())
-                    .unwrap_or_default();
-                let strat = jstr(r, "strategy_name");
-                let sym = jstr(r, "symbol");
-                let n_trials = jdisplay(r, "n_trials");
-                let fit = jstr(r, "fitness_objective");
-                let st = jstr(r, "status");
-                let best = r.get("best_value").and_then(|v| v.as_f64());
-                let done = jdisplay(r, "trials_completed");
-
-                t.row(&[
-                    &id,
-                    &strat[..16.min(strat.len())],
-                    &sym[..14.min(sym.len())],
-                    &n_trials,
-                    fit,
-                    &color_status(st),
-                    &best
-                        .map(|b| color_value(Some(b), ".4f"))
-                        .unwrap_or_else(|| muted("-")),
-                    &done,
-                ]);
-            }
-            t.footer();
         }
     }
-    Ok(())
 }
 
-fn print_backtest_machine<T: serde::Serialize>(
-    format: OutputFormat,
+async fn dispatch_artifacts(
+    cmd: ArtifactsCmd,
     client: &ApiClient,
-    command: &'static str,
-    data: T,
-) -> Result<()> {
-    match format {
-        OutputFormat::Llm => print_llm_success(
-            data,
-            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
-        ),
-        OutputFormat::Json => print_json(&data),
-        OutputFormat::Text => unreachable!("text output is handled by the caller"),
-    }
-}
-
-fn print_backtest_error_machine(
     format: OutputFormat,
-    client: &ApiClient,
-    command: &'static str,
-    kind: impl Into<String>,
-    message: impl Into<String>,
-    body: serde_json::Value,
 ) -> Result<()> {
-    let error = EnvelopeError {
-        code: None,
-        kind: kind.into(),
-        message: message.into(),
-        status_code: None,
-        body: Some(body),
-    };
-    match format {
-        OutputFormat::Llm => print_llm_error(
-            error,
-            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
-        ),
-        OutputFormat::Json => print_json(&serde_json::json!({
-            "ok": false,
-            "error": error,
-            "meta": EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
-        })),
-        OutputFormat::Text => unreachable!("text output is handled by the caller"),
+    match cmd {
+        ArtifactsCmd::List { run_id } => {
+            let path = format!("/api/backtest/{}/artifacts", run_id);
+            let resp = client
+                .request_json(reqwest::Method::GET, &path, &[], None, &[])
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    header(&format!(
+                        "Artifacts for {}",
+                        accent(&run_id[..8.min(run_id.len())])
+                    ));
+                    println!("  {}", serde_json::to_string_pretty(&resp.body)?);
+                    println!();
+                    Ok(())
+                }
+            }
+        }
+        ArtifactsCmd::Get {
+            run_id,
+            filename,
+            output,
+        } => {
+            let encoded_filename = urlencoding::encode(&filename);
+            let path = format!("/api/backtest/{}/artifacts/{}", run_id, encoded_filename);
+            let resp = client
+                .request_bytes(reqwest::Method::GET, &path, &[], None, &[])
+                .await?;
+            let output_path = output.unwrap_or_else(|| filename.clone());
+            std::fs::write(&output_path, &resp.bytes)?;
+            let data = serde_json::json!({
+                "path": output_path,
+                "bytes": resp.bytes.len(),
+            });
+            match format {
+                OutputFormat::Json => print_json(&data),
+                OutputFormat::Text => {
+                    println!(
+                        "  Downloaded {} ({} bytes)",
+                        accent(&output_path),
+                        resp.bytes.len()
+                    );
+                    Ok(())
+                }
+            }
+        }
     }
 }
 
@@ -1161,17 +1008,6 @@ fn print_optimize_result(data: &serde_json::Value) {
 
     kv("ID", &jdisplay(data, "optimization_id"), 12);
     kv("Status", &color_status(jstr(data, "status")), 12);
-    kv("Objective", jstr(data, "fitness_objective"), 12);
-
-    let sampler_v = data.get("sampler").and_then(|v| v.as_str());
-    if let Some(s) = sampler_v {
-        kv("Sampler", s, 12);
-    }
-    if let Some(pruned) = data.get("total_pruned").and_then(|v| v.as_u64()) {
-        if pruned > 0 {
-            kv("Pruned", &pruned.to_string(), 12);
-        }
-    }
 
     if let Some(best) = jf64(data, "best_value") {
         header("Best Fitness");
@@ -1184,52 +1020,6 @@ fn print_optimize_result(data: &serde_json::Value) {
         sorted.sort_by_key(|(k, _)| k.to_string());
         for (k, v) in &sorted {
             kv(k, &v.to_string(), 20);
-        }
-    }
-
-    if let Some(imp) = data.get("param_importances").and_then(|v| v.as_object()) {
-        header("Parameter Importances");
-        let mut sorted: Vec<_> = imp.iter().collect();
-        sorted.sort_by(|a, b| {
-            let va = a.1.as_f64().unwrap_or(0.0);
-            let vb = b.1.as_f64().unwrap_or(0.0);
-            vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for (k, v) in &sorted {
-            let importance = v.as_f64().unwrap_or(0.0);
-            let bar_len = (importance * 40.0) as usize;
-            let bar = format!("{}", "#".repeat(bar_len).cyan());
-            kv(k, &format!("{:.4} {}", importance, bar), 20);
-        }
-    }
-
-    if let Some(wf) = data.get("walk_forward_results").and_then(|v| v.as_array()) {
-        if !wf.is_empty() {
-            header("Walk-Forward Folds");
-            for (i, fold) in wf.iter().enumerate() {
-                if fold.is_object() {
-                    let tv = jf64(fold, "test_value");
-                    let ts = jstr(fold, "test_start");
-                    let te = jstr(fold, "test_end");
-                    println!(
-                        "    Fold {}: {} ~ {}  value={}",
-                        i + 1,
-                        ts,
-                        te,
-                        tv.map(|v| color_value(Some(v), ".4f"))
-                            .unwrap_or_else(|| muted("-")),
-                    );
-                }
-            }
-        }
-    }
-
-    if let Some(tm) = data.get("test_metrics").and_then(|v| v.as_object()) {
-        if !tm.is_empty() {
-            header("Validation (Test Period)");
-            for (k, v) in tm {
-                kv(k, &v.to_string(), 20);
-            }
         }
     }
 

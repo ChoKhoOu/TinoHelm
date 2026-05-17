@@ -7,4 +7,5 @@ pub mod node;
 pub mod signal;
 pub mod strategy;
 pub mod style;
+pub mod trading;
 pub mod universe;

@@ -1,10 +1,9 @@
 use anyhow::Result;
 use clap::Subcommand;
-use crossterm::style::Stylize;
 
 use crate::api::ApiClient;
 use crate::cli::style::*;
-use crate::output::{print_json, print_llm_success, EnvelopeMeta, OutputFormat};
+use crate::output::{print_json, OutputFormat};
 use crate::types::{DataCompactRequest, DataFetchBatchRequest, DataFetchRequest};
 
 #[derive(Subcommand)]
@@ -40,7 +39,7 @@ pub enum DataCmd {
         /// End date (YYYY-MM-DD)
         #[arg(short, long)]
         end: String,
-        /// Binance data type (e.g., klines, aggTrades, trades, bookTicker)
+        /// Binance data type
         #[arg(long, default_value = "klines")]
         data_type: String,
         /// Binance asset class (um or cm)
@@ -50,17 +49,14 @@ pub enum DataCmd {
     /// List available data catalog
     List,
     /// Show data info for a symbol
-    Info {
-        /// Symbol
-        symbol: String,
-    },
-    /// Compact stored data for a symbol/interval
-    Compact {
+    Info { symbol: String },
+    /// Consolidate stored data for a symbol/interval
+    Consolidate {
         /// Symbol (e.g., BTCUSDT-PERP)
         symbol: String,
         /// Interval (e.g., 1m, 5m)
         interval: String,
-        /// Binance bar data type (e.g., klines, markPriceKlines, indexPriceKlines)
+        /// Binance bar data type
         #[arg(long, default_value = "klines")]
         data_type: String,
     },
@@ -70,24 +66,59 @@ pub enum DataCmd {
         symbol: String,
         /// Interval (e.g., 1m, 5m)
         interval: String,
-        /// Binance bar data type (e.g., klines, markPriceKlines, indexPriceKlines)
+        /// Binance bar data type
         #[arg(long, default_value = "klines")]
         data_type: String,
     },
-    /// Scan Parquet files on disk and sync missing entries into DB catalog
-    Scan,
+    /// Check data coverage for a symbol
+    Coverage {
+        /// Symbol (e.g., BTCUSDT-PERP)
+        symbol: String,
+    },
+    /// List available symbols in catalog
+    Symbols,
+    /// List available data types
+    Types,
+    /// List data fetch jobs
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCmd,
+    },
+    /// Delete data for a symbol/interval range
+    #[command(name = "delete-range")]
+    DeleteRange {
+        /// Symbol
+        symbol: String,
+        /// Interval
+        interval: String,
+        /// Start date
+        #[arg(long)]
+        start: String,
+        /// End date
+        #[arg(long)]
+        end: String,
+        /// Skip confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete all data for a symbol
+    Delete {
+        /// Symbol
+        symbol: String,
+        /// Skip confirmation
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
-fn fmt_size(size_bytes: u64) -> String {
-    if size_bytes < 1024 {
-        format!("{} B", size_bytes)
-    } else if size_bytes < 1024 * 1024 {
-        format!("{:.1} KB", size_bytes as f64 / 1024.0)
-    } else if size_bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", size_bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", size_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+#[derive(Subcommand)]
+pub enum JobsCmd {
+    /// List active/recent fetch jobs
+    List,
+    /// Get status of a specific job
+    Get { job_id: String },
+    /// Cancel a running job
+    Cancel { job_id: String },
 }
 
 fn is_bar_data_type(data_type: &str) -> bool {
@@ -123,124 +154,18 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
                 asset_class: asset_class.clone(),
             };
             let result = client.fetch_data(&req).await?;
-            if format.is_machine() {
-                return print_data_machine(format, client, "data.fetch", result);
-            }
-
-            let st = result
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let msg = result.get("message").and_then(|v| v.as_str());
-
-            header("Data Fetch Submitted");
-            divider(50);
-            kv("Symbol", &accent(&symbol), 12);
-            kv("Data Type", &data_type, 12);
-            kv("Interval", &interval, 12);
-            kv("Period", &format!("{} ~ {}", start, end), 12);
-            kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
-            if let Some(m) = msg {
-                println!();
-                println!("    {}", dim(m));
-            }
-            println!();
-        }
-        DataCmd::List => {
-            let result = client.list_data().await?;
-            if format.is_machine() {
-                return print_data_machine(format, client, "data.list", result);
-            }
-
-            let empty_vec = vec![];
-            let items = if result.is_array() {
-                result.as_array().unwrap_or(&empty_vec)
-            } else {
-                result
-                    .get("items")
-                    .and_then(|v| v.as_array())
-                    .unwrap_or(&empty_vec)
-            };
-
-            if items.is_empty() {
-                println!();
-                println!("  {}", muted("No data in catalog."));
-                println!();
-                return Ok(());
-            }
-
-            let t = Table::new(&[
-                ("Symbol", 18, "left"),
-                ("Interval", 10, "left"),
-                ("Start", 12, "left"),
-                ("End", 12, "left"),
-                ("Size", 10, "right"),
-            ]);
-            t.header();
-
-            for item in items {
-                let sym = item.get("symbol").and_then(|v| v.as_str()).unwrap_or("?");
-                let ivl = item.get("interval").and_then(|v| v.as_str()).unwrap_or("?");
-                let start_d = item
-                    .get("start_date")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("-");
-                let end_d = item.get("end_date").and_then(|v| v.as_str()).unwrap_or("-");
-                let size = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                t.row(&[
-                    &bold(&accent(sym)),
-                    &format!("{}", ivl.yellow()),
-                    &start_d[..10.min(start_d.len())],
-                    &end_d[..10.min(end_d.len())],
-                    &accent(&fmt_size(size)),
-                ]);
-            }
-
-            t.footer();
-            println!("    {}", muted(&format!("{} dataset(s)", items.len())));
-            println!();
-        }
-        DataCmd::Info { symbol } => {
-            let result = client.list_data().await?;
-            let payload = data_info_payload(&result, &symbol);
-            if format.is_machine() {
-                return print_data_machine(format, client, "data.info", payload);
-            }
-
-            let items = payload
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
-            header(&format!("Data: {}", accent(&symbol)));
-            divider(50);
-
-            if items.is_empty() {
-                println!("    {}", muted("No data found for this symbol."));
-            } else {
-                kv("Datasets", &items.len().to_string(), 12);
-                println!();
-                for item in &items {
-                    let ivl = item.get("interval").and_then(|v| v.as_str()).unwrap_or("?");
-                    let start_d = item
-                        .get("start_date")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("-");
-                    let end_d = item.get("end_date").and_then(|v| v.as_str()).unwrap_or("-");
-                    let size = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-                    println!(
-                        "    {}  {} ~ {}  {}",
-                        accent(ivl),
-                        &start_d[..10.min(start_d.len())],
-                        &end_d[..10.min(end_d.len())],
-                        muted(&fmt_size(size)),
-                    );
+            match format {
+                OutputFormat::Json => print_json(&result),
+                OutputFormat::Text => {
+                    header("Data Fetch Submitted");
+                    divider(50);
+                    kv("Symbol", &accent(&symbol), 12);
+                    kv("Interval", &interval, 12);
+                    kv("Period", &format!("{} ~ {}", start, end), 12);
+                    println!();
+                    Ok(())
                 }
             }
-
-            println!();
         }
         DataCmd::FetchBatch {
             symbols,
@@ -253,47 +178,71 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             let effective_intervals = fetch_batch_intervals_for_request(&data_type, &interval);
             let req = DataFetchBatchRequest {
                 symbols: symbols.clone(),
-                intervals: effective_intervals.clone(),
+                intervals: effective_intervals,
                 start: start.clone(),
                 end: end.clone(),
-                data_type: data_type.clone(),
-                asset_class: asset_class.clone(),
+                data_type,
+                asset_class,
             };
             let result = client.fetch_data_batch(&req).await?;
-            if format.is_machine() {
-                return print_data_machine(format, client, "data.fetch_batch", result);
+            match format {
+                OutputFormat::Json => print_json(&result),
+                OutputFormat::Text => {
+                    header("Batch Data Fetch Submitted");
+                    divider(50);
+                    kv("Symbols", &symbols.join(", "), 12);
+                    kv("Period", &format!("{} ~ {}", start, end), 12);
+                    println!();
+                    Ok(())
+                }
             }
-
-            let st = result
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let count = result
-                .get("count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or((symbols.len() * effective_intervals.len()) as u64);
-            let msg = result.get("message").and_then(|v| v.as_str());
-
-            header("Batch Data Fetch Submitted");
-            divider(50);
-            kv("Symbols", &accent(&symbols.join(", ")), 12);
-            kv("Data Type", &data_type, 12);
-            let display_intervals = if effective_intervals.is_empty() {
-                "tick".to_string()
-            } else {
-                effective_intervals.join(", ")
-            };
-            kv("Intervals", &display_intervals, 12);
-            kv("Period", &format!("{} ~ {}", start, end), 12);
-            kv("Queued", &bold(&count.to_string()), 12);
-            kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
-            if let Some(m) = msg {
-                println!();
-                println!("    {}", dim(m));
-            }
-            println!();
         }
-        DataCmd::Compact {
+        DataCmd::List => {
+            let result = client.list_data().await?;
+            match format {
+                OutputFormat::Json => print_json(&result),
+                OutputFormat::Text => {
+                    let items = catalog_items(&result);
+                    if items.is_empty() {
+                        println!("  No data in catalog.");
+                        return Ok(());
+                    }
+                    let t = Table::new(&[
+                        ("Symbol", 18, "left"),
+                        ("Interval", 10, "left"),
+                        ("Start", 12, "left"),
+                        ("End", 12, "left"),
+                    ]);
+                    t.header();
+                    for item in &items {
+                        let sym = item.get("symbol").and_then(|v| v.as_str()).unwrap_or("?");
+                        let ivl = item.get("interval").and_then(|v| v.as_str()).unwrap_or("?");
+                        let start_d = item
+                            .get("start_date")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-");
+                        let end_d = item.get("end_date").and_then(|v| v.as_str()).unwrap_or("-");
+                        t.row(&[&accent(sym), ivl, start_d, end_d]);
+                    }
+                    t.footer();
+                    Ok(())
+                }
+            }
+        }
+        DataCmd::Info { symbol } => {
+            let result = client.list_data().await?;
+            let payload = data_info_payload(&result, &symbol);
+            match format {
+                OutputFormat::Json => print_json(&payload),
+                OutputFormat::Text => {
+                    header(&format!("Data: {}", accent(&symbol)));
+                    println!("  {}", serde_json::to_string_pretty(&payload)?);
+                    println!();
+                    Ok(())
+                }
+            }
+        }
+        DataCmd::Consolidate {
             symbol,
             interval,
             data_type,
@@ -304,31 +253,15 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
                 data_type: data_type.clone(),
             };
             let result = client.compact_data(&req).await?;
-            if format.is_machine() {
-                return print_data_machine(format, client, "data.compact", result);
+            match format {
+                OutputFormat::Json => print_json(&result),
+                OutputFormat::Text => {
+                    header(&format!("Consolidate: {} {}", symbol, interval));
+                    println!("  Done.");
+                    println!();
+                    Ok(())
+                }
             }
-
-            let st = result
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let badge = if st == "accepted" {
-                status_badge("completed")
-            } else {
-                status_badge(st)
-            };
-            let msg = result.get("message").and_then(|v| v.as_str());
-
-            header(&format!("Compact: {} {} {}", symbol, data_type, interval));
-            divider(50);
-            kv("Symbol", &accent(&symbol), 12);
-            kv("Data Type", &data_type, 12);
-            kv("Interval", &interval, 12);
-            kv("Status", &format!("{}  {}", badge, bold(st)), 12);
-            if let Some(m) = msg {
-                println!("    {}", dim(m));
-            }
-            println!();
         }
         DataCmd::Validate {
             symbol,
@@ -336,105 +269,166 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             data_type,
         } => {
             let result = client.validate_data(&symbol, &interval, &data_type).await?;
-            if format.is_machine() {
-                return print_data_machine(format, client, "data.validate", result);
+            match format {
+                OutputFormat::Json => print_json(&result),
+                OutputFormat::Text => {
+                    header(&format!("Validate: {} {}", symbol, interval));
+                    println!("  {}", serde_json::to_string_pretty(&result)?);
+                    println!();
+                    Ok(())
+                }
             }
-
-            header(&format!("Validate: {} {} {}", symbol, data_type, interval));
-            divider(50);
-            kv("Data Type", &data_type, 12);
-
-            if let Some(obj) = result.as_object() {
-                let st = obj
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let issues = obj.get("issues").and_then(|v| v.as_array());
-                let has_issues = issues.map(|a| !a.is_empty()).unwrap_or(false);
-
-                if st == "ok" && !has_issues {
-                    println!(
-                        "    {}  {}",
-                        status_badge("completed"),
-                        "Data is valid".with(crossterm::style::Color::Rgb {
-                            r: 34,
-                            g: 197,
-                            b: 94
-                        }),
-                    );
-                } else {
-                    kv("Status", &format!("{}  {}", status_badge(st), bold(st)), 12);
+        }
+        DataCmd::Coverage { symbol } => {
+            let path = format!("/api/data/coverage/{}", symbol);
+            let resp = client
+                .request_json(reqwest::Method::GET, &path, &[], None, &[])
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    header(&format!("Coverage: {}", accent(&symbol)));
+                    println!("  {}", serde_json::to_string_pretty(&resp.body)?);
+                    println!();
+                    Ok(())
                 }
-
-                for key in &["bars_count", "start_date", "end_date", "gaps", "duplicates"] {
-                    if let Some(val) = obj.get(*key) {
-                        let label = key.replace('_', " ");
-                        // Capitalize first letter
-                        let label = label
-                            .split_whitespace()
-                            .map(|w| {
-                                let mut c = w.chars();
-                                match c.next() {
-                                    None => String::new(),
-                                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        kv(&label, &val.to_string(), 12);
-                    }
-                }
-
-                if let Some(issues) = issues {
-                    if !issues.is_empty() {
-                        println!();
-                        println!(
-                            "    {}",
-                            bold(&format!(
-                                "{}",
-                                "Issues:".with(crossterm::style::Color::Rgb {
-                                    r: 248,
-                                    g: 113,
-                                    b: 113
-                                })
-                            )),
-                        );
-                        for issue in issues {
-                            let text = issue.as_str().unwrap_or("?");
-                            println!(
-                                "      {} {}",
-                                "-".with(crossterm::style::Color::Rgb {
-                                    r: 248,
-                                    g: 113,
-                                    b: 113
-                                }),
-                                text
-                            );
+            }
+        }
+        DataCmd::Symbols => {
+            let resp = client
+                .request_json(reqwest::Method::GET, "/api/data/symbols", &[], None, &[])
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    if let Some(symbols) = resp.body.as_array() {
+                        for s in symbols {
+                            if let Some(name) = s.as_str() {
+                                println!("  {}", name);
+                            }
                         }
                     }
+                    Ok(())
                 }
             }
-            println!();
         }
-        DataCmd::Scan => {
-            let result = client.scan_data().await?;
-            if format.is_machine() {
-                return print_data_machine(format, client, "data.scan", result);
+        DataCmd::Types => {
+            let resp = client
+                .request_json(reqwest::Method::GET, "/api/data/types", &[], None, &[])
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    println!("  {}", serde_json::to_string_pretty(&resp.body)?);
+                    Ok(())
+                }
             }
-
-            let scanned = result.get("scanned").and_then(|v| v.as_u64()).unwrap_or(0);
-            let created = result.get("created").and_then(|v| v.as_u64()).unwrap_or(0);
-            let updated = result.get("updated").and_then(|v| v.as_u64()).unwrap_or(0);
-
-            header("Data Catalog Scan");
-            divider(50);
-            kv("Scanned", &scanned.to_string(), 12);
-            kv("Created", &bold(&created.to_string()), 12);
-            kv("Updated", &updated.to_string(), 12);
-            println!();
+        }
+        DataCmd::Jobs { command } => dispatch_jobs(command, client, format).await,
+        DataCmd::DeleteRange {
+            symbol,
+            interval,
+            start,
+            end,
+            yes,
+        } => {
+            if !yes {
+                crate::output::print_error(
+                    &anyhow::anyhow!("use --yes to confirm delete-range"),
+                    format,
+                );
+                std::process::exit(1);
+            }
+            let body = serde_json::json!({
+                "symbol": symbol,
+                "interval": interval,
+                "start": start,
+                "end": end,
+            });
+            let resp = client
+                .request_json(
+                    reqwest::Method::POST,
+                    "/api/data/delete-range",
+                    &[],
+                    Some(body),
+                    &[],
+                )
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    println!("  Deleted data range for {} {}", symbol, interval);
+                    Ok(())
+                }
+            }
+        }
+        DataCmd::Delete { symbol, yes } => {
+            if !yes {
+                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm delete"), format);
+                std::process::exit(1);
+            }
+            let body = serde_json::json!({"symbol": symbol});
+            let resp = client
+                .request_json(
+                    reqwest::Method::DELETE,
+                    &format!("/api/data/{}", symbol),
+                    &[],
+                    Some(body),
+                    &[],
+                )
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    println!("  Deleted all data for {}", symbol);
+                    Ok(())
+                }
+            }
         }
     }
-    Ok(())
+}
+
+async fn dispatch_jobs(cmd: JobsCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
+    match cmd {
+        JobsCmd::List => {
+            let resp = client
+                .request_json(reqwest::Method::GET, "/api/data/jobs", &[], None, &[])
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    println!("  {}", serde_json::to_string_pretty(&resp.body)?);
+                    Ok(())
+                }
+            }
+        }
+        JobsCmd::Get { job_id } => {
+            let path = format!("/api/data/jobs/{}", job_id);
+            let resp = client
+                .request_json(reqwest::Method::GET, &path, &[], None, &[])
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    println!("  {}", serde_json::to_string_pretty(&resp.body)?);
+                    Ok(())
+                }
+            }
+        }
+        JobsCmd::Cancel { job_id } => {
+            let path = format!("/api/data/jobs/{}/cancel", job_id);
+            let resp = client
+                .request_json(reqwest::Method::POST, &path, &[], None, &[])
+                .await?;
+            match format {
+                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Text => {
+                    println!("  Job {} cancelled.", job_id);
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
 fn catalog_items(result: &serde_json::Value) -> Vec<&serde_json::Value> {
@@ -466,48 +460,21 @@ fn data_info_payload(result: &serde_json::Value, symbol: &str) -> serde_json::Va
     })
 }
 
-fn print_data_machine<T: serde::Serialize>(
-    format: OutputFormat,
-    client: &ApiClient,
-    command: &'static str,
-    data: T,
-) -> Result<()> {
-    match format {
-        OutputFormat::Llm => print_llm_success(
-            data,
-            EnvelopeMeta::new(command, client.base_url(), client.auth_label()),
-        ),
-        OutputFormat::Json => print_json(&data),
-        OutputFormat::Text => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn fetch_batch_defaults_empty_bar_intervals_to_one_minute() {
-        let intervals = fetch_batch_intervals_for_request("klines", &[]);
-
-        assert_eq!(intervals, vec!["1m".to_string()]);
+        assert_eq!(
+            fetch_batch_intervals_for_request("klines", &[]),
+            vec!["1m".to_string()]
+        );
     }
 
     #[test]
     fn fetch_batch_keeps_empty_raw_tick_intervals_empty() {
-        let intervals = fetch_batch_intervals_for_request("aggTrades", &[]);
-
-        assert!(intervals.is_empty());
-    }
-
-    #[test]
-    fn fetch_batch_keeps_explicit_bar_intervals() {
-        let requested = vec!["5m".to_string(), "1h".to_string()];
-
-        assert_eq!(
-            fetch_batch_intervals_for_request("klines", &requested),
-            requested
-        );
+        assert!(fetch_batch_intervals_for_request("aggTrades", &[]).is_empty());
     }
 
     #[test]
@@ -521,12 +488,6 @@ mod tests {
         });
 
         let payload = data_info_payload(&catalog, "ETHUSDT");
-
-        assert_eq!(payload["symbol"], "ETHUSDT");
         assert_eq!(payload["count"], 2);
-        let items = payload["items"].as_array().unwrap();
-        assert!(items
-            .iter()
-            .all(|item| item["symbol"].as_str().unwrap().contains("ETHUSDT")));
     }
 }

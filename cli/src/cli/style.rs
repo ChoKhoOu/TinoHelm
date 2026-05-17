@@ -26,6 +26,7 @@ const MUTED_GREY: Color = Color::Rgb {
     b: 128,
 };
 
+#[allow(dead_code)]
 /// Long position blue (Tailwind blue-400).
 pub const LONG_COLOR: Color = Color::Rgb {
     r: 96,
@@ -33,6 +34,7 @@ pub const LONG_COLOR: Color = Color::Rgb {
     b: 250,
 };
 
+#[allow(dead_code)]
 /// Short position orange (Tailwind orange-400).
 pub const SHORT_COLOR: Color = Color::Rgb {
     r: 251,

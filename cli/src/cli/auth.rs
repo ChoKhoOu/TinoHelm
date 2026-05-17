@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::cli::style::{accent, dim, divider, header, kv, muted};
 use crate::config::{ApiKeySource, Config};
-use crate::output::{print_json, print_llm_success, EnvelopeMeta, OutputFormat};
+use crate::output::{print_json, OutputFormat};
 
 #[derive(Subcommand)]
 pub enum AuthCmd {
@@ -33,14 +33,10 @@ pub fn dispatch(cmd: AuthCmd, cfg: &Config, format: OutputFormat) -> Result<()> 
             let path = Config::write_credentials(&key)?;
             let data = json!({
                 "stored": true,
-                "path": path,
+                "path": path.display().to_string(),
                 "mode": "0600",
             });
             match format {
-                OutputFormat::Llm => print_llm_success(
-                    data,
-                    EnvelopeMeta::new("auth.login", &cfg.api_url, cfg.auth_label()),
-                ),
                 OutputFormat::Json => print_json(&data),
                 OutputFormat::Text => {
                     header("API key stored");
@@ -56,13 +52,9 @@ pub fn dispatch(cmd: AuthCmd, cfg: &Config, format: OutputFormat) -> Result<()> 
             let removed = Config::remove_credentials()?;
             let data = json!({
                 "removed": removed.is_some(),
-                "path": removed,
+                "path": removed.as_ref().map(|p| p.display().to_string()),
             });
             match format {
-                OutputFormat::Llm => print_llm_success(
-                    data,
-                    EnvelopeMeta::new("auth.logout", &cfg.api_url, cfg.auth_label()),
-                ),
                 OutputFormat::Json => print_json(&data),
                 OutputFormat::Text => {
                     header("API key removed");
@@ -91,10 +83,6 @@ fn print_status(cfg: &Config, format: OutputFormat) -> Result<()> {
         "api_key_file": source_path,
     });
     match format {
-        OutputFormat::Llm => print_llm_success(
-            data,
-            EnvelopeMeta::new("auth.status", &cfg.api_url, cfg.auth_label()),
-        ),
         OutputFormat::Json => print_json(&data),
         OutputFormat::Text => {
             header("Auth Status");

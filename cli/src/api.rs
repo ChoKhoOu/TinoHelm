@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use crate::types::*;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ApiResponse {
     pub status_code: u16,
     pub elapsed_ms: u128,
@@ -15,6 +16,7 @@ pub struct ApiResponse {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ApiBytesResponse {
     pub status_code: u16,
     pub elapsed_ms: u128,
@@ -28,12 +30,14 @@ pub struct ApiHttpError {
     pub body: serde_json::Value,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiErrorDetails {
     pub code: Option<String>,
     pub message: String,
 }
 
+#[allow(dead_code)]
 pub fn extract_api_error_details(body: &serde_json::Value) -> ApiErrorDetails {
     fn str_field<'a>(value: &'a serde_json::Value, name: &str) -> Option<&'a str> {
         value
