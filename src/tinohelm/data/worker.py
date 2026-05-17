@@ -50,7 +50,7 @@ LOCK_BUSY_REQUEUE_DELAY = 1.0
 _TERMINAL_UPDATE_RETRIES = 3
 _TERMINAL_UPDATE_BACKOFF = 1.0
 _ORPHAN_SWEEP_INTERVAL = 120.0  # seconds between sweeps
-_ORPHAN_RUNNING_THRESHOLD = 600  # seconds — running job older than this is orphaned
+_ORPHAN_RUNNING_THRESHOLD = 86_400  # seconds (24h) — running job older than this is orphaned
 
 
 def _utcnow_naive() -> datetime:
