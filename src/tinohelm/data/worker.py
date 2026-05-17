@@ -842,7 +842,7 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     .values(
                         status=STATUS_FAILED,
                         error="Cancelled during execution",
-                        completed_at=datetime.utcnow(),
+                        completed_at=datetime.now(timezone.utc),
                     )
                 )
                 await db.commit()
