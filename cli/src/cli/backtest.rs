@@ -628,16 +628,21 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
             if format.is_json() {
                 loop {
                     let data = client.get_status(&run_id).await?;
-                    let st = &data.status;
+                    let st = data.status.clone();
                     if matches!(st.as_str(), "completed" | "failed" | "error" | "cancelled") {
-                        return print_json(&serde_json::json!(data));
+                        print_json(&serde_json::json!(data))?;
+                        if st != "completed" {
+                            std::process::exit(1);
+                        }
+                        return Ok(());
                     }
                     if elapsed >= timeout {
-                        return print_json(&serde_json::json!({
+                        print_json(&serde_json::json!({
                             "run_id": run_id,
                             "status": "timeout",
                             "timeout_sec": timeout,
-                        }));
+                        }))?;
+                        std::process::exit(1);
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
                     elapsed += poll_interval;
