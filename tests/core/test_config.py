@@ -120,7 +120,6 @@ class TestSettingsDefaults:
         assert s.chunk_rows == 1_000_000
         assert s.tick_chunk_rows == 500_000
         assert s.csv_queue_maxsize == 1
-        assert s.tick_max_days_per_job == 1
 
     @pytest.mark.parametrize(
         "field",
@@ -131,7 +130,6 @@ class TestSettingsDefaults:
             "chunk_rows",
             "tick_chunk_rows",
             "csv_queue_maxsize",
-            "tick_max_days_per_job",
         ],
     )
     def test_data_settings_reject_zero_or_negative_overrides(self, field):
@@ -210,7 +208,6 @@ class TestLoadSettings:
         assert s.data.chunk_rows == 1_000_000
         assert s.data.tick_chunk_rows == 500_000
         assert s.data.csv_queue_maxsize == 1
-        assert s.data.tick_max_days_per_job == 1
 
     def test_user_yaml_overrides_default(self, tmp_path, monkeypatch, clean_env):
         """user.yaml overrides values from default.yaml."""

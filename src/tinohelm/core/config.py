@@ -75,7 +75,6 @@ class DataSettings(BaseModel):
     chunk_rows: int = Field(default=1_000_000, ge=1)
     tick_chunk_rows: int = Field(default=500_000, ge=1)
     csv_queue_maxsize: int = Field(default=1, ge=1)
-    tick_max_days_per_job: int = Field(default=1, ge=1)
 
 
 class TosStorageSettings(BaseModel):
