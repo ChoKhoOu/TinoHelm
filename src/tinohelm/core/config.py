@@ -73,9 +73,8 @@ class DataSettings(BaseModel):
     job_concurrency: int = Field(default=4, ge=1)
     convert_workers: int = Field(default=1, ge=1)
     chunk_rows: int = Field(default=1_000_000, ge=1)
-    tick_chunk_rows: int = Field(default=500_000, ge=1)
+    tick_chunk_rows: int = Field(default=2_000_000, ge=1)
     csv_queue_maxsize: int = Field(default=1, ge=1)
-    tick_max_days_per_job: int = Field(default=1, ge=1)
 
 
 class TosStorageSettings(BaseModel):

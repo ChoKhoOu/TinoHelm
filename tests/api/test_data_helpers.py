@@ -23,7 +23,6 @@ from tinohelm.api.routes.data import (
     DeleteRangeRequest,
     ResetFileNamesRequest,
     _fetch_batch_intervals,
-    _split_fetch_date_ranges,
     _run_compact,
     cancel_data_fetch_job,
     consolidate_by_period,
@@ -200,32 +199,6 @@ class _CompactStorage:
 
 
 class TestFetchBatchSplitting:
-    def test_trades_multi_day_range_splits_by_configured_days(self):
-        from datetime import date
-
-        ranges = _split_fetch_date_ranges(
-            data_type="trades",
-            start=date(2024, 1, 1),
-            end=date(2024, 1, 3),
-            max_days_per_job=1,
-        )
-
-        assert ranges == [
-            (date(2024, 1, 1), date(2024, 1, 1)),
-            (date(2024, 1, 2), date(2024, 1, 2)),
-            (date(2024, 1, 3), date(2024, 1, 3)),
-        ]
-
-    def test_non_agg_trades_range_is_not_split(self):
-        from datetime import date
-
-        assert _split_fetch_date_ranges(
-            data_type="klines",
-            start=date(2024, 1, 1),
-            end=date(2024, 1, 3),
-            max_days_per_job=1,
-        ) == [(date(2024, 1, 1), date(2024, 1, 3))]
-
     def test_fetch_batch_rejects_empty_intervals_for_bar_data(self):
         body = DataFetchBatchRequest(
             symbols=["BTCUSDT-PERP"],
@@ -238,7 +211,7 @@ class TestFetchBatchSplitting:
         with pytest.raises(HTTPException) as exc:
             import asyncio
 
-            asyncio.run(trigger_data_fetch_batch(body, AsyncMock(), AsyncMock(), SimpleNamespace()))
+            asyncio.run(trigger_data_fetch_batch(body, AsyncMock(), AsyncMock()))
 
         assert exc.value.status_code == 400
         assert exc.value.detail == "intervals must not be empty"
@@ -254,7 +227,7 @@ class TestFetchBatchSplitting:
         with pytest.raises(HTTPException) as exc:
             import asyncio
 
-            asyncio.run(trigger_data_fetch_batch(body, AsyncMock(), AsyncMock(), SimpleNamespace()))
+            asyncio.run(trigger_data_fetch_batch(body, AsyncMock(), AsyncMock()))
 
         assert exc.value.status_code == 400
         assert exc.value.detail == "start must be on or before end"
@@ -286,7 +259,6 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["count"] == 1
@@ -323,7 +295,6 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["count"] == 2
@@ -350,7 +321,6 @@ class TestFetchBatchSplitting:
                 body,
                 db,
                 AsyncMock(),
-                SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
             ))
 
         assert exc.value.status_code == 400
@@ -376,7 +346,6 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["intervals"] == []
@@ -403,7 +372,6 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["data_type"] == "quote_tick"
@@ -431,7 +399,6 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["data_type"] == "mark_price"
@@ -461,7 +428,6 @@ class TestFetchBatchSplitting:
             body,
             db,
             rds,
-            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=30)),
         ))
 
         assert result["data_type"] == "index_price"
@@ -486,13 +452,12 @@ class TestFetchBatchIdentity:
             body,
             db,
             AsyncMock(),
-            SimpleNamespace(data=SimpleNamespace(tick_max_days_per_job=1)),
         ))
         return db
 
     def test_fetch_batch_assigns_one_shared_batch_id_across_fanout(self, monkeypatch):
-        # 2 symbols x 1 interval x 3 days (trades split by 1 day) = 6 jobs,
-        # but they all belong to the same FetchBatch, so share one batch_id.
+        # trade_tick effective intervals = [None], so 2 symbols × 1 interval = 2 jobs;
+        # all belong to the same FetchBatch and share one batch_id.
         body = DataFetchBatchRequest(
             symbols=["BTCUSDT-PERP", "ETHUSDT-PERP"],
             intervals=["1m", "5m"],

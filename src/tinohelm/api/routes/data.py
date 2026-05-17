@@ -200,26 +200,6 @@ async def _delete_catalog_row_after_storage(db: AsyncSession, row: DataCatalog) 
     await db.commit()
 
 
-def _split_fetch_date_ranges(
-    *,
-    data_type: str,
-    start: date,
-    end: date,
-    max_days_per_job: int,
-) -> list[tuple[date, date]]:
-    """Split large tick-data requests into bounded inclusive date windows."""
-    if data_type != "trades" or max_days_per_job <= 0:
-        return [(start, end)]
-    ranges: list[tuple[date, date]] = []
-    current = start
-    step = timedelta(days=max_days_per_job - 1)
-    while current <= end:
-        chunk_end = min(current + step, end)
-        ranges.append((current, chunk_end))
-        current = chunk_end + timedelta(days=1)
-    return ranges
-
-
 def _normalize_requested_data_type(data_type: str) -> str:
     return _PHASE1_PUBLIC_TO_UPSTREAM.get(data_type, data_type)
 
@@ -521,7 +501,6 @@ async def trigger_data_fetch_batch(
     body: DataFetchBatchRequest,
     db: AsyncSession = Depends(get_db),
     rds: aioredis.Redis = Depends(get_redis),
-    settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """Create persistent data-fetch jobs for multiple symbols."""
     if not body.symbols:
@@ -544,37 +523,30 @@ async def trigger_data_fetch_batch(
     # One fetch-batch submission = one FetchBatch. All fanned-out DataFetchJob
     # rows share this batch_id so the scheduler can treat them as a unit.
     batch_id = str(uuid4())
-    ranges = _split_fetch_date_ranges(
-        data_type=effective_data_type,
-        start=body.start,
-        end=body.end,
-        max_days_per_job=settings.data.tick_max_days_per_job,
-    )
     effective_intervals = _fetch_batch_job_intervals(body.data_type, body.intervals)
     for symbol in body.symbols:
         for interval in effective_intervals:
-            for start_date, end_date in ranges:
-                job = DataFetchJob(
-                    symbol=symbol,
-                    data_type=effective_data_type,
-                    interval=interval,
-                    start_date=start_date,
-                    end_date=end_date,
-                    asset_class=body.asset_class,
-                    status="queued",
-                    batch_id=batch_id,
-                )
-                db.add(job)
-                await db.flush()
-                job_ids.append(job.job_id)
-                jobs.append({
-                    "job_id": job.job_id,
-                    "data_type": public_data_type,
-                    "db_interval": resolve_db_interval(effective_data_type, interval),
-                    "interval": interval,
-                    "start": start_date.isoformat(),
-                    "end": end_date.isoformat(),
-                })
+            job = DataFetchJob(
+                symbol=symbol,
+                data_type=effective_data_type,
+                interval=interval,
+                start_date=body.start,
+                end_date=body.end,
+                asset_class=body.asset_class,
+                status="queued",
+                batch_id=batch_id,
+            )
+            db.add(job)
+            await db.flush()
+            job_ids.append(job.job_id)
+            jobs.append({
+                "job_id": job.job_id,
+                "data_type": public_data_type,
+                "db_interval": resolve_db_interval(effective_data_type, interval),
+                "interval": interval,
+                "start": body.start.isoformat(),
+                "end": body.end.isoformat(),
+            })
 
     await db.commit()
 
