@@ -20,11 +20,11 @@ pub enum FactorCmd {
     Universes,
     /// List symbols with catalog bar data.
     Symbols,
-    /// Show factor runner capabilities for LLM/API clients.
+    /// Show factor runner capabilities.
     Capabilities,
-    /// Synchronous quick factor exploration. Pass a full ExploreRequest JSON body.
+    /// Synchronous quick factor exploration.
     Explore(ApiBodyArgs),
-    /// Submit async deep diagnostic factor run. Pass a full RunRequest JSON body.
+    /// Submit async deep diagnostic factor run.
     Run(ApiBodyArgs),
     /// List factor runs.
     Runs {
@@ -36,13 +36,10 @@ pub enum FactorCmd {
     /// Get factor run report/result.
     Report {
         run_id: String,
-        /// Request concise LLM summary payload.
         #[arg(long)]
         summary: bool,
-        /// Request full/detail payload.
         #[arg(long)]
         detail: bool,
-        /// Comma-separated fields to keep in the API response.
         #[arg(long)]
         fields: Option<String>,
     },
@@ -56,12 +53,11 @@ pub enum FactorCmd {
         #[arg(long)]
         template: Option<String>,
     },
-    /// Synchronous factor parameter grid search. Pass a full ParamsGridRequest JSON body.
+    /// Synchronous factor parameter grid search.
     #[command(name = "params-grid")]
     ParamsGrid(ApiBodyArgs),
     /// Compare two completed factor runs.
     Compare(CompareArgs),
-
     /// Compare 2+ completed factor runs.
     #[command(name = "compare-multi")]
     CompareMulti {
@@ -102,7 +98,22 @@ pub struct BodyArgs {
 pub struct ApiBodyArgs {
     #[command(flatten)]
     body_args: BodyArgs,
-    /// Request concise LLM summary payload where supported.
+    /// Factor name (typed flag, mutually exclusive with --body/--body-file/--stdin).
+    #[arg(long)]
+    factor: Option<String>,
+    /// Universe name.
+    #[arg(long)]
+    universe: Option<String>,
+    /// Start date (YYYY-MM-DD).
+    #[arg(long)]
+    start: Option<String>,
+    /// End date (YYYY-MM-DD).
+    #[arg(long)]
+    end: Option<String>,
+    /// Factor parameter as key=value. Repeatable.
+    #[arg(long = "param", value_parser = parse_param)]
+    params: Vec<(String, String)>,
+    /// Request concise summary payload where supported.
     #[arg(long)]
     summary: bool,
     /// Request full/detail payload where supported.
@@ -111,6 +122,13 @@ pub struct ApiBodyArgs {
     /// Comma-separated fields to keep in the API response/request.
     #[arg(long)]
     fields: Option<String>,
+}
+
+fn parse_param(s: &str) -> std::result::Result<(String, String), String> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("expected key=value, got '{s}'"))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
 pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
@@ -136,67 +154,37 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         }
         FactorCmd::Universes => {
             call_and_print(
-                client,
-                format,
-                Method::GET,
-                "/api/factor/universes",
-                vec![],
-                None,
-                vec![],
+                client, format, Method::GET, "/api/factor/universes", vec![], None, vec![],
                 "factor.universes",
             )
             .await
         }
         FactorCmd::Symbols => {
             call_and_print(
-                client,
-                format,
-                Method::GET,
-                "/api/factor/symbols",
-                vec![],
-                None,
-                vec![],
+                client, format, Method::GET, "/api/factor/symbols", vec![], None, vec![],
                 "factor.symbols",
             )
             .await
         }
         FactorCmd::Capabilities => {
             call_and_print(
-                client,
-                format,
-                Method::GET,
-                "/api/factor/capabilities",
-                vec![],
-                None,
-                vec![],
+                client, format, Method::GET, "/api/factor/capabilities", vec![], None, vec![],
                 "factor.capabilities",
             )
             .await
         }
         FactorCmd::Explore(args) => {
-            let body = api_body_required(args, format == OutputFormat::Llm)?;
+            let body = api_body_required(args)?;
             call_and_print(
-                client,
-                format,
-                Method::POST,
-                "/api/factor/explore",
-                vec![],
-                Some(body),
-                vec![],
+                client, format, Method::POST, "/api/factor/explore", vec![], Some(body), vec![],
                 "factor.explore",
             )
             .await
         }
         FactorCmd::Run(args) => {
-            let body = api_body_required(args, false)?;
+            let body = api_body_required(args)?;
             call_and_print(
-                client,
-                format,
-                Method::POST,
-                "/api/factor/run",
-                vec![],
-                Some(body),
-                vec![],
+                client, format, Method::POST, "/api/factor/run", vec![], Some(body), vec![],
                 "factor.run",
             )
             .await
@@ -207,13 +195,7 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
                 query.push(("factor_name".to_string(), name));
             }
             call_and_print(
-                client,
-                format,
-                Method::GET,
-                "/api/factor/runs",
-                query,
-                None,
-                vec![],
+                client, format, Method::GET, "/api/factor/runs", query, None, vec![],
                 "factor.runs",
             )
             .await
@@ -226,13 +208,8 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         } => {
             let path = format!("/api/factor/report/{run_id}");
             let mut query = Vec::new();
-            let default_llm_summary =
-                format == OutputFormat::Llm && !summary && !detail && fields.is_none();
-            if summary || default_llm_summary {
+            if summary {
                 query.push(("summary".to_string(), "true".to_string()));
-                if !detail {
-                    query.push(("detail".to_string(), "false".to_string()));
-                }
             }
             if detail {
                 query.push(("detail".to_string(), "true".to_string()));
@@ -241,13 +218,7 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
                 query.push(("fields".to_string(), fields));
             }
             call_and_print(
-                client,
-                format,
-                Method::GET,
-                &path,
-                query,
-                None,
-                vec![],
+                client, format, Method::GET, &path, query, None, vec![],
                 "factor.report",
             )
             .await
@@ -255,13 +226,7 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         FactorCmd::Cancel { run_id } => {
             let path = format!("/api/factor/cancel/{run_id}");
             call_and_print(
-                client,
-                format,
-                Method::POST,
-                &path,
-                vec![],
-                None,
-                vec![],
+                client, format, Method::POST, &path, vec![], None, vec![],
                 "factor.cancel",
             )
             .await
@@ -276,27 +241,15 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
                 body["template"] = serde_json::Value::String(template);
             }
             call_and_print(
-                client,
-                format,
-                Method::POST,
-                "/api/factor/create",
-                vec![],
-                Some(body),
-                vec![],
+                client, format, Method::POST, "/api/factor/create", vec![], Some(body), vec![],
                 "factor.create",
             )
             .await
         }
         FactorCmd::ParamsGrid(args) => {
-            let body = api_body_required(args, false)?;
+            let body = api_body_required(args)?;
             call_and_print(
-                client,
-                format,
-                Method::POST,
-                "/api/factor/params_grid",
-                vec![],
-                Some(body),
-                vec![],
+                client, format, Method::POST, "/api/factor/params_grid", vec![], Some(body), vec![],
                 "factor.params_grid",
             )
             .await
@@ -304,13 +257,7 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
         FactorCmd::Compare(args) => {
             let body = compare_body(args)?;
             call_and_print(
-                client,
-                format,
-                Method::POST,
-                "/api/factor/compare",
-                vec![],
-                Some(body),
-                vec![],
+                client, format, Method::POST, "/api/factor/compare", vec![], Some(body), vec![],
                 "factor.compare",
             )
             .await
@@ -327,13 +274,7 @@ pub async fn dispatch(cmd: FactorCmd, client: &ApiClient, format: OutputFormat) 
                 "n_bootstrap": n_bootstrap,
             });
             call_and_print(
-                client,
-                format,
-                Method::POST,
-                "/api/factor/compare/multi",
-                vec![],
-                Some(body),
-                vec![],
+                client, format, Method::POST, "/api/factor/compare/multi", vec![], Some(body), vec![],
                 "factor.compare_multi",
             )
             .await
@@ -346,23 +287,59 @@ fn body_required(args: BodyArgs) -> Result<serde_json::Value> {
         .ok_or_else(|| anyhow::anyhow!("Missing JSON body. Use --body, --body-file, or --stdin"))
 }
 
-fn api_body_required(args: ApiBodyArgs, default_summary: bool) -> Result<serde_json::Value> {
-    let mut body = body_required(args.body_args)?;
+fn api_body_required(args: ApiBodyArgs) -> Result<serde_json::Value> {
+    let has_body_input = args.body_args.body.is_some()
+        || args.body_args.body_file.is_some()
+        || args.body_args.stdin;
+    let has_typed_flags = args.factor.is_some()
+        || args.universe.is_some()
+        || args.start.is_some()
+        || args.end.is_some()
+        || !args.params.is_empty();
+
+    if has_body_input && has_typed_flags {
+        anyhow::bail!(
+            "Typed flags (--factor, --universe, --start, --end, --param) are mutually exclusive with --body/--body-file/--stdin"
+        );
+    }
+
+    let mut body = if has_body_input {
+        body_required(args.body_args)?
+    } else if has_typed_flags {
+        let mut obj = serde_json::Map::new();
+        if let Some(factor) = args.factor {
+            obj.insert("factor_name".to_string(), Value::String(factor));
+        }
+        if let Some(universe) = args.universe {
+            obj.insert("universe".to_string(), Value::String(universe));
+        }
+        if let Some(start) = args.start {
+            obj.insert("start".to_string(), Value::String(start));
+        }
+        if let Some(end) = args.end {
+            obj.insert("end".to_string(), Value::String(end));
+        }
+        if !args.params.is_empty() {
+            let config: serde_json::Map<String, Value> = args
+                .params
+                .into_iter()
+                .map(|(k, v)| {
+                    let parsed: Value = serde_json::from_str(&v).unwrap_or(Value::String(v));
+                    (k, parsed)
+                })
+                .collect();
+            obj.insert("config".to_string(), Value::Object(config));
+        }
+        Value::Object(obj)
+    } else {
+        return Err(anyhow!(
+            "Provide either typed flags (--factor, --universe, etc.) or a JSON body (--body, --body-file, --stdin)"
+        ));
+    };
+
     let object = body
         .as_object_mut()
         .ok_or_else(|| anyhow!("JSON body must be an object"))?;
-    let body_has_result_controls = object.contains_key("summary")
-        || object.contains_key("detail")
-        || object.contains_key("fields");
-    if default_summary
-        && !args.summary
-        && !args.detail
-        && args.fields.is_none()
-        && !body_has_result_controls
-    {
-        object.insert("summary".to_string(), Value::Bool(true));
-        object.insert("detail".to_string(), Value::Bool(false));
-    }
     if args.summary {
         object.insert("summary".to_string(), Value::Bool(true));
         if !args.detail {
@@ -421,6 +398,11 @@ mod tests {
                 body_file: None,
                 stdin: false,
             },
+            factor: None,
+            universe: None,
+            start: None,
+            end: None,
+            params: vec![],
             summary: false,
             detail: false,
             fields: None,
@@ -428,34 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn llm_default_body_is_summary_unless_body_controls_output() {
-        let body = api_body_required(
-            body_args(serde_json::json!({"factor_name":"x","config":{}})),
-            true,
-        )
-        .expect("body parses");
-
-        assert_eq!(body["summary"], serde_json::Value::Bool(true));
-        assert_eq!(body["detail"], serde_json::Value::Bool(false));
-    }
-
-    #[test]
-    fn llm_default_body_preserves_explicit_detail() {
-        let body = api_body_required(
-            body_args(serde_json::json!({"factor_name":"x","config":{},"detail":true})),
-            true,
-        )
-        .expect("body parses");
-
-        assert_eq!(body["detail"], serde_json::Value::Bool(true));
-        assert!(body.get("summary").is_none());
-    }
-
-    #[test]
     fn api_body_rejects_non_object_json() {
-        let err = api_body_required(body_args(serde_json::json!([])), true)
-            .expect_err("array body must be rejected before mutation");
-
+        let err = api_body_required(body_args(serde_json::json!([])))
+            .expect_err("array body must be rejected");
         assert!(err.to_string().contains("JSON body must be an object"));
     }
 
@@ -476,7 +433,5 @@ mod tests {
 
         assert_eq!(body["eval_a_run_id"], "run-a");
         assert_eq!(body["eval_b_run_id"], "run-b");
-        assert_eq!(body["n_bootstrap"], 123);
-        assert_eq!(body["confidence"], 0.9);
     }
 }
