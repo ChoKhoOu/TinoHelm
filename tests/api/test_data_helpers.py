@@ -456,8 +456,8 @@ class TestFetchBatchIdentity:
         return db
 
     def test_fetch_batch_assigns_one_shared_batch_id_across_fanout(self, monkeypatch):
-        # 2 symbols x 2 intervals = 2 jobs (no date splitting),
-        # but they all belong to the same FetchBatch, so share one batch_id.
+        # trade_tick effective intervals = [None], so 2 symbols × 1 interval = 2 jobs;
+        # all belong to the same FetchBatch and share one batch_id.
         body = DataFetchBatchRequest(
             symbols=["BTCUSDT-PERP", "ETHUSDT-PERP"],
             intervals=["1m", "5m"],
