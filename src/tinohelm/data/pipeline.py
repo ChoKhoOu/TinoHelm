@@ -469,7 +469,7 @@ class BinanceVisionPipeline:
             raise
         try:
             await asyncio.to_thread(
-                self._consolidate_catalog_data, symbol, data_type, interval
+                self._consolidate_catalog_data, symbol, data_type, interval, start, end
             )
         except Exception as consolidation_exc:
             logger.error(
@@ -531,11 +531,14 @@ class BinanceVisionPipeline:
                     finally:
                         self._cleanup_raw_file(csv_path)
 
-            # Re-consolidate after backfill writes
+            # Re-consolidate after backfill writes (only affected range)
             post_consolidation_ok = True
+            backfill_start = min(gs for gs, _ in gap_ranges)
+            backfill_end = max(ge for _, ge in gap_ranges)
             try:
                 await asyncio.to_thread(
-                    self._consolidate_catalog_data, symbol, data_type, interval
+                    self._consolidate_catalog_data, symbol, data_type, interval,
+                    backfill_start, backfill_end,
                 )
             except Exception:
                 post_consolidation_ok = False
@@ -1019,11 +1022,13 @@ class BinanceVisionPipeline:
         symbol: str,
         data_type: str,
         interval: str | None,
+        start: date | None = None,
+        end: date | None = None,
     ) -> None:
         """Run NT-native consolidation after streaming writes complete.
 
-        All NT-native data types (bar, trade_tick, quote_tick, mark_price,
-        index_price, funding_rate) are consolidated.
+        When *start*/*end* are provided, only files overlapping that range are
+        re-consolidated (incremental). Without them, full consolidation runs.
         """
         from tinohelm.data.catalog import _catalog_for_root, consolidate_and_organize
 
@@ -1033,7 +1038,7 @@ class BinanceVisionPipeline:
 
         data_cls, identifier = resolved
         catalog = _catalog_for_root(self.catalog_path, self._storage)
-        consolidate_and_organize(catalog, data_cls, identifier)
+        consolidate_and_organize(catalog, data_cls, identifier, start=start, end=end)
 
     # ------------------------------------------------------------------
     # Helpers

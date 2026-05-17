@@ -413,3 +413,208 @@ class TestConsolidateAndOrganize:
         # Total bars preserved
         result_bars = catalog.bars(bar_types=[str(bar_type)])
         assert len(result_bars) == total_bars
+
+
+class TestIncrementalConsolidation:
+    """consolidate_and_organize with start/end only touches affected weeks."""
+
+    def _make_weekly_catalog(self, tmp_path):
+        """Set up a catalog with 3 pre-consolidated weekly files."""
+        from datetime import datetime, timezone
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        # 3 weeks starting Monday 2024-01-01
+        # Week 1: 2024-01-01 .. 2024-01-07
+        # Week 2: 2024-01-08 .. 2024-01-14
+        # Week 3: 2024-01-15 .. 2024-01-21
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        minute_ns = 60_000_000_000
+        week_bars = 7 * 24 * 60  # 10080 bars per week
+
+        for week_idx in range(3):
+            week_start_ns = int((base.timestamp() + week_idx * 7 * 86400) * 1_000_000_000)
+            bars = []
+            for i in range(week_bars):
+                ts = week_start_ns + i * minute_ns
+                bar = Bar(
+                    bar_type=bar_type,
+                    open=instrument.make_price(100.0),
+                    high=instrument.make_price(101.0),
+                    low=instrument.make_price(99.0),
+                    close=instrument.make_price(100.5),
+                    volume=instrument.make_qty(1000.0),
+                    ts_event=ts,
+                    ts_init=ts,
+                )
+                bars.append(bar)
+            catalog.write_data(bars, skip_disjoint_check=True)
+
+        # Pre-consolidate so each week is one file
+        consolidate_and_organize(catalog, Bar, str(bar_type))
+        return catalog, instrument, bar_type
+
+    def test_only_touches_affected_week(self, tmp_path):
+        """When start/end covers one week, only that week's file is rewritten."""
+        from datetime import date
+        from nautilus_trader.model.data import Bar
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        catalog, instrument, bar_type = self._make_weekly_catalog(tmp_path)
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+
+        files_before = sorted(bar_dir.glob("*.parquet"))
+        mtimes_before = {f.name: f.stat().st_mtime_ns for f in files_before}
+
+        # Add a few duplicate bars in week 2 (2024-01-08 .. 2024-01-14)
+        from datetime import datetime, timezone
+        week2_start_ns = int(datetime(2024, 1, 8, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        minute_ns = 60_000_000_000
+        dup_bars = []
+        for i in range(5):
+            ts = week2_start_ns + i * minute_ns
+            bar = Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(100.0),
+                high=instrument.make_price(101.0),
+                low=instrument.make_price(99.0),
+                close=instrument.make_price(100.5),
+                volume=instrument.make_qty(1000.0),
+                ts_event=ts,
+                ts_init=ts,
+            )
+            dup_bars.append(bar)
+        catalog.write_data(dup_bars, skip_disjoint_check=True)
+
+        # Consolidate only the affected range
+        consolidate_and_organize(
+            catalog, Bar, str(bar_type),
+            start=date(2024, 1, 8),
+            end=date(2024, 1, 14),
+        )
+
+        files_after = sorted(bar_dir.glob("*.parquet"))
+        mtimes_after = {f.name: f.stat().st_mtime_ns for f in files_after}
+
+        # Week 1 and week 3 files should be untouched
+        week1_files = [f for f in mtimes_before if "2024-01-01" in f or "2023-12" in f]
+        week3_files = [f for f in mtimes_before if "2024-01-15" in f]
+        for f in week1_files:
+            if f in mtimes_after:
+                assert mtimes_after[f] == mtimes_before[f], f"Week 1 file {f} was modified"
+        for f in week3_files:
+            if f in mtimes_after:
+                assert mtimes_after[f] == mtimes_before[f], f"Week 3 file {f} was modified"
+
+        # Data integrity: duplicates removed, total = 3 weeks worth
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        expected = 3 * 7 * 24 * 60
+        assert len(all_bars) == expected
+
+    def test_no_start_end_consolidates_all(self, tmp_path):
+        """Without start/end, all weeks are consolidated (backward compat)."""
+        from nautilus_trader.model.data import Bar
+        from tinohelm.data.catalog import consolidate_and_organize
+
+        catalog, instrument, bar_type = self._make_weekly_catalog(tmp_path)
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+
+        # Add fragments across multiple weeks
+        from datetime import datetime, timezone
+        minute_ns = 60_000_000_000
+        for week_offset in range(3):
+            week_start_ns = int(
+                datetime(2024, 1, 1 + week_offset * 7, tzinfo=timezone.utc).timestamp()
+                * 1_000_000_000
+            )
+            dup_bars = []
+            for i in range(3):
+                ts = week_start_ns + i * minute_ns
+                bar = Bar(
+                    bar_type=bar_type,
+                    open=instrument.make_price(100.0),
+                    high=instrument.make_price(101.0),
+                    low=instrument.make_price(99.0),
+                    close=instrument.make_price(100.5),
+                    volume=instrument.make_qty(1000.0),
+                    ts_event=ts,
+                    ts_init=ts,
+                )
+                dup_bars.append(bar)
+            catalog.write_data(dup_bars, skip_disjoint_check=True)
+
+        # No start/end — should consolidate everything
+        consolidate_and_organize(catalog, Bar, str(bar_type))
+
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        expected = 3 * 7 * 24 * 60
+        assert len(all_bars) == expected
+
+    def test_cross_week_boundary(self, tmp_path):
+        """start/end spanning two weeks should consolidate both weeks."""
+        from datetime import date
+        from nautilus_trader.model.data import Bar
+        from tinohelm.data.catalog import consolidate_and_organize
+
+        catalog, instrument, bar_type = self._make_weekly_catalog(tmp_path)
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+
+        files_before = sorted(bar_dir.glob("*.parquet"))
+        mtimes_before = {f.name: f.stat().st_mtime_ns for f in files_before}
+
+        # Add duplicate bars in week 1 and week 2 separately
+        from datetime import datetime, timezone
+        minute_ns = 60_000_000_000
+        # Duplicate in week 1: 2024-01-07 23:00
+        boundary_ts_1 = int(datetime(2024, 1, 7, 23, 0, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        bar1 = Bar(
+            bar_type=bar_type,
+            open=instrument.make_price(100.0),
+            high=instrument.make_price(101.0),
+            low=instrument.make_price(99.0),
+            close=instrument.make_price(100.5),
+            volume=instrument.make_qty(1000.0),
+            ts_event=boundary_ts_1,
+            ts_init=boundary_ts_1,
+        )
+        catalog.write_data([bar1], skip_disjoint_check=True)
+        # Duplicate in week 2: 2024-01-08 00:00
+        boundary_ts_2 = int(datetime(2024, 1, 8, 0, 0, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        bar2 = Bar(
+            bar_type=bar_type,
+            open=instrument.make_price(100.0),
+            high=instrument.make_price(101.0),
+            low=instrument.make_price(99.0),
+            close=instrument.make_price(100.5),
+            volume=instrument.make_qty(1000.0),
+            ts_event=boundary_ts_2,
+            ts_init=boundary_ts_2,
+        )
+        catalog.write_data([bar2], skip_disjoint_check=True)
+
+        consolidate_and_organize(
+            catalog, Bar, str(bar_type),
+            start=date(2024, 1, 7),
+            end=date(2024, 1, 8),
+        )
+
+        files_after = sorted(bar_dir.glob("*.parquet"))
+        mtimes_after = {f.name: f.stat().st_mtime_ns for f in files_after}
+
+        # Week 3 should be untouched
+        week3_files = [f for f in mtimes_before if "2024-01-15" in f]
+        for f in week3_files:
+            if f in mtimes_after:
+                assert mtimes_after[f] == mtimes_before[f], f"Week 3 file {f} was modified"
+
+        # Data integrity: duplicates removed, total unchanged
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        expected = 3 * 7 * 24 * 60
+        assert len(all_bars) == expected
