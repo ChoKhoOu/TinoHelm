@@ -34,6 +34,8 @@ services:
     image: ${TINO_API_IMAGE:-ghcr.io/chokhoou/tinohelm-api:latest}
     pull_policy: missing
     restart: unless-stopped
+    mem_limit: 5632m
+    memswap_limit: 17920m
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
