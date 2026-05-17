@@ -464,7 +464,7 @@ class BinanceVisionPipeline:
 
         # 4. Consolidate + Deduplicate + Organize by period
         try:
-            await _progress(92, "Consolidating and deduplicating...")
+            await _progress(90, "Consolidating and deduplicating...")
         except asyncio.CancelledError:
             raise
         try:
@@ -481,7 +481,77 @@ class BinanceVisionPipeline:
                 f"Data written successfully but consolidation failed for {symbol} {data_type}: {consolidation_exc}"
             ) from consolidation_exc
 
-        # 5. Update DB catalog
+        # 5. Gap detection + auto-backfill (runs after consolidation so
+        #    file-boundary artifacts don't produce false-positive gaps)
+        try:
+            await _progress(93, "Checking for data gaps...")
+        except asyncio.CancelledError:
+            raise
+        gap_ranges = await asyncio.to_thread(
+            self._detect_gaps_for_backfill, symbol, data_type, interval
+        )
+        if gap_ranges:
+            logger.info(
+                "Detected %d gap range(s) for %s %s, triggering backfill",
+                len(gap_ranges), symbol, data_type,
+            )
+            for gap_start, gap_end in gap_ranges:
+                gap_tasks = self.downloader.plan_downloads(
+                    data_type=data_type,
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    start=gap_start,
+                    end=gap_end,
+                    interval=interval,
+                )
+                if not gap_tasks:
+                    continue
+                for task in gap_tasks:
+                    try:
+                        csv_path = await self.downloader.execute_task(task)
+                    except Exception as dl_exc:
+                        logger.warning(
+                            "Gap backfill download failed: %s", dl_exc,
+                        )
+                        continue
+                    if not csv_path:
+                        continue
+                    try:
+                        n, fps = await asyncio.to_thread(
+                            self._convert_one_file,
+                            csv_path, converter, instrument, kwargs,
+                            symbol, data_type, interval, True,
+                        )
+                        total_objects += n
+                        all_file_paths.extend(fps)
+                    except Exception as conv_exc:
+                        logger.warning(
+                            "Gap backfill convert failed: %s", conv_exc,
+                        )
+                    finally:
+                        self._cleanup_raw_file(csv_path)
+
+            # Re-consolidate after backfill writes
+            post_consolidation_ok = True
+            try:
+                await asyncio.to_thread(
+                    self._consolidate_catalog_data, symbol, data_type, interval
+                )
+            except Exception:
+                post_consolidation_ok = False
+                logger.warning("Post-backfill consolidation failed", exc_info=True)
+
+            if post_consolidation_ok:
+                remaining_gaps = await asyncio.to_thread(
+                    self._detect_gaps_for_backfill, symbol, data_type, interval
+                )
+                if remaining_gaps:
+                    logger.warning(
+                        "%d gap(s) remain after backfill for %s %s (source data may be missing)",
+                        len(remaining_gaps), symbol, data_type,
+                    )
+
+        # 6. Update DB catalog
         try:
             await _progress(96, "Updating catalog database...")
         except asyncio.CancelledError:
@@ -865,6 +935,85 @@ class BinanceVisionPipeline:
 
 
 
+    def _resolve_data_cls_and_identifier(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+    ) -> tuple[type, str] | None:
+        """Resolve the NT data class and catalog identifier for a data type.
+
+        Returns None for unsupported/custom categories.
+        """
+        from tinohelm.data.pipeline_helpers import resolve_write_category
+
+        category = resolve_write_category(data_type)
+        if category == "custom":
+            return None
+
+        if category == "bar":
+            from nautilus_trader.model.data import Bar
+            from tinohelm.data.catalog import _make_bar_type, _make_instrument
+
+            inst = _make_instrument(symbol)
+            bar_type = _make_bar_type(inst.id, interval)
+            return (Bar, str(bar_type))
+        elif category == "trade_tick":
+            from nautilus_trader.model.data import TradeTick
+            from tinohelm.strategy.loader_helpers import normalize_symbol
+
+            return (TradeTick, normalize_symbol(symbol))
+        elif category == "quote_tick":
+            from nautilus_trader.model.data import QuoteTick
+            from tinohelm.strategy.loader_helpers import normalize_symbol
+
+            return (QuoteTick, normalize_symbol(symbol))
+        elif category == "mark_price":
+            from nautilus_trader.model.data import MarkPriceUpdate
+            from tinohelm.strategy.loader_helpers import normalize_symbol
+
+            return (MarkPriceUpdate, normalize_symbol(symbol))
+        elif category == "index_price":
+            from nautilus_trader.model.data import IndexPriceUpdate
+            from tinohelm.strategy.loader_helpers import normalize_symbol
+
+            return (IndexPriceUpdate, normalize_symbol(symbol))
+        elif category == "funding_rate":
+            from nautilus_trader.model.data import FundingRateUpdate
+            from tinohelm.strategy.loader_helpers import normalize_symbol
+
+            return (FundingRateUpdate, normalize_symbol(symbol))
+        return None
+
+    def _detect_gaps_for_backfill(
+        self,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+    ) -> list[tuple[date, date]]:
+        """Detect gaps in the catalog and return day-aligned ranges for backfill.
+
+        Returns an empty list when data is contiguous or the data type is unsupported.
+        """
+        from tinohelm.data.catalog import _catalog_for_root
+        from tinohelm.data.pipeline_helpers import detect_gaps, expand_gaps_to_days
+
+        resolved = self._resolve_data_cls_and_identifier(symbol, data_type, interval)
+        if resolved is None:
+            return []
+
+        data_cls, identifier = resolved
+        catalog = _catalog_for_root(self.catalog_path, self._storage)
+        intervals = catalog.get_intervals(data_cls, identifier)
+        if not intervals:
+            return []
+
+        gaps = detect_gaps(intervals)
+        if not gaps:
+            return []
+
+        return expand_gaps_to_days(gaps)
+
     def _consolidate_catalog_data(
         self,
         symbol: str,
@@ -877,46 +1026,14 @@ class BinanceVisionPipeline:
         index_price, funding_rate) are consolidated.
         """
         from tinohelm.data.catalog import _catalog_for_root, consolidate_and_organize
-        from tinohelm.data.pipeline_helpers import resolve_write_category
 
-        category = resolve_write_category(data_type)
-        if category == "custom":
+        resolved = self._resolve_data_cls_and_identifier(symbol, data_type, interval)
+        if resolved is None:
             return
 
+        data_cls, identifier = resolved
         catalog = _catalog_for_root(self.catalog_path, self._storage)
-
-        if category == "bar":
-            from nautilus_trader.model.data import Bar
-            from tinohelm.data.catalog import _make_bar_type, _make_instrument
-
-            inst = _make_instrument(symbol)
-            bar_type = _make_bar_type(inst.id, interval)
-            consolidate_and_organize(catalog, Bar, str(bar_type))
-        elif category == "trade_tick":
-            from nautilus_trader.model.data import TradeTick
-            from tinohelm.strategy.loader_helpers import normalize_symbol
-
-            consolidate_and_organize(catalog, TradeTick, normalize_symbol(symbol))
-        elif category == "quote_tick":
-            from nautilus_trader.model.data import QuoteTick
-            from tinohelm.strategy.loader_helpers import normalize_symbol
-
-            consolidate_and_organize(catalog, QuoteTick, normalize_symbol(symbol))
-        elif category == "mark_price":
-            from nautilus_trader.model.data import MarkPriceUpdate
-            from tinohelm.strategy.loader_helpers import normalize_symbol
-
-            consolidate_and_organize(catalog, MarkPriceUpdate, normalize_symbol(symbol))
-        elif category == "index_price":
-            from nautilus_trader.model.data import IndexPriceUpdate
-            from tinohelm.strategy.loader_helpers import normalize_symbol
-
-            consolidate_and_organize(catalog, IndexPriceUpdate, normalize_symbol(symbol))
-        elif category == "funding_rate":
-            from nautilus_trader.model.data import FundingRateUpdate
-            from tinohelm.strategy.loader_helpers import normalize_symbol
-
-            consolidate_and_organize(catalog, FundingRateUpdate, normalize_symbol(symbol))
+        consolidate_and_organize(catalog, data_cls, identifier)
 
     # ------------------------------------------------------------------
     # Helpers
