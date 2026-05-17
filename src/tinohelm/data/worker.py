@@ -658,6 +658,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
+                        "started_at": None,
                         "completed_at": _utcnow_naive(),
                     },
                 )
@@ -678,6 +679,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
+                        "started_at": None,
                         "completed_at": _utcnow_naive(),
                     },
                 )
@@ -871,6 +873,7 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
+                        "started_at": None,
                         "completed_at": _utcnow_naive(),
                     },
                 )
