@@ -273,7 +273,7 @@ pub async fn dispatch(cmd: NodeCmd, client: &ApiClient, format: OutputFormat) ->
         NodeCmd::PaperConfig { command } => dispatch_paper_config(command, client, format).await,
         NodeCmd::PaperReset { yes } => {
             if !yes {
-                eprintln!("  Use --yes to confirm paper trading reset");
+                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm paper trading reset"), format);
                 std::process::exit(1);
             }
             let resp = client
@@ -378,7 +378,7 @@ async fn dispatch_lifecycle(
             yes,
         } => {
             if !yes {
-                eprintln!("  Use --yes to confirm flatten");
+                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm flatten"), format);
                 std::process::exit(1);
             }
             let result = client
@@ -394,7 +394,7 @@ async fn dispatch_lifecycle(
         }
         LifecycleCmd::Halt { mode, yes } => {
             if !yes {
-                eprintln!("  Use --yes to confirm halt");
+                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm halt"), format);
                 std::process::exit(1);
             }
             let result = client.lifecycle_command("halt", &mode, None).await?;
@@ -418,7 +418,7 @@ async fn dispatch_lifecycle(
         }
         LifecycleCmd::Shutdown { mode, yes } => {
             if !yes {
-                eprintln!("  Use --yes to confirm shutdown");
+                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm shutdown"), format);
                 std::process::exit(1);
             }
             let result = client.lifecycle_command("shutdown", &mode, None).await?;
@@ -520,7 +520,7 @@ async fn dispatch_portfolio(
         }
         PortfolioCmd::FlattenStop { name, mode, yes } => {
             if !yes {
-                eprintln!("  Use --yes to confirm flatten-stop for portfolio '{}'", name);
+                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm flatten-stop for portfolio '{}'", name), format);
                 std::process::exit(1);
             }
             let resp = client.flatten_stop_portfolio(&name, &mode).await?;

@@ -336,7 +336,7 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
             yes,
         } => {
             if !yes {
-                eprintln!("  Use --yes to confirm delete-range");
+                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm delete-range"), format);
                 std::process::exit(1);
             }
             let body = serde_json::json!({
@@ -358,7 +358,7 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
         }
         DataCmd::Delete { symbol, yes } => {
             if !yes {
-                eprintln!("  Use --yes to confirm delete");
+                crate::output::print_error(&anyhow::anyhow!("use --yes to confirm delete"), format);
                 std::process::exit(1);
             }
             let body = serde_json::json!({"symbol": symbol});
