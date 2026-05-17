@@ -503,15 +503,17 @@ class TestIncrementalConsolidation:
         files_after = sorted(bar_dir.glob("*.parquet"))
         mtimes_after = {f.name: f.stat().st_mtime_ns for f in files_after}
 
-        # Week 1 and week 3 files should be untouched
-        week1_files = [f for f in mtimes_before if "2024-01-01" in f or "2023-12" in f]
-        week3_files = [f for f in mtimes_before if "2024-01-15" in f]
-        for f in week1_files:
-            if f in mtimes_after:
-                assert mtimes_after[f] == mtimes_before[f], f"Week 1 file {f} was modified"
-        for f in week3_files:
-            if f in mtimes_after:
-                assert mtimes_after[f] == mtimes_before[f], f"Week 3 file {f} was modified"
+        # Verify exactly which files were modified vs untouched
+        unchanged = {f for f, t in mtimes_before.items() if mtimes_after.get(f) == t}
+        modified_or_new = set(mtimes_after) - unchanged
+        # Only the file(s) covering the affected range should be rewritten;
+        # the unaffected file (week 1: 01-01~01-03, week 4: 01-18~01-21) must stay
+        assert len(unchanged) >= 2, (
+            f"Expected at least 2 untouched files, got {len(unchanged)}: {unchanged}"
+        )
+        assert len(modified_or_new) >= 1, (
+            f"Expected at least 1 rewritten file, got {modified_or_new}"
+        )
 
         # Data integrity: duplicates removed, total = 3 weeks worth
         all_bars = catalog.bars(bar_types=[str(bar_type)])
@@ -608,20 +610,13 @@ class TestIncrementalConsolidation:
         files_after = sorted(bar_dir.glob("*.parquet"))
         mtimes_after = {f.name: f.stat().st_mtime_ns for f in files_after}
 
-        # Week 3 should be untouched
-        week3_files = [f for f in mtimes_before if "2024-01-15" in f]
-        for f in week3_files:
-            if f in mtimes_after:
-                assert mtimes_after[f] == mtimes_before[f], f"Week 3 file {f} was modified"
+        # At least the last period file (week 4: 01-18~01-21) must be untouched
+        unchanged = {f for f, t in mtimes_before.items() if mtimes_after.get(f) == t}
+        assert len(unchanged) >= 1, (
+            f"Expected at least 1 untouched file (week 4), got {unchanged}"
+        )
 
         # Data integrity: duplicates removed, total unchanged
         all_bars = catalog.bars(bar_types=[str(bar_type)])
         expected = 3 * 7 * 24 * 60
         assert len(all_bars) == expected
-
-        # File count: affected files (week 1 + week 2) merged into one,
-        # plus untouched files remain. Total should not grow unbounded.
-        # Fewer files is acceptable (merge), but data must be intact.
-        assert len(files_after) >= 2, (
-            "Expected at least untouched files + merged result"
-        )

@@ -1612,9 +1612,11 @@ def consolidate_and_organize(
     """Consolidate and deduplicate data into periodic parquet files.
 
     When *start*/*end* are provided (incremental mode), finds existing files
-    whose time ranges overlap with [start, end], then consolidates only those
-    files plus the new fragments into single files per existing period. Files
-    outside the range are untouched.
+    whose time ranges overlap with [start, end], then merges those files plus
+    new fragments into a single deduped file. Files outside the range are
+    untouched. Note: incremental mode does NOT call consolidate_data_by_period
+    because NT's implementation deletes ALL directory files (not just those in
+    the start/end range), making it unsafe for partial use.
 
     Without *start*/*end* (full mode), all data is first merged into a single
     file (with dedup), then split into periodic files via consolidate_data_by_period.
