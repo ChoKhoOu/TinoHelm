@@ -1,6 +1,6 @@
 # TinoHelm CLI
 
-Rust CLI for TinoHelm. The old interactive TUI has been removed; `tino` is now a one-shot, LLM-first control plane with explicit human and machine output modes.
+Rust CLI for TinoHelm. One-shot typed subcommands — every operation has a dedicated command with structured flags. Default output is JSON; use `-f text` for human-friendly tables.
 
 ## Install
 
@@ -38,12 +38,11 @@ Binary after a build-only run: `cli/target/release/tino`.
 ## Output modes
 
 ```bash
-tino backtest list                         # human text
-tino -f json backtest list                 # raw JSON for scripts
-tino -f llm api get /api/node/status       # stable {ok,data,error,meta} envelope
+tino backtest list                         # default: JSON to stdout
+tino -f text backtest list                 # human-friendly tables with colors
 ```
 
-`llm` mode is intended for autonomous callers. It keeps stdout parseable on success and on API errors.
+Errors are JSON on stderr with a non-zero exit code. Scripts check `$?`; no envelope parsing needed.
 
 ## Auth
 
@@ -77,19 +76,13 @@ api:
   key_file: ~/.tino/credentials/api_key
 ```
 
-## Generic API coverage
+## Command reference
 
-Every FastAPI operation can be called through `tino api` even before a typed shortcut exists.
+Top-level commands: `auth`, `backtest`, `strategy`, `data`, `factor`, `signal`, `node`, `universe`, `trading`, `version`.
 
-```bash
-tino api routes --filter /api/factor
-tino -f llm api get /api/factor/list -q include_experimental=false
-tino -f llm api call POST /api/factor/run --body-file factor_run.json
-tino -f llm api download /api/backtest/<run_id>/artifacts/results.json -o results.json
-tino -f llm api call DELETE /api/backtest/<run_id>
-```
+Use `tino --help` or `tino <command> --help` for full flag documentation.
 
-## Typed workflow examples
+## Examples
 
 ```bash
 # Backtest
@@ -99,28 +92,58 @@ tino backtest run btc_multi_factor \
   --start 2025-02-01 \
   --end 2025-03-01
 
-tino -f llm backtest wait <run_id> --timeout 300
+tino backtest wait <run_id> --timeout 300
 tino backtest result <run_id>
+tino backtest compare <id1> <id2>
+tino backtest artifacts list <run_id>
 
 # Factor research
 tino factor list
-tino -f llm factor explore --body-file factor_explore.json
-tino -f llm factor run --body-file factor_run.json
-tino -f llm factor runs --limit 20
-tino -f llm factor report <run_id>
-tino factor params-grid --body-file params_grid.json
+tino factor explore --factor RSI --universe top50 --start 2025-01-01 --end 2025-03-01
+tino factor explore --body-file factor_explore.json    # complex requests
+tino factor run --body-file factor_run.json
+tino factor runs --limit 20
+tino factor report <run_id>
 
 # Signal research/export
 tino signal list
-tino -f llm signal run --body-file signal_run.json
-tino -f llm signal report <run_id>
-tino -f llm signal export <run_id>
+tino signal run --body-file signal_run.json
+tino signal report <run_id>
+tino signal export <run_id>
+
+# Trading
+tino trading positions list
+tino trading orders list
+tino trading orders cancel <client_order_id>
+tino trading analytics drawdown
+tino trading watchlist list
+
+# Node management
+tino node status
+tino node health
+tino node lifecycle state
+tino node risk-limits
+
+# Data management
+tino data symbols
+tino data coverage BTCUSDT-PERP
+tino data jobs list
+tino data consolidate --symbol BTCUSDT-PERP --interval 1m
 
 # Universe helpers
 tino universe list
 tino universe sync ~/.tino/research/universes/top10_perp.csv
 tino universe get <universe_id>
+
+# Version (all components)
+tino version
 ```
+
+## Design philosophy
+
+- **Typed subcommands only** — no generic API caller. `tino --help` is the single source of truth for all available operations (see [ADR 0004](../docs/adr/0004-cli-typed-subcommands-only.md)).
+- **JSON by default** — machine-parseable without extra flags; humans opt in with `-f text`.
+- **Flags + body-file** — common parameters use typed flags; complex requests accept `--body-file`/`--stdin` (mutually exclusive with flags).
 
 ## Requirements
 

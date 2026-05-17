@@ -61,8 +61,8 @@ All user data lives under `~/.tino/`: strategies, actors, data/catalog (Parquet)
 
 ## Rust CLI
 
-- Output modes: `-f text` (human), `-f json` (raw), `-f llm` (envelope `{ok,data,error,meta}` for agents).
-- API coverage rule: use `tino api call METHOD /path` first; typed subcommands are convenience wrappers.
+- Output modes: `-f json` (default), `-f text` (human-friendly tables/colors). No `-f llm` — use exit code + stderr for error detection.
+- Typed subcommands are the only interface. There is no generic API caller — if an operation lacks a typed subcommand, it is unsupported from CLI (see ADR 0004).
 - Auth: `X-API-Key`. Priority: `--api-key` > `TINO_API_KEY` > `~/.tino/credentials/api_key` > user.yaml. Never print secret values.
 
 ## Frontend (Next.js / src/web)
