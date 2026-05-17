@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -233,6 +234,7 @@ class TestClaimNextQueuedJob:
         claimed_job = SimpleNamespace(
             job_id=picked_job_id,
             status="running",
+            started_at=datetime(2025, 1, 1, 12, 0, 0),
             symbol="BTCUSDT",
             data_type="klines",
             interval="1m",
@@ -265,6 +267,7 @@ class TestClaimNextQueuedJob:
         got = await dw.claim_next_queued_job(factory)
 
         assert got is claimed_job
+        assert got.started_at is not None
         # The claim statement must atomically flip queued → running — i.e. the
         # WHERE clause must be gated on status='queued' so two racing consumers
         # can't both claim the same row.
@@ -1513,6 +1516,39 @@ class TestWorkerLifecycle:
                 await task
             except asyncio.CancelledError:
                 pass
+
+    async def test_orphan_sweeper_uses_started_at_not_created_at(self, monkeypatch):
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        captured = {}
+
+        class _Result:
+            rowcount = 1
+
+        class _DB:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, stmt):
+                captured["stmt"] = str(stmt)
+                return _Result()
+
+            async def commit(self):
+                captured["committed"] = True
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: lambda: _DB())
+        monkeypatch.setattr(dw, "datetime", SimpleNamespace(now=lambda _tz=None: datetime(2026, 1, 1, 12, 0, 0)))
+        monkeypatch.setattr(dw, "_ORPHAN_RUNNING_THRESHOLD", 600)
+
+        await dw._sweep_orphan_running_jobs()
+
+        assert captured.get("committed") is True
+        assert "started_at" in captured["stmt"]
+        assert "created_at" not in captured["stmt"]
 
     async def test_stop_cancels_running_task(self, monkeypatch):
         async def _fake_consumer(*_a, **_k):

@@ -35,6 +35,7 @@ from tinohelm.api.routes.data import (
     router,
     trigger_compact,
     trigger_data_fetch_batch,
+    get_data_fetch_job,
     validate_data,
 )
 from tinohelm.data.catalog import CatalogSession, compact_bars
@@ -588,6 +589,36 @@ class TestCancelDataFetchJob:
         assert exc.value.status_code == 409
         assert "cannot be cancelled safely" in exc.value.detail
         db.commit.assert_awaited_once()
+
+
+class TestDataFetchJobJobApi:
+    def test_job_payload_includes_started_at(self):
+        import asyncio
+
+        row = SimpleNamespace(
+            job_id="job-1",
+            symbol="BTCUSDT-PERP",
+            data_type="klines",
+            interval="1m",
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 2),
+            status="running",
+            progress=42,
+            message="Starting...",
+            error=None,
+            created_at=datetime(2026, 1, 1, 12, 0, 0),
+            started_at=datetime(2026, 1, 1, 12, 3, 0),
+            completed_at=None,
+        )
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = row
+        db.execute = AsyncMock(return_value=result)
+
+        payload = asyncio.run(get_data_fetch_job("job-1", db))
+
+        assert payload["started_at"] == "2026-01-01T12:03:00Z"
+        assert payload["completed_at"] is None
 
 
 class TestSourceAwareBarMaintenance:

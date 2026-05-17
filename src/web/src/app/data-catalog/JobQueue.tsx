@@ -17,6 +17,7 @@ interface DataFetchJob {
   message: string | null;
   error: string | null;
   created_at: string | null;
+  started_at: string | null;
   completed_at: string | null;
 }
 

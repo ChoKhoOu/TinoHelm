@@ -52,6 +52,10 @@ _TERMINAL_UPDATE_BACKOFF = 1.0
 _ORPHAN_SWEEP_INTERVAL = 120.0  # seconds between sweeps
 _ORPHAN_RUNNING_THRESHOLD = 600  # seconds — running job older than this is orphaned
 
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 # Returned by ``claim_next_queued_job`` to distinguish "row was claimed but
 # is no longer runnable" (e.g. cancelled between the atomic UPDATE and the
 # follow-up SELECT) from "the queued table is genuinely empty". Without this
@@ -98,6 +102,7 @@ async def _flip_running_to_queued(factory, model_cls) -> int:
                 status=STATUS_QUEUED,
                 progress=0,
                 message="Recovered after restart",
+                started_at=None,
             )
         )
         await db.commit()
@@ -353,6 +358,7 @@ async def claim_next_queued_job(factory):
                 progress=0,
                 message="Starting...",
                 error=None,
+                started_at=_utcnow_naive(),
                 completed_at=None,
             )
             .returning(DataFetchJob.job_id)
@@ -387,6 +393,7 @@ async def _claim_queued_job(factory, job_id: str):
                 progress=0,
                 message="Starting...",
                 error=None,
+                started_at=_utcnow_naive(),
                 completed_at=None,
             )
         )
@@ -419,7 +426,8 @@ async def _try_acquire_catalog_lock(lock_key: str):
 
 
 async def _guarded_terminal_update(factory, job_id: str, values: dict) -> bool:
-    for attempt in range(_TERMINAL_UPDATE_RETRIES):
+    attempt = 0
+    while True:
         try:
             async with factory() as db:
                 result = await db.execute(
@@ -433,14 +441,14 @@ async def _guarded_terminal_update(factory, job_id: str, values: dict) -> bool:
         except asyncio.CancelledError:
             raise
         except Exception:
-            if attempt == _TERMINAL_UPDATE_RETRIES - 1:
+            attempt += 1
+            if attempt >= _TERMINAL_UPDATE_RETRIES:
                 raise
             logger.warning(
                 "Terminal update for job %s failed (attempt %d/%d), retrying",
-                job_id, attempt + 1, _TERMINAL_UPDATE_RETRIES, exc_info=True,
+                job_id, attempt, _TERMINAL_UPDATE_RETRIES, exc_info=True,
             )
-            await asyncio.sleep(_TERMINAL_UPDATE_BACKOFF * (2 ** attempt))
-    return False
+            await asyncio.sleep(_TERMINAL_UPDATE_BACKOFF * (2 ** (attempt - 1)))
 
 
 async def _guarded_queued_failure_update(factory, job_id: str, values: dict) -> bool:
@@ -590,7 +598,8 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     "status": terminal_status,
                     "progress": 100,
                     "message": msg,
-                    "completed_at": datetime.now(timezone.utc),
+                    "started_at": None,
+                    "completed_at": _utcnow_naive(),
                 },
             )
             if not updated:
@@ -649,7 +658,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.now(timezone.utc),
+                        "completed_at": _utcnow_naive(),
                     },
                 )
                 if updated:
@@ -669,7 +678,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.now(timezone.utc),
+                        "completed_at": _utcnow_naive(),
                     },
                 )
                 if updated:
@@ -704,7 +713,7 @@ async def _revert_claimed_to_queued(factory, job_id: str) -> None:
             update(DataFetchJob)
             .where(DataFetchJob.job_id == job_id)
             .where(DataFetchJob.status == STATUS_RUNNING)
-            .values(status=STATUS_QUEUED, progress=0, message="Deferred: catalog lock busy")
+            .values(status=STATUS_QUEUED, progress=0, message="Deferred: catalog lock busy", started_at=None)
         )
         await db.commit()
 
@@ -797,7 +806,8 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     "status": terminal_status,
                     "progress": 100,
                     "message": msg,
-                    "completed_at": datetime.now(timezone.utc),
+                    "started_at": None,
+                    "completed_at": _utcnow_naive(),
                 },
             )
             if not updated:
@@ -842,7 +852,8 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     .values(
                         status=STATUS_FAILED,
                         error="Cancelled during execution",
-                        completed_at=datetime.now(timezone.utc),
+                        started_at=None,
+                        completed_at=_utcnow_naive(),
                     )
                 )
                 await db.commit()
@@ -860,7 +871,7 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     {
                         "status": STATUS_FAILED,
                         "error": failure_error[:2000],
-                        "completed_at": datetime.now(timezone.utc),
+                        "completed_at": _utcnow_naive(),
                     },
                 )
                 if updated:
@@ -1042,17 +1053,19 @@ async def _sweep_orphan_running_jobs() -> int:
     (e.g. prolonged DB outage) and the worker moved on.
     """
     factory = get_session_factory()
-    cutoff = datetime.utcnow() - timedelta(seconds=_ORPHAN_RUNNING_THRESHOLD)
+    cutoff = _utcnow_naive() - timedelta(seconds=_ORPHAN_RUNNING_THRESHOLD)
     async with factory() as db:
         result = await db.execute(
             update(DataFetchJob)
             .where(DataFetchJob.status == STATUS_RUNNING)
+            .where(DataFetchJob.started_at.isnot(None))
             .where(DataFetchJob.completed_at.is_(None))
-            .where(DataFetchJob.created_at < cutoff)
+            .where(DataFetchJob.started_at < cutoff)
             .values(
                 status=STATUS_FAILED,
                 error="Marked failed by orphan sweeper: job exceeded running time threshold",
-                completed_at=datetime.utcnow(),
+                started_at=None,
+                completed_at=_utcnow_naive(),
             )
         )
         await db.commit()

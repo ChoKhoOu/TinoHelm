@@ -96,6 +96,37 @@ async def _all_rows(factory):
 class TestDrainExecutesClaimedRows:
     """Tracer: a single queued row must go all the way to ``completed``."""
 
+    async def test_sweeper_does_not_fail_fresh_running_job_that_waited_long_in_queue(
+        self, factory, fake_redis, monkeypatch
+    ):
+        stale_created = datetime(2026, 1, 1, 10, 0, 0)
+        fresh_started = datetime(2026, 1, 1, 12, 5, 0)
+        row = DataFetchJob(
+            job_id=str(uuid.uuid4()),
+            batch_id="sweep",
+            symbol="BTCUSDT",
+            data_type="klines",
+            interval="1m",
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 1),
+            asset_class="um",
+            status="running",
+            created_at=stale_created,
+            started_at=fresh_started,
+            completed_at=None,
+        )
+        await _seed(factory, [row])
+
+        monkeypatch.setattr(dw, "_ORPHAN_RUNNING_THRESHOLD", 600)
+        monkeypatch.setattr(dw, "_utcnow_naive", lambda: datetime(2026, 1, 1, 12, 10, 0))
+
+        count = await dw._sweep_orphan_running_jobs()
+
+        assert count == 0
+        rows = await _all_rows(factory)
+        assert rows[0].status == "running"
+        assert rows[0].started_at == fresh_started
+
     async def test_claimed_row_with_busy_catalog_lock_reverts_to_queued(
         self, factory, fake_redis, stub_pipeline, monkeypatch
     ):
