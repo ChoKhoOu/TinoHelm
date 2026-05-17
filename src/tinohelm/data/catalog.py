@@ -1626,11 +1626,14 @@ def consolidate_and_organize(
     if not intervals:
         return
 
+    one_week_ns = 7 * 24 * 3600 * 1_000_000_000
+
     if start is not None and end is not None:
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
 
         start_ns = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
-        end_ns = int(datetime(end.year, end.month, end.day, 23, 59, 59, 999999, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        next_day = end + timedelta(days=1)
+        end_ns = int(datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000) - 1
         affected = _affected_intervals(intervals, start_ns, end_ns)
         if affected:
             merge_start = min(s for s, _ in affected)
@@ -1657,7 +1660,6 @@ def consolidate_and_organize(
         if not intervals:
             return
         total_span_ns = intervals[-1][1] - intervals[0][0]
-        one_week_ns = 7 * 24 * 3600 * 1_000_000_000
         if total_span_ns > one_week_ns:
             catalog.consolidate_data_by_period(
                 data_cls=data_cls,

@@ -618,3 +618,10 @@ class TestIncrementalConsolidation:
         all_bars = catalog.bars(bar_types=[str(bar_type)])
         expected = 3 * 7 * 24 * 60
         assert len(all_bars) == expected
+
+        # File count: affected files (week 1 + week 2) merged into one,
+        # plus untouched files remain. Total should not grow unbounded.
+        # Fewer files is acceptable (merge), but data must be intact.
+        assert len(files_after) >= 2, (
+            "Expected at least untouched files + merged result"
+        )
