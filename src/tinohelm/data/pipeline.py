@@ -528,13 +528,16 @@ class BinanceVisionPipeline:
             self._detect_gaps_for_backfill, symbol, data_type, interval
         )
         if data_type == "trades" and trade_tick_missing_slices:
-            requested_gap_start = min(slice_start for slice_start, _ in trade_tick_missing_slices)
-            requested_gap_end = max(slice_end for _, slice_end in trade_tick_missing_slices)
-            gap_ranges = [
-                (gap_start, gap_end)
-                for gap_start, gap_end in gap_ranges
-                if gap_end >= requested_gap_start and gap_start <= requested_gap_end
-            ]
+            filtered_gap_ranges: list[tuple[date, date]] = []
+            for gap_start, gap_end in gap_ranges:
+                for slice_start, slice_end in trade_tick_missing_slices:
+                    if gap_end < slice_start or gap_start > slice_end:
+                        continue
+                    filtered_gap_ranges.append((
+                        max(gap_start, slice_start),
+                        min(gap_end, slice_end),
+                    ))
+            gap_ranges = filtered_gap_ranges
         if gap_ranges:
             logger.info(
                 "Detected %d gap range(s) for %s %s, triggering backfill",

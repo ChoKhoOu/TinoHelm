@@ -375,6 +375,9 @@ class TestFetchBatchSplitting:
 
         enqueue = AsyncMock()
         monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
+        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
         db = _FetchBatchDb()
         rds = AsyncMock()
         body = DataFetchBatchRequest(

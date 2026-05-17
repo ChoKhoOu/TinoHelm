@@ -912,10 +912,15 @@ class CatalogSession:
 
         catalog = _catalog_for_root(self.catalog_path, self.storage)
         intervals = catalog.get_intervals(TradeTick, normalize_symbol(symbol))
+        closed_intervals = [
+            (interval_start, interval_end - 1)
+            for interval_start, interval_end in intervals
+            if interval_end > interval_start
+        ]
         return missing_date_slices_from_intervals(
             start=start,
             end=end,
-            intervals=intervals,
+            intervals=closed_intervals,
         )
 
     def funding_rate_parquet_path(self, symbol: str) -> Path:
