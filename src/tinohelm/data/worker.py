@@ -832,6 +832,22 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
         return True
 
     except asyncio.CancelledError:
+        _clear_current_task_cancellation()
+        try:
+            async with factory() as db:
+                await db.execute(
+                    update(DataFetchJob)
+                    .where(DataFetchJob.job_id == job_id)
+                    .where(DataFetchJob.status == STATUS_RUNNING)
+                    .values(
+                        status=STATUS_FAILED,
+                        error="Cancelled during execution",
+                        completed_at=datetime.utcnow(),
+                    )
+                )
+                await db.commit()
+        except Exception:
+            logger.warning("Failed to mark cancelled job %s as failed", job_id, exc_info=True)
         raise
     except Exception as exc:
         failure_error = str(exc)
