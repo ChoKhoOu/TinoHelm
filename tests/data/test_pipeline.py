@@ -1344,3 +1344,83 @@ class TestProgressCallback:
 
 
 # ---------------------------------------------------------------------------
+# _parquet_time_range — stale dircache resilience
+# ---------------------------------------------------------------------------
+
+
+class TestParquetTimeRangeStaleCache:
+    """After consolidation rewrites files via a separate s3fs instance,
+    the TinoHelm storage instance may hold stale ETag/path references.
+    _parquet_time_range must tolerate these gracefully."""
+
+    def test_returns_none_on_file_not_found(self):
+        """FileNotFoundError from stale dircache → None (skip file)."""
+        storage = MagicMock()
+        storage.provider = "s3"
+        storage.open_input_file.side_effect = FileNotFoundError(
+            "trade-data/catalog/data/bar/BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL/"
+            "2023-05-17T00-00-59-999000000Z_2026-05-16T23-59-59-999000000Z.parquet"
+        )
+        obj = MagicMock()
+
+        result = BinanceVisionPipeline._parquet_time_range(obj, storage=storage)
+
+        assert result is None
+
+    def test_returns_none_on_etag_mismatch_oserror(self):
+        """OSError errno 16 (stale ETag) → None (skip file)."""
+        storage = MagicMock()
+        storage.provider = "s3"
+        storage.open_input_file.side_effect = OSError(
+            16,
+            'The remote file corresponding to filename '
+            'trade-data/catalog/...parquet and Etag "abc123" no longer exists.',
+        )
+        obj = MagicMock()
+
+        result = BinanceVisionPipeline._parquet_time_range(obj, storage=storage)
+
+        assert result is None
+
+    def test_propagates_permission_error(self):
+        """PermissionError (auth failure) must NOT be swallowed."""
+        storage = MagicMock()
+        storage.provider = "s3"
+        storage.open_input_file.side_effect = PermissionError("Access Denied")
+        obj = MagicMock()
+
+        with pytest.raises(PermissionError):
+            BinanceVisionPipeline._parquet_time_range(obj, storage=storage)
+
+    def test_propagates_generic_oserror(self):
+        """OSError with non-16 errno must NOT be swallowed."""
+        storage = MagicMock()
+        storage.provider = "s3"
+        storage.open_input_file.side_effect = OSError(28, "No space left on device")
+        obj = MagicMock()
+
+        with pytest.raises(OSError):
+            BinanceVisionPipeline._parquet_time_range(obj, storage=storage)
+
+
+class TestCatalogStorageCoverageInvalidatesCache:
+    """_catalog_storage_coverage must invalidate dircache before listing
+    so it doesn't see files deleted by consolidation's separate fs instance."""
+
+    def test_invalidates_dircache_before_iter_files(self):
+        """Storage fs.invalidate_cache is called before iter_files."""
+        p = BinanceVisionPipeline(catalog_path="/tmp/test")
+
+        mock_storage = MagicMock()
+        mock_storage.provider = "s3"
+        mock_storage.iter_files.return_value = []
+        mock_fs = MagicMock()
+        mock_storage.fs = mock_fs
+        p._storage = mock_storage
+
+        p._catalog_item_dir = MagicMock(return_value=Path("trade-data/catalog/data/bar/X"))
+
+        result = p._catalog_storage_coverage("BTCUSDT-PERP", "klines", "1m", "klines")
+
+        mock_fs.invalidate_cache.assert_called_once()
+        assert result is None  # no files → None
