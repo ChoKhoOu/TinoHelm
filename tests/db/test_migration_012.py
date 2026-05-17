@@ -371,7 +371,9 @@ async def test_upgrade_after_downgrade_idempotent(engine, ensure_at_head):
         ver = await _get_version(conn)
         found = await _get_indexes(conn)
         catalog_cols = await _get_table_columns(conn, "data_catalog")
+        data_fetch_cols = await _get_table_columns(conn, "data_fetch_jobs")
 
-    assert ver == "014"
+    assert ver == "015"
     assert found == EXPECTED_INDEXES
     assert "last_ingest_id" in catalog_cols
+    assert "started_at" in data_fetch_cols
