@@ -1590,6 +1590,59 @@ class TestWorkerLifecycle:
         assert payload["job_id"] == "job-1"
         fake_rds.close.assert_awaited_once()
 
+    async def test_cancelled_claimed_job_publishes_failed_event(self, monkeypatch):
+        job = SimpleNamespace(
+            job_id="job-cancelled-running",
+            symbol="BTCUSDT",
+            data_type="klines",
+            interval="1m",
+            start_date="2025-01-01",
+            end_date="2025-01-02",
+            asset_class="um",
+        )
+
+        fake_rds = AsyncMock()
+        fake_rds.close = AsyncMock()
+        monkeypatch.setattr(dw.aioredis, "from_url", lambda *_a, **_k: fake_rds)
+
+        class _DB:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, _stmt):
+                result = MagicMock()
+                result.rowcount = 1
+                return result
+
+            async def commit(self):
+                return None
+
+        monkeypatch.setattr(dw, "get_session_factory", lambda: lambda: _DB())
+
+        import tinohelm.data.pipeline as pkg_pipeline
+
+        class _CancellingPipeline:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, **_k):
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _CancellingPipeline)
+
+        with pytest.raises(asyncio.CancelledError):
+            await dw._process_claimed_job(job, "redis://x", "/cat")
+
+        final = fake_rds.publish.await_args_list[-1]
+        assert final.args[0] == "tino:data:events"
+        payload = json.loads(final.args[1])
+        assert payload["type"] == "data.fetch.failed"
+        assert payload["job_id"] == "job-cancelled-running"
+        assert payload["error"] == "Cancelled during execution"
+
     async def test_stop_cancels_running_task(self, monkeypatch):
         async def _fake_consumer(*_a, **_k):
             await asyncio.sleep(5)

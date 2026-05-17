@@ -845,6 +845,7 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
 
     except asyncio.CancelledError:
         _clear_current_task_cancellation()
+        failure_error = "Cancelled during execution"
         try:
             async with factory() as db:
                 await db.execute(
@@ -853,12 +854,19 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                     .where(DataFetchJob.status == STATUS_RUNNING)
                     .values(
                         status=STATUS_FAILED,
-                        error="Cancelled during execution",
+                        error=failure_error,
                         started_at=None,
                         completed_at=_utcnow_naive(),
                     )
                 )
                 await db.commit()
+            await rds.publish("tino:data:events", json.dumps({
+                "type": "data.fetch.failed",
+                "job_id": job_id,
+                "symbol": symbol,
+                "data_type": data_type,
+                "error": failure_error,
+            }))
         except Exception:
             logger.warning("Failed to mark cancelled job %s as failed", job_id, exc_info=True)
         raise
