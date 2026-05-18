@@ -1685,14 +1685,15 @@ def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) ->
 
     After consolidate_data_by_period, small overlapping fragments may remain
     (e.g. from gap backfill). This function detects overlapping file pairs,
-    merges them pairwise with deduplication, keeping memory bounded to the
-    size of two overlapping files at a time.
+    merges them pairwise using NT-native ``_deduplicate_table`` for dedup,
+    keeping memory bounded to two files at a time.
     """
     import os
 
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     directory = catalog._make_path(data_cls, identifier)
 
@@ -1720,27 +1721,13 @@ def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) ->
                 combined = pa.concat_tables([t1, t2])
                 del t1, t2
 
-                # Sort by composite key so identical rows are adjacent for dedup.
-                has_trade_id = "trade_id" in combined.schema.names
+                deduped = ParquetDataCatalog._deduplicate_table(combined)
+                del combined
+                # Sort by ts_event for correct ordering
                 sort_keys = [("ts_event", "ascending")]
-                if has_trade_id:
+                if "trade_id" in deduped.schema.names:
                     sort_keys.append(("trade_id", "ascending"))
-                sorted_indices = pc.sort_indices(combined, sort_keys=sort_keys)
-                combined = combined.take(sorted_indices)
-                del sorted_indices
-                ts_arr = combined.column("ts_event").combine_chunks()
-                if has_trade_id:
-                    tid_arr = combined.column("trade_id").combine_chunks()
-                    ts_diff = pc.not_equal(ts_arr[:-1], ts_arr[1:])
-                    tid_diff = pc.not_equal(tid_arr[:-1], tid_arr[1:])
-                    row_differs = pc.or_(ts_diff, tid_diff)
-                    del tid_arr, ts_diff, tid_diff
-                else:
-                    row_differs = pc.not_equal(ts_arr[:-1], ts_arr[1:])
-                keep_mask = pa.concat_arrays([pa.array([True]), row_differs])
-                del ts_arr, row_differs
-                deduped = combined.filter(keep_mask)
-                del combined, keep_mask
+                deduped = deduped.sort_by(sort_keys)
 
                 new_start = min(s1, s2)
                 new_end = max(e1, e2)
@@ -1770,49 +1757,89 @@ def consolidate_and_organize(
 ) -> None:
     """Consolidate and deduplicate data into periodic parquet files.
 
-    Uses ``consolidate_data_by_period`` exclusively to avoid loading all
-    fragments into memory at once (which causes OOM on large trade tick
-    ingests with millions of rows across many chunk files).
-
-    When *start*/*end* are provided (incremental mode), only the affected
-    time range is consolidated. Without them, all data is organized into
-    weekly period files. A per-file deduplication pass runs afterward to
-    remove any duplicate rows (bounded memory — one period file at a time).
+    Calls ``consolidate_data_by_period`` **per week** in a for loop so that
+    memory is released between iterations (prevents OOM on large trade tick
+    ingests). Weeks that already consist of a single file are skipped entirely
+    — newly downloaded data never causes existing consolidated files to be
+    disassembled and reprocessed.
     """
+    import gc
+    import os
+
     import pandas as pd
 
     intervals = catalog.get_intervals(data_cls, identifier)
     if not intervals:
         return
 
-    if start is not None and end is not None:
-        from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta, timezone
 
-        start_ns = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+    WEEK_NS = 7 * 24 * 3600 * 1_000_000_000
+
+    if start is not None and end is not None:
+        range_start_ns = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
         next_day = end + timedelta(days=1)
-        end_ns = int(datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000) - 1
-        affected = _affected_intervals(intervals, start_ns, end_ns)
-        if affected:
-            merge_start = min(s for s, _ in affected)
-            merge_end = max(e for _, e in affected)
-        else:
-            merge_start = start_ns
-            merge_end = end_ns
-        catalog.consolidate_data_by_period(
-            data_cls=data_cls,
-            identifier=identifier,
-            period=pd.Timedelta(weeks=1),
-            start=merge_start,
-            end=merge_end,
-            ensure_contiguous_files=False,
-        )
+        range_end_ns = int(datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000) - 1
     else:
+        range_start_ns = min(s for s, _ in intervals)
+        range_end_ns = max(e for _, e in intervals)
+
+    directory = catalog._make_path(data_cls, identifier)
+
+    # Iterate week by week
+    week_start_ns = (range_start_ns // WEEK_NS) * WEEK_NS
+    while week_start_ns <= range_end_ns:
+        week_end_ns = week_start_ns + WEEK_NS - 1
+
+        # Find files overlapping this week
+        current_files = sorted(catalog.fs.glob(os.path.join(directory, "*.parquet")))
+        overlapping = []
+        for f in current_files:
+            parsed = _parse_parquet_filename_timestamps(f)
+            if parsed is None:
+                continue
+            f_start, f_end = parsed
+            if f_start <= week_end_ns and f_end >= week_start_ns:
+                overlapping.append((f_start, f_end, f))
+
+        # Skip if 0 or 1 files cover this week (nothing to consolidate)
+        if len(overlapping) <= 1:
+            week_start_ns += WEEK_NS
+            continue
+
+        # Identify "fragments" — small files from ingest that need consolidation.
+        # A file spanning >= 5 days is considered an already-consolidated period
+        # file and must not be touched. This threshold safely distinguishes
+        # weekly consolidated files (~7 days) from ingest chunks (typically
+        # hours to ~1 day).
+        CONSOLIDATED_THRESHOLD_NS = 5 * 24 * 3600 * 1_000_000_000
+        fragments = []
+        for f_start, f_end, f in overlapping:
+            if (f_end - f_start) >= CONSOLIDATED_THRESHOLD_NS:
+                continue
+            fragments.append((f_start, f_end, f))
+
+        if len(fragments) <= 1:
+            week_start_ns += WEEK_NS
+            continue
+
+        # Clamp the consolidation range to this week's boundaries — fragments
+        # that cross into the next week will only have the current-week portion
+        # processed now; the spill-over stays as-is for the next iteration.
+        frag_start = max(min(s for s, _, _ in fragments), week_start_ns)
+        frag_end = min(max(e for _, e, _ in fragments), week_end_ns)
+
         catalog.consolidate_data_by_period(
             data_cls=data_cls,
             identifier=identifier,
             period=pd.Timedelta(weeks=1),
+            start=frag_start,
+            end=frag_end,
             ensure_contiguous_files=False,
         )
+        gc.collect()
+
+        week_start_ns += WEEK_NS
 
     _merge_overlapping_files(catalog, data_cls, identifier)
 
