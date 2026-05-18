@@ -732,6 +732,42 @@ class TestScanSingleFiles:
 
 
 
+class TestTradeTickMissingDateSlices:
+    def test_returns_full_range_when_trade_tick_missing(self, tmp_path: Path):
+        from datetime import date
+
+        from tinohelm.data.catalog import CatalogSession
+
+        session = CatalogSession(tmp_path)
+        assert session.missing_date_slices(
+            "BTCUSDT-PERP",
+            "trades",
+            None,
+            date(2024, 1, 1),
+            date(2024, 1, 3),
+        ) == [(date(2024, 1, 1), date(2024, 1, 3))]
+
+    def test_treats_catalog_intervals_as_half_open(self, tmp_path: Path, monkeypatch):
+        from datetime import date
+
+        from tinohelm.data.catalog import CatalogSession
+
+        class _Catalog:
+            def get_intervals(self, data_cls, identifier):
+                return [(1_704_067_200_000_000_000, 1_704_240_000_000_000_000)]
+
+        monkeypatch.setattr("tinohelm.data.catalog._catalog_for_root", lambda *args, **kwargs: _Catalog())
+
+        session = CatalogSession(tmp_path)
+        assert session.missing_date_slices(
+            "BTCUSDT-PERP",
+            "trades",
+            None,
+            date(2024, 1, 1),
+            date(2024, 1, 3),
+        ) == [(date(2024, 1, 3), date(2024, 1, 3))]
+
+
 class TestFundingParquetCovers:
     def test_returns_false_when_parquet_missing(self, tmp_path: Path):
         from datetime import date

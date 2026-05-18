@@ -297,6 +297,51 @@ def expand_gaps_to_days(gaps: list[tuple[int, int]]) -> list[tuple[date, date]]:
     return result
 
 
+def missing_date_slices_from_intervals(
+    *,
+    start: date,
+    end: date,
+    intervals: list[tuple[int, int]],
+) -> list[tuple[date, date]]:
+    """Return day-aligned missing slices within the requested date window.
+
+    ``intervals`` should come from catalog coverage (UTC nanosecond tuples).
+    Any interval portions outside ``[start, end]`` are ignored.
+    """
+    request_start_ns = date_start_ns(start)
+    request_end_ns = date_end_ns(end) - 1
+    if not intervals:
+        return [(start, end)]
+
+    covered: list[tuple[int, int]] = []
+    for interval_start, interval_end in intervals:
+        if interval_end < request_start_ns or interval_start > request_end_ns:
+            continue
+        covered.append((max(interval_start, request_start_ns), min(interval_end, request_end_ns)))
+    if not covered:
+        return [(start, end)]
+
+    covered.sort()
+    merged: list[list[int]] = []
+    for interval_start, interval_end in covered:
+        if not merged or interval_start > merged[-1][1] + 1:
+            merged.append([interval_start, interval_end])
+        else:
+            merged[-1][1] = max(merged[-1][1], interval_end)
+
+    gaps: list[tuple[int, int]] = []
+    cursor = request_start_ns
+    for interval_start, interval_end in merged:
+        if interval_start > cursor:
+            gaps.append((cursor, interval_start))
+        cursor = max(cursor, interval_end + 1)
+    if cursor <= request_end_ns:
+        gaps.append((cursor, request_end_ns))
+    if not gaps:
+        return []
+    return expand_gaps_to_days(gaps)
+
+
 def csv_has_header(first_line: str) -> bool:
     """Return True if a CSV's first line looks like a text header.
 

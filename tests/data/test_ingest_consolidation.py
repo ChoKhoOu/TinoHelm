@@ -415,6 +415,57 @@ class TestConsolidateAndOrganize:
         assert len(result_bars) == total_bars
 
 
+class TestTradeTickConsolidation:
+    def test_trade_tick_consolidation_is_idempotent_for_duplicate_fragments(self, tmp_path):
+        from datetime import date
+
+        from nautilus_trader.model.data import TradeTick
+        from tinohelm.data.catalog import _catalog_for_root, consolidate_and_organize
+        from tinohelm.data.catalog import write_trade_ticks
+        from tinohelm.data.instruments import make_instrument
+        from nautilus_trader.model.enums import AggressorSide
+        from nautilus_trader.model.identifiers import TradeId
+
+        instrument = make_instrument("BTCUSDT-PERP")
+        ticks = []
+        base_ts = 1_704_931_200_000_000_000
+        for i in range(5):
+            ts = base_ts + i * 1_000_000
+            ticks.append(TradeTick(
+                instrument_id=instrument.id,
+                price=instrument.make_price(100.0 + i),
+                size=instrument.make_qty(0.1),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId(str(i + 1)),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+
+        write_trade_ticks(ticks, "BTCUSDT-PERP", tmp_path)
+        write_trade_ticks(ticks, "BTCUSDT-PERP", tmp_path)
+
+        catalog = _catalog_for_root(tmp_path)
+        consolidate_and_organize(
+            catalog,
+            TradeTick,
+            str(instrument.id),
+            start=date(2024, 1, 11),
+            end=date(2024, 1, 11),
+        )
+        first = catalog.query(TradeTick, instrument_ids=[str(instrument.id)])
+        assert len(first) == 5
+
+        consolidate_and_organize(
+            catalog,
+            TradeTick,
+            str(instrument.id),
+            start=date(2024, 1, 11),
+            end=date(2024, 1, 11),
+        )
+        second = catalog.query(TradeTick, instrument_ids=[str(instrument.id)])
+        assert len(second) == 5
+
+
 class TestIncrementalConsolidation:
     """consolidate_and_organize with start/end only touches affected weeks."""
 

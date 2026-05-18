@@ -162,15 +162,47 @@ class BinanceVisionPipeline:
                     start=start, end=end, skipped=True,
                 )
 
+        trade_tick_missing_slices: list[tuple[date, date]] | None = None
+        if data_type == "trades":
+            from tinohelm.data.catalog import CatalogSession
+
+            _trade_session = CatalogSession(self.catalog_path, storage=self._storage)
+            trade_tick_missing_slices = _trade_session.missing_date_slices(
+                symbol,
+                data_type,
+                interval,
+                start,
+                end,
+            )
+            if not trade_tick_missing_slices:
+                await _progress(100, "Trade tick parquet already covers range")
+                return IngestResult(
+                    symbol=symbol, data_type=data_type,
+                    objects_count=0, files_written=0,
+                    start=start, end=end, skipped=True,
+                )
+
         # 1. Plan downloads (monthly-first + daily-tail)
-        tasks = self.downloader.plan_downloads(
-            data_type=data_type,
-            symbol=symbol,
-            asset_class=asset_class,
-            start=start,
-            end=end,
-            interval=interval,
-        )
+        if data_type == "trades" and trade_tick_missing_slices is not None:
+            tasks = []
+            for slice_start, slice_end in trade_tick_missing_slices:
+                tasks.extend(self.downloader.plan_downloads(
+                    data_type=data_type,
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    start=slice_start,
+                    end=slice_end,
+                    interval=interval,
+                ))
+        else:
+            tasks = self.downloader.plan_downloads(
+                data_type=data_type,
+                symbol=symbol,
+                asset_class=asset_class,
+                start=start,
+                end=end,
+                interval=interval,
+            )
 
         if not tasks:
             await _progress(100, "No downloads needed")
@@ -467,9 +499,14 @@ class BinanceVisionPipeline:
             await _progress(90, "Consolidating and deduplicating...")
         except asyncio.CancelledError:
             raise
+        consolidate_start = start
+        consolidate_end = end
+        if data_type == "trades" and trade_tick_missing_slices:
+            consolidate_start = min(slice_start for slice_start, _ in trade_tick_missing_slices)
+            consolidate_end = max(slice_end for _, slice_end in trade_tick_missing_slices)
         try:
             await asyncio.to_thread(
-                self._consolidate_catalog_data, symbol, data_type, interval, start, end
+                self._consolidate_catalog_data, symbol, data_type, interval, consolidate_start, consolidate_end
             )
         except Exception as consolidation_exc:
             logger.error(
@@ -490,6 +527,17 @@ class BinanceVisionPipeline:
         gap_ranges = await asyncio.to_thread(
             self._detect_gaps_for_backfill, symbol, data_type, interval
         )
+        if data_type == "trades" and trade_tick_missing_slices:
+            filtered_gap_ranges: list[tuple[date, date]] = []
+            for gap_start, gap_end in gap_ranges:
+                for slice_start, slice_end in trade_tick_missing_slices:
+                    if gap_end < slice_start or gap_start > slice_end:
+                        continue
+                    filtered_gap_ranges.append((
+                        max(gap_start, slice_start),
+                        min(gap_end, slice_end),
+                    ))
+            gap_ranges = filtered_gap_ranges
         if gap_ranges:
             logger.info(
                 "Detected %d gap range(s) for %s %s, triggering backfill",
