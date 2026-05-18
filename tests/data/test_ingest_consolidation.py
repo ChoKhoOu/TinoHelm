@@ -415,6 +415,111 @@ class TestConsolidateAndOrganize:
         assert len(result_bars) == total_bars
 
 
+class TestConsolidateUsesByPeriod:
+    """consolidate_and_organize must use consolidate_data_by_period (not consolidate_data)."""
+
+    def test_does_not_call_consolidate_data(self, tmp_path, monkeypatch):
+        """Verify consolidate_and_organize never calls the OOM-prone consolidate_data."""
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        base_ts = 1_700_000_000_000_000_000
+        minute_ns = 60_000_000_000
+        for chunk_idx in range(3):
+            bars = []
+            for i in range(10):
+                ts = base_ts + (chunk_idx * 10 + i) * minute_ns
+                bar = Bar(
+                    bar_type=bar_type,
+                    open=instrument.make_price(100.0),
+                    high=instrument.make_price(101.0),
+                    low=instrument.make_price(99.0),
+                    close=instrument.make_price(100.5),
+                    volume=instrument.make_qty(1000.0),
+                    ts_event=ts,
+                    ts_init=ts,
+                )
+                bars.append(bar)
+            catalog.write_data(bars, skip_disjoint_check=True)
+
+        consolidate_data_called = []
+        original_consolidate = catalog.consolidate_data
+
+        def _spy_consolidate_data(*args, **kwargs):
+            consolidate_data_called.append(True)
+            return original_consolidate(*args, **kwargs)
+
+        monkeypatch.setattr(catalog, "consolidate_data", _spy_consolidate_data)
+
+        consolidate_and_organize(catalog, Bar, str(bar_type))
+
+        assert not consolidate_data_called, (
+            "consolidate_and_organize must NOT call consolidate_data (OOM risk); "
+            "use consolidate_data_by_period instead"
+        )
+
+    def test_incremental_mode_does_not_call_consolidate_data(self, tmp_path, monkeypatch):
+        """Incremental mode (with start/end) must also avoid consolidate_data."""
+        from datetime import date
+
+        from nautilus_trader.model.data import TradeTick
+        from nautilus_trader.model.enums import AggressorSide
+        from nautilus_trader.model.identifiers import TradeId
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import consolidate_and_organize
+        from tinohelm.data.instruments import make_instrument
+
+        instrument = make_instrument("BTCUSDT-PERP")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        # Write multiple fragments with different time ranges (simulates chunked ingest)
+        base_ts = 1_704_931_200_000_000_000  # 2024-01-11 00:00:00 UTC
+        for chunk_idx in range(3):
+            ticks = []
+            for i in range(10):
+                ts = base_ts + (chunk_idx * 10 + i) * 1_000_000_000
+                ticks.append(TradeTick(
+                    instrument_id=instrument.id,
+                    price=instrument.make_price(100.0 + i),
+                    size=instrument.make_qty(0.1),
+                    aggressor_side=AggressorSide.BUYER,
+                    trade_id=TradeId(str(chunk_idx * 10 + i + 1)),
+                    ts_event=ts,
+                    ts_init=ts,
+                ))
+            catalog.write_data(ticks, skip_disjoint_check=True)
+
+        consolidate_data_called = []
+        original_consolidate = catalog.consolidate_data
+
+        def _spy(*args, **kwargs):
+            consolidate_data_called.append(True)
+            return original_consolidate(*args, **kwargs)
+
+        monkeypatch.setattr(catalog, "consolidate_data", _spy)
+
+        consolidate_and_organize(
+            catalog, TradeTick, str(instrument.id),
+            start=date(2024, 1, 11), end=date(2024, 1, 11),
+        )
+
+        assert not consolidate_data_called, (
+            "consolidate_and_organize (incremental) must NOT call consolidate_data"
+        )
+
+        result = catalog.query(TradeTick, instrument_ids=[str(instrument.id)])
+        assert len(result) == 30
+
+
 class TestTradeTickConsolidation:
     def test_trade_tick_consolidation_is_idempotent_for_duplicate_fragments(self, tmp_path):
         from datetime import date
