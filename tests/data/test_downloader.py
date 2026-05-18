@@ -523,6 +523,24 @@ class TestInMemoryExecuteTask:
         with pytest.raises(ValueError, match="would escape"):
             dl.extract_zip_stream(zip_file, "evil.zip")
 
+    def test_zip_member_reader_closes_zip_even_if_member_close_fails(self, tmp_path):
+        zip_path = tmp_path / "payload.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("data.csv", "a,b\n1,2\n")
+
+        dl = _make_dl(tmp_path)
+        reader = dl.prepare_zip_payload(zip_path, zip_path.name).open()
+        closed_zip = {"called": False}
+        original_zip_close = reader._zip_file.close
+        reader._member_file.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        reader._zip_file.close = lambda: closed_zip.__setitem__("called", True)
+
+        with pytest.raises(RuntimeError):
+            reader.close()
+
+        assert closed_zip["called"]
+        reader._zip_file.close = original_zip_close
+
 
 # ---------------------------------------------------------------------------
 # 4. verify_checksum

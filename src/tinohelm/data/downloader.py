@@ -175,8 +175,10 @@ class _ZipMemberBinaryReader:
         return False
 
     def close(self) -> None:
-        self._member_file.close()
-        self._zip_file.close()
+        try:
+            self._member_file.close()
+        finally:
+            self._zip_file.close()
 
     @property
     def closed(self) -> bool:
