@@ -1726,10 +1726,6 @@ def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) ->
                     row_differs = pc.not_equal(ts_arr[:-1], ts_arr[1:])
                 keep_mask = pa.concat_arrays([pa.array([True]), row_differs])
                 del ts_arr, row_differs
-                if pc.all(keep_mask).as_py():
-                    del combined, keep_mask
-                    i += 1
-                    continue
                 deduped = combined.filter(keep_mask)
                 del combined, keep_mask
 
