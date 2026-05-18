@@ -1828,3 +1828,100 @@ class TestCatalogStorageCoverageInvalidatesCache:
 
         mock_fs.invalidate_cache.assert_called_once_with()
         assert result is None  # no files → None
+
+
+class TestConsolidationFailureDoesNotBlockIngest:
+    """Consolidation is a post-write optimization; failure must not mark the job failed."""
+
+    def test_consolidation_error_still_returns_result(self, tmp_path, monkeypatch):
+        """When consolidation raises, ingest returns a successful result (data is safe)."""
+        task = SimpleNamespace(url="memory://data.csv")
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(
+            return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"id,price,qty,quoteQty,time,isBuyerMaker\n")
+        )
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        monkeypatch.setattr(p, "_get_instrument", lambda _s: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_a: {})
+        monkeypatch.setattr(
+            "tinohelm.data.pipeline.get_converter",
+            lambda _dt: SimpleNamespace(supports_chunked=False),
+        )
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda *_a, **_kw: [(date(2025, 1, 1), date(2025, 1, 1))],
+        )
+        monkeypatch.setattr(p, "_convert_one_file", lambda *_a, **_kw: (100, ["/some/path.parquet"]))
+        monkeypatch.setattr(
+            p, "_consolidate_catalog_data",
+            MagicMock(side_effect=RuntimeError("OOM during consolidation")),
+        )
+        monkeypatch.setattr(p, "_detect_gaps_for_backfill", MagicMock(return_value=[]))
+        monkeypatch.setattr(p, "_catalog_storage_stats", MagicMock(return_value=(100, 5000)))
+        p._update_db_catalog = AsyncMock()
+
+        result = asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        ))
+
+        assert result.objects_count == 100
+        assert not result.skipped
+        p._update_db_catalog.assert_awaited_once()
+
+    def test_consolidation_error_progress_shows_warning(self, tmp_path, monkeypatch):
+        """Progress callback receives a message indicating consolidation failed but data is safe."""
+        task = SimpleNamespace(url="memory://data.csv")
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(
+            return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"id,price,qty,quoteQty,time,isBuyerMaker\n")
+        )
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        monkeypatch.setattr(p, "_get_instrument", lambda _s: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_a: {})
+        monkeypatch.setattr(
+            "tinohelm.data.pipeline.get_converter",
+            lambda _dt: SimpleNamespace(supports_chunked=False),
+        )
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda *_a, **_kw: [(date(2025, 1, 1), date(2025, 1, 1))],
+        )
+        monkeypatch.setattr(p, "_convert_one_file", lambda *_a, **_kw: (100, ["/some/path.parquet"]))
+        monkeypatch.setattr(
+            p, "_consolidate_catalog_data",
+            MagicMock(side_effect=RuntimeError("OOM during consolidation")),
+        )
+        monkeypatch.setattr(p, "_detect_gaps_for_backfill", MagicMock(return_value=[]))
+        monkeypatch.setattr(p, "_catalog_storage_stats", MagicMock(return_value=(100, 5000)))
+        p._update_db_catalog = AsyncMock()
+
+        progress_messages: list[tuple[int, str]] = []
+
+        async def _track_progress(pct, msg):
+            progress_messages.append((pct, msg))
+
+        result = asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+            progress_cb=_track_progress,
+        ))
+
+        assert result.objects_count == 100
+        # Should have a progress message indicating data is safe before consolidation
+        write_done_msgs = [m for _, m in progress_messages if "落盘" in m or "written" in m.lower()]
+        assert write_done_msgs, f"Expected a 'data written' progress stage, got: {progress_messages}"

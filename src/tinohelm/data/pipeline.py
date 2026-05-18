@@ -508,11 +508,13 @@ class BinanceVisionPipeline:
                 f"{symbol} {data_type} converted 0 objects from {len(tasks)} downloaded file(s)"
             )
 
-        # 4. Consolidate + Deduplicate + Organize by period
+        # --- Write phase complete: data is safely on disk ---
         try:
-            await _progress(90, "Consolidating and deduplicating...")
+            await _progress(88, f"落盘完成 {total_objects:,} objects, 整理中...")
         except asyncio.CancelledError:
             raise
+
+        # 4. Consolidate + Deduplicate + Organize by period
         consolidate_start = start
         consolidate_end = end
         if data_type == "trades" and trade_tick_missing_slices:
@@ -523,14 +525,11 @@ class BinanceVisionPipeline:
                 self._consolidate_catalog_data, symbol, data_type, interval, consolidate_start, consolidate_end
             )
         except Exception as consolidation_exc:
-            logger.error(
-                "Consolidation failed for %s %s; data is written but fragmented/duplicated",
-                symbol, data_type, exc_info=True,
+            logger.warning(
+                "Consolidation failed for %s %s; data is written but fragmented — "
+                "run /consolidate to retry later: %s",
+                symbol, data_type, consolidation_exc, exc_info=True,
             )
-            await _progress(100, f"Consolidation failed: {consolidation_exc}")
-            raise RuntimeError(
-                f"Data written successfully but consolidation failed for {symbol} {data_type}: {consolidation_exc}"
-            ) from consolidation_exc
 
         # 5. Gap detection + auto-backfill (runs after consolidation so
         #    file-boundary artifacts don't produce false-positive gaps)
