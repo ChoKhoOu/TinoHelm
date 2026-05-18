@@ -30,6 +30,13 @@ from tinohelm.data.pipeline_helpers import WRITE_CATEGORY as _PIPELINE_WRITE_CAT
 
 logger = logging.getLogger(__name__)
 
+# Files spanning >= this duration are considered already-consolidated period
+# files and won't be re-processed by the per-week consolidation loop. Set to
+# 5 days because weekly consolidation produces ~6.9-day files, while ingest
+# chunks are typically hours to 1 day. Binance Vision daily zips never exceed
+# ~26 hours per file.
+_CONSOLIDATED_FILE_THRESHOLD_NS = 5 * 24 * 3600 * 1_000_000_000
+
 if TYPE_CHECKING:
     import pandas as pd
     import polars as pl
@@ -1680,20 +1687,29 @@ def _timestamps_to_parquet_filename(ts1: int, ts2: int) -> str:
     return f"{_iso_to_file_ts(unix_nanos_to_iso8601(ts1))}_{_iso_to_file_ts(unix_nanos_to_iso8601(ts2))}.parquet"
 
 
+def _deduplicate_arrow_table(table):
+    """Deduplicate an Arrow table by removing rows where ALL columns are identical.
+
+    Wraps NT's ``ParquetDataCatalog._deduplicate_table`` (group_by all columns).
+    Pinned to nautilus_trader==1.226.0 — verify on NT upgrades.
+    """
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    return ParquetDataCatalog._deduplicate_table(table)
+
+
 def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) -> None:
     """Merge overlapping parquet files and deduplicate (bounded memory).
 
     After consolidate_data_by_period, small overlapping fragments may remain
     (e.g. from gap backfill). This function detects overlapping file pairs,
-    merges them pairwise using NT-native ``_deduplicate_table`` for dedup,
-    keeping memory bounded to two files at a time.
+    merges them pairwise with full-row deduplication, keeping memory bounded
+    to two files at a time.
     """
     import os
 
     import pyarrow as pa
-    import pyarrow.compute as pc
     import pyarrow.parquet as pq
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     directory = catalog._make_path(data_cls, identifier)
 
@@ -1721,9 +1737,8 @@ def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) ->
                 combined = pa.concat_tables([t1, t2])
                 del t1, t2
 
-                deduped = ParquetDataCatalog._deduplicate_table(combined)
+                deduped = _deduplicate_arrow_table(combined)
                 del combined
-                # Sort by ts_event for correct ordering
                 sort_keys = [("ts_event", "ascending")]
                 if "trade_id" in deduped.schema.names:
                     sort_keys.append(("trade_id", "ascending"))
@@ -1807,15 +1822,9 @@ def consolidate_and_organize(
             week_start_ns += WEEK_NS
             continue
 
-        # Identify "fragments" — small files from ingest that need consolidation.
-        # A file spanning >= 5 days is considered an already-consolidated period
-        # file and must not be touched. This threshold safely distinguishes
-        # weekly consolidated files (~7 days) from ingest chunks (typically
-        # hours to ~1 day).
-        CONSOLIDATED_THRESHOLD_NS = 5 * 24 * 3600 * 1_000_000_000
         fragments = []
         for f_start, f_end, f in overlapping:
-            if (f_end - f_start) >= CONSOLIDATED_THRESHOLD_NS:
+            if (f_end - f_start) >= _CONSOLIDATED_FILE_THRESHOLD_NS:
                 continue
             fragments.append((f_start, f_end, f))
 
