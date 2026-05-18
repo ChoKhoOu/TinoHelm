@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # chunks are typically hours to 1 day. Binance Vision daily zips never exceed
 # ~26 hours per file.
 _CONSOLIDATED_FILE_THRESHOLD_NS = 5 * 24 * 3600 * 1_000_000_000
+_WEEK_NS = 7 * 24 * 3600 * 1_000_000_000
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -1789,7 +1790,6 @@ def consolidate_and_organize(
 
     from datetime import datetime, timedelta, timezone
 
-    WEEK_NS = 7 * 24 * 3600 * 1_000_000_000
 
     if start is not None and end is not None:
         range_start_ns = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
@@ -1814,9 +1814,9 @@ def consolidate_and_organize(
     all_files = _scan_files()
 
     # Iterate week by week
-    week_start_ns = (range_start_ns // WEEK_NS) * WEEK_NS
+    week_start_ns = (range_start_ns // _WEEK_NS) * _WEEK_NS
     while week_start_ns <= range_end_ns:
-        week_end_ns = week_start_ns + WEEK_NS - 1
+        week_end_ns = week_start_ns + _WEEK_NS - 1
 
         overlapping = [
             (s, e, f) for s, e, f in all_files
@@ -1824,7 +1824,7 @@ def consolidate_and_organize(
         ]
 
         if len(overlapping) <= 1:
-            week_start_ns += WEEK_NS
+            week_start_ns += _WEEK_NS
             continue
 
         fragments = [
@@ -1833,7 +1833,7 @@ def consolidate_and_organize(
         ]
 
         if len(fragments) <= 1:
-            week_start_ns += WEEK_NS
+            week_start_ns += _WEEK_NS
             continue
 
         frag_start = max(min(s for s, _, _ in fragments), week_start_ns)
@@ -1851,7 +1851,7 @@ def consolidate_and_organize(
         # Re-scan after consolidation changed the directory contents
         all_files = _scan_files()
 
-        week_start_ns += WEEK_NS
+        week_start_ns += _WEEK_NS
 
     _merge_overlapping_files(catalog, data_cls, identifier)
 
