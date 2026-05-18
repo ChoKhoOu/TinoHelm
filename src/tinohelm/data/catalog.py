@@ -1660,8 +1660,11 @@ def _parse_parquet_filename_timestamps(filename: str) -> tuple[int, int] | None:
     iso2 = _file_ts_to_iso(match.group(2))
     if iso1 is None or iso2 is None:
         return None
-    first = maybe_dt_to_unix_nanos(iso1)
-    last = maybe_dt_to_unix_nanos(iso2)
+    try:
+        first = maybe_dt_to_unix_nanos(iso1)
+        last = maybe_dt_to_unix_nanos(iso2)
+    except (ValueError, TypeError, OverflowError):
+        return None
     if first is None or last is None:
         return None
     return (first, last)

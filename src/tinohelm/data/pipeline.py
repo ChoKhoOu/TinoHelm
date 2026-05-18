@@ -532,6 +532,12 @@ class BinanceVisionPipeline:
                 "run /consolidate to retry later: %s",
                 symbol, data_type, consolidation_exc, exc_info=True,
             )
+            try:
+                await _progress(
+                    93, f"整理失败（数据已落盘）: {consolidation_exc!s:.80s}",
+                )
+            except asyncio.CancelledError:
+                raise
 
         # 5. Gap detection + auto-backfill
         # Only safe after successful consolidation — file-boundary artifacts
