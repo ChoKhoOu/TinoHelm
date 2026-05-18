@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -153,6 +154,83 @@ class VisionCsvPayload:
         finally:
             self.file.seek(pos)
         return f"VisionCsvPayload(name={self.name!r}, bytes={size}, closed=False)"
+
+
+class _ZipMemberBinaryReader:
+    """Context-managed binary reader for a CSV member inside a ZIP file."""
+
+    def __init__(self, zip_path: Path, member: str) -> None:
+        self._zip_file = zipfile.ZipFile(zip_path, "r")
+        self._member_file = self._zip_file.open(member, "r")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def close(self) -> None:
+        self._member_file.close()
+        self._zip_file.close()
+
+    @property
+    def closed(self) -> bool:
+        return bool(getattr(self._member_file, "closed", False))
+
+    def readable(self) -> bool:
+        return True
+
+    def __iter__(self):
+        return iter(self._member_file)
+
+    def __getattr__(self, name: str):
+        return getattr(self._member_file, name)
+
+
+@dataclass
+class VisionZipCsvPayload:
+    """ZIP-backed CSV source that re-opens the member on demand."""
+
+    name: str
+    zip_path: Path
+    member: str
+    _closed: bool = False
+
+    @property
+    def path(self) -> Path:
+        return Path(self.name)
+
+    @property
+    def stem(self) -> str:
+        return Path(self.name).stem
+
+    @property
+    def suffix(self) -> str:
+        return Path(self.name).suffix
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def open(self):
+        if self._closed:
+            raise ValueError(f"CSV source {self.name!r} is closed")
+        try:
+            return _ZipMemberBinaryReader(self.zip_path, self.member)
+        except FileNotFoundError as exc:
+            self._closed = True
+            raise ValueError(f"CSV source {self.name!r} is closed") from exc
+
+    def close(self) -> None:
+        self._closed = True
+        self.zip_path.unlink(missing_ok=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"VisionZipCsvPayload(name={self.name!r}, zip_path={str(self.zip_path)!r}, "
+            f"closed={self.closed})"
+        )
 
 
 class VisionDownloader:
@@ -408,13 +486,23 @@ class VisionDownloader:
         logger.debug("Downloaded in memory: %s (%d bytes)", url.rsplit("/", 1)[-1], len(payload))
         return payload
 
-    async def download_stream(self, url: str) -> BinaryIO:
-        """Download a file by streaming response chunks into an in-memory buffer."""
+    async def download_stream_to_tempfile(self, url: str) -> Path:
+        """Download a file by streaming response chunks into a temporary ZIP file."""
         attempt = 0
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
         while True:
-            stream = BytesIO()
+            stream = None
+            temp_path: Path | None = None
             try:
                 total = 0
+                stream = tempfile.NamedTemporaryFile(
+                    mode="w+b",
+                    suffix=".zip",
+                    prefix="vision-",
+                    dir=self.raw_dir,
+                    delete=False,
+                )
+                temp_path = Path(stream.name)
                 async with httpx.AsyncClient(timeout=60.0) as client:
                     async with client.stream("GET", url, follow_redirects=True) as resp:
                         resp.raise_for_status()
@@ -423,11 +511,19 @@ class VisionDownloader:
                                 continue
                             stream.write(chunk)
                             total += len(chunk)
-                stream.seek(0)
-                logger.debug("Downloaded stream: %s (%d bytes)", url.rsplit("/", 1)[-1], total)
-                return stream
-            except httpx.HTTPStatusError as exc:
+                stream.flush()
                 stream.close()
+                logger.debug(
+                    "Downloaded stream to temp file: %s (%d bytes)",
+                    url.rsplit("/", 1)[-1],
+                    total,
+                )
+                return temp_path
+            except httpx.HTTPStatusError as exc:
+                if stream is not None and not stream.closed:
+                    stream.close()
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
                 status = exc.response.status_code
                 kind = classify_http_status(status)
                 if kind == "not_found":
@@ -455,7 +551,10 @@ class VisionDownloader:
                     continue
                 raise
             except httpx.RequestError as exc:
-                stream.close()
+                if stream is not None and not stream.closed:
+                    stream.close()
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
                 attempt += 1
                 if attempt > _MAX_RETRIES:
                     raise
@@ -465,8 +564,17 @@ class VisionDownloader:
                 )
                 await asyncio.sleep(REQUEST_ERROR_SLEEP_SECONDS)
                 continue
+            except asyncio.CancelledError:
+                if stream is not None and not stream.closed:
+                    stream.close()
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+                raise
             except Exception:
-                stream.close()
+                if stream is not None and not stream.closed:
+                    stream.close()
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
                 raise
 
     async def _fetch_expected_checksum(self, zip_name: str, checksum_url: str) -> str:
@@ -534,6 +642,18 @@ class VisionDownloader:
 
         logger.debug("Checksum OK: %s", zip_name)
 
+    def _resolve_first_csv_member(self, zf: zipfile.ZipFile, zip_name: str) -> tuple[str, str]:
+        csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+        if not csv_names:
+            raise FileNotFoundError(f"No CSV file found inside {zip_name}")
+        member = csv_names[0]
+        logical = PurePosixPath(member.replace("\\", "/"))
+        if logical.is_absolute() or ".." in logical.parts:
+            raise ValueError(
+                f"Zip entry {member!r} would escape extraction directory"
+            )
+        return member, (logical.name or member)
+
     async def verify_checksum(self, zip_path: Path, checksum_url: str) -> None:
         """Verify the SHA-256 checksum of a downloaded ZIP.
 
@@ -589,10 +709,7 @@ class VisionDownloader:
         """
         dest_dir = zip_path.parent
         with zipfile.ZipFile(zip_path, "r") as zf:
-            csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-            if not csv_names:
-                raise FileNotFoundError(f"No CSV file found inside {zip_path.name}")
-            member = csv_names[0]
+            member, _ = self._resolve_first_csv_member(zf, zip_path.name)
             target = (dest_dir / member).resolve()
             if not is_within_dir(target, dest_dir):
                 raise ValueError(
@@ -614,15 +731,7 @@ class VisionDownloader:
         try:
             zip_file.seek(0)
             with zipfile.ZipFile(zip_file, "r") as zf:
-                csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-                if not csv_names:
-                    raise FileNotFoundError(f"No CSV file found inside {zip_name}")
-                member = csv_names[0]
-                logical = PurePosixPath(member.replace("\\", "/"))
-                if logical.is_absolute() or ".." in logical.parts:
-                    raise ValueError(
-                        f"Zip entry {member!r} would escape extraction directory"
-                    )
+                member, name = self._resolve_first_csv_member(zf, zip_name)
                 with zf.open(member, "r") as fh:
                     while True:
                         chunk = fh.read(_STREAM_CHUNK_SIZE)
@@ -631,15 +740,22 @@ class VisionDownloader:
                         csv_file.write(chunk)
 
             csv_file.seek(0)
-            name = logical.name or member
             logger.debug("Extracted to in-memory CSV source: %s", name)
             return VisionCsvPayload(name=name, file=csv_file)
         except Exception:
             csv_file.close()
             raise
 
-    async def execute_task(self, task: DownloadTask) -> Path | VisionCsvPayload:
-        """Execute one download task without staging fresh raw ZIP/CSV files."""
+    def prepare_zip_payload(self, zip_path: Path, zip_name: str) -> VisionZipCsvPayload:
+        """Return a ZIP-backed CSV payload without extracting the CSV to disk."""
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            member, name = self._resolve_first_csv_member(zf, zip_name)
+
+        logger.debug("Prepared ZIP-backed CSV source: %s", name)
+        return VisionZipCsvPayload(name=name, zip_path=zip_path, member=member)
+
+    async def execute_task(self, task: DownloadTask) -> Path | VisionZipCsvPayload:
+        """Execute one download task with temporary ZIP staging only."""
         # Incremental skip: reuse existing raw CSVs so chunked converters can
         # stream them instead of re-downloading.
         if task.dest_path.exists() and task.dest_path.stat().st_size > 0:
@@ -647,23 +763,22 @@ class VisionDownloader:
             return task.dest_path
 
         logger.info("Downloading %s [%s]", task.zip_path.name, task.granularity)
-        zip_file = await self.download_stream(task.url)
+        zip_path = await self.download_stream_to_tempfile(task.url)
         try:
-            await self.verify_checksum_stream(
-                zip_file,
-                task.zip_path.name,
-                task.checksum_url,
-            )
-            # Run sync extraction in thread pool to avoid blocking the event loop.
+            await self.verify_checksum(zip_path, task.checksum_url)
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
                 None,
-                self.extract_zip_stream,
-                zip_file,
+                self.prepare_zip_payload,
+                zip_path,
                 task.zip_path.name,
             )
-        finally:
-            zip_file.close()
+        except asyncio.CancelledError:
+            zip_path.unlink(missing_ok=True)
+            raise
+        except Exception:
+            zip_path.unlink(missing_ok=True)
+            raise
 
 
 # ---------------------------------------------------------------------------

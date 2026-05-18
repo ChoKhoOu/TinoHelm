@@ -5,7 +5,7 @@ All network, DB, and filesystem side-effects are mocked.
 from __future__ import annotations
 
 import asyncio
-import json
+import threading
 from io import BytesIO
 from datetime import date
 from pathlib import Path
@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import polars as pl
 import pytest
 
-from tinohelm.data.downloader import VisionCsvPayload
+from tinohelm.data.downloader import VisionCsvPayload, VisionZipCsvPayload
 from tinohelm.data.pipeline import (
     BinanceVisionPipeline,
     IngestResult,
@@ -254,6 +254,99 @@ class TestBoundedCsvConversion:
         p._cleanup_raw_file(payload)
 
         assert payload.closed
+
+    def test_cleanup_removes_zip_backed_csv_payload(self, tmp_path: Path):
+        zip_path = tmp_path / "vision-temp.zip"
+        zip_path.write_bytes(b"zip")
+        payload = VisionZipCsvPayload(
+            name="BTCUSDT-trades-2025-01-15.csv",
+            zip_path=zip_path,
+            member="BTCUSDT-trades-2025-01-15.csv",
+        )
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+
+        p._cleanup_raw_file(payload)
+
+        assert payload.closed
+        assert not zip_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_ingest_cancellation_cleans_zip_backed_payloads(self, tmp_path: Path, monkeypatch):
+        first_payload = VisionZipCsvPayload(
+            name="BTCUSDT-trades-2025-01-01.csv",
+            zip_path=tmp_path / "first.zip",
+            member="BTCUSDT-trades-2025-01-01.csv",
+        )
+        second_payload = VisionZipCsvPayload(
+            name="BTCUSDT-trades-2025-01-02.csv",
+            zip_path=tmp_path / "second.zip",
+            member="BTCUSDT-trades-2025-01-02.csv",
+        )
+        first_payload.zip_path.write_bytes(b"zip")
+        second_payload.zip_path.write_bytes(b"zip")
+        tasks = [
+            SimpleNamespace(url="memory://one", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv")),
+            SimpleNamespace(url="memory://two", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-02.csv")),
+        ]
+        started = threading.Event()
+        second_returned = asyncio.Event()
+        release_convert = threading.Event()
+        payload_iter = iter([first_payload, second_payload])
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return tasks
+
+            async def execute_task(self, task):
+                payload = next(payload_iter)
+                if task is tasks[1]:
+                    second_returned.set()
+                return payload
+
+        class Converter:
+            supports_chunked = False
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = Downloader()
+        p._convert_workers = 1
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        monkeypatch.setattr("tinohelm.data.catalog.CatalogSession.missing_date_slices", lambda *_args, **_kwargs: [(date(2025, 1, 1), date(2025, 1, 2))])
+
+        def fake_convert(*_args, **_kwargs):
+            started.set()
+            release_convert.wait(timeout=5)
+            return (1, ["memory://catalog/file.parquet"])
+
+        monkeypatch.setattr(p, "_convert_one_file", fake_convert)
+        monkeypatch.setattr(p, "_consolidate_catalog_data", MagicMock())
+        monkeypatch.setattr(p, "_detect_gaps_for_backfill", MagicMock(return_value=[]))
+        p._update_db_catalog = AsyncMock()
+        monkeypatch.setattr(p, "_catalog_storage_stats", MagicMock(return_value=(1, 1)))
+
+        ingest_task = asyncio.create_task(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 2),
+        ))
+
+        await asyncio.to_thread(started.wait)
+        await second_returned.wait()
+        ingest_task.cancel()
+        release_convert.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await ingest_task
+
+        assert first_payload.closed
+        assert second_payload.closed
+        assert not first_payload.zip_path.exists()
+        assert not second_payload.zip_path.exists()
+        p._update_db_catalog.assert_not_awaited()
 
 
 class TestIngestEarlyFailClosed:
