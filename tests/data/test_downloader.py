@@ -301,18 +301,17 @@ class TestInMemoryExecuteTask:
         assert result == task.dest_path
 
     @pytest.mark.asyncio
-    async def test_execute_task_keeps_fresh_vision_ingest_fully_in_memory_without_tempfile(self, tmp_path, monkeypatch):
-        """Fresh Vision downloads must stay in RAM and never use tempfile-backed staging."""
+    async def test_execute_task_keeps_fresh_vision_ingest_csv_off_disk(self, tmp_path, monkeypatch):
+        """Fresh Vision downloads may stage ZIP temporarily but must not extract CSV to disk."""
         dl = _make_dl(tmp_path)
         task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
         zip_payload = _zip_bytes("BTCUSDT-aggTrades-2025-01-15.csv", "a,b\n1,2\n")
         checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
 
-        def fail_spooled(*args, **kwargs):
-            raise AssertionError("fresh Vision ingest must not use tempfile.SpooledTemporaryFile")
+        def fail_write_bytes(self, data):
+            raise AssertionError("fresh Vision ingest must not extract raw CSV files to disk")
 
-        monkeypatch.setattr(tempfile, "SpooledTemporaryFile", fail_spooled)
-        monkeypatch.setattr(Path, "write_bytes", lambda self, data: (_ for _ in ()).throw(AssertionError("fresh Vision ingest must not stage raw ZIP/CSV files")))
+        monkeypatch.setattr(Path, "write_bytes", fail_write_bytes)
 
         checksum_response = MagicMock()
         checksum_response.text = checksum_text
@@ -360,14 +359,14 @@ class TestInMemoryExecuteTask:
         with patch("httpx.AsyncClient", return_value=fake_client):
             result = await dl.execute_task(task)
 
-        assert isinstance(result, VisionCsvPayload)
+        assert not isinstance(result, Path)
         assert result.name == "BTCUSDT-aggTrades-2025-01-15.csv"
-        assert not hasattr(result, "content")
+        assert task.dest_path.suffix == ".csv"
+        assert not task.dest_path.exists()
         with result.open() as fh:
             assert fh.read() == b"a,b\n1,2\n"
         result.close()
         assert fake_client.streamed_urls == [task.url]
-        assert not task.zip_path.exists()
         assert not task.dest_path.exists()
 
     @pytest.mark.asyncio
@@ -377,11 +376,6 @@ class TestInMemoryExecuteTask:
         task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
         zip_payload = _zip_bytes("data.csv", "a,b\n1,2\n")
         checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
-
-        def fail_spooled(*args, **kwargs):
-            raise AssertionError("fresh Vision ingest must not use tempfile.SpooledTemporaryFile")
-
-        monkeypatch.setattr(tempfile, "SpooledTemporaryFile", fail_spooled)
 
         checksum_response = MagicMock()
         checksum_response.text = checksum_text
@@ -423,9 +417,76 @@ class TestInMemoryExecuteTask:
         with patch("httpx.AsyncClient", return_value=FakeClient()):
             result = await dl.execute_task(task)
 
+        assert not isinstance(result, Path)
         with result.open() as fh:
             assert fh.read() == b"a,b\n1,2\n"
         result.close()
+
+    @pytest.mark.asyncio
+    async def test_execute_task_cleans_temporary_zip_after_fresh_download(self, tmp_path, monkeypatch):
+        """Fresh Vision ingest should stage only a temporary ZIP and clean it up."""
+        dl = _make_dl(tmp_path)
+        task = dl._make_task("aggTrades", "BTCUSDT", "um", "daily", "2025-01-15", None)
+        zip_payload = _zip_bytes("BTCUSDT-aggTrades-2025-01-15.csv", "a,b\n1,2\n")
+        checksum_text = f"{hashlib.sha256(zip_payload).hexdigest()}  {task.zip_path.name}\n"
+
+        created_zip_paths: list[Path] = []
+        real_named_temporary_file = tempfile.NamedTemporaryFile
+
+        def fake_named_temporary_file(*args, **kwargs):
+            kwargs.setdefault("delete", False)
+            kwargs.setdefault("suffix", ".zip")
+            kwargs.setdefault("dir", tmp_path)
+            fh = real_named_temporary_file(*args, **kwargs)
+            created_zip_paths.append(Path(fh.name))
+            return fh
+
+        monkeypatch.setattr(tempfile, "NamedTemporaryFile", fake_named_temporary_file)
+
+        checksum_response = MagicMock()
+        checksum_response.text = checksum_text
+        checksum_response.raise_for_status = MagicMock()
+
+        class FakeStreamResponse:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self):
+                for idx in range(0, len(zip_payload), 3):
+                    yield zip_payload[idx:idx + 3]
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method: str, url: str, **kwargs):
+                assert method == "GET"
+                assert url == task.url
+                return FakeStreamResponse()
+
+            async def get(self, url: str, **kwargs):
+                assert url == task.checksum_url
+                return checksum_response
+
+        with patch("httpx.AsyncClient", return_value=FakeClient()):
+            result = await dl.execute_task(task)
+
+        assert not isinstance(result, Path)
+        assert result.name == "BTCUSDT-aggTrades-2025-01-15.csv"
+        assert created_zip_paths, "expected a temporary ZIP file to be created"
+        with result.open() as fh:
+            assert fh.read() == b"a,b\n1,2\n"
+        result.close()
+        assert all(not path.exists() for path in created_zip_paths)
 
     def test_extract_zip_stream_copies_csv_member_in_bounded_chunks(self, tmp_path, monkeypatch):
         """ZIP member extraction must not call ZipExtFile.read() without a size."""
@@ -461,6 +522,24 @@ class TestInMemoryExecuteTask:
 
         with pytest.raises(ValueError, match="would escape"):
             dl.extract_zip_stream(zip_file, "evil.zip")
+
+    def test_zip_member_reader_closes_zip_even_if_member_close_fails(self, tmp_path):
+        zip_path = tmp_path / "payload.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("data.csv", "a,b\n1,2\n")
+
+        dl = _make_dl(tmp_path)
+        reader = dl.prepare_zip_payload(zip_path, zip_path.name).open()
+        closed_zip = {"called": False}
+        original_zip_close = reader._zip_file.close
+        reader._member_file.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        reader._zip_file.close = lambda: closed_zip.__setitem__("called", True)
+
+        with pytest.raises(RuntimeError):
+            reader.close()
+
+        assert closed_zip["called"]
+        reader._zip_file.close = original_zip_close
 
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ from uuid import uuid4
 import pandas as pd
 
 from tinohelm.data.converters import get_converter
-from tinohelm.data.downloader import VisionCsvPayload, VisionDownloader, _KLINES_TYPES
+from tinohelm.data.downloader import VisionCsvPayload, VisionDownloader, VisionZipCsvPayload, _KLINES_TYPES
 from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
     classify_download_failures,
@@ -52,7 +52,7 @@ def _timestamp_stat_to_ns(value: Any) -> int:
     return int(value)
 
 
-CsvSource = Path | VisionCsvPayload
+CsvSource = Path | VisionCsvPayload | VisionZipCsvPayload
 
 
 @dataclass
@@ -336,12 +336,15 @@ class BinanceVisionPipeline:
 
         async def _download_one(index: int, task):
             nonlocal download_done
+            csv_path: CsvSource | None = None
+            queued = False
             async with sem:
                 try:
                     csv_path = await self.downloader.execute_task(task)
                     if csv_path:
                         download_success_indices.add(index)
                         await csv_queue.put(csv_path)
+                        queued = True
                     else:
                         exc = RuntimeError("downloader returned no CSV payload")
                         download_failed_indices[index] = exc
@@ -352,6 +355,9 @@ class BinanceVisionPipeline:
                     )
                     download_failed_indices[index] = exc
                     download_errors.append((task.url, exc))
+                finally:
+                    if csv_path is not None and not queued:
+                        self._cleanup_raw_file(csv_path)
                 download_done += 1
                 await _progress(
                     compute_stage_pct(convert_done, total_tasks),
@@ -427,13 +433,14 @@ class BinanceVisionPipeline:
                         _discard_convert_future(convert_future)
                     logger.warning("Convert failed for %s", csv_name, exc_info=True)
                     convert_errors.append((csv_name, exc))
-                self._cleanup_raw_file(csv_path)
-                convert_done += 1
-                pct = compute_stage_pct(convert_done, total_tasks)
-                await _progress(
-                    pct,
-                    f"已完成 {convert_done}/{total_tasks} ({total_objects:,} objects)",
-                )
+                finally:
+                    self._cleanup_raw_file(csv_path)
+                    convert_done += 1
+                    pct = compute_stage_pct(convert_done, total_tasks)
+                    await _progress(
+                        pct,
+                        f"已完成 {convert_done}/{total_tasks} ({total_objects:,} objects)",
+                    )
 
         consumer_tasks = [asyncio.create_task(_convert_consumer()) for _ in range(n_converters)]
         download_task = asyncio.create_task(_download_all())
@@ -447,6 +454,13 @@ class BinanceVisionPipeline:
             await _await_ignoring_cancellation(
                 asyncio.gather(*pipeline_tasks, return_exceptions=True)
             )
+            while True:
+                try:
+                    queued_csv = csv_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if queued_csv is not None:
+                    self._cleanup_raw_file(queued_csv)
             await _await_ignoring_cancellation(_drain_pending_convert_futures())
             raise
 
@@ -699,13 +713,13 @@ class BinanceVisionPipeline:
 
     @staticmethod
     def _csv_display_name(csv_source: CsvSource) -> str:
-        if isinstance(csv_source, VisionCsvPayload):
+        if isinstance(csv_source, (VisionCsvPayload, VisionZipCsvPayload)):
             return csv_source.name
         return str(csv_source)
 
     @staticmethod
     def _open_csv_binary(csv_source: CsvSource):
-        if isinstance(csv_source, VisionCsvPayload):
+        if isinstance(csv_source, (VisionCsvPayload, VisionZipCsvPayload)):
             return csv_source.open()
         return open(csv_source, "rb")
 
@@ -1194,7 +1208,7 @@ class BinanceVisionPipeline:
     @staticmethod
     def _cleanup_raw_file(csv_path: CsvSource) -> None:
         """Remove processed legacy raw CSV/ZIP files; close bounded CSV payloads."""
-        if isinstance(csv_path, VisionCsvPayload):
+        if isinstance(csv_path, (VisionCsvPayload, VisionZipCsvPayload)):
             csv_path.close()
             return
         try:
