@@ -97,7 +97,10 @@ dist-clean:
 	$(RM) -r "$(DIST_DIR)"
 
 deploy:
-	docker compose -f docker-compose.yml --profile sandbox up -d --pull always --force-recreate --no-build
+	docker compose -f docker-compose.yml --profile sandbox pull api web
+	docker compose -f docker-compose.yml --profile sandbox up -d --no-build
+	docker image prune -f
+	docker builder prune -f
 
 cli-deploy:
 	./scripts/install-tino.sh --nightly
