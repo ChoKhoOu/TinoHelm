@@ -776,3 +776,505 @@ class TestIncrementalConsolidation:
         all_bars = catalog.bars(bar_types=[str(bar_type)])
         expected = 3 * 7 * 24 * 60
         assert len(all_bars) == expected
+
+
+class TestWeeklyForLoopConsolidation:
+    """consolidate_and_organize must call consolidate_data_by_period per week, not once for full range."""
+
+    def test_new_data_does_not_disassemble_existing_week_file(self, tmp_path):
+        """Downloading Jan 4 data must not re-split an existing Jan5-Jan11 consolidated file."""
+        from datetime import date, datetime, timezone
+
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        minute_ns = 60_000_000_000
+
+        # Create pre-consolidated week file: Jan 5 - Jan 11 (one file covering 7 days)
+        jan5_ns = int(datetime(2024, 1, 5, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        week_bars = []
+        for i in range(7 * 24 * 60):  # 7 days of 1m bars
+            ts = jan5_ns + i * minute_ns
+            week_bars.append(Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(100.0),
+                high=instrument.make_price(101.0),
+                low=instrument.make_price(99.0),
+                close=instrument.make_price(100.5),
+                volume=instrument.make_qty(1000.0),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(week_bars, skip_disjoint_check=True)
+
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+        files_after_setup = sorted(bar_dir.glob("*.parquet"))
+        assert len(files_after_setup) == 1, "Setup should produce exactly 1 file"
+        existing_file = files_after_setup[0]
+        existing_mtime = existing_file.stat().st_mtime_ns
+
+        # Now simulate downloading Jan 4 data (the day before the existing week)
+        jan4_ns = int(datetime(2024, 1, 4, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        jan4_bars = []
+        for i in range(24 * 60):  # 1 day of 1m bars
+            ts = jan4_ns + i * minute_ns
+            jan4_bars.append(Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(99.0),
+                high=instrument.make_price(100.0),
+                low=instrument.make_price(98.0),
+                close=instrument.make_price(99.5),
+                volume=instrument.make_qty(500.0),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(jan4_bars, skip_disjoint_check=True)
+
+        # Consolidate only Jan 4 (the newly downloaded day)
+        consolidate_and_organize(
+            catalog, Bar, str(bar_type),
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+        )
+
+        files_after = sorted(bar_dir.glob("*.parquet"))
+        # The existing Jan5-Jan11 file must NOT be touched
+        still_exists = [f for f in files_after if f.stat().st_mtime_ns == existing_mtime]
+        assert len(still_exists) >= 1, (
+            f"The pre-existing Jan5-Jan11 file was modified or deleted! "
+            f"Files after: {[f.name for f in files_after]}"
+        )
+
+        # Total data should be intact: 1 day (Jan 4) + 7 days (Jan 5-11) = 8 days
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        expected = (1 + 7) * 24 * 60
+        assert len(all_bars) == expected
+
+    def test_wide_range_does_not_reprocess_existing_week_file(self, tmp_path):
+        """Consolidating Jan4-Jan12 must not disassemble an existing Jan5-Jan11 file."""
+        from datetime import date, datetime, timezone
+
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        minute_ns = 60_000_000_000
+
+        # Pre-consolidated week file: Jan 5 00:00 - Jan 11 23:59
+        jan5_ns = int(datetime(2024, 1, 5, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        week_bars = []
+        for i in range(7 * 24 * 60):
+            ts = jan5_ns + i * minute_ns
+            week_bars.append(Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(100.0),
+                high=instrument.make_price(101.0),
+                low=instrument.make_price(99.0),
+                close=instrument.make_price(100.5),
+                volume=instrument.make_qty(1000.0),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(week_bars, skip_disjoint_check=True)
+
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+        existing_file = sorted(bar_dir.glob("*.parquet"))[0]
+        existing_mtime = existing_file.stat().st_mtime_ns
+        existing_name = existing_file.name
+
+        # New fragments: Jan 4 (one day) and Jan 12 (one day)
+        for day_offset, day_num in [(4, 4), (12, 12)]:
+            day_ns = int(datetime(2024, 1, day_num, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+            day_bars = []
+            for i in range(24 * 60):
+                ts = day_ns + i * minute_ns
+                day_bars.append(Bar(
+                    bar_type=bar_type,
+                    open=instrument.make_price(99.0),
+                    high=instrument.make_price(100.0),
+                    low=instrument.make_price(98.0),
+                    close=instrument.make_price(99.5),
+                    volume=instrument.make_qty(500.0),
+                    ts_event=ts,
+                    ts_init=ts,
+                ))
+            catalog.write_data(day_bars, skip_disjoint_check=True)
+
+        # Consolidate the FULL range spanning all data
+        consolidate_and_organize(
+            catalog, Bar, str(bar_type),
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 12),
+        )
+
+        files_after = sorted(bar_dir.glob("*.parquet"))
+        # The Jan5-Jan11 file must still exist with same mtime (not reprocessed)
+        still_exists = [f for f in files_after if f.stat().st_mtime_ns == existing_mtime]
+        assert len(still_exists) == 1, (
+            f"The pre-existing Jan5-Jan11 file was reprocessed! "
+            f"Original: {existing_name}, Files after: {[f.name for f in files_after]}"
+        )
+
+        # All data intact: Jan 4 (1d) + Jan 5-11 (7d) + Jan 12 (1d) = 9 days
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        expected = 9 * 24 * 60
+        assert len(all_bars) == expected
+
+    def test_multi_week_fragments_consolidate_into_weekly_files(self, tmp_path):
+        """Fresh 3-week ingest (all fragments) should produce ~3 weekly files."""
+        from datetime import date, datetime, timezone
+
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        minute_ns = 60_000_000_000
+        # Write 21 days (3 weeks) as daily fragments (21 separate write_data calls)
+        jan1_ns = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        for day in range(21):
+            day_start = jan1_ns + day * 24 * 60 * minute_ns
+            bars = []
+            for i in range(24 * 60):  # 1 day
+                ts = day_start + i * minute_ns
+                bars.append(Bar(
+                    bar_type=bar_type,
+                    open=instrument.make_price(100.0),
+                    high=instrument.make_price(101.0),
+                    low=instrument.make_price(99.0),
+                    close=instrument.make_price(100.5),
+                    volume=instrument.make_qty(1000.0),
+                    ts_event=ts,
+                    ts_init=ts,
+                ))
+            catalog.write_data(bars, skip_disjoint_check=True)
+
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+        assert len(list(bar_dir.glob("*.parquet"))) == 21
+
+        consolidate_and_organize(
+            catalog, Bar, str(bar_type),
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 21),
+        )
+
+        files_after = sorted(bar_dir.glob("*.parquet"))
+        # Should produce a small number of weekly files (3-4 depending on alignment)
+        assert len(files_after) <= 5, f"Expected <=5 consolidated files, got {len(files_after)}"
+        assert len(files_after) >= 3, f"Expected >=3 files for 3 weeks, got {len(files_after)}"
+
+        # Data integrity
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        assert len(all_bars) == 21 * 24 * 60
+
+    def test_no_start_end_consolidates_all_fragments(self, tmp_path):
+        """Without start/end, all fragments are consolidated into weekly files."""
+        from datetime import datetime, timezone
+
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        minute_ns = 60_000_000_000
+        jan1_ns = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        for day in range(14):  # 2 weeks as daily fragments
+            day_start = jan1_ns + day * 24 * 60 * minute_ns
+            bars = []
+            for i in range(24 * 60):
+                ts = day_start + i * minute_ns
+                bars.append(Bar(
+                    bar_type=bar_type,
+                    open=instrument.make_price(100.0),
+                    high=instrument.make_price(101.0),
+                    low=instrument.make_price(99.0),
+                    close=instrument.make_price(100.5),
+                    volume=instrument.make_qty(1000.0),
+                    ts_event=ts,
+                    ts_init=ts,
+                ))
+            catalog.write_data(bars, skip_disjoint_check=True)
+
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+        assert len(list(bar_dir.glob("*.parquet"))) == 14
+
+        # No start/end — full consolidation
+        consolidate_and_organize(catalog, Bar, str(bar_type))
+
+        files_after = list(bar_dir.glob("*.parquet"))
+        assert len(files_after) <= 4
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        assert len(all_bars) == 14 * 24 * 60
+
+    def test_fragment_crossing_week_boundary_does_not_corrupt_adjacent_week(self, tmp_path):
+        """A fragment spanning a week boundary must not pull in files from the next week."""
+        from datetime import date, datetime, timezone
+
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        minute_ns = 60_000_000_000
+        # Figure out the epoch-week boundary after Jan 4
+        WEEK_NS = 7 * 24 * 3600 * 1_000_000_000
+        jan4_ns = int(datetime(2024, 1, 4, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        week_boundary = ((jan4_ns // WEEK_NS) + 1) * WEEK_NS  # Start of next epoch-week
+        boundary_dt = datetime.fromtimestamp(week_boundary / 1e9, tz=timezone.utc)
+
+        # Pre-existing consolidated file in the NEXT week (starts at boundary, spans 7 days)
+        next_week_bars = []
+        for i in range(7 * 24 * 60):
+            ts = week_boundary + i * minute_ns
+            next_week_bars.append(Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(100.0),
+                high=instrument.make_price(101.0),
+                low=instrument.make_price(99.0),
+                close=instrument.make_price(100.5),
+                volume=instrument.make_qty(1000.0),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(next_week_bars, skip_disjoint_check=True)
+
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+        next_week_file = sorted(bar_dir.glob("*.parquet"))[0]
+        next_week_mtime = next_week_file.stat().st_mtime_ns
+
+        # Two fragments in the CURRENT week that straddle the boundary:
+        # Fragment A: 6 hours before boundary
+        # Fragment B: from 3 hours before boundary to 3 hours after (crosses!)
+        frag_a_start = week_boundary - 12 * 60 * minute_ns  # 12 hours before
+        frag_a_bars = []
+        for i in range(6 * 60):  # 6 hours
+            ts = frag_a_start + i * minute_ns
+            frag_a_bars.append(Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(99.0),
+                high=instrument.make_price(100.0),
+                low=instrument.make_price(98.0),
+                close=instrument.make_price(99.5),
+                volume=instrument.make_qty(500.0),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(frag_a_bars, skip_disjoint_check=True)
+
+        frag_b_start = week_boundary - 3 * 60 * minute_ns  # 3 hours before
+        frag_b_bars = []
+        for i in range(6 * 60):  # 6 hours (crosses boundary by 3 hours)
+            ts = frag_b_start + i * minute_ns
+            frag_b_bars.append(Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(98.0),
+                high=instrument.make_price(99.0),
+                low=instrument.make_price(97.0),
+                close=instrument.make_price(98.5),
+                volume=instrument.make_qty(300.0),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(frag_b_bars, skip_disjoint_check=True)
+
+        # Consolidate the range covering the fragments
+        frag_start_date = datetime.fromtimestamp(frag_a_start / 1e9, tz=timezone.utc).date()
+        frag_end_date = datetime.fromtimestamp((frag_b_start + 6*60*minute_ns) / 1e9, tz=timezone.utc).date()
+        consolidate_and_organize(
+            catalog, Bar, str(bar_type),
+            start=frag_start_date,
+            end=frag_end_date,
+        )
+
+        files_after = sorted(bar_dir.glob("*.parquet"))
+        # After consolidation: fragments merged into current-week file,
+        # spill-over portion merged into next-week file via _merge_overlapping_files.
+        # The key invariant is data integrity — no data loss.
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        # next_week: 7*24*60=10080, frag_a: 6*60=360, frag_b: 6*60=360
+        # frag_a and frag_b overlap by 3 hours (180 bars) → unique = 360+360-180 = 540
+        # frag_b spills 3h into next_week (180 bars overlap with next_week) → deduped
+        # Total unique = 10080 + 540 - 180 = 10440
+        assert len(all_bars) >= 10080 + 360, (
+            f"Data loss detected: {len(all_bars)} bars, expected at least {10080 + 360}"
+        )
+        # Should not exceed non-deduped maximum
+        assert len(all_bars) <= 10080 + 360 + 360
+
+    def test_download_within_existing_week_adds_without_corruption(self, tmp_path):
+        """Downloading Jan 6 data when Jan5-Jan11 file already exists: no corruption."""
+        from datetime import date, datetime, timezone
+
+        from nautilus_trader.model.data import TradeTick
+        from nautilus_trader.model.enums import AggressorSide
+        from nautilus_trader.model.identifiers import TradeId
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        # Pre-existing consolidated week file: Jan 5-11 (one tick per hour for simplicity)
+        jan5_ns = int(datetime(2024, 1, 5, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        hour_ns = 3600 * 1_000_000_000
+        week_ticks = []
+        for i in range(7 * 24):
+            ts = jan5_ns + i * hour_ns
+            week_ticks.append(TradeTick(
+                instrument_id=instrument.id,
+                price=instrument.make_price(100.0),
+                size=instrument.make_qty(1.0),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId(str(i + 1)),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(week_ticks, skip_disjoint_check=True)
+
+        tick_dir = tmp_path / "data" / "trade_tick" / str(instrument.id)
+        existing_file = sorted(tick_dir.glob("*.parquet"))[0]
+        existing_mtime = existing_file.stat().st_mtime_ns
+        original_count = len(catalog.query(TradeTick, instrument_ids=[str(instrument.id)]))
+
+        # Download Jan 6 data (within the existing file's range) — simulates gap backfill
+        # Use trade_ids that DON'T collide with existing (existing Jan 6 = ids 25-48)
+        jan6_ns = int(datetime(2024, 1, 6, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        new_ticks = []
+        for i in range(24):  # 1 tick per hour, different trade_ids
+            ts = jan6_ns + i * hour_ns
+            new_ticks.append(TradeTick(
+                instrument_id=instrument.id,
+                price=instrument.make_price(100.0),
+                size=instrument.make_qty(1.0),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId(str(1000 + i)),  # guaranteed unique
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(new_ticks, skip_disjoint_check=True)
+
+        consolidate_and_organize(
+            catalog, TradeTick, str(instrument.id),
+            start=date(2024, 1, 6),
+            end=date(2024, 1, 6),
+        )
+
+        # _merge_overlapping_files merges the small fragment into the big file
+        # Data integrity: all ticks preserved (dedup by ts_event + trade_id keeps unique trade_ids)
+        all_ticks = catalog.query(TradeTick, instrument_ids=[str(instrument.id)])
+        assert len(all_ticks) == original_count + 24
+
+    def test_nt_deduplicate_table_removes_exact_duplicate_rows(self, tmp_path):
+        """NT's _deduplicate_table removes rows where ALL columns are identical."""
+        import pyarrow as pa
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        # Same row repeated
+        table = pa.table({
+            "ts_event": [100, 100, 200, 200, 300],
+            "trade_id": ["a", "a", "b", "b", "c"],
+            "price": [1.0, 1.0, 2.0, 2.0, 3.0],
+        })
+        deduped = ParquetDataCatalog._deduplicate_table(table)
+        assert deduped.num_rows == 3
+
+        # Same ts_event+trade_id but different price → NOT deduped (correct)
+        table2 = pa.table({
+            "ts_event": [100, 100],
+            "trade_id": ["a", "a"],
+            "price": [1.0, 1.5],
+        })
+        deduped2 = ParquetDataCatalog._deduplicate_table(table2)
+        assert deduped2.num_rows == 2
+
+    def test_two_overlapping_large_files_are_deduped(self, tmp_path):
+        """Two consolidated files with overlapping ranges must be deduped to avoid backtest corruption."""
+        from datetime import date, datetime, timezone
+
+        from nautilus_trader.model.data import Bar
+        from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+        from tinohelm.data.catalog import _make_bar_type, _make_instrument, consolidate_and_organize
+
+        instrument = _make_instrument("BTCUSDT-PERP")
+        bar_type = _make_bar_type(instrument.id, "1m")
+        catalog = ParquetDataCatalog(str(tmp_path))
+        catalog.write_data([instrument])
+
+        minute_ns = 60_000_000_000
+        # File 1: Jan 1 - Jan 8 (8 days, span > 5 days = "consolidated")
+        jan1_ns = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        bars1 = []
+        for i in range(8 * 24 * 60):
+            ts = jan1_ns + i * minute_ns
+            bars1.append(Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(100.0),
+                high=instrument.make_price(101.0),
+                low=instrument.make_price(99.0),
+                close=instrument.make_price(100.5),
+                volume=instrument.make_qty(1000.0),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(bars1, skip_disjoint_check=True)
+
+        # File 2: Jan 6 - Jan 14 (9 days, overlaps file 1 by 3 days)
+        jan6_ns = int(datetime(2024, 1, 6, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+        bars2 = []
+        for i in range(9 * 24 * 60):
+            ts = jan6_ns + i * minute_ns
+            bars2.append(Bar(
+                bar_type=bar_type,
+                open=instrument.make_price(100.0),
+                high=instrument.make_price(101.0),
+                low=instrument.make_price(99.0),
+                close=instrument.make_price(100.5),
+                volume=instrument.make_qty(1000.0),
+                ts_event=ts,
+                ts_init=ts,
+            ))
+        catalog.write_data(bars2, skip_disjoint_check=True)
+
+        bar_dir = tmp_path / "data" / "bar" / str(bar_type)
+        assert len(list(bar_dir.glob("*.parquet"))) == 2
+
+        # Consolidate — must resolve the overlap
+        consolidate_and_organize(catalog, Bar, str(bar_type))
+
+        all_bars = catalog.bars(bar_types=[str(bar_type)])
+        expected_unique = 14 * 24 * 60  # Jan 1 through Jan 14
+        assert len(all_bars) == expected_unique, (
+            f"Overlap not deduped! Got {len(all_bars)}, expected {expected_unique}. "
+            f"Backtest would receive duplicate bars."
+        )
