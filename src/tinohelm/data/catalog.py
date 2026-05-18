@@ -1632,6 +1632,42 @@ def _affected_intervals(
     return [(s, e) for s, e in intervals if s <= end_ns and e >= start_ns]
 
 
+def _parse_parquet_filename_timestamps(filename: str) -> tuple[int, int] | None:
+    """Parse NT-style parquet filename into (start_ns, end_ns) timestamps."""
+    import os
+    import re
+
+    from nautilus_trader.core.datetime import maybe_dt_to_unix_nanos
+
+    base = os.path.splitext(os.path.basename(filename))[0]
+    match = re.match(r"(.*?)_(.*)", base)
+    if not match:
+        return None
+
+    def _file_ts_to_iso(file_ts: str) -> str:
+        date_part, time_part = file_ts.split("T")
+        time_part = time_part[:-1]  # strip Z
+        last_h = time_part.rfind("-")
+        time_part = time_part[:last_h] + "." + time_part[last_h + 1:]
+        return f"{date_part}T{time_part.replace('-', ':')}Z"
+
+    first = maybe_dt_to_unix_nanos(_file_ts_to_iso(match.group(1)))
+    last = maybe_dt_to_unix_nanos(_file_ts_to_iso(match.group(2)))
+    if first is None or last is None:
+        return None
+    return (first, last)
+
+
+def _timestamps_to_parquet_filename(ts1: int, ts2: int) -> str:
+    """Build NT-style parquet filename from (start_ns, end_ns)."""
+    from nautilus_trader.core.datetime import unix_nanos_to_iso8601
+
+    def _iso_to_file_ts(iso: str) -> str:
+        return iso.replace(":", "-").replace(".", "-")
+
+    return f"{_iso_to_file_ts(unix_nanos_to_iso8601(ts1))}_{_iso_to_file_ts(unix_nanos_to_iso8601(ts2))}.parquet"
+
+
 def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) -> None:
     """Merge overlapping parquet files and deduplicate (bounded memory).
 
@@ -1645,7 +1681,6 @@ def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) ->
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
-    from nautilus_trader.persistence.catalog.parquet import _parse_filename_timestamps, _timestamps_to_filename
 
     directory = catalog._make_path(data_cls, identifier)
 
@@ -1656,7 +1691,7 @@ def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) ->
 
         intervals = []
         for f in parquet_files:
-            parsed = _parse_filename_timestamps(f)
+            parsed = _parse_parquet_filename_timestamps(f)
             if parsed:
                 intervals.append((parsed[0], parsed[1], f))
 
@@ -1677,20 +1712,30 @@ def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) ->
                 combined = combined.take(sorted_indices)
                 del sorted_indices
 
-                # Deduplicate by ts_event using Arrow-native ops (preserves schema)
+                # Deduplicate: trade ticks can share ts_event (same nanosecond),
+                # so use (ts_event, trade_id) as composite key when available.
+                has_trade_id = "trade_id" in combined.schema.names
                 ts_arr = combined.column("ts_event").combine_chunks()
-                # Mark first occurrence of each ts_event as keep=True
-                diffs = pc.not_equal(ts_arr[:-1], ts_arr[1:])
-                keep_mask = pa.concat_arrays([
-                    pa.array([True]),
-                    diffs,
-                ])
+                if has_trade_id:
+                    tid_arr = combined.column("trade_id").combine_chunks()
+                    ts_diff = pc.not_equal(ts_arr[:-1], ts_arr[1:])
+                    tid_diff = pc.not_equal(tid_arr[:-1], tid_arr[1:])
+                    row_differs = pc.or_(ts_diff, tid_diff)
+                    del tid_arr, ts_diff, tid_diff
+                else:
+                    row_differs = pc.not_equal(ts_arr[:-1], ts_arr[1:])
+                keep_mask = pa.concat_arrays([pa.array([True]), row_differs])
+                del ts_arr, row_differs
+                if pc.all(keep_mask).as_py():
+                    del combined, keep_mask
+                    i += 1
+                    continue
                 deduped = combined.filter(keep_mask)
-                del combined, keep_mask, ts_arr
+                del combined, keep_mask
 
                 new_start = min(s1, s2)
                 new_end = max(e1, e2)
-                new_name = os.path.join(directory, _timestamps_to_filename(new_start, new_end))
+                new_name = os.path.join(directory, _timestamps_to_parquet_filename(new_start, new_end))
                 pq.write_table(deduped, new_name, filesystem=catalog.fs)
                 del deduped
 
