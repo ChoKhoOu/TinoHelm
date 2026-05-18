@@ -1644,15 +1644,24 @@ def _parse_parquet_filename_timestamps(filename: str) -> tuple[int, int] | None:
     if not match:
         return None
 
-    def _file_ts_to_iso(file_ts: str) -> str:
-        date_part, time_part = file_ts.split("T")
-        time_part = time_part[:-1]  # strip Z
-        last_h = time_part.rfind("-")
-        time_part = time_part[:last_h] + "." + time_part[last_h + 1:]
-        return f"{date_part}T{time_part.replace('-', ':')}Z"
+    def _file_ts_to_iso(file_ts: str) -> str | None:
+        try:
+            date_part, time_part = file_ts.split("T")
+            time_part = time_part[:-1]  # strip Z
+            last_h = time_part.rfind("-")
+            if last_h <= 0:
+                return None
+            time_part = time_part[:last_h] + "." + time_part[last_h + 1:]
+            return f"{date_part}T{time_part.replace('-', ':')}Z"
+        except (ValueError, IndexError):
+            return None
 
-    first = maybe_dt_to_unix_nanos(_file_ts_to_iso(match.group(1)))
-    last = maybe_dt_to_unix_nanos(_file_ts_to_iso(match.group(2)))
+    iso1 = _file_ts_to_iso(match.group(1))
+    iso2 = _file_ts_to_iso(match.group(2))
+    if iso1 is None or iso2 is None:
+        return None
+    first = maybe_dt_to_unix_nanos(iso1)
+    last = maybe_dt_to_unix_nanos(iso2)
     if first is None or last is None:
         return None
     return (first, last)
