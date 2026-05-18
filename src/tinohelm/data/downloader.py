@@ -14,7 +14,7 @@ import hashlib
 import logging
 import tempfile
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path, PurePosixPath
@@ -161,7 +161,11 @@ class _ZipMemberBinaryReader:
 
     def __init__(self, zip_path: Path, member: str) -> None:
         self._zip_file = zipfile.ZipFile(zip_path, "r")
-        self._member_file = self._zip_file.open(member, "r")
+        try:
+            self._member_file = self._zip_file.open(member, "r")
+        except Exception:
+            self._zip_file.close()
+            raise
 
     def __enter__(self):
         return self
@@ -195,7 +199,7 @@ class VisionZipCsvPayload:
     name: str
     zip_path: Path
     member: str
-    _closed: bool = False
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
 
     @property
     def path(self) -> Path:
