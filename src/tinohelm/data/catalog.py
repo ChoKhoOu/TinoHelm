@@ -1708,13 +1708,14 @@ def _merge_overlapping_files(catalog, data_cls: type, identifier: str | None) ->
                 combined = pa.concat_tables([t1, t2])
                 del t1, t2
 
-                sorted_indices = pc.sort_indices(combined, sort_keys=[("ts_event", "ascending")])
+                # Sort by composite key so identical rows are adjacent for dedup.
+                has_trade_id = "trade_id" in combined.schema.names
+                sort_keys = [("ts_event", "ascending")]
+                if has_trade_id:
+                    sort_keys.append(("trade_id", "ascending"))
+                sorted_indices = pc.sort_indices(combined, sort_keys=sort_keys)
                 combined = combined.take(sorted_indices)
                 del sorted_indices
-
-                # Deduplicate: trade ticks can share ts_event (same nanosecond),
-                # so use (ts_event, trade_id) as composite key when available.
-                has_trade_id = "trade_id" in combined.schema.names
                 ts_arr = combined.column("ts_event").combine_chunks()
                 if has_trade_id:
                     tid_arr = combined.column("trade_id").combine_chunks()
