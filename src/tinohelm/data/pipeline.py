@@ -508,39 +508,55 @@ class BinanceVisionPipeline:
                 f"{symbol} {data_type} converted 0 objects from {len(tasks)} downloaded file(s)"
             )
 
-        # 4. Consolidate + Deduplicate + Organize by period
+        # --- Write phase complete: data is safely on disk ---
         try:
-            await _progress(90, "Consolidating and deduplicating...")
+            await _progress(88, f"落盘完成 {total_objects:,} objects, 整理中...")
         except asyncio.CancelledError:
             raise
+
+        # 4. Consolidate + Deduplicate + Organize by period
         consolidate_start = start
         consolidate_end = end
         if data_type == "trades" and trade_tick_missing_slices:
             consolidate_start = min(slice_start for slice_start, _ in trade_tick_missing_slices)
             consolidate_end = max(slice_end for _, slice_end in trade_tick_missing_slices)
+        consolidation_ok = False
         try:
             await asyncio.to_thread(
                 self._consolidate_catalog_data, symbol, data_type, interval, consolidate_start, consolidate_end
             )
+            consolidation_ok = True
         except Exception as consolidation_exc:
-            logger.error(
-                "Consolidation failed for %s %s; data is written but fragmented/duplicated",
-                symbol, data_type, exc_info=True,
+            logger.warning(
+                "Consolidation failed for %s %s; data is written but fragmented — "
+                "run /consolidate to retry later: %s",
+                symbol, data_type, consolidation_exc, exc_info=True,
             )
-            await _progress(100, f"Consolidation failed: {consolidation_exc}")
-            raise RuntimeError(
-                f"Data written successfully but consolidation failed for {symbol} {data_type}: {consolidation_exc}"
-            ) from consolidation_exc
+            try:
+                await _progress(
+                    93, f"整理失败（数据已落盘）: {consolidation_exc!s:.80s}",
+                )
+            except asyncio.CancelledError:
+                raise
 
-        # 5. Gap detection + auto-backfill (runs after consolidation so
-        #    file-boundary artifacts don't produce false-positive gaps)
-        try:
-            await _progress(93, "Checking for data gaps...")
-        except asyncio.CancelledError:
-            raise
-        gap_ranges = await asyncio.to_thread(
-            self._detect_gaps_for_backfill, symbol, data_type, interval
-        )
+        # 5. Gap detection + auto-backfill
+        # Only safe after successful consolidation — file-boundary artifacts
+        # in fragmented data would produce false-positive gaps.
+        gap_ranges: list[tuple[date, date]] = []
+        if not consolidation_ok:
+            logger.info(
+                "Skipping gap detection for %s %s: consolidation failed, "
+                "fragmented files would cause false positives",
+                symbol, data_type,
+            )
+        else:
+            try:
+                await _progress(93, "Checking for data gaps...")
+            except asyncio.CancelledError:
+                raise
+            gap_ranges = await asyncio.to_thread(
+                self._detect_gaps_for_backfill, symbol, data_type, interval
+            )
         if data_type == "trades" and trade_tick_missing_slices:
             filtered_gap_ranges: list[tuple[date, date]] = []
             for gap_start, gap_end in gap_ranges:
