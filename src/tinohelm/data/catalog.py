@@ -1801,40 +1801,41 @@ def consolidate_and_organize(
 
     directory = catalog._make_path(data_cls, identifier)
 
+    def _scan_files():
+        """Glob once and parse all filenames into (start_ns, end_ns, path) tuples."""
+        parsed = []
+        for f in catalog.fs.glob(os.path.join(directory, "*.parquet")):
+            ts = _parse_parquet_filename_timestamps(f)
+            if ts is not None:
+                parsed.append((ts[0], ts[1], f))
+        parsed.sort(key=lambda x: x[0])
+        return parsed
+
+    all_files = _scan_files()
+
     # Iterate week by week
     week_start_ns = (range_start_ns // WEEK_NS) * WEEK_NS
     while week_start_ns <= range_end_ns:
         week_end_ns = week_start_ns + WEEK_NS - 1
 
-        # Find files overlapping this week
-        current_files = sorted(catalog.fs.glob(os.path.join(directory, "*.parquet")))
-        overlapping = []
-        for f in current_files:
-            parsed = _parse_parquet_filename_timestamps(f)
-            if parsed is None:
-                continue
-            f_start, f_end = parsed
-            if f_start <= week_end_ns and f_end >= week_start_ns:
-                overlapping.append((f_start, f_end, f))
+        overlapping = [
+            (s, e, f) for s, e, f in all_files
+            if s <= week_end_ns and e >= week_start_ns
+        ]
 
-        # Skip if 0 or 1 files cover this week (nothing to consolidate)
         if len(overlapping) <= 1:
             week_start_ns += WEEK_NS
             continue
 
-        fragments = []
-        for f_start, f_end, f in overlapping:
-            if (f_end - f_start) >= _CONSOLIDATED_FILE_THRESHOLD_NS:
-                continue
-            fragments.append((f_start, f_end, f))
+        fragments = [
+            (s, e, f) for s, e, f in overlapping
+            if (e - s) < _CONSOLIDATED_FILE_THRESHOLD_NS
+        ]
 
         if len(fragments) <= 1:
             week_start_ns += WEEK_NS
             continue
 
-        # Clamp the consolidation range to this week's boundaries — fragments
-        # that cross into the next week will only have the current-week portion
-        # processed now; the spill-over stays as-is for the next iteration.
         frag_start = max(min(s for s, _, _ in fragments), week_start_ns)
         frag_end = min(max(e for _, e, _ in fragments), week_end_ns)
 
@@ -1847,6 +1848,8 @@ def consolidate_and_organize(
             ensure_contiguous_files=False,
         )
         gc.collect()
+        # Re-scan after consolidation changed the directory contents
+        all_files = _scan_files()
 
         week_start_ns += WEEK_NS
 
