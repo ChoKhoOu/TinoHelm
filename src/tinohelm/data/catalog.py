@@ -30,12 +30,10 @@ from tinohelm.data.pipeline_helpers import WRITE_CATEGORY as _PIPELINE_WRITE_CAT
 
 logger = logging.getLogger(__name__)
 
-# Files spanning >= this duration are considered already-consolidated period
-# files and won't be re-processed by the per-week consolidation loop. Set to
-# 5 days because weekly consolidation produces ~6.9-day files, while ingest
-# chunks are typically hours to 1 day. Binance Vision daily zips never exceed
-# ~26 hours per file.
-_CONSOLIDATED_FILE_THRESHOLD_NS = 5 * 24 * 3600 * 1_000_000_000
+# Weekly consolidated files span ~6.99 days (last bar at 23:59).
+# Anything >= 6.9 days is a consolidated period file and must not be
+# re-processed. Ingest chunks never exceed 1 day.
+_CONSOLIDATED_FILE_THRESHOLD_NS = int(6.9 * 24 * 3600 * 1_000_000_000)
 _WEEK_NS = 7 * 24 * 3600 * 1_000_000_000
 
 if TYPE_CHECKING:
