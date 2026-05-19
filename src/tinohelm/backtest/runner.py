@@ -632,6 +632,7 @@ class BacktestRunner:
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
         from tinohelm.core.config import get_settings
         from tinohelm.data.coverage import plan_submission_slices
+        from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
         from tinohelm.db.models import DataFetchJob
 
         # Create a fresh engine for this event loop — the global singleton
@@ -639,6 +640,7 @@ class BacktestRunner:
         settings = get_settings()
         engine = create_async_engine(settings.database.url, echo=False, pool_size=2)
         factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        catalog_storage = get_catalog_storage(settings=settings, catalog_root=get_active_catalog_root(settings))
 
         effective_data_type = data_type or self.data_type
         # A backtest-triggered fetch is its own single-job FetchBatch, so we
@@ -658,6 +660,7 @@ class BacktestRunner:
                     interval=ivl,
                     start=start_date,
                     end=end_date,
+                    storage=catalog_storage,
                 )
                 if not missing_slices:
                     logger.info(

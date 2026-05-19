@@ -21,7 +21,7 @@ from tinohelm.data.catalog_locks import (
     hold_catalog_lock,
     hold_global_catalog_lock,
 )
-from tinohelm.data.coverage import catalog_session_for_fetch, plan_submission_slices
+from tinohelm.data.coverage import plan_submission_slices
 from tinohelm.data.pipeline_helpers import (
     WRITE_CATEGORY,
     resolve_db_interval,
@@ -533,13 +533,12 @@ async def trigger_data_fetch_batch(
     settings = get_settings()
     base_catalog_path = get_active_catalog_root(settings)
     storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path)
-    catalog_session = catalog_session_for_fetch(base_catalog_path, storage=storage)
 
     for symbol in body.symbols:
         for interval in effective_intervals:
             missing_slices = await plan_submission_slices(
                 db=db,
-                catalog_path=Path(catalog_session.catalog_path),
+                catalog_path=base_catalog_path,
                 symbol=symbol,
                 data_type=effective_data_type,
                 interval=interval,
