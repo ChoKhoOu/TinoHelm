@@ -7,7 +7,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
+
+def test_build_cache_config_uses_current_nt_redis_timeout_fields():
+    """build_cache_config must construct a Redis CacheConfig on NT 1.226.0."""
+    from tinohelm.node._common import build_cache_config
+
+    cache_config = build_cache_config(
+        redis_host="redis",
+        redis_port=6379,
+        redis_password="secret",
+        is_sandbox=True,
+    )
+
+    assert cache_config.database.type == "redis"
+    assert cache_config.database.host == "redis"
+    assert cache_config.database.port == 6379
+    assert cache_config.database.password == "secret"
+    assert cache_config.database.connection_timeout == 2
+    assert cache_config.database.response_timeout == 2
+    assert cache_config.flush_on_start is True
 
 
 class TestResolveStrategiesDir:
