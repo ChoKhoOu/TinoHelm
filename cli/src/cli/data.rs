@@ -197,7 +197,7 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
                 OutputFormat::Text => {
                     header("Batch Data Fetch Submitted");
                     divider(50);
-                    kv("Batch", &result["batch_id"].as_str().unwrap_or("-"), 12);
+                    kv("Batch", result["batch_id"].as_str().unwrap_or("-"), 12);
                     kv("Symbols", &symbols.join(", "), 12);
                     kv("Period", &format!("{} ~ {}", start, end), 12);
                     println!();
