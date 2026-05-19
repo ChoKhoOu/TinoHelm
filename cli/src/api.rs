@@ -495,6 +495,43 @@ impl ApiClient {
         .await
     }
 
+    pub async fn list_data_batches(
+        &self,
+        status: Option<&str>,
+        page: u64,
+        page_size: u64,
+    ) -> Result<DataBatchList> {
+        let mut query = vec![
+            ("page".to_string(), page.to_string()),
+            ("page_size".to_string(), page_size.to_string()),
+        ];
+        if let Some(status) = status {
+            query.push(("status".to_string(), status.to_string()));
+        }
+        self.typed_json(Method::GET, "/api/data/batches", &query, None)
+            .await
+    }
+
+    pub async fn get_data_batch(&self, batch_id: &str) -> Result<DataBatchDetail> {
+        self.typed_json(
+            Method::GET,
+            &format!("/api/data/batches/{}", batch_id),
+            &[],
+            None,
+        )
+        .await
+    }
+
+    pub async fn cancel_data_batch(&self, batch_id: &str) -> Result<DataBatchCancelResponse> {
+        self.typed_json(
+            Method::POST,
+            &format!("/api/data/batches/{}/cancel", batch_id),
+            &[],
+            None,
+        )
+        .await
+    }
+
     pub async fn compact_data(&self, req: &DataCompactRequest) -> Result<serde_json::Value> {
         self.typed_json(
             Method::POST,

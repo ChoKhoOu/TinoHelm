@@ -9,9 +9,9 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
@@ -249,6 +249,107 @@ def _catalog_for_maintenance(settings: Settings):
     return _catalog_for_root(base_catalog_path, storage), storage
 
 
+_TERMINAL_BATCH_STATUSES = {"completed", "partial_completed", "failed", "cancelled"}
+
+
+def _batch_key(job: DataFetchJob) -> str:
+    return job.batch_id or job.job_id
+
+
+def _job_payload(job: DataFetchJob) -> dict:
+    return {
+        "job_id": job.job_id,
+        "symbol": job.symbol,
+        "data_type": _public_data_type(job.data_type),
+        "interval": job.interval,
+        "start_date": job.start_date.isoformat(),
+        "end_date": job.end_date.isoformat(),
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "error": job.error,
+        "created_at": (job.created_at.isoformat() + "Z") if job.created_at else None,
+        "started_at": (job.started_at.isoformat() + "Z") if job.started_at else None,
+        "completed_at": (job.completed_at.isoformat() + "Z") if job.completed_at else None,
+    }
+
+
+def _batch_progress_value(job: DataFetchJob) -> int:
+    if job.status == "queued":
+        return 0
+    if job.status == "running":
+        return job.progress
+    return 100
+
+
+def _batch_status(jobs: list[DataFetchJob]) -> str:
+    statuses = [job.status for job in jobs]
+    if any(status == "running" for status in statuses):
+        return "running"
+    if any(status == "queued" for status in statuses):
+        return "queued"
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if all(status == "cancelled" for status in statuses):
+        return "cancelled"
+    if all(status == "completed" for status in statuses):
+        return "completed"
+    return "partial_completed"
+
+
+def _batch_payload(batch_id: str, jobs: list[DataFetchJob]) -> dict:
+    ordered_jobs = sorted(
+        jobs,
+        key=lambda job: (
+            job.symbol,
+            job.data_type,
+            job.interval or "",
+            job.start_date,
+            job.created_at or datetime.min,
+            job.job_id,
+        ),
+    )
+    status = _batch_status(ordered_jobs)
+    counts = {
+        "jobs": len(ordered_jobs),
+        "queued": sum(job.status == "queued" for job in ordered_jobs),
+        "running": sum(job.status == "running" for job in ordered_jobs),
+        "completed": sum(job.status == "completed" for job in ordered_jobs),
+        "partial_completed": sum(job.status == "partial_completed" for job in ordered_jobs),
+        "failed": sum(job.status == "failed" for job in ordered_jobs),
+        "cancelled": sum(job.status == "cancelled" for job in ordered_jobs),
+    }
+    created_at = min((job.created_at for job in ordered_jobs if job.created_at is not None), default=None)
+    started_at = min((job.started_at for job in ordered_jobs if job.started_at is not None), default=None)
+    completed_at = None
+    if status in _TERMINAL_BATCH_STATUSES:
+        completed_at = max((job.completed_at for job in ordered_jobs if job.completed_at is not None), default=None)
+    return {
+        "batch_id": batch_id,
+        "data_type": _public_data_type(ordered_jobs[0].data_type),
+        "asset_class": ordered_jobs[0].asset_class,
+        "symbols": sorted({job.symbol for job in ordered_jobs}),
+        "intervals": sorted({job.interval for job in ordered_jobs if job.interval}),
+        "start_date": min(job.start_date for job in ordered_jobs).isoformat(),
+        "end_date": max(job.end_date for job in ordered_jobs).isoformat(),
+        "status": status,
+        "progress": round(sum(_batch_progress_value(job) for job in ordered_jobs) / len(ordered_jobs)),
+        "counts": counts,
+        "created_at": (created_at.isoformat() + "Z") if created_at else None,
+        "started_at": (started_at.isoformat() + "Z") if started_at else None,
+        "completed_at": (completed_at.isoformat() + "Z") if completed_at else None,
+        "jobs": [_job_payload(job) for job in ordered_jobs],
+    }
+
+
+def _group_batch_rows(rows: list[DataFetchJob]) -> list[dict]:
+    grouped: dict[str, list[DataFetchJob]] = {}
+    for row in rows:
+        grouped.setdefault(_batch_key(row), []).append(row)
+    batches = [_batch_payload(batch_id, jobs) for batch_id, jobs in grouped.items()]
+    return sorted(batches, key=lambda batch: (batch["created_at"] or "", batch["batch_id"]), reverse=True)
+
+
 def _parse_period(value: str) -> timedelta:
     token = str(value).strip().lower()
     if not token:
@@ -341,34 +442,75 @@ async def list_data_catalog(
     ]
 
 
-@router.get("/jobs")
-async def list_data_fetch_jobs(
+@router.get("/batches")
+async def list_data_fetch_batches(
     status: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """List data-fetch jobs, optionally filtered by status."""
-    stmt = select(DataFetchJob).order_by(DataFetchJob.created_at.desc()).limit(100)
+) -> dict:
+    """List data-fetch batches, optionally filtered by aggregated status."""
+    rows = (await db.execute(select(DataFetchJob).order_by(DataFetchJob.created_at.desc()))).scalars().all()
+    batches = _group_batch_rows(rows)
     if status:
-        stmt = stmt.where(DataFetchJob.status == status)
-    rows = (await db.execute(stmt)).scalars().all()
-    return [
-        {
-            "job_id": j.job_id,
-            "symbol": j.symbol,
-            "data_type": _public_data_type(j.data_type),
-            "interval": j.interval,
-            "start_date": j.start_date.isoformat(),
-            "end_date": j.end_date.isoformat(),
-            "status": j.status,
-            "progress": j.progress,
-            "message": j.message,
-            "error": j.error,
-            "created_at": (j.created_at.isoformat() + "Z") if j.created_at else None,
-            "started_at": (j.started_at.isoformat() + "Z") if j.started_at else None,
-            "completed_at": (j.completed_at.isoformat() + "Z") if j.completed_at else None,
-        }
-        for j in rows
-    ]
+        batches = [batch for batch in batches if batch["status"] == status]
+    total = len(batches)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "batches": [
+            {
+                key: value
+                for key, value in batch.items()
+                if key != "jobs"
+            }
+            for batch in batches[start:end]
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/batches/{batch_id}")
+async def get_data_fetch_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Get aggregated status of a single data-fetch batch."""
+    rows = (await db.execute(select(DataFetchJob).order_by(DataFetchJob.created_at.desc()))).scalars().all()
+    batches = {batch["batch_id"]: batch for batch in _group_batch_rows(rows)}
+    batch = batches.get(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return batch
+
+
+@router.post("/batches/{batch_id}/cancel")
+async def cancel_data_fetch_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Cancel queued jobs inside a batch without interrupting running jobs."""
+    rows = (await db.execute(select(DataFetchJob))).scalars().all()
+    batch_jobs = [job for job in rows if _batch_key(job) == batch_id]
+    if not batch_jobs:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    queued_jobs = [job for job in batch_jobs if job.status == "queued"]
+    running_jobs = [job for job in batch_jobs if job.status == "running"]
+    finished_jobs = [job for job in batch_jobs if job.status not in {"queued", "running"}]
+    if not queued_jobs and not running_jobs:
+        raise HTTPException(status_code=409, detail="Batch already finished")
+    for job in queued_jobs:
+        job.status = "cancelled"
+    await db.commit()
+    return {
+        "batch_id": batch_id,
+        "status": "cancellation_requested",
+        "cancelled_jobs": len(queued_jobs),
+        "running_jobs": len(running_jobs),
+        "finished_jobs": len(finished_jobs),
+    }
 
 
 @router.get("/jobs/{job_id}")
@@ -382,21 +524,7 @@ async def get_data_fetch_job(
     )).scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {
-        "job_id": job.job_id,
-        "symbol": job.symbol,
-        "data_type": _public_data_type(job.data_type),
-        "interval": job.interval,
-        "start_date": job.start_date.isoformat(),
-        "end_date": job.end_date.isoformat(),
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "error": job.error,
-        "created_at": (job.created_at.isoformat() + "Z") if job.created_at else None,
-        "started_at": (job.started_at.isoformat() + "Z") if job.started_at else None,
-        "completed_at": (job.completed_at.isoformat() + "Z") if job.completed_at else None,
-    }
+    return _job_payload(job)
 
 
 @router.post("/jobs/{job_id}/cancel")
@@ -583,6 +711,7 @@ async def trigger_data_fetch_batch(
     return {
         "status": "accepted",
         "message": message,
+        "batch_id": batch_id,
         "job_ids": job_ids,
         "jobs": jobs,
         "symbols": body.symbols,
