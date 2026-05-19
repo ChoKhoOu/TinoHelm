@@ -719,58 +719,6 @@ class BinanceVisionPipeline:
             symbol, data_type, interval, schema_validated,
         )
 
-    async def _ingest_streaming(
-        self,
-        csv_paths: list[CsvSource],
-        converter,
-        instrument,
-        kwargs: dict,
-        symbol: str,
-        data_type: str,
-        interval: str | None,
-        _progress,
-    ) -> tuple[int, list[str]]:
-        """Process CSVs one at a time to bound memory usage.
-
-        Reads each full CSV, converts it, writes the resulting NT objects,
-        then deletes the processed file to free disk space.
-        """
-        total_objects = 0
-        all_file_paths: list[str] = []
-        schema_validated = False
-
-        for csv_idx, csv_path in enumerate(csv_paths):
-            csv_name = self._csv_display_name(csv_path)
-            try:
-                hdr = self._detect_header(csv_path)
-            except Exception:
-                logger.warning("Failed to read CSV header %s", csv_name, exc_info=True)
-                raise
-
-            n, fps = self._stream_full_file(
-                csv_path, hdr, converter, instrument, kwargs,
-                symbol, data_type, interval, schema_validated,
-            )
-
-            schema_validated = True
-            if n <= 0 or not fps:
-                raise RuntimeError(
-                    f"conversion produced no objects/files for {csv_name}"
-                )
-            total_objects += n
-            all_file_paths.extend(fps)
-
-            # Free disk: remove processed CSV and its ZIP
-            self._cleanup_raw_file(csv_path)
-
-            pct = 78 + int(12 * (csv_idx + 1) / len(csv_paths))
-            await _progress(
-                pct,
-                f"Converted {csv_idx + 1}/{len(csv_paths)} files ({total_objects} objects)",
-            )
-
-        return total_objects, all_file_paths
-
     def _stream_full_file(
         self, csv_path: CsvSource, hdr, converter, instrument, kwargs,
         symbol, data_type, interval, schema_validated,
