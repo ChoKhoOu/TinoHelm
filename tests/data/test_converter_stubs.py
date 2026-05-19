@@ -14,9 +14,9 @@ class TestConverterRegistration:
         c = get_converter("bookTicker")
         assert c is not None
 
-    def test_book_ticker_has_supports_chunked(self):
+    def test_book_ticker_exposes_convert(self):
         c = get_converter("bookTicker")
-        assert isinstance(c.supports_chunked, bool)
+        assert callable(c.convert)
 
 
 # --- bookTicker ---

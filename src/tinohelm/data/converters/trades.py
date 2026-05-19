@@ -19,8 +19,6 @@ _COLUMN_NAMES = ["id", "price", "qty", "quote_qty", "time", "is_buyer_maker"]
 class TradesConverter:
     """Converts Binance Vision trades CSV (no header) to NT TradeTick objects."""
 
-    supports_chunked = True
-
     def validate_schema(self, df: pd.DataFrame) -> None:
         if len(df.columns) < 6:
             raise SchemaError(
@@ -62,5 +60,3 @@ class TradesConverter:
         )
         return ticks
 
-    def convert_chunk(self, chunk: pd.DataFrame, instrument: Any, **kwargs) -> list:
-        return self.convert(chunk, instrument, **kwargs)

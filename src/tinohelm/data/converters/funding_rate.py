@@ -37,8 +37,6 @@ _COLUMN_NAMES = ["calc_time", "funding_interval_hours", "last_funding_rate"]
 class FundingRateConverter:
     """fundingRate CSV (no header) → NT FundingRateUpdate."""
 
-    supports_chunked = False
-
     def validate_schema(self, df: pd.DataFrame) -> None:
         if len(df.columns) < 3:
             raise SchemaError(
@@ -87,5 +85,3 @@ class FundingRateConverter:
         )
         return records
 
-    def convert_chunk(self, chunk: pd.DataFrame, instrument: Any, **kwargs) -> list:
-        return self.convert(chunk, instrument, **kwargs)

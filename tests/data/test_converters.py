@@ -35,12 +35,10 @@ class TestConverterRegistry:
         assert expected == set(CONVERTER_REGISTRY.keys())
 
     def test_converter_protocol_attributes(self):
-        """Every registered converter exposes supports_chunked, validate_schema, convert."""
+        """Every registered converter exposes validate_schema and convert."""
         for name, c in CONVERTER_REGISTRY.items():
-            assert hasattr(c, "supports_chunked"), f"{name} missing supports_chunked"
             assert hasattr(c, "validate_schema"), f"{name} missing validate_schema"
             assert hasattr(c, "convert"), f"{name} missing convert"
-            assert hasattr(c, "convert_chunk"), f"{name} missing convert_chunk"
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +127,6 @@ class TestKlinesConverter:
     def setup_method(self):
         self.c = get_converter("klines")
 
-    def test_supports_chunked_false(self):
-        assert self.c.supports_chunked is False
-
     def test_validate_schema_ok_12_columns(self):
         df = pd.DataFrame([[0] * 12])
         self.c.validate_schema(df)  # should not raise
@@ -210,9 +205,6 @@ class TestTradesConverter:
     def setup_method(self):
         self.c = get_converter("trades")
 
-    def test_supports_chunked_true(self):
-        assert self.c.supports_chunked is True
-
     def test_validate_schema_ok(self):
         # 6 columns: id, price, qty, quote_qty, time, is_buyer_maker
         df = pd.DataFrame([[1, "42000.0", "0.1", "4200.0", 1704067200000, False]])
@@ -237,9 +229,6 @@ class TestTradesConverter:
 class TestFundingRateConverter:
     def setup_method(self):
         self.c = get_converter("fundingRate")
-
-    def test_supports_chunked_false(self):
-        assert self.c.supports_chunked is False
 
     def test_validate_schema_ok(self):
         # 3 columns: calc_time, funding_interval_hours, last_funding_rate

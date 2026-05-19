@@ -184,8 +184,7 @@ class TestBoundedCsvConversion:
         p._write_objects = MagicMock(return_value=["memory://catalog/file.parquet"])
 
         class Converter:
-            supports_chunked = False
-
+            
             def validate_schema(self, df):
                 assert list(df.columns) == ["a", "b"]
 
@@ -211,26 +210,47 @@ class TestBoundedCsvConversion:
             ["object-1"], "BTCUSDT-PERP", "trades", None, merge=False,
         )
 
-    def test_chunked_conversion_reads_csv_payload_in_chunks(self, tmp_path: Path):
-        payload = _csv_payload("BTCUSDT-trades-2025-01-15.csv", b"1,2\n3,4\n")
+    def test_conversion_reads_full_csv_payload_once(self, tmp_path: Path):
+        payload = _csv_payload("BTCUSDT-markPriceKlines-2025-01-15.csv", b"1,2\n3,4\n")
         p = BinanceVisionPipeline(catalog_path=tmp_path)
-        p._chunk_rows = 1
-        p._tick_chunk_rows = 1
-        p._write_objects = MagicMock(side_effect=[
-            ["memory://catalog/a.parquet"],
-            ["memory://catalog/b.parquet"],
-        ])
+        p._write_objects = MagicMock(return_value=["memory://catalog/full.parquet"])
 
         class Converter:
-            supports_chunked = True
-
             def validate_schema(self, df):
                 assert list(df.columns) == [0, 1]
 
-            def convert_chunk(self, chunk, instrument, **kwargs):
-                return [tuple(chunk.iloc[0].tolist())]
+            def convert(self, df, instrument, **kwargs):
+                assert len(df) == 2
+                return [tuple(row) for row in df.itertuples(index=False, name=None)]
 
-        seen_progress: list[int] = []
+        count, paths = p._convert_one_file(
+            payload,
+            Converter(),
+            object(),
+            {"symbol": "BTCUSDT-PERP"},
+            "BTCUSDT-PERP",
+            "markPriceKlines",
+            None,
+            False,
+        )
+
+        assert count == 2
+        assert paths == ["memory://catalog/full.parquet"]
+        p._write_objects.assert_called_once()
+
+    def test_trades_conversion_reads_full_daily_file_once(self, tmp_path: Path):
+        payload = _csv_payload("BTCUSDT-trades-2025-01-15.csv", b"1,2\n3,4\n")
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._write_objects = MagicMock(return_value=["memory://catalog/day.parquet"])
+
+        class Converter:
+            def validate_schema(self, df):
+                assert list(df.columns) == [0, 1]
+
+            def convert(self, df, instrument, **kwargs):
+                assert len(df) == 2
+                return [tuple(row) for row in df.itertuples(index=False, name=None)]
+
         count, paths = p._convert_one_file(
             payload,
             Converter(),
@@ -240,12 +260,39 @@ class TestBoundedCsvConversion:
             "trades",
             None,
             False,
-            chunk_cb=seen_progress.append,
         )
 
         assert count == 2
-        assert paths == ["memory://catalog/a.parquet", "memory://catalog/b.parquet"]
-        assert seen_progress == [1, 2]
+        assert paths == ["memory://catalog/day.parquet"]
+        p._write_objects.assert_called_once()
+
+    def test_bookticker_conversion_reads_full_daily_file_once(self, tmp_path: Path):
+        payload = _csv_payload("BTCUSDT-bookTicker-2025-01-15.csv", b"a,b\n1,2\n3,4\n")
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p._write_objects = MagicMock(return_value=["memory://catalog/day.parquet"])
+
+        class Converter:
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                assert len(df) == 2
+                return [tuple(row) for row in df.itertuples(index=False, name=None)]
+
+        count, paths = p._convert_one_file(
+            payload,
+            Converter(),
+            object(),
+            {"symbol": "BTCUSDT-PERP"},
+            "BTCUSDT-PERP",
+            "bookTicker",
+            None,
+            False,
+        )
+
+        assert count == 2
+        assert paths == ["memory://catalog/day.parquet"]
+        p._write_objects.assert_called_once()
 
     def test_cleanup_closes_in_memory_csv_payload(self, tmp_path: Path):
         payload = _csv_payload("BTCUSDT-trades-2025-01-15.csv", b"1,2\n")
@@ -306,7 +353,7 @@ class TestBoundedCsvConversion:
                 return payload
 
         class Converter:
-            supports_chunked = False
+            pass
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         p.downloader = Downloader()
@@ -349,6 +396,100 @@ class TestBoundedCsvConversion:
         p._update_db_catalog.assert_not_awaited()
 
 
+class TestDailyTickIngest:
+    @pytest.mark.asyncio
+    async def test_trades_ingest_skips_consolidation_and_gap_detection(self, tmp_path: Path, monkeypatch):
+        task = SimpleNamespace(url="memory://one", granularity="daily", dest_path=Path("BTCUSDT-trades-2025-01-01.csv"))
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return [task]
+
+            async def execute_task(self, _task):
+                return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"1,2\n")
+
+        class Converter:
+            
+            def validate_schema(self, df):
+                assert list(df.columns) == [0, 1]
+
+            def convert(self, df, instrument, **kwargs):
+                return [tuple(df.iloc[0].tolist())]
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = Downloader()
+        p._convert_workers = 1
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        monkeypatch.setattr("tinohelm.data.coverage.plan_catalog_missing_slices", lambda **_kwargs: [(date(2025, 1, 1), date(2025, 1, 1))])
+        monkeypatch.setattr(p, "_write_objects", MagicMock(return_value=["memory://catalog/day.parquet"]))
+        monkeypatch.setattr(p, "_consolidate_catalog_data", MagicMock())
+        monkeypatch.setattr(p, "_detect_gaps_for_backfill", MagicMock(return_value=[]))
+        monkeypatch.setattr(p, "_catalog_storage_stats", MagicMock(return_value=(1, 1)))
+        p._update_db_catalog = AsyncMock()
+
+        result = await p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+
+        assert result.objects_count == 1
+        p._consolidate_catalog_data.assert_not_called()
+        p._detect_gaps_for_backfill.assert_not_called()
+        p._update_db_catalog.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_bookticker_ingest_skips_consolidation_and_gap_detection(self, tmp_path: Path, monkeypatch):
+        task = SimpleNamespace(url="memory://one", granularity="daily", dest_path=Path("BTCUSDT-bookTicker-2025-01-01.csv"))
+
+        class Downloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return [task]
+
+            async def execute_task(self, _task):
+                return _csv_payload("BTCUSDT-bookTicker-2025-01-01.csv", b"a,b\n1,2\n")
+
+        class Converter:
+            
+            def validate_schema(self, df):
+                assert list(df.columns) == ["a", "b"]
+
+            def convert(self, df, instrument, **kwargs):
+                return [tuple(df.iloc[0].tolist())]
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = Downloader()
+        p._convert_workers = 1
+        monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: Converter())
+        monkeypatch.setattr("tinohelm.data.coverage.plan_catalog_missing_slices", lambda **_kwargs: [(date(2025, 1, 1), date(2025, 1, 1))])
+        monkeypatch.setattr(p, "_write_objects", MagicMock(return_value=["memory://catalog/day.parquet"]))
+        monkeypatch.setattr(p, "_consolidate_catalog_data", MagicMock())
+        monkeypatch.setattr(p, "_detect_gaps_for_backfill", MagicMock(return_value=[]))
+        monkeypatch.setattr(p, "_catalog_storage_stats", MagicMock(return_value=(1, 1)))
+        p._update_db_catalog = AsyncMock()
+
+        result = await p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="bookTicker",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        )
+
+        assert result.objects_count == 1
+        p._consolidate_catalog_data.assert_not_called()
+        p._detect_gaps_for_backfill.assert_not_called()
+        p._update_db_catalog.assert_awaited_once()
+
+
 class TestIngestEarlyFailClosed:
     def test_empty_csv_payload_fails_before_catalog_db_update(self, tmp_path: Path, monkeypatch):
         task = SimpleNamespace(url="memory://empty.csv")
@@ -358,7 +499,7 @@ class TestIngestEarlyFailClosed:
         mock_dl.execute_task = AsyncMock(return_value=_csv_payload("BTCUSDT-trades-empty.csv", b""))
 
         class Converter:
-            supports_chunked = True
+            pass
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
         p.downloader = mock_dl
@@ -1014,8 +1155,7 @@ class TestIngestFailClosed:
                 return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n")
 
         class Converter:
-            supports_chunked = False
-
+            
             def validate_schema(self, df):
                 assert list(df.columns) == ["a", "b"]
 
@@ -1057,7 +1197,7 @@ class TestIngestFailClosed:
                 return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n")
 
         class Converter:
-            supports_chunked = False
+            pass
 
         p.downloader = Downloader()
         monkeypatch.setattr(p, "_get_instrument", lambda _symbol: object())
@@ -1094,8 +1234,7 @@ class TestIngestFailClosed:
                 return _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"a,b\n1,2\n")
 
         class Converter:
-            supports_chunked = False
-
+            
             def validate_schema(self, df):
                 pass
 
@@ -1146,8 +1285,7 @@ class TestIngestFailClosed:
                 return _csv_payload(task.dest_path.name, b"a,b\n1,2\n")
 
         class Converter:
-            supports_chunked = False
-
+            
             def validate_schema(self, df):
                 assert list(df.columns) == ["a", "b"]
 
@@ -1414,8 +1552,6 @@ class TestTradeTickCoverageShortCircuit:
                 return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
 
         class Converter:
-            supports_chunked = False
-
             def validate_schema(self, df):
                 return None
 
@@ -1448,7 +1584,7 @@ class TestTradeTickCoverageShortCircuit:
 
         assert result.skipped is False
         assert planned_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
-        assert consolidate_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
+        assert consolidate_ranges == []
 
     def test_ingest_trade_tick_multiple_missing_slices_plan_each_slice(self, monkeypatch: pytest.MonkeyPatch):
         planned_ranges: list[tuple[date, date]] = []
@@ -1484,8 +1620,6 @@ class TestTradeTickCoverageShortCircuit:
                 return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
 
         class Converter:
-            supports_chunked = False
-
             def validate_schema(self, df):
                 return None
 
@@ -1521,7 +1655,7 @@ class TestTradeTickCoverageShortCircuit:
             (date(2024, 1, 11), date(2024, 1, 11)),
             (date(2024, 1, 15), date(2024, 1, 15)),
         ]
-        assert consolidate_ranges == [(date(2024, 1, 11), date(2024, 1, 15))]
+        assert consolidate_ranges == []
 
     def test_ingest_trade_tick_does_not_backfill_gaps_outside_requested_missing_slices(self, monkeypatch: pytest.MonkeyPatch):
         planned_ranges: list[tuple[date, date]] = []
@@ -1555,8 +1689,7 @@ class TestTradeTickCoverageShortCircuit:
                 return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
 
         class Converter:
-            supports_chunked = False
-
+            
             def validate_schema(self, df):
                 return None
 
@@ -1589,7 +1722,7 @@ class TestTradeTickCoverageShortCircuit:
 
         assert planned_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
 
-    def test_ingest_trade_tick_backfill_clips_detected_gap_to_requested_missing_slice(self, monkeypatch: pytest.MonkeyPatch):
+    def test_ingest_trade_tick_does_not_backfill_detected_gaps(self, monkeypatch: pytest.MonkeyPatch):
         planned_ranges: list[tuple[date, date]] = []
 
         monkeypatch.setattr(
@@ -1621,8 +1754,6 @@ class TestTradeTickCoverageShortCircuit:
                 return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
 
         class Converter:
-            supports_chunked = False
-
             def validate_schema(self, df):
                 return None
 
@@ -1654,7 +1785,6 @@ class TestTradeTickCoverageShortCircuit:
         ))
 
         assert planned_ranges == [
-            (date(2024, 1, 11), date(2024, 1, 11)),
             (date(2024, 1, 11), date(2024, 1, 11)),
         ]
 
@@ -1914,7 +2044,7 @@ class TestConsolidationFailureDoesNotBlockIngest:
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
         mock_dl.execute_task = AsyncMock(
-            return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"id,price,qty,quoteQty,time,isBuyerMaker\n")
+            return_value=_csv_payload("BTCUSDT-1m-2025-01-01.csv", b"open_time,open,high,low,close,volume,close_time\n")
         )
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
@@ -1924,7 +2054,7 @@ class TestConsolidationFailureDoesNotBlockIngest:
         monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_a: {})
         monkeypatch.setattr(
             "tinohelm.data.pipeline.get_converter",
-            lambda _dt: SimpleNamespace(supports_chunked=False),
+            lambda _dt: SimpleNamespace(),
         )
         monkeypatch.setattr(
             "tinohelm.data.catalog.CatalogSession.missing_date_slices",
@@ -1941,13 +2071,15 @@ class TestConsolidationFailureDoesNotBlockIngest:
 
         result = asyncio.run(p.ingest(
             symbol="BTCUSDT-PERP",
-            data_type="trades",
+            data_type="klines",
+            interval="1m",
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
         ))
 
         assert result.objects_count == 100
         assert not result.skipped
+        p._consolidate_catalog_data.assert_called_once()
         p._update_db_catalog.assert_awaited_once()
 
     def test_consolidation_error_progress_shows_warning(self, tmp_path, monkeypatch):
@@ -1957,7 +2089,7 @@ class TestConsolidationFailureDoesNotBlockIngest:
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
         mock_dl.execute_task = AsyncMock(
-            return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"id,price,qty,quoteQty,time,isBuyerMaker\n")
+            return_value=_csv_payload("BTCUSDT-1m-2025-01-01.csv", b"open_time,open,high,low,close,volume,close_time\n")
         )
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
@@ -1967,7 +2099,7 @@ class TestConsolidationFailureDoesNotBlockIngest:
         monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_a: {})
         monkeypatch.setattr(
             "tinohelm.data.pipeline.get_converter",
-            lambda _dt: SimpleNamespace(supports_chunked=False),
+            lambda _dt: SimpleNamespace(),
         )
         monkeypatch.setattr(
             "tinohelm.data.catalog.CatalogSession.missing_date_slices",
@@ -1989,13 +2121,13 @@ class TestConsolidationFailureDoesNotBlockIngest:
 
         result = asyncio.run(p.ingest(
             symbol="BTCUSDT-PERP",
-            data_type="trades",
+            data_type="klines",
+            interval="1m",
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
             progress_cb=_track_progress,
         ))
 
         assert result.objects_count == 100
-        # Should have a progress message indicating data is safe before consolidation
-        write_done_msgs = [m for _, m in progress_messages if "落盘" in m or "written" in m.lower()]
-        assert write_done_msgs, f"Expected a 'data written' progress stage, got: {progress_messages}"
+        warning_msgs = [m for _, m in progress_messages if "整理失败" in m]
+        assert warning_msgs, f"Expected a consolidation warning, got: {progress_messages}"

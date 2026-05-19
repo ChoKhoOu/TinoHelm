@@ -18,8 +18,6 @@ _COLUMN_NAMES = ["open_time", "open", "high", "low", "close", "close_time"]
 class IndexPriceConverter:
     """Converts Binance Vision indexPriceKlines CSV to NT IndexPriceUpdate."""
 
-    supports_chunked = False
-
     def validate_schema(self, df: pd.DataFrame) -> None:
         if len(df.columns) < 6:
             raise SchemaError(
@@ -67,5 +65,3 @@ class IndexPriceConverter:
         )
         return records
 
-    def convert_chunk(self, chunk: pd.DataFrame, instrument: Any, **kwargs) -> list:
-        return self.convert(chunk, instrument, **kwargs)

@@ -29,7 +29,6 @@ from tinohelm.data.downloader import VisionCsvPayload, VisionDownloader, VisionZ
 from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
     classify_download_failures,
-    compute_chunk_subprogress,
     compute_stage_pct,
     csv_has_header,
     resolve_db_category,
@@ -98,8 +97,6 @@ class BinanceVisionPipeline:
             raw_dir=raw_dir, concurrency=cfg.data.download_concurrency,
         )
         self._convert_workers = max(1, cfg.data.convert_workers)
-        self._chunk_rows = max(1, cfg.data.chunk_rows)
-        self._tick_chunk_rows = max(1, cfg.data.tick_chunk_rows)
         self._csv_queue_maxsize = max(1, cfg.data.csv_queue_maxsize)
 
     # ------------------------------------------------------------------
@@ -356,17 +353,6 @@ class BinanceVisionPipeline:
                     break
 
                 csv_name = self._csv_display_name(csv_path)
-                # Thread-safe chunk callback: interpolates within current file's range
-                _cd = convert_done  # snapshot before executor starts
-                def _chunk_cb(objects_so_far):
-                    chunk_rows = self._chunk_rows_for(data_type)
-                    chunks = max(1, objects_so_far // chunk_rows)
-                    sub = compute_chunk_subprogress(_cd, total_tasks, chunks)
-                    asyncio.run_coroutine_threadsafe(
-                        _progress(sub, f"转换中 {objects_so_far:,} objects..."),
-                        loop,
-                    )
-
                 convert_future: asyncio.Future | None = None
                 try:
                     done_event = threading.Event()
@@ -377,7 +363,6 @@ class BinanceVisionPipeline:
                             result = self._convert_one_file(
                                 csv_path, converter, instrument, kwargs,
                                 symbol, data_type, interval, schema_validated,
-                                _chunk_cb,
                             )
                             result_box["result"] = result
                             return result
@@ -484,129 +469,123 @@ class BinanceVisionPipeline:
                 f"{symbol} {data_type} converted 0 objects from {len(tasks)} downloaded file(s)"
             )
 
-        # --- Write phase complete: data is safely on disk ---
-        try:
-            await _progress(88, f"落盘完成 {total_objects:,} objects, 整理中...")
-        except asyncio.CancelledError:
-            raise
+        skip_post_write_organize = data_type in {"trades", "bookTicker"}
 
-        # 4. Consolidate + Deduplicate + Organize by period
-        consolidate_start = start
-        consolidate_end = end
-        if data_type == "trades" and missing_slices:
-            consolidate_start = min(slice_start for slice_start, _ in missing_slices)
-            consolidate_end = max(slice_end for _, slice_end in missing_slices)
-        consolidation_ok = False
-        try:
-            await asyncio.to_thread(
-                self._consolidate_catalog_data, symbol, data_type, interval, consolidate_start, consolidate_end
-            )
-            consolidation_ok = True
-        except Exception as consolidation_exc:
-            logger.warning(
-                "Consolidation failed for %s %s; data is written but fragmented — "
-                "run /consolidate to retry later: %s",
-                symbol, data_type, consolidation_exc, exc_info=True,
-            )
+        # --- Write phase complete: data is safely on disk ---
+        if skip_post_write_organize:
             try:
-                await _progress(
-                    93, f"整理失败（数据已落盘）: {consolidation_exc!s:.80s}",
-                )
+                await _progress(93, f"落盘完成 {total_objects:,} objects")
             except asyncio.CancelledError:
                 raise
-
-        # 5. Gap detection + auto-backfill
-        # Only safe after successful consolidation — file-boundary artifacts
-        # in fragmented data would produce false-positive gaps.
-        gap_ranges: list[tuple[date, date]] = []
-        if not consolidation_ok:
-            logger.info(
-                "Skipping gap detection for %s %s: consolidation failed, "
-                "fragmented files would cause false positives",
-                symbol, data_type,
-            )
         else:
             try:
-                await _progress(93, "Checking for data gaps...")
+                await _progress(88, f"落盘完成 {total_objects:,} objects, 整理中...")
             except asyncio.CancelledError:
                 raise
-            gap_ranges = await asyncio.to_thread(
-                self._detect_gaps_for_backfill, symbol, data_type, interval
-            )
-        if data_type == "trades" and missing_slices:
-            filtered_gap_ranges: list[tuple[date, date]] = []
-            for gap_start, gap_end in gap_ranges:
-                for slice_start, slice_end in missing_slices:
-                    if gap_end < slice_start or gap_start > slice_end:
-                        continue
-                    filtered_gap_ranges.append((
-                        max(gap_start, slice_start),
-                        min(gap_end, slice_end),
-                    ))
-            gap_ranges = filtered_gap_ranges
-        if gap_ranges:
-            logger.info(
-                "Detected %d gap range(s) for %s %s, triggering backfill",
-                len(gap_ranges), symbol, data_type,
-            )
-            for gap_start, gap_end in gap_ranges:
-                gap_tasks = self.downloader.plan_downloads(
-                    data_type=data_type,
-                    symbol=symbol,
-                    asset_class=asset_class,
-                    start=gap_start,
-                    end=gap_end,
-                    interval=interval,
-                )
-                if not gap_tasks:
-                    continue
-                for task in gap_tasks:
-                    try:
-                        csv_path = await self.downloader.execute_task(task)
-                    except Exception as dl_exc:
-                        logger.warning(
-                            "Gap backfill download failed: %s", dl_exc,
-                        )
-                        continue
-                    if not csv_path:
-                        continue
-                    try:
-                        n, fps = await asyncio.to_thread(
-                            self._convert_one_file,
-                            csv_path, converter, instrument, kwargs,
-                            symbol, data_type, interval, True,
-                        )
-                        total_objects += n
-                        all_file_paths.extend(fps)
-                    except Exception as conv_exc:
-                        logger.warning(
-                            "Gap backfill convert failed: %s", conv_exc,
-                        )
-                    finally:
-                        self._cleanup_raw_file(csv_path)
 
-            # Re-consolidate after backfill writes (only affected range)
-            post_consolidation_ok = True
-            backfill_start = min(gs for gs, _ in gap_ranges)
-            backfill_end = max(ge for _, ge in gap_ranges)
+            # 4. Consolidate + Deduplicate + Organize by period
+            consolidate_start = start
+            consolidate_end = end
+            consolidation_ok = False
             try:
                 await asyncio.to_thread(
-                    self._consolidate_catalog_data, symbol, data_type, interval,
-                    backfill_start, backfill_end,
+                    self._consolidate_catalog_data, symbol, data_type, interval, consolidate_start, consolidate_end
                 )
-            except Exception:
-                post_consolidation_ok = False
-                logger.warning("Post-backfill consolidation failed", exc_info=True)
+                consolidation_ok = True
+            except Exception as consolidation_exc:
+                logger.warning(
+                    "Consolidation failed for %s %s; data is written but fragmented — "
+                    "run /consolidate to retry later: %s",
+                    symbol, data_type, consolidation_exc, exc_info=True,
+                )
+                try:
+                    await _progress(
+                        93, f"整理失败（数据已落盘）: {consolidation_exc!s:.80s}",
+                    )
+                except asyncio.CancelledError:
+                    raise
 
-            if post_consolidation_ok:
-                remaining_gaps = await asyncio.to_thread(
+            # 5. Gap detection + auto-backfill
+            # Only safe after successful consolidation — file-boundary artifacts
+            # in fragmented data would produce false-positive gaps.
+            gap_ranges: list[tuple[date, date]] = []
+            if not consolidation_ok:
+                logger.info(
+                    "Skipping gap detection for %s %s: consolidation failed, "
+                    "fragmented files would cause false positives",
+                    symbol, data_type,
+                )
+            else:
+                try:
+                    await _progress(93, "Checking for data gaps...")
+                except asyncio.CancelledError:
+                    raise
+                gap_ranges = await asyncio.to_thread(
                     self._detect_gaps_for_backfill, symbol, data_type, interval
                 )
-                if remaining_gaps:
-                    logger.warning(
-                        "%d gap(s) remain after backfill for %s %s (source data may be missing)",
-                        len(remaining_gaps), symbol, data_type,
+            if gap_ranges:
+                logger.info(
+                    "Detected %d gap range(s) for %s %s, triggering backfill",
+                    len(gap_ranges), symbol, data_type,
+                )
+                for gap_start, gap_end in gap_ranges:
+                    gap_tasks = self.downloader.plan_downloads(
+                        data_type=data_type,
+                        symbol=symbol,
+                        asset_class=asset_class,
+                        start=gap_start,
+                        end=gap_end,
+                        interval=interval,
                     )
+                    if not gap_tasks:
+                        continue
+                    for task in gap_tasks:
+                        try:
+                            csv_path = await self.downloader.execute_task(task)
+                        except Exception as dl_exc:
+                            logger.warning(
+                                "Gap backfill download failed: %s", dl_exc,
+                            )
+                            continue
+                        if not csv_path:
+                            continue
+                        try:
+                            n, fps = await asyncio.to_thread(
+                                self._convert_one_file,
+                                csv_path, converter, instrument, kwargs,
+                                symbol, data_type, interval, True,
+                            )
+                            total_objects += n
+                            all_file_paths.extend(fps)
+                        except Exception as conv_exc:
+                            logger.warning(
+                                "Gap backfill convert failed: %s", conv_exc,
+                            )
+                        finally:
+                            self._cleanup_raw_file(csv_path)
+
+                # Re-consolidate after backfill writes (only affected range)
+                post_consolidation_ok = True
+                backfill_start = min(gs for gs, _ in gap_ranges)
+                backfill_end = max(ge for _, ge in gap_ranges)
+                try:
+                    await asyncio.to_thread(
+                        self._consolidate_catalog_data, symbol, data_type, interval,
+                        backfill_start, backfill_end,
+                    )
+                except Exception:
+                    post_consolidation_ok = False
+                    logger.warning("Post-backfill consolidation failed", exc_info=True)
+
+                if post_consolidation_ok:
+                    remaining_gaps = await asyncio.to_thread(
+                        self._detect_gaps_for_backfill, symbol, data_type, interval
+                    )
+                    if remaining_gaps:
+                        logger.warning(
+                            "%d gap(s) remain after backfill for %s %s (source data may be missing)",
+                            len(remaining_gaps), symbol, data_type,
+                        )
 
         # 6. Update DB catalog
         try:
@@ -732,150 +711,13 @@ class BinanceVisionPipeline:
     def _convert_one_file(
         self, csv_path: CsvSource, converter, instrument, kwargs,
         symbol, data_type, interval, schema_validated,
-        chunk_cb=None,
     ) -> tuple[int, list[str]]:
         """Convert a single CSV file/payload (sync, runs in executor thread)."""
         hdr = self._detect_header(csv_path)
-
-        if converter.supports_chunked:
-            return self._stream_chunked_file(
-                csv_path, hdr, converter, instrument, kwargs,
-                symbol, data_type, interval, schema_validated,
-                chunk_cb=chunk_cb,
-            )
-        else:
-            return self._stream_full_file(
-                csv_path, hdr, converter, instrument, kwargs,
-                symbol, data_type, interval, schema_validated,
-            )
-
-    async def _ingest_streaming(
-        self,
-        csv_paths: list[CsvSource],
-        converter,
-        instrument,
-        kwargs: dict,
-        symbol: str,
-        data_type: str,
-        interval: str | None,
-        _progress,
-    ) -> tuple[int, list[str]]:
-        """Process CSVs one at a time to bound memory usage.
-
-        For chunked converters: reads in chunks, converts, flushes periodically.
-        For non-chunked converters: reads one full CSV, converts, writes, moves on.
-        Deletes each CSV (and its ZIP) after processing to free disk space.
-        """
-        total_objects = 0
-        all_file_paths: list[str] = []
-        schema_validated = False
-
-        for csv_idx, csv_path in enumerate(csv_paths):
-            csv_name = self._csv_display_name(csv_path)
-            try:
-                hdr = self._detect_header(csv_path)
-            except Exception:
-                logger.warning("Failed to read CSV header %s", csv_name, exc_info=True)
-                raise
-
-            if converter.supports_chunked:
-                n, fps = self._stream_chunked_file(
-                    csv_path, hdr, converter, instrument, kwargs,
-                    symbol, data_type, interval, schema_validated,
-                )
-            else:
-                n, fps = self._stream_full_file(
-                    csv_path, hdr, converter, instrument, kwargs,
-                    symbol, data_type, interval, schema_validated,
-                )
-
-            schema_validated = True
-            if n <= 0 or not fps:
-                raise RuntimeError(
-                    f"conversion produced no objects/files for {csv_name}"
-                )
-            total_objects += n
-            all_file_paths.extend(fps)
-
-            # Free disk: remove processed CSV and its ZIP
-            self._cleanup_raw_file(csv_path)
-
-            pct = 78 + int(12 * (csv_idx + 1) / len(csv_paths))
-            await _progress(
-                pct,
-                f"Converted {csv_idx + 1}/{len(csv_paths)} files ({total_objects} objects)",
-            )
-
-        return total_objects, all_file_paths
-
-    def _stream_chunked_file(
-        self, csv_path: CsvSource, hdr, converter, instrument, kwargs,
-        symbol, data_type, interval, schema_validated,
-        chunk_cb=None,
-    ) -> tuple[int, list[str]]:
-        """Read one CSV source in chunks, convert, flush periodically."""
-        source = None
-        csv_name = self._csv_display_name(csv_path)
-        try:
-            chunk_rows = self._chunk_rows_for(data_type)
-            source = self._open_csv_binary(csv_path)
-            reader = pd.read_csv(source, header=hdr, chunksize=chunk_rows)
-        except Exception:
-            if source is not None:
-                source.close()
-            logger.warning("Failed to open CSV %s", csv_name, exc_info=True)
-            raise
-
-        count = 0
-        fps: list[str] = []
-        chunk_objects: list = []
-
-        try:
-            for chunk in reader:
-                if hdr is None:
-                    chunk.columns = range(len(chunk.columns))
-                if not schema_validated:
-                    converter.validate_schema(chunk)
-                    schema_validated = True
-
-                objs = converter.convert_chunk(chunk, instrument, **kwargs)
-                chunk_objects.extend(objs)
-
-                if len(chunk_objects) >= chunk_rows:
-                    fp = self._write_objects(
-                        chunk_objects, symbol, data_type, interval, merge=False,
-                    )
-                    if not fp:
-                        raise RuntimeError(
-                            f"{data_type} conversion produced {len(chunk_objects)} objects but wrote no parquet files"
-                        )
-                    count += len(chunk_objects)
-                    fps.extend(fp)
-                    chunk_objects = []
-                    if chunk_cb:
-                        chunk_cb(count)
-        finally:
-            source.close()
-
-        if chunk_objects:
-            fp = self._write_objects(
-                chunk_objects, symbol, data_type, interval, merge=False,
-            )
-            if not fp:
-                raise RuntimeError(
-                    f"{data_type} conversion produced {len(chunk_objects)} objects but wrote no parquet files"
-                )
-            count += len(chunk_objects)
-            fps.extend(fp)
-            if chunk_cb:
-                chunk_cb(count)
-
-        return count, fps
-
-    def _chunk_rows_for(self, data_type: str) -> int:
-        if data_type == "trades":
-            return self._tick_chunk_rows
-        return self._chunk_rows
+        return self._stream_full_file(
+            csv_path, hdr, converter, instrument, kwargs,
+            symbol, data_type, interval, schema_validated,
+        )
 
     def _stream_full_file(
         self, csv_path: CsvSource, hdr, converter, instrument, kwargs,

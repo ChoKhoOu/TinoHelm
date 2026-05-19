@@ -25,8 +25,6 @@ _REQUIRED_COLUMNS = {
 class BookTickerConverter:
     """Converts Binance Vision bookTicker CSV to NT QuoteTick."""
 
-    supports_chunked = True
-
     def validate_schema(self, df: pd.DataFrame) -> None:
         if hasattr(df.columns[0], 'lower'):
             missing = _REQUIRED_COLUMNS - set(df.columns)
@@ -73,7 +71,3 @@ class BookTickerConverter:
         )
         return ticks
 
-    def convert_chunk(
-        self, chunk: pd.DataFrame, instrument: Any, **kwargs,
-    ) -> list:
-        return self.convert(chunk, instrument, **kwargs)

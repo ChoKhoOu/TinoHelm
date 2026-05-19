@@ -18,18 +18,12 @@ class SchemaError(Exception):
 class Converter(Protocol):
     """Converter 统一接口"""
 
-    supports_chunked: bool
-
     def validate_schema(self, df: pd.DataFrame) -> None:
         """检查必需列是否存在，缺失则抛 SchemaError"""
         ...
 
     def convert(self, df: pd.DataFrame, instrument: Any, **kwargs) -> list:
         """将完整 DataFrame 转换为 NT 数据对象列表"""
-        ...
-
-    def convert_chunk(self, chunk: pd.DataFrame, instrument: Any, **kwargs) -> list:
-        """处理单个 chunk（仅 supports_chunked=True 时使用）"""
         ...
 
 
