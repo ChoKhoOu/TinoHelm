@@ -56,6 +56,32 @@ class _FetchBatchDb:
         pass
 
     async def execute(self, stmt):
+        rows = list(self.jobs)
+        criteria = getattr(stmt, "_where_criteria", ())
+        for criterion in criteria:
+            left = getattr(criterion, "left", None)
+            right = getattr(criterion, "right", None)
+            op = getattr(criterion, "operator", None)
+            column = getattr(left, "name", None)
+            if column is None or right is None or op is None:
+                continue
+            value = getattr(right, "value", right)
+            if column == "symbol" and op.__name__ == "eq":
+                rows = [row for row in rows if getattr(row, "symbol", None) == value]
+            elif column == "data_type" and op.__name__ == "eq":
+                rows = [row for row in rows if getattr(row, "data_type", None) == value]
+            elif column == "interval" and op.__name__ == "eq":
+                rows = [row for row in rows if getattr(row, "interval", None) == value]
+            elif column == "interval" and op.__name__ == "is_":
+                rows = [row for row in rows if getattr(row, "interval", None) is None]
+            elif column == "status" and op.__name__ == "in_op":
+                allowed = set(getattr(right, "value", ()) or ())
+                rows = [row for row in rows if getattr(row, "status", None) in allowed]
+            elif column == "start_date" and op.__name__ == "le":
+                rows = [row for row in rows if getattr(row, "start_date", None) <= value]
+            elif column == "end_date" and op.__name__ == "ge":
+                rows = [row for row in rows if getattr(row, "end_date", None) >= value]
+
         class _Result:
             def __init__(self, rows):
                 self._rows = rows
@@ -70,7 +96,7 @@ class _FetchBatchDb:
 
                 return _Scalars(self._rows)
 
-        return _Result(self.jobs)
+        return _Result(rows)
 
 
 class _FakeS3File(BytesIO):
@@ -376,8 +402,8 @@ class TestFetchBatchSplitting:
         enqueue = AsyncMock()
         monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
         monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
-        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
         db = _FetchBatchDb()
         rds = AsyncMock()
         body = DataFetchBatchRequest(
@@ -406,8 +432,8 @@ class TestFetchBatchSplitting:
         enqueue = AsyncMock()
         monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
         monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
-        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
         db = _FetchBatchDb()
         rds = AsyncMock()
         body = DataFetchBatchRequest(
@@ -438,8 +464,8 @@ class TestFetchBatchSplitting:
         enqueue = AsyncMock()
         monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
         monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
-        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
         db = _FetchBatchDb()
         rds = AsyncMock()
         body = DataFetchBatchRequest(
@@ -478,8 +504,8 @@ class TestFetchBatchSplitting:
             raising=False,
         )
         monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
-        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
         db = _FetchBatchDb()
         rds = AsyncMock()
         body = DataFetchBatchRequest(
@@ -498,6 +524,119 @@ class TestFetchBatchSplitting:
         assert db.jobs == []
         enqueue.assert_not_awaited()
 
+    def test_fetch_batch_klines_full_coverage_returns_zero_jobs(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        from tinohelm.data.catalog import CatalogSession
+
+        monkeypatch.setattr(
+            CatalogSession,
+            "missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [],
+            raising=False,
+        )
+        monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        db = _FetchBatchDb()
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=["1m"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+            data_type="klines",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(body, db, rds))
+
+        assert result["count"] == 0
+        assert result["job_ids"] == []
+        assert result["jobs"] == []
+        assert db.jobs == []
+        enqueue.assert_not_awaited()
+
+    def test_fetch_batch_funding_rate_full_coverage_returns_zero_jobs(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        from tinohelm.data.catalog import CatalogSession
+
+        monkeypatch.setattr(
+            CatalogSession,
+            "missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [],
+            raising=False,
+        )
+        monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        db = _FetchBatchDb()
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=[],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+            data_type="funding_rate",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(body, db, rds))
+
+        assert result["count"] == 0
+        assert result["job_ids"] == []
+        assert result["jobs"] == []
+        assert db.jobs == []
+        enqueue.assert_not_awaited()
+
+    def test_fetch_batch_klines_skips_slice_already_queued_or_running(self, monkeypatch):
+        import asyncio
+
+        enqueue = AsyncMock()
+        monkeypatch.setattr("tinohelm.api.routes.data.enqueue_job", enqueue)
+        from tinohelm.data.catalog import CatalogSession
+
+        monkeypatch.setattr(
+            CatalogSession,
+            "missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [
+                (date(2024, 1, 11), date(2024, 1, 11)),
+            ],
+            raising=False,
+        )
+        monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        db = _FetchBatchDb()
+        db.jobs.append(SimpleNamespace(
+            symbol="BTCUSDT-PERP",
+            data_type="klines",
+            interval="1m",
+            start_date=date(2024, 1, 11),
+            end_date=date(2024, 1, 11),
+            status="running",
+            job_id="existing-job",
+        ))
+        rds = AsyncMock()
+        body = DataFetchBatchRequest(
+            symbols=["BTCUSDT-PERP"],
+            intervals=["1m"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+            data_type="klines",
+        )
+
+        result = asyncio.run(trigger_data_fetch_batch(body, db, rds))
+
+        assert result["count"] == 0
+        assert result["job_ids"] == []
+        assert result["jobs"] == []
+        assert len(db.jobs) == 1
+        enqueue.assert_not_awaited()
+
     def test_fetch_batch_trade_tick_partial_coverage_enqueues_only_missing_slice(self, monkeypatch):
         import asyncio
 
@@ -514,8 +653,8 @@ class TestFetchBatchSplitting:
             raising=False,
         )
         monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
-        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
         db = _FetchBatchDb()
         rds = AsyncMock()
         body = DataFetchBatchRequest(
@@ -559,8 +698,8 @@ class TestFetchBatchSplitting:
             raising=False,
         )
         monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
-        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
         db = _FetchBatchDb()
         db.jobs.append(SimpleNamespace(
             symbol="BTCUSDT-PERP",
@@ -605,8 +744,8 @@ class TestFetchBatchSplitting:
             raising=False,
         )
         monkeypatch.setattr("tinohelm.api.routes.data.get_settings", lambda: SimpleNamespace())
-        monkeypatch.setattr("tinohelm.data.storage.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
-        monkeypatch.setattr("tinohelm.data.storage.get_catalog_storage", lambda settings=None, catalog_root=None: None)
+        monkeypatch.setattr("tinohelm.api.routes.data.get_active_catalog_root", lambda settings: Path("/tmp/test-catalog"))
+        monkeypatch.setattr("tinohelm.api.routes.data.get_catalog_storage", lambda settings=None, catalog_root=None: None)
         db = _FetchBatchDb()
         db.jobs.append(SimpleNamespace(
             symbol="BTCUSDT-PERP",

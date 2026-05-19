@@ -24,6 +24,7 @@ from uuid import uuid4
 import pandas as pd
 
 from tinohelm.data.converters import get_converter
+from tinohelm.data.coverage import plan_catalog_missing_slices
 from tinohelm.data.downloader import VisionCsvPayload, VisionDownloader, VisionZipCsvPayload, _KLINES_TYPES
 from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_BASE,
@@ -150,59 +151,34 @@ class BinanceVisionPipeline:
 
         await _progress(0, f"Planning downloads for {symbol} {data_type}...")
 
-        if data_type == "fundingRate":
-            from tinohelm.data.catalog import CatalogSession
-
-            _funding_session = CatalogSession(self.catalog_path, storage=self._storage)
-            if _funding_session.funding_parquet_covers(symbol, start, end):
-                await _progress(100, "Funding rate parquet already covers range")
-                return IngestResult(
-                    symbol=symbol, data_type=data_type,
-                    objects_count=0, files_written=0,
-                    start=start, end=end, skipped=True,
-                )
-
-        trade_tick_missing_slices: list[tuple[date, date]] | None = None
-        if data_type == "trades":
-            from tinohelm.data.catalog import CatalogSession
-
-            _trade_session = CatalogSession(self.catalog_path, storage=self._storage)
-            trade_tick_missing_slices = _trade_session.missing_date_slices(
-                symbol,
-                data_type,
-                interval,
-                start,
-                end,
+        missing_slices = plan_catalog_missing_slices(
+            catalog_path=self.catalog_path,
+            symbol=symbol,
+            data_type=data_type,
+            interval=interval,
+            start=start,
+            end=end,
+            storage=self._storage,
+        )
+        if not missing_slices:
+            await _progress(100, f"{data_type} parquet already covers range")
+            return IngestResult(
+                symbol=symbol, data_type=data_type,
+                objects_count=0, files_written=0,
+                start=start, end=end, skipped=True,
             )
-            if not trade_tick_missing_slices:
-                await _progress(100, "Trade tick parquet already covers range")
-                return IngestResult(
-                    symbol=symbol, data_type=data_type,
-                    objects_count=0, files_written=0,
-                    start=start, end=end, skipped=True,
-                )
 
         # 1. Plan downloads (monthly-first + daily-tail)
-        if data_type == "trades" and trade_tick_missing_slices is not None:
-            tasks = []
-            for slice_start, slice_end in trade_tick_missing_slices:
-                tasks.extend(self.downloader.plan_downloads(
-                    data_type=data_type,
-                    symbol=symbol,
-                    asset_class=asset_class,
-                    start=slice_start,
-                    end=slice_end,
-                    interval=interval,
-                ))
-        else:
-            tasks = self.downloader.plan_downloads(
+        tasks = []
+        for slice_start, slice_end in missing_slices:
+            tasks.extend(self.downloader.plan_downloads(
                 data_type=data_type,
                 symbol=symbol,
                 asset_class=asset_class,
-                start=start,
-                end=end,
+                start=slice_start,
+                end=slice_end,
                 interval=interval,
-            )
+            ))
 
         if not tasks:
             await _progress(100, "No downloads needed")
@@ -517,9 +493,9 @@ class BinanceVisionPipeline:
         # 4. Consolidate + Deduplicate + Organize by period
         consolidate_start = start
         consolidate_end = end
-        if data_type == "trades" and trade_tick_missing_slices:
-            consolidate_start = min(slice_start for slice_start, _ in trade_tick_missing_slices)
-            consolidate_end = max(slice_end for _, slice_end in trade_tick_missing_slices)
+        if data_type == "trades" and missing_slices:
+            consolidate_start = min(slice_start for slice_start, _ in missing_slices)
+            consolidate_end = max(slice_end for _, slice_end in missing_slices)
         consolidation_ok = False
         try:
             await asyncio.to_thread(
@@ -557,10 +533,10 @@ class BinanceVisionPipeline:
             gap_ranges = await asyncio.to_thread(
                 self._detect_gaps_for_backfill, symbol, data_type, interval
             )
-        if data_type == "trades" and trade_tick_missing_slices:
+        if data_type == "trades" and missing_slices:
             filtered_gap_ranges: list[tuple[date, date]] = []
             for gap_start, gap_end in gap_ranges:
-                for slice_start, slice_end in trade_tick_missing_slices:
+                for slice_start, slice_end in missing_slices:
                     if gap_end < slice_start or gap_start > slice_end:
                         continue
                     filtered_gap_ranges.append((

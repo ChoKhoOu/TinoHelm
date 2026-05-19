@@ -630,8 +630,9 @@ class BacktestRunner:
         import asyncio as _aio
         from sqlalchemy import select
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-        from tinohelm.db.models import DataFetchJob
         from tinohelm.core.config import get_settings
+        from tinohelm.data.coverage import plan_submission_slices
+        from tinohelm.db.models import DataFetchJob
 
         # Create a fresh engine for this event loop — the global singleton
         # from the parent process is bound to a different loop after fork.
@@ -640,30 +641,47 @@ class BacktestRunner:
         factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
         effective_data_type = data_type or self.data_type
-        job_id = str(uuid.uuid4())
         # A backtest-triggered fetch is its own single-job FetchBatch, so we
-        # mint a fresh batch_id per call rather than reusing job_id.
+        # mint a fresh batch_id per call rather than reusing any job_id.
         batch_id = str(uuid.uuid4())
         effective_start = start_override if start_override is not None else self.start
         start_date = effective_start.date() if isinstance(effective_start, datetime) else effective_start
         end_date = self.end.date() if isinstance(self.end, datetime) else self.end
 
         try:
-            # Create job in DB
             async with factory() as session:
-                session.add(DataFetchJob(
-                    job_id=job_id,
-                    batch_id=batch_id,
+                missing_slices = await plan_submission_slices(
+                    db=session,
+                    catalog_path=self.catalog_path,
                     symbol=sym,
                     data_type=effective_data_type,
                     interval=ivl,
-                    start_date=start_date,
-                    end_date=end_date,
-                    asset_class="um",
-                    status="queued",
-                    progress=0,
-                    message="Queued by backtest",
-                ))
+                    start=start_date,
+                    end=end_date,
+                )
+                if not missing_slices:
+                    logger.info(
+                        "Skipping data fetch job for %s %s [%s..%s]: no missing slices",
+                        sym, ivl, start_date, end_date,
+                    )
+                    return True
+                created_job_ids: list[str] = []
+                for slice_start, slice_end in missing_slices:
+                    job_id = str(uuid.uuid4())
+                    session.add(DataFetchJob(
+                        job_id=job_id,
+                        batch_id=batch_id,
+                        symbol=sym,
+                        data_type=effective_data_type,
+                        interval=ivl,
+                        start_date=slice_start,
+                        end_date=slice_end,
+                        asset_class="um",
+                        status="queued",
+                        progress=0,
+                        message="Queued by backtest",
+                    ))
+                    created_job_ids.append(job_id)
                 await session.commit()
 
             # Wake the data-fetch worker. After #164 Redis no longer holds
@@ -678,27 +696,29 @@ class BacktestRunner:
             rds.lpush(QUEUE_KEY, WAKE_TOKEN)
 
             logger.info(
-                "Submitted data fetch job %s for %s %s [%s..%s]",
-                job_id, sym, ivl, start_date, end_date,
+                "Submitted %d data fetch job(s) for %s %s [%s..%s]",
+                len(created_job_ids), sym, ivl, missing_slices[0][0], missing_slices[-1][1],
             )
 
             # Poll for completion
             while True:
                 async with factory() as session:
-                    stmt = select(DataFetchJob).where(DataFetchJob.job_id == job_id)
-                    job = (await session.execute(stmt)).scalar_one_or_none()
-                    if not job:
-                        logger.error("DataFetchJob %s disappeared", job_id)
+                    stmt = select(DataFetchJob).where(DataFetchJob.batch_id == batch_id)
+                    jobs = (await session.execute(stmt)).scalars().all()
+                    if not jobs:
+                        logger.error("DataFetchJob batch %s disappeared", batch_id)
                         return False
 
-                    if job.status in ("completed", "partial_completed"):
-                        logger.info("Data fetch %s: %s %s — %s", job.status, sym, ivl, job.message)
+                    if all(job.status in ("completed", "partial_completed") for job in jobs):
+                        logger.info("Data fetch completed: %s %s — %d job(s)", sym, ivl, len(jobs))
                         return True
-                    if job.status in ("failed", "cancelled"):
-                        logger.warning("Data fetch %s: %s %s — %s", job.status, sym, ivl, job.error)
+                    failed_job = next((job for job in jobs if job.status in ("failed", "cancelled")), None)
+                    if failed_job is not None:
+                        logger.warning("Data fetch %s: %s %s — %s", failed_job.status, sym, ivl, failed_job.error)
                         return False
 
-                    self._report_progress(3, message=f"Fetching {sym} {ivl}: {job.progress}%")
+                    min_progress = min(getattr(job, "progress", 0) for job in jobs)
+                    self._report_progress(3, message=f"Fetching {sym} {ivl}: {min_progress}%")
 
                 await _aio.sleep(2)
         finally:

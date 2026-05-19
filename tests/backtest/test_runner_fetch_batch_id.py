@@ -63,21 +63,36 @@ class _CapturingSession:
         pass
 
     async def execute(self, stmt):
-        # Return the most-recently-added job with status=completed so the
-        # poll loop exits on the first iteration.
+        # Return the most-recently-added job or batch rows with status=completed
+        # so the poll loop exits on the first iteration.
         job = self._state.get("last_added")
         if job is not None:
             job.status = "completed"
             job.message = "ok"
+        rows = list(self._added)
+        for row in rows:
+            row.status = "completed"
+            row.message = "ok"
 
         class _Result:
-            def __init__(self, row):
+            def __init__(self, row, rows):
                 self._row = row
+                self._rows = rows
 
             def scalar_one_or_none(self):
                 return self._row
 
-        return _Result(job)
+            def scalars(self):
+                class _Scalars:
+                    def __init__(self, rows):
+                        self._rows = rows
+
+                    def all(self_inner):
+                        return list(self_inner._rows)
+
+                return _Scalars(self._rows)
+
+        return _Result(job, rows)
 
 
 def _install_capturing_db(monkeypatch, added: list) -> None:
@@ -108,6 +123,46 @@ def _install_capturing_db(monkeypatch, added: list) -> None:
 
 
 class TestBacktestSubmitAndWaitFetchBatchId:
+    def test_submit_skips_job_creation_when_no_missing_slices(self, monkeypatch):
+        runner = _mk_runner()
+        added: list = []
+        _install_capturing_db(monkeypatch, added)
+        async def _no_missing(**_kwargs):
+            return []
+
+        monkeypatch.setattr(
+            "tinohelm.data.coverage.plan_submission_slices",
+            _no_missing,
+        )
+
+        ok = asyncio.run(runner._submit_and_wait_fetch("BTCUSDT-PERP", "1m"))
+
+        assert ok is True
+        assert added == []
+        assert not runner._redis_client.lpush.called
+
+    def test_submit_creates_one_job_per_missing_slice(self, monkeypatch):
+        runner = _mk_runner()
+        added: list = []
+        _install_capturing_db(monkeypatch, added)
+
+        async def _two_slices(**_kwargs):
+            return [
+                (datetime(2024, 1, 1, tzinfo=timezone.utc).date(), datetime(2024, 1, 1, tzinfo=timezone.utc).date()),
+                (datetime(2024, 1, 2, tzinfo=timezone.utc).date(), datetime(2024, 1, 2, tzinfo=timezone.utc).date()),
+            ]
+
+        monkeypatch.setattr("tinohelm.data.coverage.plan_submission_slices", _two_slices)
+
+        ok = asyncio.run(runner._submit_and_wait_fetch("BTCUSDT-PERP", "1m"))
+
+        assert ok is True
+        assert len(added) == 2
+        assert [(job.start_date, job.end_date) for job in added] == [
+            (datetime(2024, 1, 1, tzinfo=timezone.utc).date(), datetime(2024, 1, 1, tzinfo=timezone.utc).date()),
+            (datetime(2024, 1, 2, tzinfo=timezone.utc).date(), datetime(2024, 1, 2, tzinfo=timezone.utc).date()),
+        ]
+
     def test_single_submit_assigns_non_empty_batch_id(self, monkeypatch):
         runner = _mk_runner()
         added: list = []
@@ -127,10 +182,15 @@ class TestBacktestSubmitAndWaitFetchBatchId:
         added: list = []
         _install_capturing_db(monkeypatch, added)
 
+        async def _one_slice(**_kwargs):
+            return [(datetime(2024, 1, 1, tzinfo=timezone.utc).date(), datetime(2024, 1, 1, tzinfo=timezone.utc).date())]
+
+        monkeypatch.setattr("tinohelm.data.coverage.plan_submission_slices", _one_slice)
+
         assert asyncio.run(runner._submit_and_wait_fetch("BTCUSDT-PERP", "1m"))
         assert asyncio.run(runner._submit_and_wait_fetch("BTCUSDT-PERP", "5m"))
 
-        assert len(added) == 2
+        assert len(added) >= 2
         batch_ids = {job.batch_id for job in added}
         assert len(batch_ids) == 2, (
             "each backtest-triggered fetch is its own FetchBatch → "

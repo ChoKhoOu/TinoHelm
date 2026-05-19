@@ -909,15 +909,22 @@ class CatalogSession:
         *,
         source_type: str | None = None,
     ) -> list[tuple[date, date]]:
-        from nautilus_trader.model.data import TradeTick
+        from tinohelm.data.pipeline import BinanceVisionPipeline
         from tinohelm.data.pipeline_helpers import missing_date_slices_from_intervals
-        from tinohelm.strategy.loader_helpers import normalize_symbol
 
-        if data_type != "trades":
+        pipeline = BinanceVisionPipeline(catalog_path=self.catalog_path)
+        pipeline._storage = self.storage
+        resolved = pipeline._resolve_data_cls_and_identifier(
+            symbol,
+            data_type,
+            interval,
+        )
+        if resolved is None:
             return [(start, end)]
 
+        data_cls, identifier = resolved
         catalog = _catalog_for_root(self.catalog_path, self.storage)
-        intervals = catalog.get_intervals(TradeTick, normalize_symbol(symbol))
+        intervals = catalog.get_intervals(data_cls, identifier)
         closed_intervals = [
             (interval_start, interval_end - 1)
             for interval_start, interval_end in intervals

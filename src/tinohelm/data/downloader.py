@@ -761,11 +761,16 @@ class VisionDownloader:
         return VisionZipCsvPayload(name=name, zip_path=zip_path, member=member)
 
     async def execute_task(self, task: DownloadTask) -> Path | VisionZipCsvPayload:
-        """Execute one download task with temporary ZIP staging only."""
-        # Incremental skip: reuse existing raw CSVs so chunked converters can
-        # stream them instead of re-downloading.
+        """Execute one download task with temporary ZIP staging only.
+
+        Fresh Vision ingests stream a temporary ZIP and return a ZIP-backed CSV
+        payload. The ``dest_path`` fast-path exists only for legacy raw CSVs
+        that were materialized by older flows and can still be streamed path-backed.
+        """
+        # Legacy compatibility only: reuse an already-materialized raw CSV if one
+        # exists. Gap-first planning must decide whether a download is needed.
         if task.dest_path.exists() and task.dest_path.stat().st_size > 0:
-            logger.debug("Skip (csv exists): %s", task.dest_path.name)
+            logger.debug("Legacy raw CSV reuse: %s", task.dest_path.name)
             return task.dest_path
 
         logger.info("Downloading %s [%s]", task.zip_path.name, task.granularity)

@@ -1274,6 +1274,40 @@ class TestFundingRateCacheShortCircuit:
         mock_dl.plan_downloads.assert_called_once()
 
 
+class TestGeneralCoverageShortCircuit:
+    def test_ingest_skips_when_bar_catalog_covers_range(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [],
+        )
+
+        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
+
+        mock_dl = MagicMock()
+        mock_dl.plan_downloads.side_effect = AssertionError(
+            "plan_downloads must not run when bar catalog covers range"
+        )
+        p.downloader = mock_dl
+
+        async def _noop(*a, **kw):
+            pass
+
+        with patch.object(p, "_update_db_catalog", side_effect=_noop):
+            result = asyncio.run(p.ingest(
+                symbol="BTCUSDT-PERP",
+                data_type="klines",
+                interval="1m",
+                start=date(2024, 1, 5),
+                end=date(2024, 1, 20),
+            ))
+
+        assert result.skipped is True
+        assert result.objects_count == 0
+        mock_dl.plan_downloads.assert_not_called()
+
+
 class TestTradeTickCoverageShortCircuit:
     def test_ingest_skips_when_trade_tick_catalog_covers_range(
         self, monkeypatch: pytest.MonkeyPatch,

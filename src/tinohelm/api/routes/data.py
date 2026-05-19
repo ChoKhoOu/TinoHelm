@@ -21,13 +21,12 @@ from tinohelm.data.catalog_locks import (
     hold_catalog_lock,
     hold_global_catalog_lock,
 )
+from tinohelm.data.coverage import catalog_session_for_fetch, plan_submission_slices
 from tinohelm.data.pipeline_helpers import (
     WRITE_CATEGORY,
-    date_end_ns,
-    date_start_ns,
-    missing_date_slices_from_intervals,
     resolve_db_interval,
 )
+from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
 from tinohelm.data.worker import enqueue_job
 from tinohelm.db.models import DataCatalog, DataFetchJob
 
@@ -248,16 +247,6 @@ def _catalog_for_maintenance(settings: Settings):
     base_catalog_path = get_active_catalog_root(settings) if settings else Path("data/catalog")
     storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path) if settings else get_catalog_storage(catalog_root=base_catalog_path)
     return _catalog_for_root(base_catalog_path, storage), storage
-
-
-def _catalog_session_for_fetch_batch():
-    from tinohelm.data.catalog import CatalogSession
-    from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
-
-    settings = get_settings()
-    base_catalog_path = get_active_catalog_root(settings)
-    storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path)
-    return CatalogSession(base_catalog_path, storage=storage)
 
 
 def _parse_period(value: str) -> timedelta:
@@ -541,68 +530,28 @@ async def trigger_data_fetch_batch(
     batch_id = str(uuid4())
     effective_intervals = _fetch_batch_job_intervals(body.data_type, body.intervals)
 
-    def _subtract_active_slices(
-        requested: list[tuple[date, date]],
-        active_rows: list[Any],
-    ) -> list[tuple[date, date]]:
-        remaining: list[tuple[date, date]] = []
-        active_intervals = [
-            (row.start_date, row.end_date)
-            for row in active_rows
-            if getattr(row, "start_date", None) is not None
-            and getattr(row, "end_date", None) is not None
-        ]
-        if not active_intervals:
-            return requested
-        for slice_start, slice_end in requested:
-            overlapping = [
-                (active_start, active_end)
-                for active_start, active_end in active_intervals
-                if active_end >= slice_start and active_start <= slice_end
-            ]
-            if not overlapping:
-                remaining.append((slice_start, slice_end))
-                continue
-            remaining.extend(missing_date_slices_from_intervals(
-                start=slice_start,
-                end=slice_end,
-                intervals=[
-                    (date_start_ns(active_start), date_end_ns(active_end) - 1)
-                    for active_start, active_end in overlapping
-                ],
-            ))
-        return remaining
-
-    trade_tick_missing_slices: dict[str, list[tuple[date, date]]] = {}
-    if effective_data_type == "trades":
-        session = _catalog_session_for_fetch_batch()
-        for symbol in body.symbols:
-            requested_slices = session.missing_date_slices(
-                symbol,
-                effective_data_type,
-                None,
-                body.start,
-                body.end,
-            )
-            rows = (await db.execute(
-                select(DataFetchJob).where(
-                    DataFetchJob.symbol == symbol,
-                    DataFetchJob.data_type == effective_data_type,
-                    DataFetchJob.interval.is_(None),
-                    DataFetchJob.status.in_(["queued", "running"]),
-                    DataFetchJob.start_date <= body.end,
-                    DataFetchJob.end_date >= body.start,
-                )
-            )).scalars().all()
-            trade_tick_missing_slices[symbol] = _subtract_active_slices(requested_slices, list(rows))
+    settings = get_settings()
+    base_catalog_path = get_active_catalog_root(settings)
+    storage = get_catalog_storage(settings=settings, catalog_root=base_catalog_path)
+    catalog_session = catalog_session_for_fetch(base_catalog_path, storage=storage)
 
     for symbol in body.symbols:
-        if effective_data_type == "trades":
-            for slice_start, slice_end in trade_tick_missing_slices.get(symbol, []):
+        for interval in effective_intervals:
+            missing_slices = await plan_submission_slices(
+                db=db,
+                catalog_path=Path(catalog_session.catalog_path),
+                symbol=symbol,
+                data_type=effective_data_type,
+                interval=interval,
+                start=body.start,
+                end=body.end,
+                storage=storage,
+            )
+            for slice_start, slice_end in missing_slices:
                 job = DataFetchJob(
                     symbol=symbol,
                     data_type=effective_data_type,
-                    interval=None,
+                    interval=interval,
                     start_date=slice_start,
                     end_date=slice_end,
                     asset_class=body.asset_class,
@@ -615,43 +564,26 @@ async def trigger_data_fetch_batch(
                 jobs.append({
                     "job_id": job.job_id,
                     "data_type": public_data_type,
-                    "db_interval": resolve_db_interval(effective_data_type, None),
-                    "interval": None,
+                    "db_interval": resolve_db_interval(effective_data_type, interval),
+                    "interval": interval,
                     "start": slice_start.isoformat(),
                     "end": slice_end.isoformat(),
                 })
-            continue
-        for interval in effective_intervals:
-            job = DataFetchJob(
-                symbol=symbol,
-                data_type=effective_data_type,
-                interval=interval,
-                start_date=body.start,
-                end_date=body.end,
-                asset_class=body.asset_class,
-                status="queued",
-                batch_id=batch_id,
-            )
-            db.add(job)
-            await db.flush()
-            job_ids.append(job.job_id)
-            jobs.append({
-                "job_id": job.job_id,
-                "data_type": public_data_type,
-                "db_interval": resolve_db_interval(effective_data_type, interval),
-                "interval": interval,
-                "start": body.start.isoformat(),
-                "end": body.end.isoformat(),
-            })
 
     await db.commit()
 
     for jid in job_ids:
         await enqueue_job(rds, jid)
 
+    message = (
+        "No fetch jobs queued: already covered or already reserved by active jobs"
+        if not job_ids
+        else f"Data fetch for {len(job_ids)} job(s) queued ({len(body.symbols)} symbol(s) × {len(effective_intervals)} effective interval(s))"
+    )
+
     return {
         "status": "accepted",
-        "message": f"Data fetch for {len(job_ids)} job(s) queued ({len(body.symbols)} symbol(s) × {len(effective_intervals)} effective interval(s))",
+        "message": message,
         "job_ids": job_ids,
         "jobs": jobs,
         "symbols": body.symbols,
