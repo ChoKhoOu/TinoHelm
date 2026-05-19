@@ -1176,30 +1176,24 @@ class TestIngestFailClosed:
 # 4b. ingest() — funding-rate cache short-circuit
 # ---------------------------------------------------------------------------
 
-class TestFundingRateCacheShortCircuit:
-    """The pipeline must skip plan_downloads when the JSON cache already
-    covers [start, end] — defense-in-depth against repeated Binance hits.
+class TestFundingRateCoverageShortCircuit:
+    """The pipeline must skip plan_downloads when the unified coverage planner
+    reports no missing funding-rate slices.
     """
 
-    def test_ingest_skips_when_funding_cache_covers_range(
+    def test_ingest_skips_when_funding_rate_catalog_covers_range(
         self, monkeypatch: pytest.MonkeyPatch,
     ):
-        import tinohelm.data.funding_cache as fc
-        monkeypatch.setattr(fc, "_load_cache", lambda sym: [
-            {"funding_time_ms": 1_704_067_200_000, "funding_rate": 0.01},
-            {"funding_time_ms": 1_705_276_800_000, "funding_rate": 0.02},
-            {"funding_time_ms": 1_706_745_600_000, "funding_rate": 0.03},
-        ])
         monkeypatch.setattr(
-            "tinohelm.data.catalog.CatalogSession.funding_parquet_covers",
-            lambda self, symbol, start, end: True,
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda self, symbol, data_type, interval, start, end, source_type=None: [],
         )
 
         p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
 
         mock_dl = MagicMock()
         mock_dl.plan_downloads.side_effect = AssertionError(
-            "plan_downloads must not run when cache covers range"
+            "plan_downloads must not run when funding-rate catalog covers range"
         )
         p.downloader = mock_dl
 
