@@ -405,11 +405,9 @@ async fn dispatch_batch(cmd: BatchCmd, client: &ApiClient, format: OutputFormat)
                 let resp = client
                     .list_data_batches(status.as_deref(), page, page_size)
                     .await?;
+                let page_len = resp.batches.len() as u64;
                 batches.extend(resp.batches);
-                if batches.len() as u64 >= resp.total
-                    || batches.is_empty()
-                    || (batches.len() as u64 % page_size != 0)
-                {
+                if batches.len() as u64 >= resp.total || page_len == 0 || page_len < page_size {
                     break;
                 }
                 page += 1;

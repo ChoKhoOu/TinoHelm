@@ -11,7 +11,7 @@ from uuid import uuid4
 import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tinohelm.api.deps import get_db, get_redis, get_settings_dep
@@ -350,6 +350,63 @@ def _group_batch_rows(rows: list[DataFetchJob]) -> list[dict]:
     return sorted(batches, key=lambda batch: (batch["created_at"] or "", batch["batch_id"]), reverse=True)
 
 
+def _batch_key_expr():
+    return func.coalesce(DataFetchJob.batch_id, DataFetchJob.job_id)
+
+
+def _batch_row_filter(batch_id: str):
+    return or_(DataFetchJob.batch_id == batch_id, and_(DataFetchJob.batch_id.is_(None), DataFetchJob.job_id == batch_id))
+
+
+async def _load_batch_rows(
+    db: AsyncSession,
+    *,
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[DataFetchJob], int]:
+    batch_key = _batch_key_expr()
+    batch_created_at = func.min(DataFetchJob.created_at)
+    grouped = select(batch_key.label("batch_id"), batch_created_at.label("created_at")).group_by(batch_key)
+    if status:
+        grouped = grouped.having(
+            case(
+                (func.sum(case((DataFetchJob.status == "running", 1), else_=0)) > 0, "running"),
+                (func.sum(case((DataFetchJob.status == "queued", 1), else_=0)) > 0, "queued"),
+                (func.sum(case((DataFetchJob.status == "failed", 1), else_=0)) > 0, "failed"),
+                (
+                    func.sum(case((DataFetchJob.status == "cancelled", 1), else_=0)) == func.count(),
+                    "cancelled",
+                ),
+                (
+                    func.sum(case((DataFetchJob.status == "completed", 1), else_=0)) == func.count(),
+                    "completed",
+                ),
+                else_="partial_completed",
+            ) == status
+        )
+    grouped_subq = grouped.subquery()
+    total = len((await db.execute(select(grouped_subq.c.batch_id))).scalars().all())
+    page_batch_ids = (
+        await db.execute(
+            select(grouped_subq.c.batch_id)
+            .order_by(grouped_subq.c.created_at.desc(), grouped_subq.c.batch_id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).scalars().all()
+    if not page_batch_ids:
+        return [], total
+    rows = (
+        await db.execute(
+            select(DataFetchJob)
+            .where(batch_key.in_(page_batch_ids))
+            .order_by(DataFetchJob.created_at.desc())
+        )
+    ).scalars().all()
+    return rows, total
+
+
 def _parse_period(value: str) -> timedelta:
     token = str(value).strip().lower()
     if not token:
@@ -450,13 +507,8 @@ async def list_data_fetch_batches(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """List data-fetch batches, optionally filtered by aggregated status."""
-    rows = (await db.execute(select(DataFetchJob).order_by(DataFetchJob.created_at.desc()))).scalars().all()
+    rows, total = await _load_batch_rows(db, status=status, page=page, page_size=page_size)
     batches = _group_batch_rows(rows)
-    if status:
-        batches = [batch for batch in batches if batch["status"] == status]
-    total = len(batches)
-    start = (page - 1) * page_size
-    end = start + page_size
     return {
         "batches": [
             {
@@ -464,7 +516,7 @@ async def list_data_fetch_batches(
                 for key, value in batch.items()
                 if key != "jobs"
             }
-            for batch in batches[start:end]
+            for batch in batches
         ],
         "total": total,
         "page": page,
@@ -478,7 +530,13 @@ async def get_data_fetch_batch(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Get aggregated status of a single data-fetch batch."""
-    rows = (await db.execute(select(DataFetchJob).order_by(DataFetchJob.created_at.desc()))).scalars().all()
+    rows = (
+        await db.execute(
+            select(DataFetchJob)
+            .where(_batch_row_filter(batch_id))
+            .order_by(DataFetchJob.created_at.desc())
+        )
+    ).scalars().all()
     batches = {batch["batch_id"]: batch for batch in _group_batch_rows(rows)}
     batch = batches.get(batch_id)
     if not batch:
@@ -492,8 +550,9 @@ async def cancel_data_fetch_batch(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Cancel queued jobs inside a batch without interrupting running jobs."""
-    rows = (await db.execute(select(DataFetchJob))).scalars().all()
-    batch_jobs = [job for job in rows if _batch_key(job) == batch_id]
+    batch_jobs = (
+        await db.execute(select(DataFetchJob).where(_batch_row_filter(batch_id)))
+    ).scalars().all()
     if not batch_jobs:
         raise HTTPException(status_code=404, detail="Batch not found")
     queued_jobs = [job for job in batch_jobs if job.status == "queued"]

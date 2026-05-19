@@ -920,9 +920,13 @@ class TestDataFetchBatchApi:
                 completed_at=datetime(2026, 1, 1, 9, 10, 0),
             ),
         ]
-        result = MagicMock()
-        result.scalars.return_value.all.return_value = rows
-        db.execute = AsyncMock(return_value=result)
+        total_result = MagicMock()
+        total_result.scalars.return_value.all.return_value = ["job-legacy", "batch-1"]
+        page_result = MagicMock()
+        page_result.scalars.return_value.all.return_value = ["job-legacy", "batch-1"]
+        rows_result = MagicMock()
+        rows_result.scalars.return_value.all.return_value = rows
+        db.execute = AsyncMock(side_effect=[total_result, page_result, rows_result])
 
         payload = asyncio.run(list_data_fetch_batches(page=1, page_size=20, db=db))
 
@@ -939,6 +943,61 @@ class TestDataFetchBatchApi:
         assert grouped["start_date"] == "2026-01-01"
         assert grouped["end_date"] == "2026-01-04"
 
+
+    def test_list_batches_only_groups_current_page_rows(self):
+        import asyncio
+
+        db = AsyncMock()
+        batch_page = [
+            SimpleNamespace(
+                job_id="job-2",
+                batch_id="batch-2",
+                symbol="ETHUSDT-PERP",
+                data_type="klines",
+                interval="5m",
+                start_date=date(2026, 1, 2),
+                end_date=date(2026, 1, 2),
+                asset_class="um",
+                status="completed",
+                progress=100,
+                message="done",
+                error=None,
+                created_at=datetime(2026, 1, 2, 9, 0, 0),
+                started_at=datetime(2026, 1, 2, 9, 1, 0),
+                completed_at=datetime(2026, 1, 2, 9, 2, 0),
+            ),
+            SimpleNamespace(
+                job_id="job-1",
+                batch_id="batch-2",
+                symbol="BTCUSDT-PERP",
+                data_type="klines",
+                interval="1m",
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 1, 1),
+                asset_class="um",
+                status="queued",
+                progress=0,
+                message=None,
+                error=None,
+                created_at=datetime(2026, 1, 2, 8, 0, 0),
+                started_at=None,
+                completed_at=None,
+            ),
+        ]
+        total_result = MagicMock()
+        total_result.scalars.return_value.all.return_value = ["batch-2", "batch-1"]
+        page_result = MagicMock()
+        page_result.scalars.return_value.all.return_value = ["batch-2"]
+        rows_result = MagicMock()
+        rows_result.scalars.return_value.all.return_value = batch_page
+        db.execute = AsyncMock(side_effect=[total_result, page_result, rows_result])
+
+        payload = asyncio.run(list_data_fetch_batches(page=1, page_size=1, db=db))
+
+        assert payload["total"] == 2
+        assert [item["batch_id"] for item in payload["batches"]] == ["batch-2"]
+        assert payload["batches"][0]["counts"]["jobs"] == 2
+        assert db.execute.await_count == 3
 
     def test_list_batches_aggregates_status_progress_and_filters_after_grouping(self):
         import asyncio
@@ -1031,9 +1090,13 @@ class TestDataFetchBatchApi:
                 completed_at=datetime(2026, 1, 1, 8, 5, 0),
             ),
         ]
-        result = MagicMock()
-        result.scalars.return_value.all.return_value = rows
-        db.execute = AsyncMock(return_value=result)
+        total_result = MagicMock()
+        total_result.scalars.return_value.all.return_value = ["batch-a"]
+        page_result = MagicMock()
+        page_result.scalars.return_value.all.return_value = ["batch-a"]
+        rows_result = MagicMock()
+        rows_result.scalars.return_value.all.return_value = rows[:3]
+        db.execute = AsyncMock(side_effect=[total_result, page_result, rows_result])
 
         payload = asyncio.run(list_data_fetch_batches(status="running", page=1, page_size=20, db=db))
 

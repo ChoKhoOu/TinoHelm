@@ -77,6 +77,7 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
   const [batches, setBatches] = useState<DataFetchBatch[]>([]);
   const prevActiveRef = useRef<Set<string>>(new Set());
   const onJobCompleteRef = useRef(onJobComplete);
+  const progressRefreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   onJobCompleteRef.current = onJobComplete;
 
   const load = useCallback(async () => {
@@ -105,7 +106,13 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
     const jobId = p.job_id;
     const pct = p.progress;
     if (!jobId || pct == null) return;
-    void load();
+    if (progressRefreshTimeoutRef.current) {
+      clearTimeout(progressRefreshTimeoutRef.current);
+    }
+    progressRefreshTimeoutRef.current = setTimeout(() => {
+      void load();
+      progressRefreshTimeoutRef.current = null;
+    }, 300);
   }, [load, progressMsg]);
 
   // Detect job completions and notify parent
@@ -114,12 +121,17 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
       batches.filter((b: DataFetchBatch) => b.status === "running" || b.status === "queued").map((b: DataFetchBatch) => b.batch_id),
     );
     const prev = prevActiveRef.current;
-    // If a previously active job is no longer active, it completed/failed
     if (prev.size > 0 && currentActive.size < prev.size) {
       const finished = [...prev].some((id) => !currentActive.has(id));
       if (finished) onJobCompleteRef.current?.();
     }
     prevActiveRef.current = currentActive;
+    return () => {
+      if (progressRefreshTimeoutRef.current) {
+        clearTimeout(progressRefreshTimeoutRef.current);
+        progressRefreshTimeoutRef.current = null;
+      }
+    };
   }, [batches]);
 
   const isActive = (s: string) => s === "running" || s === "queued";
