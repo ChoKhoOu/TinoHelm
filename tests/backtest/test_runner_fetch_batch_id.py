@@ -168,6 +168,11 @@ class TestBacktestSubmitAndWaitFetchBatchId:
         added: list = []
         _install_capturing_db(monkeypatch, added)
 
+        async def _one_slice(**_kwargs):
+            return [(datetime(2024, 1, 1, tzinfo=timezone.utc).date(), datetime(2024, 1, 1, tzinfo=timezone.utc).date())]
+
+        monkeypatch.setattr("tinohelm.data.coverage.plan_submission_slices", _one_slice)
+
         ok = asyncio.run(runner._submit_and_wait_fetch("BTCUSDT-PERP", "1m"))
 
         assert ok is True
@@ -203,6 +208,11 @@ class TestBacktestSubmitAndWaitFetchBatchId:
         added: list = []
         _install_capturing_db(monkeypatch, added)
 
+        async def _one_slice(**_kwargs):
+            return [(datetime(2024, 1, 1, tzinfo=timezone.utc).date(), datetime(2024, 1, 1, tzinfo=timezone.utc).date())]
+
+        monkeypatch.setattr("tinohelm.data.coverage.plan_submission_slices", _one_slice)
+
         asyncio.run(runner._submit_and_wait_fetch("BTCUSDT-PERP", "1m"))
 
         job = added[0]
@@ -222,6 +232,11 @@ class TestBacktestSubmitAndWaitFetchBatchId:
         runner = _mk_runner()
         added: list = []
         _install_capturing_db(monkeypatch, added)
+
+        async def _one_slice(**_kwargs):
+            return [(datetime(2024, 1, 1, tzinfo=timezone.utc).date(), datetime(2024, 1, 1, tzinfo=timezone.utc).date())]
+
+        monkeypatch.setattr("tinohelm.data.coverage.plan_submission_slices", _one_slice)
 
         asyncio.run(runner._submit_and_wait_fetch("BTCUSDT-PERP", "1m"))
 
