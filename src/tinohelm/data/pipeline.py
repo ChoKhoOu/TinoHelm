@@ -486,9 +486,6 @@ class BinanceVisionPipeline:
             # 4. Consolidate + Deduplicate + Organize by period
             consolidate_start = start
             consolidate_end = end
-            if data_type == "trades" and missing_slices:
-                consolidate_start = min(slice_start for slice_start, _ in missing_slices)
-                consolidate_end = max(slice_end for _, slice_end in missing_slices)
             consolidation_ok = False
             try:
                 await asyncio.to_thread(
@@ -526,17 +523,6 @@ class BinanceVisionPipeline:
                 gap_ranges = await asyncio.to_thread(
                     self._detect_gaps_for_backfill, symbol, data_type, interval
                 )
-            if data_type == "trades" and missing_slices:
-                filtered_gap_ranges: list[tuple[date, date]] = []
-                for gap_start, gap_end in gap_ranges:
-                    for slice_start, slice_end in missing_slices:
-                        if gap_end < slice_start or gap_start > slice_end:
-                            continue
-                        filtered_gap_ranges.append((
-                            max(gap_start, slice_start),
-                            min(gap_end, slice_end),
-                        ))
-                gap_ranges = filtered_gap_ranges
             if gap_ranges:
                 logger.info(
                     "Detected %d gap range(s) for %s %s, triggering backfill",
