@@ -120,14 +120,29 @@ async def _count_queued_jobs(factory, model_cls) -> int:
     return int(count or 0)
 
 
+async def _reset_interrupted_batch_finalize(factory) -> int:
+    async with factory() as db:
+        result = await db.execute(
+            update(DataFetchJob)
+            .where(DataFetchJob.status.in_(_TERMINAL_BATCH_STATUSES))
+            .where(DataFetchJob.batch_finalize_started_at.isnot(None))
+            .where(DataFetchJob.batch_finalized_at.is_(None))
+            .values(batch_finalize_started_at=None)
+        )
+        await db.commit()
+    return _rowcount(result)
+
+
 async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     """Startup recovery for the DB-driven fetch scheduler.
 
-    Recovery does two things:
+    Recovery does three things:
 
     1. Flip every ``status='running'`` row back to ``queued`` — whoever
        was in flight when the process died re-enters the runnable pool.
-    2. If any queued work exists, push a single ``WAKE_TOKEN`` so the
+    2. Clear any stale batch-finalize in-progress witness on terminal rows
+       so finalize can be retried after restart.
+    3. If any queued work exists, push a single ``WAKE_TOKEN`` so the
        first idle consumer immediately drains the backlog. No wake is
        needed when the DB is empty — new fetch requests will push their
        own wake tokens as they arrive.
@@ -136,6 +151,7 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
     """
     factory = get_session_factory()
     recovered = await _flip_running_to_queued(factory, DataFetchJob)
+    reset_finalize = await _reset_interrupted_batch_finalize(factory)
 
     queued_count = await _count_queued_jobs(factory, DataFetchJob)
 
@@ -222,6 +238,12 @@ _BUCKET_STARTED_STATUSES = (
     STATUS_CANCELLED,
 )
 _BUCKET_RUNNING_STATUSES = (STATUS_RUNNING,)
+_TERMINAL_BATCH_STATUSES = (
+    STATUS_COMPLETED,
+    STATUS_PARTIAL_COMPLETED,
+    STATUS_FAILED,
+    STATUS_CANCELLED,
+)
 
 
 def _next_queued_job_id_subquery():
@@ -506,6 +528,69 @@ async def _persist_progress_if_running(factory, job_id: str, pct: int, msg: str)
         await db.commit()
 
 
+async def _finalize_batch_if_ready(batch_id: str, *, redis_url: str, catalog_path: str) -> bool:
+    if not batch_id:
+        return False
+
+    factory = get_session_factory()
+    async with factory() as db:
+        rows = list((await db.execute(
+            select(DataFetchJob).where(DataFetchJob.batch_id == batch_id)
+        )).scalars().all())
+
+    if not rows:
+        return False
+    if any(getattr(row, "status", None) not in _TERMINAL_BATCH_STATUSES for row in rows):
+        return False
+    if any(getattr(row, "batch_finalized_at", None) is not None for row in rows):
+        return False
+
+    started_at = _utcnow_naive()
+    async with factory() as db:
+        claim = await db.execute(
+            update(DataFetchJob)
+            .where(DataFetchJob.batch_id == batch_id)
+            .where(DataFetchJob.batch_finalize_started_at.is_(None))
+            .where(DataFetchJob.batch_finalized_at.is_(None))
+            .values(batch_finalize_started_at=started_at, batch_finalize_error=None)
+        )
+        await db.commit()
+    if _rowcount(claim) != len(rows):
+        return False
+
+    try:
+        from tinohelm.data.pipeline import BinanceVisionPipeline
+
+        pipeline = BinanceVisionPipeline(catalog_path=catalog_path)
+        await pipeline.finalize_batch(jobs=rows)
+    except Exception as exc:
+        async with factory() as db:
+            await db.execute(
+                update(DataFetchJob)
+                .where(DataFetchJob.batch_id == batch_id)
+                .values(batch_finalize_error=str(exc)[:2000])
+            )
+            await db.commit()
+        logger.exception("FetchBatch %s finalize failed", batch_id)
+        return False
+
+    finalized_at = _utcnow_naive()
+    async with factory() as db:
+        await db.execute(
+            update(DataFetchJob)
+            .where(DataFetchJob.batch_id == batch_id)
+            .values(batch_finalized_at=finalized_at, batch_finalize_error=None)
+        )
+        await db.commit()
+
+    logger.info(
+        "FetchBatch %s finalized after %d terminal job(s)",
+        batch_id,
+        len(rows),
+    )
+    return True
+
+
 async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
     """Execute a single data-fetch job."""
     factory = get_session_factory()
@@ -577,6 +662,7 @@ async def _process_job(job_id: str, redis_url: str, catalog_path: str) -> None:
                 asset_class=asset_class,
                 interval=interval,
                 progress_cb=_progress,
+                defer_finalize=True,
             )
         finally:
             lock.release()
@@ -787,6 +873,7 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
                 asset_class=job.asset_class,
                 interval=interval,
                 progress_cb=_progress,
+                defer_finalize=True,
             )
         finally:
             lock.release()
@@ -841,6 +928,12 @@ async def _process_claimed_job(job, redis_url: str, catalog_path: str) -> bool:
             )
         if terminal_cancelled:
             raise asyncio.CancelledError
+        if updated and job.batch_id:
+            await _finalize_batch_if_ready(
+                job.batch_id,
+                redis_url=redis_url,
+                catalog_path=catalog_path,
+            )
         return True
 
     except asyncio.CancelledError:

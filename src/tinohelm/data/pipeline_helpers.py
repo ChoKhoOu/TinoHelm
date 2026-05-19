@@ -297,6 +297,72 @@ def expand_gaps_to_days(gaps: list[tuple[int, int]]) -> list[tuple[date, date]]:
     return result
 
 
+def merge_date_slices(
+    slices: list[tuple[date, date]],
+) -> list[tuple[date, date]]:
+    """Merge overlapping or adjacent day-aligned slices."""
+    if not slices:
+        return []
+
+    ordered = sorted(slices)
+    merged: list[list[date]] = []
+    for slice_start, slice_end in ordered:
+        if not merged or slice_start > merged[-1][1] + timedelta(days=1):
+            merged.append([slice_start, slice_end])
+        else:
+            merged[-1][1] = max(merged[-1][1], slice_end)
+    return [(slice_start, slice_end) for slice_start, slice_end in merged]
+
+
+def intersect_date_slices(
+    left: list[tuple[date, date]],
+    right: list[tuple[date, date]],
+) -> list[tuple[date, date]]:
+    """Intersect two fragmented day-aligned slice sets."""
+    left_merged = merge_date_slices(left)
+    right_merged = merge_date_slices(right)
+    intersections: list[tuple[date, date]] = []
+
+    i = 0
+    j = 0
+    while i < len(left_merged) and j < len(right_merged):
+        left_start, left_end = left_merged[i]
+        right_start, right_end = right_merged[j]
+        overlap_start = max(left_start, right_start)
+        overlap_end = min(left_end, right_end)
+        if overlap_start <= overlap_end:
+            intersections.append((overlap_start, overlap_end))
+        if left_end < right_end:
+            i += 1
+        else:
+            j += 1
+
+    return intersections
+
+
+def covered_date_slices_from_intervals(
+    *,
+    start: date,
+    end: date,
+    intervals: list[tuple[int, int]],
+) -> list[tuple[date, date]]:
+    """Return day-aligned covered slices within the requested date window."""
+    request_start_ns = date_start_ns(start)
+    request_end_ns = date_end_ns(end) - 1
+    covered: list[tuple[date, date]] = []
+
+    for interval_start, interval_end in intervals:
+        if interval_end < request_start_ns or interval_start > request_end_ns:
+            continue
+        clipped_start = max(interval_start, request_start_ns)
+        clipped_end = min(interval_end, request_end_ns)
+        start_day = datetime.fromtimestamp(clipped_start // 1_000_000_000, tz=timezone.utc).date()
+        end_day = datetime.fromtimestamp(clipped_end // 1_000_000_000, tz=timezone.utc).date()
+        covered.append((start_day, end_day))
+
+    return merge_date_slices(covered)
+
+
 def missing_date_slices_from_intervals(
     *,
     start: date,

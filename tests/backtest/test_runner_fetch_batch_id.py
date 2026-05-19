@@ -64,15 +64,17 @@ class _CapturingSession:
 
     async def execute(self, stmt):
         # Return the most-recently-added job or batch rows with status=completed
-        # so the poll loop exits on the first iteration.
+        # and batch_finalized_at set so the poll loop exits on the first iteration.
         job = self._state.get("last_added")
         if job is not None:
             job.status = "completed"
             job.message = "ok"
+            job.batch_finalized_at = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = list(self._added)
         for row in rows:
             row.status = "completed"
             row.message = "ok"
+            row.batch_finalized_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         class _Result:
             def __init__(self, row, rows):
@@ -217,6 +219,32 @@ class TestBacktestSubmitAndWaitFetchBatchId:
 
         job = added[0]
         assert job.batch_id != job.job_id
+
+    def test_submit_returns_false_when_batch_finalize_fails(self, monkeypatch):
+        runner = _mk_runner()
+        added: list = []
+        _install_capturing_db(monkeypatch, added)
+
+        async def _one_slice(**_kwargs):
+            return [(datetime(2024, 1, 1, tzinfo=timezone.utc).date(), datetime(2024, 1, 1, tzinfo=timezone.utc).date())]
+
+        monkeypatch.setattr("tinohelm.data.coverage.plan_submission_slices", _one_slice)
+
+        original_execute = _CapturingSession.execute
+
+        async def _execute_with_finalize_error(self, stmt):
+            result = await original_execute(self, stmt)
+            rows = result.scalars().all()
+            for row in rows:
+                row.batch_finalized_at = None
+                row.batch_finalize_error = "finalize failed"
+            return result
+
+        monkeypatch.setattr(_CapturingSession, "execute", _execute_with_finalize_error)
+
+        ok = asyncio.run(runner._submit_and_wait_fetch("BTCUSDT-PERP", "1m"))
+
+        assert ok is False
 
     def test_submit_pushes_wake_token_not_job_id(self, monkeypatch):
         """Issue #164: backtest also speaks the wake-signal dialect.

@@ -114,6 +114,9 @@ def _reset_database_to_pre_012() -> None:
                 await conn.execute(text("DROP INDEX IF EXISTS ix_data_fetch_jobs_batch_id"))
                 await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS batch_id"))
                 await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS started_at"))
+                await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS batch_finalize_started_at"))
+                await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS batch_finalized_at"))
+                await conn.execute(text("ALTER TABLE data_fetch_jobs DROP COLUMN IF EXISTS batch_finalize_error"))
 
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
@@ -292,6 +295,20 @@ async def test_data_fetch_jobs_started_at_column_nullable(engine, ensure_at_head
     assert nullable_map.get("started_at") is True, (
         "started_at must be nullable so queued/terminal jobs can clear it"
     )
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_data_fetch_jobs_batch_finalize_columns_nullable(engine, ensure_at_head):
+    """016 adds nullable batch finalize witness columns to data_fetch_jobs."""
+    async with engine.connect() as conn:
+        cols = await _get_table_columns(conn, "data_fetch_jobs")
+        nullable_map = await _get_nullable_cols(conn, "data_fetch_jobs")
+
+    for col in ("batch_finalize_started_at", "batch_finalized_at", "batch_finalize_error"):
+        assert col in cols, f"016 must add {col} to data_fetch_jobs"
+        assert nullable_map.get(col) is True, (
+            f"{col} must be nullable so legacy / in-flight rows remain valid"
+        )
 
 
 @pytest.mark.asyncio(loop_scope="module")

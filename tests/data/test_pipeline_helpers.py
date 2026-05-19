@@ -25,6 +25,9 @@ from tinohelm.data.pipeline_helpers import (
     date_end_ns,
     date_start_dt,
     date_start_ns,
+    intersect_date_slices,
+    merge_date_slices,
+    covered_date_slices_from_intervals,
     parse_vision_coverage_end,
     resolve_db_category,
     resolve_db_interval,
@@ -209,6 +212,48 @@ class TestMissingDateSliceHelpers:
                 (date_start_ns(date(2024, 1, 12)), date_end_ns(date(2024, 1, 20)) - 1),
             ],
         ) == [(date(2024, 1, 11), date(2024, 1, 11))]
+
+
+class TestFragmentedDateSliceHelpers:
+    def test_merge_date_slices_coalesces_adjacent_and_overlapping_ranges(self):
+        assert merge_date_slices([
+            (date(2024, 1, 11), date(2024, 1, 11)),
+            (date(2024, 1, 12), date(2024, 1, 12)),
+            (date(2024, 1, 15), date(2024, 1, 16)),
+            (date(2024, 1, 16), date(2024, 1, 17)),
+        ]) == [
+            (date(2024, 1, 11), date(2024, 1, 12)),
+            (date(2024, 1, 15), date(2024, 1, 17)),
+        ]
+
+    def test_intersect_date_slices_preserves_holes_between_fragments(self):
+        requested = [
+            (date(2024, 1, 11), date(2024, 1, 12)),
+            (date(2024, 1, 15), date(2024, 1, 17)),
+        ]
+        actual = [
+            (date(2024, 1, 11), date(2024, 1, 11)),
+            (date(2024, 1, 13), date(2024, 1, 13)),
+            (date(2024, 1, 16), date(2024, 1, 18)),
+        ]
+
+        assert intersect_date_slices(requested, actual) == [
+            (date(2024, 1, 11), date(2024, 1, 11)),
+            (date(2024, 1, 16), date(2024, 1, 17)),
+        ]
+
+    def test_covered_date_slices_from_intervals_keeps_fragment_boundaries(self):
+        assert covered_date_slices_from_intervals(
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 20),
+            intervals=[
+                (date_start_ns(date(2024, 1, 11)), date_end_ns(date(2024, 1, 11)) - 1),
+                (date_start_ns(date(2024, 1, 15)), date_end_ns(date(2024, 1, 16)) - 1),
+            ],
+        ) == [
+            (date(2024, 1, 11), date(2024, 1, 11)),
+            (date(2024, 1, 15), date(2024, 1, 16)),
+        ]
 
 
 class TestResolveDbInterval:

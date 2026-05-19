@@ -712,12 +712,25 @@ class BacktestRunner:
                         logger.error("DataFetchJob batch %s disappeared", batch_id)
                         return False
 
-                    if all(job.status in ("completed", "partial_completed") for job in jobs):
+                    if all(
+                        job.status in ("completed", "partial_completed")
+                        and getattr(job, "batch_finalized_at", None) is not None
+                        for job in jobs
+                    ):
                         logger.info("Data fetch completed: %s %s — %d job(s)", sym, ivl, len(jobs))
                         return True
                     failed_job = next((job for job in jobs if job.status in ("failed", "cancelled")), None)
                     if failed_job is not None:
                         logger.warning("Data fetch %s: %s %s — %s", failed_job.status, sym, ivl, failed_job.error)
+                        return False
+                    finalize_failed_job = next((job for job in jobs if getattr(job, "batch_finalize_error", None)), None)
+                    if finalize_failed_job is not None:
+                        logger.warning(
+                            "Data fetch finalize failed: %s %s — %s",
+                            sym,
+                            ivl,
+                            finalize_failed_job.batch_finalize_error,
+                        )
                         return False
 
                     min_progress = min(getattr(job, "progress", 0) for job in jobs)

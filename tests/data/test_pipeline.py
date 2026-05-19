@@ -1904,6 +1904,86 @@ class TestCatalogStorageCoverageInvalidatesCache:
         assert result is None  # no files → None
 
 
+class TestDeferredBatchFinalize:
+    def test_defer_finalize_skips_immediate_consolidation_and_gap_backfill(self, tmp_path, monkeypatch):
+        task = SimpleNamespace(url="memory://data.csv")
+        mock_dl = MagicMock()
+        mock_dl.concurrency = 1
+        mock_dl.plan_downloads.return_value = [task]
+        mock_dl.execute_task = AsyncMock(
+            return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"id,price,qty,quoteQty,time,isBuyerMaker\n")
+        )
+
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        p.downloader = mock_dl
+        p._convert_workers = 1
+        monkeypatch.setattr(p, "_get_instrument", lambda _s: object())
+        monkeypatch.setattr(p, "_build_converter_kwargs", lambda *_a: {})
+        monkeypatch.setattr(
+            "tinohelm.data.pipeline.get_converter",
+            lambda _dt: SimpleNamespace(supports_chunked=False),
+        )
+        monkeypatch.setattr(
+            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
+            lambda *_a, **_kw: [(date(2025, 1, 1), date(2025, 1, 1))],
+        )
+        monkeypatch.setattr(p, "_convert_one_file", lambda *_a, **_kw: (100, ["/some/path.parquet"]))
+        consolidate = MagicMock()
+        detect_gaps = MagicMock(return_value=[(date(2025, 1, 2), date(2025, 1, 2))])
+        monkeypatch.setattr(p, "_consolidate_catalog_data", consolidate)
+        monkeypatch.setattr(p, "_detect_gaps_for_backfill", detect_gaps)
+        monkeypatch.setattr(p, "_catalog_storage_stats", MagicMock(return_value=(100, 5000)))
+        p._update_db_catalog = AsyncMock()
+
+        result = asyncio.run(p.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+            defer_finalize=True,
+        ))
+
+        assert result.objects_count == 100
+        consolidate.assert_not_called()
+        detect_gaps.assert_not_called()
+        p._update_db_catalog.assert_awaited_once()
+
+
+class TestBatchFinalize:
+    @pytest.mark.asyncio
+    async def test_finalize_batch_only_consolidates_covered_requested_fragments(self, tmp_path, monkeypatch):
+        p = BinanceVisionPipeline(catalog_path=tmp_path)
+        consolidate_ranges: list[tuple[date, date]] = []
+
+        monkeypatch.setattr(
+            p,
+            "_covered_requested_slices",
+            lambda **_kwargs: [
+                (date(2024, 1, 11), date(2024, 1, 11)),
+                (date(2024, 1, 15), date(2024, 1, 16)),
+            ],
+        )
+        monkeypatch.setattr(
+            p,
+            "_consolidate_catalog_data",
+            lambda symbol, data_type, interval, start, end: consolidate_ranges.append((start, end)),
+        )
+        p._update_db_catalog = AsyncMock()
+
+        jobs = [
+            SimpleNamespace(symbol="BTCUSDT-PERP", data_type="trades", interval=None, start_date=date(2024, 1, 11), end_date=date(2024, 1, 11)),
+            SimpleNamespace(symbol="BTCUSDT-PERP", data_type="trades", interval=None, start_date=date(2024, 1, 15), end_date=date(2024, 1, 17)),
+        ]
+
+        await p.finalize_batch(jobs=jobs)
+
+        assert consolidate_ranges == [
+            (date(2024, 1, 11), date(2024, 1, 11)),
+            (date(2024, 1, 15), date(2024, 1, 16)),
+        ]
+        p._update_db_catalog.assert_awaited_once()
+
+
 class TestConsolidationFailureDoesNotBlockIngest:
     """Consolidation is a post-write optimization; failure must not mark the job failed."""
 

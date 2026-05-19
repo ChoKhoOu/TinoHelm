@@ -31,7 +31,10 @@ from tinohelm.data.pipeline_helpers import (
     classify_download_failures,
     compute_chunk_subprogress,
     compute_stage_pct,
+    covered_date_slices_from_intervals,
     csv_has_header,
+    intersect_date_slices,
+    merge_date_slices,
     resolve_db_category,
     resolve_db_interval,
     resolve_write_category,
@@ -115,6 +118,7 @@ class BinanceVisionPipeline:
         asset_class: str = "um",
         interval: str | None = None,
         progress_cb: Callable[[int, str], Any] | None = None,
+        defer_finalize: bool = False,
     ) -> IngestResult:
         """Ingest data from Binance Vision into the Parquet catalog.
 
@@ -490,123 +494,132 @@ class BinanceVisionPipeline:
         except asyncio.CancelledError:
             raise
 
-        # 4. Consolidate + Deduplicate + Organize by period
-        consolidate_start = start
-        consolidate_end = end
-        if data_type == "trades" and missing_slices:
-            consolidate_start = min(slice_start for slice_start, _ in missing_slices)
-            consolidate_end = max(slice_end for _, slice_end in missing_slices)
-        consolidation_ok = False
-        try:
-            await asyncio.to_thread(
-                self._consolidate_catalog_data, symbol, data_type, interval, consolidate_start, consolidate_end
-            )
-            consolidation_ok = True
-        except Exception as consolidation_exc:
-            logger.warning(
-                "Consolidation failed for %s %s; data is written but fragmented — "
-                "run /consolidate to retry later: %s",
-                symbol, data_type, consolidation_exc, exc_info=True,
-            )
-            try:
-                await _progress(
-                    93, f"整理失败（数据已落盘）: {consolidation_exc!s:.80s}",
-                )
-            except asyncio.CancelledError:
-                raise
-
-        # 5. Gap detection + auto-backfill
-        # Only safe after successful consolidation — file-boundary artifacts
-        # in fragmented data would produce false-positive gaps.
-        gap_ranges: list[tuple[date, date]] = []
-        if not consolidation_ok:
+        if defer_finalize:
             logger.info(
-                "Skipping gap detection for %s %s: consolidation failed, "
-                "fragmented files would cause false positives",
-                symbol, data_type,
+                "Deferring finalize for %s %s [%s..%s] until FetchBatch terminal state",
+                symbol,
+                data_type,
+                start,
+                end,
             )
         else:
-            try:
-                await _progress(93, "Checking for data gaps...")
-            except asyncio.CancelledError:
-                raise
-            gap_ranges = await asyncio.to_thread(
-                self._detect_gaps_for_backfill, symbol, data_type, interval
-            )
-        if data_type == "trades" and missing_slices:
-            filtered_gap_ranges: list[tuple[date, date]] = []
-            for gap_start, gap_end in gap_ranges:
-                for slice_start, slice_end in missing_slices:
-                    if gap_end < slice_start or gap_start > slice_end:
-                        continue
-                    filtered_gap_ranges.append((
-                        max(gap_start, slice_start),
-                        min(gap_end, slice_end),
-                    ))
-            gap_ranges = filtered_gap_ranges
-        if gap_ranges:
-            logger.info(
-                "Detected %d gap range(s) for %s %s, triggering backfill",
-                len(gap_ranges), symbol, data_type,
-            )
-            for gap_start, gap_end in gap_ranges:
-                gap_tasks = self.downloader.plan_downloads(
-                    data_type=data_type,
-                    symbol=symbol,
-                    asset_class=asset_class,
-                    start=gap_start,
-                    end=gap_end,
-                    interval=interval,
-                )
-                if not gap_tasks:
-                    continue
-                for task in gap_tasks:
-                    try:
-                        csv_path = await self.downloader.execute_task(task)
-                    except Exception as dl_exc:
-                        logger.warning(
-                            "Gap backfill download failed: %s", dl_exc,
-                        )
-                        continue
-                    if not csv_path:
-                        continue
-                    try:
-                        n, fps = await asyncio.to_thread(
-                            self._convert_one_file,
-                            csv_path, converter, instrument, kwargs,
-                            symbol, data_type, interval, True,
-                        )
-                        total_objects += n
-                        all_file_paths.extend(fps)
-                    except Exception as conv_exc:
-                        logger.warning(
-                            "Gap backfill convert failed: %s", conv_exc,
-                        )
-                    finally:
-                        self._cleanup_raw_file(csv_path)
-
-            # Re-consolidate after backfill writes (only affected range)
-            post_consolidation_ok = True
-            backfill_start = min(gs for gs, _ in gap_ranges)
-            backfill_end = max(ge for _, ge in gap_ranges)
+            # 4. Consolidate + Deduplicate + Organize by period
+            consolidate_start = start
+            consolidate_end = end
+            if data_type == "trades" and missing_slices:
+                consolidate_start = min(slice_start for slice_start, _ in missing_slices)
+                consolidate_end = max(slice_end for _, slice_end in missing_slices)
+            consolidation_ok = False
             try:
                 await asyncio.to_thread(
-                    self._consolidate_catalog_data, symbol, data_type, interval,
-                    backfill_start, backfill_end,
+                    self._consolidate_catalog_data, symbol, data_type, interval, consolidate_start, consolidate_end
                 )
-            except Exception:
-                post_consolidation_ok = False
-                logger.warning("Post-backfill consolidation failed", exc_info=True)
+                consolidation_ok = True
+            except Exception as consolidation_exc:
+                logger.warning(
+                    "Consolidation failed for %s %s; data is written but fragmented — "
+                    "run /consolidate to retry later: %s",
+                    symbol, data_type, consolidation_exc, exc_info=True,
+                )
+                try:
+                    await _progress(
+                        93, f"整理失败（数据已落盘）: {consolidation_exc!s:.80s}",
+                    )
+                except asyncio.CancelledError:
+                    raise
 
-            if post_consolidation_ok:
-                remaining_gaps = await asyncio.to_thread(
+            # 5. Gap detection + auto-backfill
+            # Only safe after successful consolidation — file-boundary artifacts
+            # in fragmented data would produce false-positive gaps.
+            gap_ranges: list[tuple[date, date]] = []
+            if not consolidation_ok:
+                logger.info(
+                    "Skipping gap detection for %s %s: consolidation failed, "
+                    "fragmented files would cause false positives",
+                    symbol, data_type,
+                )
+            else:
+                try:
+                    await _progress(93, "Checking for data gaps...")
+                except asyncio.CancelledError:
+                    raise
+                gap_ranges = await asyncio.to_thread(
                     self._detect_gaps_for_backfill, symbol, data_type, interval
                 )
-                if remaining_gaps:
-                    logger.warning(
-                        "%d gap(s) remain after backfill for %s %s (source data may be missing)",
-                        len(remaining_gaps), symbol, data_type,
+            if data_type == "trades" and missing_slices:
+                filtered_gap_ranges: list[tuple[date, date]] = []
+                for gap_start, gap_end in gap_ranges:
+                    for slice_start, slice_end in missing_slices:
+                        if gap_end < slice_start or gap_start > slice_end:
+                            continue
+                        filtered_gap_ranges.append((
+                            max(gap_start, slice_start),
+                            min(gap_end, slice_end),
+                        ))
+                gap_ranges = filtered_gap_ranges
+            if gap_ranges:
+                logger.info(
+                    "Detected %d gap range(s) for %s %s, triggering backfill",
+                    len(gap_ranges), symbol, data_type,
+                )
+                for gap_start, gap_end in gap_ranges:
+                    gap_tasks = self.downloader.plan_downloads(
+                        data_type=data_type,
+                        symbol=symbol,
+                        asset_class=asset_class,
+                        start=gap_start,
+                        end=gap_end,
+                        interval=interval,
                     )
+                    if not gap_tasks:
+                        continue
+                    for task in gap_tasks:
+                        try:
+                            csv_path = await self.downloader.execute_task(task)
+                        except Exception as dl_exc:
+                            logger.warning(
+                                "Gap backfill download failed: %s", dl_exc,
+                            )
+                            continue
+                        if not csv_path:
+                            continue
+                        try:
+                            n, fps = await asyncio.to_thread(
+                                self._convert_one_file,
+                                csv_path, converter, instrument, kwargs,
+                                symbol, data_type, interval, True,
+                            )
+                            total_objects += n
+                            all_file_paths.extend(fps)
+                        except Exception as conv_exc:
+                            logger.warning(
+                                "Gap backfill convert failed: %s", conv_exc,
+                            )
+                        finally:
+                            self._cleanup_raw_file(csv_path)
+
+                # Re-consolidate after backfill writes (only affected range)
+                post_consolidation_ok = True
+                backfill_start = min(gs for gs, _ in gap_ranges)
+                backfill_end = max(ge for _, ge in gap_ranges)
+                try:
+                    await asyncio.to_thread(
+                        self._consolidate_catalog_data, symbol, data_type, interval,
+                        backfill_start, backfill_end,
+                    )
+                except Exception:
+                    post_consolidation_ok = False
+                    logger.warning("Post-backfill consolidation failed", exc_info=True)
+
+                if post_consolidation_ok:
+                    remaining_gaps = await asyncio.to_thread(
+                        self._detect_gaps_for_backfill, symbol, data_type, interval
+                    )
+                    if remaining_gaps:
+                        logger.warning(
+                            "%d gap(s) remain after backfill for %s %s (source data may be missing)",
+                            len(remaining_gaps), symbol, data_type,
+                        )
 
         # 6. Update DB catalog
         try:
@@ -1093,6 +1106,89 @@ class BinanceVisionPipeline:
         data_cls, identifier = resolved
         catalog = _catalog_for_root(self.catalog_path, self._storage)
         consolidate_and_organize(catalog, data_cls, identifier, start=start, end=end)
+
+    def _covered_requested_slices(
+        self,
+        *,
+        symbol: str,
+        data_type: str,
+        interval: str | None,
+        requested_slices: list[tuple[date, date]],
+    ) -> list[tuple[date, date]]:
+        resolved = self._resolve_data_cls_and_identifier(symbol, data_type, interval)
+        if resolved is None or not requested_slices:
+            return []
+
+        from tinohelm.data.catalog import _catalog_for_root
+
+        data_cls, identifier = resolved
+        catalog = _catalog_for_root(self.catalog_path, self._storage)
+        intervals = catalog.get_intervals(data_cls, identifier)
+        closed_intervals = [
+            (interval_start, interval_end - 1)
+            for interval_start, interval_end in intervals
+            if interval_end > interval_start
+        ]
+        actual_slices = covered_date_slices_from_intervals(
+            start=min(slice_start for slice_start, _ in requested_slices),
+            end=max(slice_end for _, slice_end in requested_slices),
+            intervals=closed_intervals,
+        )
+        return intersect_date_slices(requested_slices, actual_slices)
+
+    async def finalize_batch(
+        self,
+        *,
+        jobs: list[Any],
+    ) -> None:
+        """Finalize a terminal FetchBatch using fragmented requested slices."""
+        groups: dict[tuple[str, str, str | None], list[Any]] = {}
+        for job in jobs:
+            key = (job.symbol, job.data_type, job.interval)
+            groups.setdefault(key, []).append(job)
+
+        for (symbol, data_type, interval), group_jobs in groups.items():
+            requested_slices = merge_date_slices([
+                (job.start_date, job.end_date)
+                for job in group_jobs
+                if getattr(job, "start_date", None) is not None and getattr(job, "end_date", None) is not None
+            ])
+            if not requested_slices:
+                continue
+
+            consolidate_slices = await asyncio.to_thread(
+                self._covered_requested_slices,
+                symbol=symbol,
+                data_type=data_type,
+                interval=interval,
+                requested_slices=requested_slices,
+            )
+            if not consolidate_slices:
+                continue
+
+            for slice_start, slice_end in consolidate_slices:
+                await asyncio.to_thread(
+                    self._consolidate_catalog_data,
+                    symbol,
+                    data_type,
+                    interval,
+                    slice_start,
+                    slice_end,
+                )
+
+            start = min(slice_start for slice_start, _ in requested_slices)
+            end = max(slice_end for _, slice_end in requested_slices)
+            await self._update_db_catalog(
+                symbol,
+                data_type,
+                interval,
+                start,
+                end,
+                record_count=None,
+                size_bytes=None,
+                source_type=data_type,
+                ingest_run_id=uuid4().hex,
+            )
 
     # ------------------------------------------------------------------
     # Helpers

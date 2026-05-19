@@ -909,6 +909,9 @@ class TestDataFetchJobJobApi:
             created_at=datetime(2026, 1, 1, 12, 0, 0),
             started_at=datetime(2026, 1, 1, 12, 3, 0),
             completed_at=None,
+            batch_finalize_started_at=datetime(2026, 1, 1, 12, 4, 0),
+            batch_finalized_at=datetime(2026, 1, 1, 12, 5, 0),
+            batch_finalize_error=None,
         )
         db = AsyncMock()
         result = MagicMock()
@@ -919,6 +922,9 @@ class TestDataFetchJobJobApi:
 
         assert payload["started_at"] == "2026-01-01T12:03:00Z"
         assert payload["completed_at"] is None
+        assert payload["batch_finalize_started_at"] == "2026-01-01T12:04:00Z"
+        assert payload["batch_finalized_at"] == "2026-01-01T12:05:00Z"
+        assert payload["batch_finalize_error"] is None
 
 
 class TestSourceAwareBarMaintenance:

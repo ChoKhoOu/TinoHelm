@@ -625,6 +625,7 @@ class TestRecoverInterruptedJobs:
             return 4  # Pretend 4 running rows flipped back to queued.
 
         monkeypatch.setattr(dw, "_flip_running_to_queued", _fake_flip)
+        monkeypatch.setattr(dw, "_reset_interrupted_batch_finalize", AsyncMock(return_value=0))
         monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=9))
         monkeypatch.setattr(dw, "get_session_factory", lambda: factory_marker)
         rds = AsyncMock()
@@ -637,6 +638,7 @@ class TestRecoverInterruptedJobs:
         """With queued rows still present, recovery must wake exactly ONE
         consumer — not one wake token per job (PRD #162 decision #20)."""
         monkeypatch.setattr(dw, "_flip_running_to_queued", AsyncMock(return_value=3))
+        monkeypatch.setattr(dw, "_reset_interrupted_batch_finalize", AsyncMock(return_value=0))
         monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=12))
         monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
 
@@ -650,6 +652,7 @@ class TestRecoverInterruptedJobs:
         """Empty DB ⇒ no wake token; the worker will wait on BRPOP until
         something new arrives, avoiding noise on clean restarts."""
         monkeypatch.setattr(dw, "_flip_running_to_queued", AsyncMock(return_value=0))
+        monkeypatch.setattr(dw, "_reset_interrupted_batch_finalize", AsyncMock(return_value=0))
         monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=0))
         monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
 
@@ -658,6 +661,18 @@ class TestRecoverInterruptedJobs:
 
         rds.lpush.assert_not_awaited()
 
+    async def test_resets_interrupted_batch_finalize_before_waking(self, monkeypatch):
+        monkeypatch.setattr(dw, "_flip_running_to_queued", AsyncMock(return_value=0))
+        reset = AsyncMock(return_value=2)
+        monkeypatch.setattr(dw, "_reset_interrupted_batch_finalize", reset)
+        monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=0))
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+
+        rds = AsyncMock()
+        await dw.recover_interrupted_jobs(rds)
+
+        reset.assert_awaited_once_with("factory")
+        rds.lpush.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

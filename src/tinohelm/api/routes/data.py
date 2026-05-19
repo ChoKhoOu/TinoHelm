@@ -366,6 +366,9 @@ async def list_data_fetch_jobs(
             "created_at": (j.created_at.isoformat() + "Z") if j.created_at else None,
             "started_at": (j.started_at.isoformat() + "Z") if j.started_at else None,
             "completed_at": (j.completed_at.isoformat() + "Z") if j.completed_at else None,
+            "batch_finalize_started_at": (j.batch_finalize_started_at.isoformat() + "Z") if j.batch_finalize_started_at else None,
+            "batch_finalized_at": (j.batch_finalized_at.isoformat() + "Z") if j.batch_finalized_at else None,
+            "batch_finalize_error": j.batch_finalize_error,
         }
         for j in rows
     ]
@@ -396,6 +399,9 @@ async def get_data_fetch_job(
         "created_at": (job.created_at.isoformat() + "Z") if job.created_at else None,
         "started_at": (job.started_at.isoformat() + "Z") if job.started_at else None,
         "completed_at": (job.completed_at.isoformat() + "Z") if job.completed_at else None,
+        "batch_finalize_started_at": (job.batch_finalize_started_at.isoformat() + "Z") if job.batch_finalize_started_at else None,
+        "batch_finalized_at": (job.batch_finalized_at.isoformat() + "Z") if job.batch_finalized_at else None,
+        "batch_finalize_error": job.batch_finalize_error,
     }
 
 

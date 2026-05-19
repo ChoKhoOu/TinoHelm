@@ -190,6 +190,89 @@ class TestDrainExecutesClaimedRows:
         assert events, "expected a tino:data:events publish on completion"
         assert events[-1]["type"] == "data.fetch.completed"
 
+    async def test_finalize_runs_once_after_batch_reaches_terminal_state(
+        self, factory, fake_redis, monkeypatch
+    ):
+        class _Stub:
+            def __init__(self, *a, **k):
+                pass
+
+            async def ingest(self, *, progress_cb, **kwargs):
+                await progress_cb(100, "done")
+                return SimpleNamespace(objects_count=1, partial=False, last_available_date=None)
+
+            async def finalize_batch(self, *, jobs):
+                return None
+
+        import tinohelm.data.pipeline as pkg_pipeline
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _Stub)
+
+        base = datetime(2026, 5, 6, 9, 0, 0)
+        await _seed(factory, [
+            _queued("AAAUSDT", date(2026, 1, 1), base, batch="batch-finalize"),
+            _queued("AAAUSDT", date(2026, 1, 2), base.replace(second=1), batch="batch-finalize"),
+        ])
+
+        n = await dw.drain_once(redis_url="redis://x", catalog_path="/cat")
+
+        assert n == 2
+        rows = await _all_rows(factory)
+        assert {row.status for row in rows} == {"completed"}
+        assert len({row.batch_finalized_at for row in rows}) == 1
+        assert rows[0].batch_finalized_at is not None
+
+    async def test_finalize_batch_if_ready_is_idempotent_after_success(
+        self, factory, fake_redis, monkeypatch
+    ):
+        finalized_calls: list[int] = []
+
+        class _Stub:
+            def __init__(self, *a, **k):
+                pass
+
+            async def finalize_batch(self, *, jobs):
+                finalized_calls.append(len(jobs))
+
+        import tinohelm.data.pipeline as pkg_pipeline
+
+        monkeypatch.setattr(pkg_pipeline, "BinanceVisionPipeline", _Stub)
+
+        finished_at = datetime(2026, 5, 6, 9, 0, 0)
+        rows = [
+            DataFetchJob(
+                job_id=str(uuid.uuid4()),
+                batch_id="batch-idem",
+                symbol="AAAUSDT",
+                data_type="klines",
+                interval="1m",
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 1, 1),
+                asset_class="um",
+                status="completed",
+                created_at=finished_at,
+                completed_at=finished_at,
+            ),
+            DataFetchJob(
+                job_id=str(uuid.uuid4()),
+                batch_id="batch-idem",
+                symbol="AAAUSDT",
+                data_type="klines",
+                interval="1m",
+                start_date=date(2026, 1, 2),
+                end_date=date(2026, 1, 2),
+                asset_class="um",
+                status="completed",
+                created_at=finished_at,
+                completed_at=finished_at,
+            ),
+        ]
+        await _seed(factory, rows)
+
+        assert await dw._finalize_batch_if_ready("batch-idem", redis_url="redis://x", catalog_path="/cat") is True
+        assert await dw._finalize_batch_if_ready("batch-idem", redis_url="redis://x", catalog_path="/cat") is False
+        assert finalized_calls == [2]
+
     async def test_round_robin_drain_reaches_terminal_for_all_rows(
         self, factory, fake_redis, stub_pipeline
     ):

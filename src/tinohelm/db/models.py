@@ -278,6 +278,9 @@ class DataFetchJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    batch_finalize_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    batch_finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    batch_finalize_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_data_fetch_jobs_status", "status"),
