@@ -279,6 +279,8 @@ def _batch_progress_value(job: DataFetchJob) -> int:
         return 0
     if job.status == "running":
         return job.progress
+    if job.status in {"cancelled", "failed"}:
+        return 0
     return 100
 
 
@@ -386,7 +388,7 @@ async def _load_batch_rows(
             ) == status
         )
     grouped_subq = grouped.subquery()
-    total = len((await db.execute(select(grouped_subq.c.batch_id))).scalars().all())
+    total = (await db.execute(select(func.count()).select_from(grouped_subq))).scalar_one()
     page_batch_ids = (
         await db.execute(
             select(grouped_subq.c.batch_id)

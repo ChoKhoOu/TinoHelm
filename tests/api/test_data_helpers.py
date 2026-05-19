@@ -921,7 +921,7 @@ class TestDataFetchBatchApi:
             ),
         ]
         total_result = MagicMock()
-        total_result.scalars.return_value.all.return_value = ["job-legacy", "batch-1"]
+        total_result.scalar_one.return_value = 2
         page_result = MagicMock()
         page_result.scalars.return_value.all.return_value = ["job-legacy", "batch-1"]
         rows_result = MagicMock()
@@ -985,7 +985,7 @@ class TestDataFetchBatchApi:
             ),
         ]
         total_result = MagicMock()
-        total_result.scalars.return_value.all.return_value = ["batch-2", "batch-1"]
+        total_result.scalar_one.return_value = 2
         page_result = MagicMock()
         page_result.scalars.return_value.all.return_value = ["batch-2"]
         rows_result = MagicMock()
@@ -1091,7 +1091,7 @@ class TestDataFetchBatchApi:
             ),
         ]
         total_result = MagicMock()
-        total_result.scalars.return_value.all.return_value = ["batch-a"]
+        total_result.scalar_one.return_value = 1
         page_result = MagicMock()
         page_result.scalars.return_value.all.return_value = ["batch-a"]
         rows_result = MagicMock()
@@ -1114,6 +1114,76 @@ class TestDataFetchBatchApi:
             "failed": 0,
             "cancelled": 0,
         }
+
+    def test_list_batches_progress_does_not_count_failed_or_cancelled_as_done(self):
+        import asyncio
+
+        db = AsyncMock()
+        rows = [
+            SimpleNamespace(
+                job_id="job-1",
+                batch_id="batch-c",
+                symbol="BTCUSDT-PERP",
+                data_type="klines",
+                interval="1m",
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 1, 1),
+                asset_class="um",
+                status="cancelled",
+                progress=0,
+                message=None,
+                error=None,
+                created_at=datetime(2026, 1, 3, 9, 0, 0),
+                started_at=None,
+                completed_at=None,
+            ),
+            SimpleNamespace(
+                job_id="job-2",
+                batch_id="batch-c",
+                symbol="BTCUSDT-PERP",
+                data_type="klines",
+                interval="1m",
+                start_date=date(2026, 1, 2),
+                end_date=date(2026, 1, 2),
+                asset_class="um",
+                status="failed",
+                progress=10,
+                message=None,
+                error="boom",
+                created_at=datetime(2026, 1, 3, 9, 1, 0),
+                started_at=None,
+                completed_at=datetime(2026, 1, 3, 9, 2, 0),
+            ),
+            SimpleNamespace(
+                job_id="job-3",
+                batch_id="batch-c",
+                symbol="BTCUSDT-PERP",
+                data_type="klines",
+                interval="1m",
+                start_date=date(2026, 1, 3),
+                end_date=date(2026, 1, 3),
+                asset_class="um",
+                status="completed",
+                progress=100,
+                message="done",
+                error=None,
+                created_at=datetime(2026, 1, 3, 9, 3, 0),
+                started_at=None,
+                completed_at=datetime(2026, 1, 3, 9, 4, 0),
+            ),
+        ]
+        total_result = MagicMock()
+        total_result.scalar_one.return_value = 1
+        page_result = MagicMock()
+        page_result.scalars.return_value.all.return_value = ["batch-c"]
+        rows_result = MagicMock()
+        rows_result.scalars.return_value.all.return_value = rows
+        db.execute = AsyncMock(side_effect=[total_result, page_result, rows_result])
+
+        payload = asyncio.run(list_data_fetch_batches(page=1, page_size=20, db=db))
+
+        assert payload["batches"][0]["progress"] == 33
+        assert payload["batches"][0]["status"] == "failed"
 
     def test_get_batch_returns_summary_and_jobs(self):
         import asyncio
