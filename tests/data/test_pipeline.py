@@ -1552,7 +1552,6 @@ class TestTradeTickCoverageShortCircuit:
                 return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
 
         class Converter:
-            
             def validate_schema(self, df):
                 return None
 
@@ -1585,7 +1584,7 @@ class TestTradeTickCoverageShortCircuit:
 
         assert result.skipped is False
         assert planned_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
-        assert consolidate_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
+        assert consolidate_ranges == []
 
     def test_ingest_trade_tick_multiple_missing_slices_plan_each_slice(self, monkeypatch: pytest.MonkeyPatch):
         planned_ranges: list[tuple[date, date]] = []
@@ -1621,7 +1620,6 @@ class TestTradeTickCoverageShortCircuit:
                 return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
 
         class Converter:
-            
             def validate_schema(self, df):
                 return None
 
@@ -1657,7 +1655,7 @@ class TestTradeTickCoverageShortCircuit:
             (date(2024, 1, 11), date(2024, 1, 11)),
             (date(2024, 1, 15), date(2024, 1, 15)),
         ]
-        assert consolidate_ranges == [(date(2024, 1, 11), date(2024, 1, 15))]
+        assert consolidate_ranges == []
 
     def test_ingest_trade_tick_does_not_backfill_gaps_outside_requested_missing_slices(self, monkeypatch: pytest.MonkeyPatch):
         planned_ranges: list[tuple[date, date]] = []
@@ -1724,7 +1722,7 @@ class TestTradeTickCoverageShortCircuit:
 
         assert planned_ranges == [(date(2024, 1, 11), date(2024, 1, 11))]
 
-    def test_ingest_trade_tick_backfill_clips_detected_gap_to_requested_missing_slice(self, monkeypatch: pytest.MonkeyPatch):
+    def test_ingest_trade_tick_does_not_backfill_detected_gaps(self, monkeypatch: pytest.MonkeyPatch):
         planned_ranges: list[tuple[date, date]] = []
 
         monkeypatch.setattr(
@@ -1756,7 +1754,6 @@ class TestTradeTickCoverageShortCircuit:
                 return _csv_payload(task.dest_path.name, b"1,65000,0.1,6500,1704931200000,true\n")
 
         class Converter:
-            
             def validate_schema(self, df):
                 return None
 
@@ -1788,7 +1785,6 @@ class TestTradeTickCoverageShortCircuit:
         ))
 
         assert planned_ranges == [
-            (date(2024, 1, 11), date(2024, 1, 11)),
             (date(2024, 1, 11), date(2024, 1, 11)),
         ]
 
@@ -2048,7 +2044,7 @@ class TestConsolidationFailureDoesNotBlockIngest:
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
         mock_dl.execute_task = AsyncMock(
-            return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"id,price,qty,quoteQty,time,isBuyerMaker\n")
+            return_value=_csv_payload("BTCUSDT-1m-2025-01-01.csv", b"open_time,open,high,low,close,volume,close_time\n")
         )
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
@@ -2075,13 +2071,15 @@ class TestConsolidationFailureDoesNotBlockIngest:
 
         result = asyncio.run(p.ingest(
             symbol="BTCUSDT-PERP",
-            data_type="trades",
+            data_type="klines",
+            interval="1m",
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
         ))
 
         assert result.objects_count == 100
         assert not result.skipped
+        p._consolidate_catalog_data.assert_called_once()
         p._update_db_catalog.assert_awaited_once()
 
     def test_consolidation_error_progress_shows_warning(self, tmp_path, monkeypatch):
@@ -2091,7 +2089,7 @@ class TestConsolidationFailureDoesNotBlockIngest:
         mock_dl.concurrency = 1
         mock_dl.plan_downloads.return_value = [task]
         mock_dl.execute_task = AsyncMock(
-            return_value=_csv_payload("BTCUSDT-trades-2025-01-01.csv", b"id,price,qty,quoteQty,time,isBuyerMaker\n")
+            return_value=_csv_payload("BTCUSDT-1m-2025-01-01.csv", b"open_time,open,high,low,close,volume,close_time\n")
         )
 
         p = BinanceVisionPipeline(catalog_path=tmp_path)
@@ -2123,13 +2121,13 @@ class TestConsolidationFailureDoesNotBlockIngest:
 
         result = asyncio.run(p.ingest(
             symbol="BTCUSDT-PERP",
-            data_type="trades",
+            data_type="klines",
+            interval="1m",
             start=date(2025, 1, 1),
             end=date(2025, 1, 1),
             progress_cb=_track_progress,
         ))
 
         assert result.objects_count == 100
-        # Should have a progress message indicating data is safe before consolidation
-        write_done_msgs = [m for _, m in progress_messages if "落盘" in m or "written" in m.lower()]
-        assert write_done_msgs, f"Expected a 'data written' progress stage, got: {progress_messages}"
+        warning_msgs = [m for _, m in progress_messages if "整理失败" in m]
+        assert warning_msgs, f"Expected a consolidation warning, got: {progress_messages}"

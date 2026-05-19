@@ -732,9 +732,8 @@ class BinanceVisionPipeline:
     ) -> tuple[int, list[str]]:
         """Process CSVs one at a time to bound memory usage.
 
-        For chunked converters: reads in chunks, converts, flushes periodically.
-        For non-chunked converters: reads one full CSV, converts, writes, moves on.
-        Deletes each CSV (and its ZIP) after processing to free disk space.
+        Reads each full CSV, converts it, writes the resulting NT objects,
+        then deletes the processed file to free disk space.
         """
         total_objects = 0
         all_file_paths: list[str] = []
