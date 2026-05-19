@@ -22,8 +22,6 @@ _COLUMN_NAMES = [
 class KlinesConverter:
     """Converts Binance Vision klines CSV (no header) to NT Bar objects."""
 
-    supports_chunked = False
-
     def validate_schema(self, df: pd.DataFrame) -> None:
         if len(df.columns) < 7:
             raise SchemaError(
@@ -66,5 +64,3 @@ class KlinesConverter:
         logger.debug("Converted %d klines rows to %d Bar objects", len(df), len(bars))
         return bars
 
-    def convert_chunk(self, chunk: pd.DataFrame, instrument: Any, **kwargs) -> list:
-        return self.convert(chunk, instrument, **kwargs)

@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 # (data_type) -> (supports_daily, supports_monthly)
 # ---------------------------------------------------------------------------
 DATA_TYPE_AVAILABILITY: dict[str, tuple[bool, bool]] = {
-    "trades":               (True,  True),
-    "bookTicker":           (True,  True),
+    "trades":               (True,  False),
+    "bookTicker":           (True,  False),
     "klines":               (True,  True),
     "indexPriceKlines":     (True,  True),
     "markPriceKlines":      (True,  True),

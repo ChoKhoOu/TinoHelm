@@ -124,33 +124,6 @@ def compute_stage_pct(
     return base + round(span * done / total)
 
 
-def compute_chunk_subprogress(
-    stage_done: int,
-    total_tasks: int,
-    chunks: int,
-    *,
-    base: int = DOWNLOAD_PROGRESS_BASE,
-    span: int = DOWNLOAD_PROGRESS_SPAN,
-) -> int:
-    """Interpolate intra-task progress between two adjacent stage percentages.
-
-    The pipeline reports task-level progress in equal slices of ``span`` (one
-    slice per task). Within a single task, large CSV files emit chunk
-    callbacks; this helper maps the chunk count to a sub-percentage that
-    stays *strictly below* the next task slice.
-
-    The interpolation uses ``chunks / (chunks + 2)`` so 1 chunk = 33% of the
-    sub-window, 4 chunks = 67%, never reaching 100%.
-    """
-    base_pct = compute_stage_pct(stage_done, total_tasks, base=base, span=span)
-    next_pct = compute_stage_pct(stage_done + 1, total_tasks, base=base, span=span)
-    if next_pct <= base_pct:
-        return base_pct
-    chunks = max(1, chunks)
-    sub = base_pct + round((next_pct - base_pct) * chunks / (chunks + 2))
-    return min(sub, next_pct - 1)
-
-
 # ---------------------------------------------------------------------------
 # UTC date-boundary conversions
 # ---------------------------------------------------------------------------

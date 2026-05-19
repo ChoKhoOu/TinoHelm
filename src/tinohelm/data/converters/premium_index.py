@@ -25,8 +25,6 @@ class PremiumIndexConverter:
     Same schema as klines (12 columns). Uses PriceType.LAST.
     """
 
-    supports_chunked = False
-
     def validate_schema(self, df: pd.DataFrame) -> None:
         if len(df.columns) < 7:
             raise SchemaError(
@@ -69,5 +67,3 @@ class PremiumIndexConverter:
         )
         return bars
 
-    def convert_chunk(self, chunk: pd.DataFrame, instrument: Any, **kwargs) -> list:
-        return self.convert(chunk, instrument, **kwargs)

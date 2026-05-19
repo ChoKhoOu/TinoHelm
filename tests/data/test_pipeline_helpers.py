@@ -18,7 +18,6 @@ from tinohelm.data.pipeline_helpers import (
     DOWNLOAD_PROGRESS_SPAN,
     INTERVAL_CONVENTION,
     WRITE_CATEGORY,
-    compute_chunk_subprogress,
     compute_stage_pct,
     csv_has_header,
     date_end_dt,
@@ -287,44 +286,6 @@ class TestComputeStagePct:
 
     def test_returns_int(self):
         assert isinstance(compute_stage_pct(3, 7), int)
-
-
-# ---------------------------------------------------------------------------
-# 8. compute_chunk_subprogress — interpolates between stage slices
-# ---------------------------------------------------------------------------
-
-class TestComputeChunkSubprogress:
-    def test_strictly_below_next_slice(self):
-        # 0/4 done → base = 5; next = 27
-        result = compute_chunk_subprogress(0, 4, 1)
-        assert 5 < result < 27
-
-    def test_more_chunks_get_closer_to_next_but_never_reach(self):
-        next_pct = compute_stage_pct(1, 4)  # 27
-        result = compute_chunk_subprogress(0, 4, 100)
-        assert result == next_pct - 1
-
-    def test_at_least_one_chunk_assumption(self):
-        with_zero = compute_chunk_subprogress(0, 4, 0)
-        with_one = compute_chunk_subprogress(0, 4, 1)
-        assert with_zero == with_one
-
-    def test_full_completion_no_room_to_interpolate(self):
-        result = compute_chunk_subprogress(4, 4, 10)
-        assert result == 95  # base of last slice == top of band
-
-    def test_total_zero_returns_base(self):
-        assert compute_chunk_subprogress(0, 0, 5) == 5
-
-    def test_monotonic_in_chunks(self):
-        results = [compute_chunk_subprogress(1, 5, c) for c in (1, 2, 5, 10, 50)]
-        assert results == sorted(results)
-
-    def test_interpolation_formula_pin(self):
-        # 0/2 done → base = 5; next = 50; sub-width = 45
-        assert compute_chunk_subprogress(0, 2, 1) == 20
-        assert compute_chunk_subprogress(0, 2, 2) == 27
-        assert compute_chunk_subprogress(0, 2, 4) == 35
 
 
 # ---------------------------------------------------------------------------

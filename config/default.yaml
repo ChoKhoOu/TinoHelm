@@ -27,8 +27,6 @@ data:
   download_concurrency: 4
   job_concurrency: 4
   convert_workers: 1
-  chunk_rows: 1000000
-  tick_chunk_rows: 2000000
   csv_queue_maxsize: 1
 
 backtest:

@@ -117,8 +117,6 @@ class TestSettingsDefaults:
         assert s.download_concurrency == 4
         assert s.job_concurrency == 4
         assert s.convert_workers == 1
-        assert s.chunk_rows == 1_000_000
-        assert s.tick_chunk_rows == 2_000_000
         assert s.csv_queue_maxsize == 1
 
     @pytest.mark.parametrize(
@@ -127,8 +125,6 @@ class TestSettingsDefaults:
             "download_concurrency",
             "job_concurrency",
             "convert_workers",
-            "chunk_rows",
-            "tick_chunk_rows",
             "csv_queue_maxsize",
         ],
     )
@@ -205,8 +201,6 @@ class TestLoadSettings:
         assert s.data.download_concurrency == 4
         assert s.data.job_concurrency == 4
         assert s.data.convert_workers == 1
-        assert s.data.chunk_rows == 1_000_000
-        assert s.data.tick_chunk_rows == 2_000_000
         assert s.data.csv_queue_maxsize == 1
 
     def test_user_yaml_overrides_default(self, tmp_path, monkeypatch, clean_env):

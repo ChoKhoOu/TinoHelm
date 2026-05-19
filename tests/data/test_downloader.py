@@ -96,14 +96,36 @@ class TestPlanDownloads:
         assert len(tasks) == 3  # Jan, Feb, Mar
 
     def test_daily_only_type(self, tmp_path):
-        """trades is daily+monthly but we can test daily path works."""
+        """trades uses daily packages only."""
         dl = _make_dl(tmp_path)
         tasks = dl.plan_downloads(
             "trades", "BTCUSDT-PERP", "um",
             date(2025, 1, 1), date(2025, 1, 5),
         )
-        daily_tasks = [t for t in tasks if t.granularity == "daily"]
-        assert len(daily_tasks) == 5
+        assert all(t.granularity == "daily" for t in tasks)
+        assert len(tasks) == 5
+
+    def test_trades_never_uses_monthly_packages(self, tmp_path):
+        dl = _make_dl(tmp_path)
+        tasks = dl.plan_downloads(
+            "trades", "BTCUSDT-PERP", "um",
+            date(2025, 1, 15), date(2025, 4, 10),
+        )
+
+        assert all(t.granularity == "daily" for t in tasks)
+        assert not any("/monthly/" in t.url for t in tasks)
+        assert len(tasks) == 86
+
+    def test_bookticker_never_uses_monthly_packages(self, tmp_path):
+        dl = _make_dl(tmp_path)
+        tasks = dl.plan_downloads(
+            "bookTicker", "BTCUSDT-PERP", "um",
+            date(2025, 1, 15), date(2025, 4, 10),
+        )
+
+        assert all(t.granularity == "daily" for t in tasks)
+        assert not any("/monthly/" in t.url for t in tasks)
+        assert len(tasks) == 86
 
     def test_single_day_range(self, tmp_path):
         """Single day → exactly 1 daily task."""
