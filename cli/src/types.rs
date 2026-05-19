@@ -187,6 +187,86 @@ pub struct DataCompactRequest {
     pub data_type: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DataBatchCounts {
+    pub jobs: u64,
+    pub queued: u64,
+    pub running: u64,
+    pub completed: u64,
+    pub partial_completed: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DataBatchItem {
+    pub batch_id: String,
+    pub data_type: String,
+    pub asset_class: String,
+    pub symbols: Vec<String>,
+    pub intervals: Vec<String>,
+    pub start_date: String,
+    pub end_date: String,
+    pub status: String,
+    pub progress: u64,
+    pub counts: DataBatchCounts,
+    pub created_at: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DataBatchJobItem {
+    pub job_id: String,
+    pub symbol: String,
+    pub data_type: String,
+    pub interval: Option<String>,
+    pub start_date: String,
+    pub end_date: String,
+    pub status: String,
+    pub progress: u64,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    pub created_at: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DataBatchDetail {
+    pub batch_id: String,
+    pub data_type: String,
+    pub asset_class: String,
+    pub symbols: Vec<String>,
+    pub intervals: Vec<String>,
+    pub start_date: String,
+    pub end_date: String,
+    pub status: String,
+    pub progress: u64,
+    pub counts: DataBatchCounts,
+    pub created_at: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub jobs: Vec<DataBatchJobItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DataBatchList {
+    pub batches: Vec<DataBatchItem>,
+    pub total: u64,
+    pub page: u64,
+    pub page_size: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DataBatchCancelResponse {
+    pub batch_id: String,
+    pub status: String,
+    pub cancelled_jobs: u64,
+    pub running_jobs: u64,
+    pub finished_jobs: u64,
+}
+
 // ---- Trading (positions & fills) ----
 
 #[allow(dead_code)]

@@ -4,7 +4,7 @@ use clap::Subcommand;
 use crate::api::ApiClient;
 use crate::cli::style::*;
 use crate::output::{print_json, OutputFormat};
-use crate::types::{DataCompactRequest, DataFetchBatchRequest, DataFetchRequest};
+use crate::types::{DataBatchItem, DataCompactRequest, DataFetchBatchRequest, DataFetchRequest};
 
 #[derive(Subcommand)]
 pub enum DataCmd {
@@ -79,10 +79,10 @@ pub enum DataCmd {
     Symbols,
     /// List available data types
     Types,
-    /// List data fetch jobs
-    Jobs {
+    /// Batch fetch status
+    Batch {
         #[command(subcommand)]
-        command: JobsCmd,
+        command: BatchCmd,
     },
     /// Delete data for a symbol/interval range
     #[command(name = "delete-range")]
@@ -112,13 +112,20 @@ pub enum DataCmd {
 }
 
 #[derive(Subcommand)]
-pub enum JobsCmd {
-    /// List active/recent fetch jobs
-    List,
-    /// Get status of a specific job
-    Get { job_id: String },
-    /// Cancel a running job
-    Cancel { job_id: String },
+pub enum BatchCmd {
+    /// List active/recent batches
+    List {
+        /// Filter by aggregated batch status
+        #[arg(long)]
+        status: Option<String>,
+        /// Page size for API paging
+        #[arg(long = "page-size", default_value_t = 200)]
+        page_size: u64,
+    },
+    /// Get status of a specific batch
+    Get { batch_id: String },
+    /// Cancel a batch
+    Cancel { batch_id: String },
 }
 
 fn is_bar_data_type(data_type: &str) -> bool {
@@ -190,6 +197,7 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
                 OutputFormat::Text => {
                     header("Batch Data Fetch Submitted");
                     divider(50);
+                    kv("Batch", result["batch_id"].as_str().unwrap_or("-"), 12);
                     kv("Symbols", &symbols.join(", "), 12);
                     kv("Period", &format!("{} ~ {}", start, end), 12);
                     println!();
@@ -324,7 +332,7 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
                 }
             }
         }
-        DataCmd::Jobs { command } => dispatch_jobs(command, client, format).await,
+        DataCmd::Batch { command } => dispatch_batch(command, client, format).await,
         DataCmd::DeleteRange {
             symbol,
             interval,
@@ -388,42 +396,86 @@ pub async fn dispatch(cmd: DataCmd, client: &ApiClient, format: OutputFormat) ->
     }
 }
 
-async fn dispatch_jobs(cmd: JobsCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
+async fn dispatch_batch(cmd: BatchCmd, client: &ApiClient, format: OutputFormat) -> Result<()> {
     match cmd {
-        JobsCmd::List => {
-            let resp = client
-                .request_json(reqwest::Method::GET, "/api/data/jobs", &[], None, &[])
-                .await?;
+        BatchCmd::List { status, page_size } => {
+            let mut page = 1;
+            let mut batches: Vec<DataBatchItem> = Vec::new();
+            loop {
+                let resp = client
+                    .list_data_batches(status.as_deref(), page, page_size)
+                    .await?;
+                let page_len = resp.batches.len() as u64;
+                batches.extend(resp.batches);
+                if batches.len() as u64 >= resp.total || page_len == 0 || page_len < page_size {
+                    break;
+                }
+                page += 1;
+            }
             match format {
-                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Json => print_json(&batches),
                 OutputFormat::Text => {
-                    println!("  {}", serde_json::to_string_pretty(&resp.body)?);
+                    if batches.is_empty() {
+                        println!("  No batches.");
+                        return Ok(());
+                    }
+                    let t = Table::new(&[
+                        ("Batch", 12, "left"),
+                        ("Type", 10, "left"),
+                        ("Syms", 8, "left"),
+                        ("Ivl", 10, "left"),
+                        ("Jobs", 6, "right"),
+                        ("Status", 16, "left"),
+                        ("Progress", 9, "right"),
+                        ("Created", 12, "left"),
+                    ]);
+                    t.header();
+                    for batch in &batches {
+                        let syms = if batch.symbols.len() <= 2 {
+                            batch.symbols.join(",")
+                        } else {
+                            format!("{}+{}", batch.symbols[0], batch.symbols.len() - 1)
+                        };
+                        let ivls = if batch.intervals.is_empty() {
+                            "-".to_string()
+                        } else {
+                            batch.intervals.join(",")
+                        };
+                        t.row(&[
+                            &accent(&batch.batch_id.chars().take(8).collect::<String>()),
+                            &batch.data_type,
+                            &syms,
+                            &ivls,
+                            &batch.counts.jobs.to_string(),
+                            &color_status(&batch.status),
+                            &format!("{}%", batch.progress),
+                            batch.created_at.as_deref().unwrap_or("-"),
+                        ]);
+                    }
+                    t.footer();
                     Ok(())
                 }
             }
         }
-        JobsCmd::Get { job_id } => {
-            let path = format!("/api/data/jobs/{}", job_id);
-            let resp = client
-                .request_json(reqwest::Method::GET, &path, &[], None, &[])
-                .await?;
+        BatchCmd::Get { batch_id } => {
+            let resp = client.get_data_batch(&batch_id).await?;
             match format {
-                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Json => print_json(&resp),
                 OutputFormat::Text => {
-                    println!("  {}", serde_json::to_string_pretty(&resp.body)?);
+                    println!("  {}", serde_json::to_string_pretty(&resp)?);
                     Ok(())
                 }
             }
         }
-        JobsCmd::Cancel { job_id } => {
-            let path = format!("/api/data/jobs/{}/cancel", job_id);
-            let resp = client
-                .request_json(reqwest::Method::POST, &path, &[], None, &[])
-                .await?;
+        BatchCmd::Cancel { batch_id } => {
+            let resp = client.cancel_data_batch(&batch_id).await?;
             match format {
-                OutputFormat::Json => print_json(&resp.body),
+                OutputFormat::Json => print_json(&resp),
                 OutputFormat::Text => {
-                    println!("  Job {} cancelled.", job_id);
+                    println!(
+                        "  Batch {} cancellation requested (cancelled {}, running {}, finished {}).",
+                        batch_id, resp.cancelled_jobs, resp.running_jobs, resp.finished_jobs
+                    );
                     Ok(())
                 }
             }

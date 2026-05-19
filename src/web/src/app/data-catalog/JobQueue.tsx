@@ -5,20 +5,37 @@ import { apiGet } from "@/lib/api";
 import { useWsEvent } from "@/providers/WebSocketProvider";
 import { SectionLabel, StatusBadge } from "@/components/qds";
 
-interface DataFetchJob {
-  job_id: string;
-  symbol: string;
+interface DataFetchBatchCounts {
+  jobs: number;
+  queued: number;
+  running: number;
+  completed: number;
+  partial_completed: number;
+  failed: number;
+  cancelled: number;
+}
+
+interface DataFetchBatch {
+  batch_id: string;
   data_type: string;
-  interval: string | null;
+  asset_class: string;
+  symbols: string[];
+  intervals: string[];
   start_date: string;
   end_date: string;
   status: string;
   progress: number;
-  message: string | null;
-  error: string | null;
+  counts: DataFetchBatchCounts;
   created_at: string | null;
   started_at: string | null;
   completed_at: string | null;
+}
+
+interface DataFetchBatchListResponse {
+  batches: DataFetchBatch[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 interface DataFetchProgressPayload {
@@ -57,24 +74,28 @@ interface JobQueueProps {
 }
 
 export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
-  const [jobs, setJobs] = useState<DataFetchJob[]>([]);
+  const [batches, setBatches] = useState<DataFetchBatch[]>([]);
   const prevActiveRef = useRef<Set<string>>(new Set());
   const onJobCompleteRef = useRef(onJobComplete);
+  const progressRefreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   onJobCompleteRef.current = onJobComplete;
 
   const load = useCallback(async () => {
-    const data = await apiGet<DataFetchJob[]>("/api/data/jobs");
-    if (data) setJobs(data);
+    const data = await apiGet<DataFetchBatchListResponse>("/api/data/batches", {
+      page: "1",
+      page_size: "100",
+    });
+    if (data) setBatches(data.batches);
   }, []);
 
   useEffect(() => { load(); }, [load, refreshTrigger]);
 
   // Poll: 3s when active jobs, 15s otherwise
   useEffect(() => {
-    const hasActive = jobs.some((j) => j.status === "running" || j.status === "queued");
+    const hasActive = batches.some((b: DataFetchBatch) => b.status === "running" || b.status === "queued");
     const id = setInterval(load, hasActive ? 3000 : 15000);
     return () => clearInterval(id);
-  }, [jobs, load]);
+  }, [batches, load]);
 
   // Real-time progress via WebSocket
   const progressMsg = useWsEvent("data.fetch.progress");
@@ -85,32 +106,37 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
     const jobId = p.job_id;
     const pct = p.progress;
     if (!jobId || pct == null) return;
-    setJobs((prev) =>
-      prev.map((j) =>
-        j.job_id === jobId
-          ? { ...j, progress: pct, message: p.message ?? j.message, status: "running" }
-          : j,
-      ),
-    );
-  }, [progressMsg]);
+    if (progressRefreshTimeoutRef.current) {
+      clearTimeout(progressRefreshTimeoutRef.current);
+    }
+    progressRefreshTimeoutRef.current = setTimeout(() => {
+      void load();
+      progressRefreshTimeoutRef.current = null;
+    }, 300);
+  }, [load, progressMsg]);
 
   // Detect job completions and notify parent
   useEffect(() => {
     const currentActive = new Set(
-      jobs.filter((j) => j.status === "running" || j.status === "queued").map((j) => j.job_id),
+      batches.filter((b: DataFetchBatch) => b.status === "running" || b.status === "queued").map((b: DataFetchBatch) => b.batch_id),
     );
     const prev = prevActiveRef.current;
-    // If a previously active job is no longer active, it completed/failed
     if (prev.size > 0 && currentActive.size < prev.size) {
       const finished = [...prev].some((id) => !currentActive.has(id));
       if (finished) onJobCompleteRef.current?.();
     }
     prevActiveRef.current = currentActive;
-  }, [jobs]);
+    return () => {
+      if (progressRefreshTimeoutRef.current) {
+        clearTimeout(progressRefreshTimeoutRef.current);
+        progressRefreshTimeoutRef.current = null;
+      }
+    };
+  }, [batches]);
 
   const isActive = (s: string) => s === "running" || s === "queued";
-  const active = jobs.filter((j) => isActive(j.status));
-  const recent = jobs.filter((j) => !isActive(j.status)).slice(0, 10);
+  const active = batches.filter((b: DataFetchBatch) => isActive(b.status));
+  const recent = batches.filter((b: DataFetchBatch) => !isActive(b.status)).slice(0, 10);
   const sorted = [...active, ...recent];
 
   return (
@@ -134,8 +160,8 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
             <div className="text-[.75rem] text-muted-foreground">暂无拉取任务</div>
           </div>
         ) : (
-          sorted.map((job) => (
-            <JobRow key={job.job_id} job={job} />
+          sorted.map((batch) => (
+            <JobRow key={batch.batch_id} batch={batch} />
           ))
         )}
       </div>
@@ -143,37 +169,31 @@ export function JobQueue({ refreshTrigger, onJobComplete }: JobQueueProps) {
   );
 }
 
-function JobRow({ job }: { job: DataFetchJob }) {
-  const isRunning = job.status === "running";
-  const intervalLabel =
-    job.interval && job.interval !== "tick" && job.interval !== "—"
-      ? ` · ${job.interval}`
-      : "";
-  const isTerminal = job.status === "completed" || job.status === "partial_completed" || job.status === "failed";
-  const timeStr = isTerminal
-    ? timeAgo(job.completed_at)
-    : timeAgo(job.created_at);
+function JobRow({ batch }: { batch: DataFetchBatch }) {
+  const isRunning = batch.status === "running";
+  const intervalLabel = batch.intervals.length > 0 ? ` · ${batch.intervals.join(", ")}` : "";
+  const isTerminal = batch.status === "completed" || batch.status === "partial_completed" || batch.status === "failed";
+  const timeStr = isTerminal ? timeAgo(batch.completed_at) : timeAgo(batch.created_at);
+  const symbolLabel = batch.symbols.length <= 2 ? batch.symbols.join(", ") : `${batch.symbols[0]} +${batch.symbols.length - 1}`;
+  const message = `${batch.counts.jobs} job${batch.counts.jobs > 1 ? "s" : ""}`;
 
   return (
     <div
       className="grid border-b border-border last:border-b-0 hover:bg-secondary transition-colors duration-150"
       style={{ gridTemplateColumns: "3px 1fr 14rem 4.5rem" }}
     >
-      {/* 3px accent bar */}
       <div
         className="w-[3px] self-stretch rounded-l-sm"
-        style={{ background: accentColor(job.status) }}
+        style={{ background: accentColor(batch.status) }}
       />
 
-      {/* Symbol + meta */}
       <div className="py-[.65rem] px-[.85rem]">
-        <div className="font-mono text-[.78rem] font-semibold">{job.symbol}</div>
+        <div className="font-mono text-[.78rem] font-semibold">{symbolLabel}</div>
         <div className="text-[.68rem] text-muted-foreground mt-[.1rem]">
-          {job.data_type}{intervalLabel} · {job.start_date} → {job.end_date}
+          {batch.data_type}{intervalLabel} · {batch.start_date} → {batch.end_date}
         </div>
       </div>
 
-      {/* Status */}
       <div className="py-[.65rem] px-[.5rem] text-right">
         {isRunning ? (
           <>
@@ -181,36 +201,35 @@ function JobRow({ job }: { job: DataFetchJob }) {
               <div className="w-20 h-1 bg-secondary rounded-sm overflow-hidden relative">
                 <div
                   className="h-full rounded-sm transition-[width] duration-1000 ease-out"
-                  style={{ width: `${job.progress}%`, background: "var(--acc)" }}
+                  style={{ width: `${batch.progress}%`, background: "var(--acc)" }}
                 />
               </div>
-              <span style={{ color: "var(--acc)" }}>{job.progress}%</span>
+              <span style={{ color: "var(--acc)" }}>{batch.progress}%</span>
             </div>
-            <div className="text-[.62rem] text-muted-foreground max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{job.message || "处理中..."}</div>
+            <div className="text-[.62rem] text-muted-foreground max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{message}</div>
           </>
-        ) : job.status === "queued" ? (
+        ) : batch.status === "queued" ? (
           <StatusBadge status="queued" />
-        ) : job.status === "completed" ? (
+        ) : batch.status === "completed" ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
             <StatusBadge status="done">✓ 完成</StatusBadge>
-            {job.message && <div className="text-[.62rem] text-muted-foreground max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{job.message}</div>}
+            <div className="text-[.62rem] text-muted-foreground max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{message}</div>
           </div>
-        ) : job.status === "partial_completed" ? (
+        ) : batch.status === "partial_completed" ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
             <StatusBadge status="warning">◐ 部分完成</StatusBadge>
-            {job.message && <div className="text-[.62rem] text-qds-warning max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{job.message}</div>}
+            <div className="text-[.62rem] text-qds-warning max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{message}</div>
           </div>
-        ) : job.status === "failed" ? (
+        ) : batch.status === "failed" ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
             <StatusBadge status="failed">✕ 失败</StatusBadge>
-            {(job.error || job.message) && <div className="text-[.62rem] text-destructive max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{job.error || job.message}</div>}
+            <div className="text-[.62rem] text-destructive max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap">{message}</div>
           </div>
         ) : (
           <StatusBadge status="cancelled" />
         )}
       </div>
 
-      {/* Time */}
       <div className="py-[.65rem] pl-[.25rem] pr-[.85rem] font-mono text-[.65rem] text-qds-t3 text-right whitespace-nowrap">{timeStr}</div>
     </div>
   );
