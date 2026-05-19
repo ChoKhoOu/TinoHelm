@@ -52,7 +52,8 @@ def build_cache_config(
         "type": "redis",
         "host": redis_host,
         "port": redis_port,
-        "timeout": 2,
+        "connection_timeout": 2,
+        "response_timeout": 2,
     }
     if redis_password:
         db_kwargs["password"] = redis_password

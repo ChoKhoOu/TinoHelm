@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 
 class TestResolveStrategiesDir:
     """resolve_strategies_dir resolution order."""
