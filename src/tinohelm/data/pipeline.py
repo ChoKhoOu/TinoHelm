@@ -23,6 +23,7 @@ from uuid import uuid4
 
 import pandas as pd
 
+from tinohelm.data.convert_write_gate import hold_convert_write_gate
 from tinohelm.data.converters import get_converter
 from tinohelm.data.coverage import plan_catalog_missing_slices
 from tinohelm.data.downloader import VisionCsvPayload, VisionDownloader, VisionZipCsvPayload, _KLINES_TYPES
@@ -346,7 +347,6 @@ class BinanceVisionPipeline:
         async def _convert_consumer():
             nonlocal convert_done, total_objects
             schema_validated = False
-            loop = asyncio.get_running_loop()
             while True:
                 csv_path = await csv_queue.get()
                 if csv_path is None:
@@ -358,21 +358,11 @@ class BinanceVisionPipeline:
                     done_event = threading.Event()
                     result_box: dict[str, Any] = {}
 
-                    def _run_convert_one_file():
-                        try:
-                            result = self._convert_one_file(
-                                csv_path, converter, instrument, kwargs,
-                                symbol, data_type, interval, schema_validated,
-                            )
-                            result_box["result"] = result
-                            return result
-                        except BaseException as exc:
-                            result_box["exception"] = exc
-                            raise
-                        finally:
-                            done_event.set()
-
-                    convert_future = loop.run_in_executor(None, _run_convert_one_file)
+                    convert_future = asyncio.create_task(self._convert_one_file_async(
+                        csv_path, converter, instrument, kwargs,
+                        symbol, data_type, interval, schema_validated,
+                        done_event=done_event, result_box=result_box,
+                    ))
                     pending_convert_futures.add(convert_future)
                     pending_convert_names[convert_future] = csv_name
                     pending_convert_events[convert_future] = done_event
@@ -550,8 +540,7 @@ class BinanceVisionPipeline:
                         if not csv_path:
                             continue
                         try:
-                            n, fps = await asyncio.to_thread(
-                                self._convert_one_file,
+                            n, fps = await self._convert_one_file_async(
                                 csv_path, converter, instrument, kwargs,
                                 symbol, data_type, interval, True,
                             )
@@ -707,6 +696,42 @@ class BinanceVisionPipeline:
         else:
             first = str(first_raw)
         return 0 if csv_has_header(first) else None
+
+    async def _convert_one_file_async(
+        self,
+        csv_path: CsvSource,
+        converter,
+        instrument,
+        kwargs,
+        symbol,
+        data_type,
+        interval,
+        schema_validated,
+        *,
+        done_event=None,
+        result_box: dict[str, Any] | None = None,
+    ) -> tuple[int, list[str]]:
+        loop = asyncio.get_running_loop()
+
+        def _run_convert_one_file():
+            try:
+                with hold_convert_write_gate():
+                    result = self._convert_one_file(
+                        csv_path, converter, instrument, kwargs,
+                        symbol, data_type, interval, schema_validated,
+                    )
+                if result_box is not None:
+                    result_box["result"] = result
+                return result
+            except BaseException as exc:
+                if result_box is not None:
+                    result_box["exception"] = exc
+                raise
+            finally:
+                if done_event is not None:
+                    done_event.set()
+
+        return await loop.run_in_executor(None, _run_convert_one_file)
 
     def _convert_one_file(
         self, csv_path: CsvSource, converter, instrument, kwargs,

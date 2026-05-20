@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -602,6 +602,50 @@ class TestDrainOnce:
         await asyncio.sleep(0)
 
         assert scheduled == [], "multi-consumer mode must not self-wake"
+
+    async def test_multiple_consumers_can_enter_pipeline_concurrently(self, monkeypatch):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        max_active = 0
+        lock = asyncio.Lock()
+
+        jobs = [
+            SimpleNamespace(job_id="job-1", symbol="BTC", data_type="trades", interval=None),
+            SimpleNamespace(job_id="job-2", symbol="ETH", data_type="trades", interval=None),
+        ]
+
+        async def fake_claim(_factory):
+            if jobs:
+                return jobs.pop(0)
+            return None
+
+        async def fake_process(job, redis_url: str, catalog_path: str) -> bool:
+            nonlocal active, max_active
+            async with lock:
+                active += 1
+                max_active = max(max_active, active)
+                if active == 2:
+                    started.set()
+            await release.wait()
+            async with lock:
+                active -= 1
+            return True
+
+        monkeypatch.setattr(dw, "claim_next_queued_job", fake_claim)
+        monkeypatch.setattr(dw, "_process_claimed_job", fake_process)
+        monkeypatch.setattr(dw, "get_session_factory", lambda: "factory")
+        monkeypatch.setattr(dw, "get_settings", lambda: SimpleNamespace(data=SimpleNamespace(job_concurrency=2)))
+
+        task1 = asyncio.create_task(dw.drain_once(redis_url="redis://x", catalog_path="/cat"))
+        task2 = asyncio.create_task(dw.drain_once(redis_url="redis://x", catalog_path="/cat"))
+
+        await asyncio.wait_for(started.wait(), timeout=1)
+        release.set()
+        processed = await asyncio.gather(task1, task2)
+
+        assert sorted(processed) == [1, 1]
+        assert max_active == 2, "worker-level concurrency must remain available; convert/write gate must not serialize at worker entry"
 
 
 # ---------------------------------------------------------------------------

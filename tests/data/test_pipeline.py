@@ -396,6 +396,235 @@ class TestBoundedCsvConversion:
         p._update_db_catalog.assert_not_awaited()
 
 
+class TestGlobalConvertWriteGate:
+    @pytest.mark.asyncio
+    async def test_two_ingests_can_download_in_parallel_but_serialize_convert_write(self, tmp_path: Path, monkeypatch):
+        btc_task = SimpleNamespace(
+            url="memory://btc",
+            granularity="daily",
+            dest_path=Path("BTCUSDT-trades-2025-01-01.csv"),
+        )
+        eth_task = SimpleNamespace(
+            url="memory://eth",
+            granularity="daily",
+            dest_path=Path("ETHUSDT-trades-2025-01-01.csv"),
+        )
+        btc_downloaded = asyncio.Event()
+        eth_downloaded = asyncio.Event()
+        first_convert_entered = threading.Event()
+        second_convert_entered = threading.Event()
+        release_first_convert = threading.Event()
+        active_lock = threading.Lock()
+        active_converts = 0
+        max_active_converts = 0
+
+        class Downloader:
+            concurrency = 1
+
+            def __init__(self, task, payload, downloaded_event: asyncio.Event):
+                self._task = task
+                self._payload = payload
+                self._downloaded_event = downloaded_event
+
+            def plan_downloads(self, **_kwargs):
+                return [self._task]
+
+            async def execute_task(self, _task):
+                self._downloaded_event.set()
+                return self._payload
+
+        class Converter:
+            def validate_schema(self, df):
+                return None
+
+            def convert(self, df, instrument, **kwargs):
+                nonlocal active_converts, max_active_converts
+                with active_lock:
+                    active_converts += 1
+                    max_active_converts = max(max_active_converts, active_converts)
+                    is_first = active_converts == 1 and not first_convert_entered.is_set()
+                if is_first:
+                    first_convert_entered.set()
+                    release_first_convert.wait(timeout=5)
+                else:
+                    second_convert_entered.set()
+                with active_lock:
+                    active_converts -= 1
+                return [SimpleNamespace(ts_init=1)]
+
+        converter = Converter()
+        btc_pipeline = BinanceVisionPipeline(catalog_path=tmp_path / "btc")
+        btc_pipeline.downloader = Downloader(
+            btc_task,
+            _csv_payload("BTCUSDT-trades-2025-01-01.csv", b"1,65000,0.1,6500,1704067200000,true\n"),
+            btc_downloaded,
+        )
+        eth_pipeline = BinanceVisionPipeline(catalog_path=tmp_path / "eth")
+        eth_pipeline.downloader = Downloader(
+            eth_task,
+            _csv_payload("ETHUSDT-trades-2025-01-01.csv", b"1,3500,0.2,700,1704067200000,false\n"),
+            eth_downloaded,
+        )
+
+        for pipeline in (btc_pipeline, eth_pipeline):
+            pipeline._convert_workers = 1
+            monkeypatch.setattr(pipeline, "_get_instrument", lambda _symbol: object())
+            monkeypatch.setattr(pipeline, "_build_converter_kwargs", lambda *_args: {})
+            monkeypatch.setattr(pipeline, "_write_objects", MagicMock(return_value=["memory://catalog/day.parquet"]))
+            monkeypatch.setattr(pipeline, "_consolidate_catalog_data", MagicMock())
+            monkeypatch.setattr(pipeline, "_detect_gaps_for_backfill", MagicMock(return_value=[]))
+            monkeypatch.setattr(pipeline, "_catalog_storage_stats", MagicMock(return_value=(1, 1)))
+            pipeline._update_db_catalog = AsyncMock()
+
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: converter)
+        monkeypatch.setattr(
+            "tinohelm.data.pipeline.plan_catalog_missing_slices",
+            lambda **_kwargs: [(date(2025, 1, 1), date(2025, 1, 1))],
+        )
+
+        btc_ingest = asyncio.create_task(btc_pipeline.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="trades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        ))
+        eth_ingest = asyncio.create_task(eth_pipeline.ingest(
+            symbol="ETHUSDT-PERP",
+            data_type="trades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        ))
+
+        await asyncio.wait_for(asyncio.to_thread(first_convert_entered.wait), timeout=5)
+        await asyncio.wait_for(
+            asyncio.gather(btc_downloaded.wait(), eth_downloaded.wait()),
+            timeout=1,
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.to_thread(second_convert_entered.wait), timeout=0.2)
+
+        release_first_convert.set()
+        btc_result, eth_result = await asyncio.gather(btc_ingest, eth_ingest)
+
+        assert btc_result.objects_count == 1
+        assert eth_result.objects_count == 1
+        assert max_active_converts == 1
+
+    @pytest.mark.asyncio
+    async def test_gap_backfill_shares_same_global_convert_write_gate(self, tmp_path: Path, monkeypatch):
+        main_task = SimpleNamespace(
+            url="memory://main",
+            granularity="daily",
+            dest_path=Path("BTCUSDT-1m-2025-01-01.csv"),
+        )
+        gap_task = SimpleNamespace(
+            url="memory://gap",
+            granularity="daily",
+            dest_path=Path("BTCUSDT-1m-2025-01-02.csv"),
+        )
+        other_task = SimpleNamespace(
+            url="memory://other",
+            granularity="daily",
+            dest_path=Path("ETHUSDT-trades-2025-01-01.csv"),
+        )
+        backfill_entered = threading.Event()
+        release_backfill = threading.Event()
+        other_downloaded = asyncio.Event()
+        other_convert_entered = threading.Event()
+        main_convert_calls = 0
+
+        class MainDownloader:
+            concurrency = 1
+
+            def plan_downloads(self, **kwargs):
+                if kwargs["start"] == date(2025, 1, 2):
+                    return [gap_task]
+                return [main_task]
+
+            async def execute_task(self, _task):
+                return _csv_payload("BTCUSDT-1m.csv", b"1,2\n")
+
+        class OtherDownloader:
+            concurrency = 1
+
+            def plan_downloads(self, **_kwargs):
+                return [other_task]
+
+            async def execute_task(self, _task):
+                other_downloaded.set()
+                return _csv_payload("ETHUSDT-trades.csv", b"1,2\n")
+
+        main_pipeline = BinanceVisionPipeline(catalog_path=tmp_path / "main")
+        main_pipeline.downloader = MainDownloader()
+        main_pipeline._convert_workers = 1
+        monkeypatch.setattr(main_pipeline, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(main_pipeline, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr(main_pipeline, "_write_objects", MagicMock(return_value=["memory://catalog/main.parquet"]))
+        monkeypatch.setattr(main_pipeline, "_catalog_storage_stats", MagicMock(return_value=(2, 2)))
+        monkeypatch.setattr(main_pipeline, "_consolidate_catalog_data", MagicMock())
+        monkeypatch.setattr(main_pipeline, "_detect_gaps_for_backfill", MagicMock(side_effect=[[(date(2025, 1, 2), date(2025, 1, 2))], []]))
+        main_pipeline._update_db_catalog = AsyncMock()
+
+        other_pipeline = BinanceVisionPipeline(catalog_path=tmp_path / "other")
+        other_pipeline.downloader = OtherDownloader()
+        other_pipeline._convert_workers = 1
+        monkeypatch.setattr(other_pipeline, "_get_instrument", lambda _symbol: object())
+        monkeypatch.setattr(other_pipeline, "_build_converter_kwargs", lambda *_args: {})
+        monkeypatch.setattr(other_pipeline, "_write_objects", MagicMock(return_value=["memory://catalog/other.parquet"]))
+        monkeypatch.setattr(other_pipeline, "_catalog_storage_stats", MagicMock(return_value=(1, 1)))
+        monkeypatch.setattr(other_pipeline, "_consolidate_catalog_data", MagicMock())
+        monkeypatch.setattr(other_pipeline, "_detect_gaps_for_backfill", MagicMock(return_value=[]))
+        other_pipeline._update_db_catalog = AsyncMock()
+
+        monkeypatch.setattr(
+            "tinohelm.data.pipeline.plan_catalog_missing_slices",
+            lambda **_kwargs: [(date(2025, 1, 1), date(2025, 1, 1))],
+        )
+        monkeypatch.setattr("tinohelm.data.pipeline.get_converter", lambda _data_type: object())
+
+        def main_convert(*_args, **_kwargs):
+            nonlocal main_convert_calls
+            main_convert_calls += 1
+            if main_convert_calls == 2:
+                backfill_entered.set()
+                release_backfill.wait(timeout=5)
+            return (1, ["memory://catalog/main.parquet"])
+
+        def other_convert(*_args, **_kwargs):
+            other_convert_entered.set()
+            return (1, ["memory://catalog/other.parquet"])
+
+        monkeypatch.setattr(main_pipeline, "_convert_one_file", main_convert)
+        monkeypatch.setattr(other_pipeline, "_convert_one_file", other_convert)
+
+        main_ingest = asyncio.create_task(main_pipeline.ingest(
+            symbol="BTCUSDT-PERP",
+            data_type="klines",
+            interval="1m",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        ))
+
+        await asyncio.wait_for(asyncio.to_thread(backfill_entered.wait), timeout=5)
+
+        other_ingest = asyncio.create_task(other_pipeline.ingest(
+            symbol="ETHUSDT-PERP",
+            data_type="trades",
+            start=date(2025, 1, 1),
+            end=date(2025, 1, 1),
+        ))
+
+        await asyncio.wait_for(other_downloaded.wait(), timeout=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.to_thread(other_convert_entered.wait), timeout=0.2)
+
+        release_backfill.set()
+        main_result, other_result = await asyncio.gather(main_ingest, other_ingest)
+
+        assert main_result.objects_count == 2
+        assert other_result.objects_count == 1
+
+
 class TestDailyTickIngest:
     @pytest.mark.asyncio
     async def test_trades_ingest_skips_consolidation_and_gap_detection(self, tmp_path: Path, monkeypatch):
@@ -1416,40 +1645,6 @@ class TestFundingRateCoverageShortCircuit:
             end=date(2024, 1, 5),
             interval=None,
         )
-
-
-class TestGeneralCoverageShortCircuit:
-    def test_ingest_skips_when_bar_catalog_covers_range(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ):
-        monkeypatch.setattr(
-            "tinohelm.data.catalog.CatalogSession.missing_date_slices",
-            lambda self, symbol, data_type, interval, start, end, source_type=None: [],
-        )
-
-        p = BinanceVisionPipeline(catalog_path="/tmp/test_catalog")
-
-        mock_dl = MagicMock()
-        mock_dl.plan_downloads.side_effect = AssertionError(
-            "plan_downloads must not run when bar catalog covers range"
-        )
-        p.downloader = mock_dl
-
-        async def _noop(*a, **kw):
-            pass
-
-        with patch.object(p, "_update_db_catalog", side_effect=_noop):
-            result = asyncio.run(p.ingest(
-                symbol="BTCUSDT-PERP",
-                data_type="klines",
-                interval="1m",
-                start=date(2024, 1, 5),
-                end=date(2024, 1, 20),
-            ))
-
-        assert result.skipped is True
-        assert result.objects_count == 0
-        mock_dl.plan_downloads.assert_not_called()
 
 
 class TestGeneralCoverageShortCircuit:
