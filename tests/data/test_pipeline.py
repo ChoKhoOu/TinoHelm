@@ -495,7 +495,7 @@ class TestGlobalConvertWriteGate:
             end=date(2025, 1, 1),
         ))
 
-        await asyncio.to_thread(first_convert_entered.wait)
+        await asyncio.wait_for(asyncio.to_thread(first_convert_entered.wait), timeout=5)
         await asyncio.wait_for(
             asyncio.gather(btc_downloaded.wait(), eth_downloaded.wait()),
             timeout=1,
@@ -605,7 +605,7 @@ class TestGlobalConvertWriteGate:
             end=date(2025, 1, 1),
         ))
 
-        await asyncio.to_thread(backfill_entered.wait)
+        await asyncio.wait_for(asyncio.to_thread(backfill_entered.wait), timeout=5)
 
         other_ingest = asyncio.create_task(other_pipeline.ingest(
             symbol="ETHUSDT-PERP",

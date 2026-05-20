@@ -9,8 +9,5 @@ _convert_write_gate = threading.Lock()
 
 @contextmanager
 def hold_convert_write_gate() -> Generator[None, None, None]:
-    _convert_write_gate.acquire()
-    try:
+    with _convert_write_gate:
         yield
-    finally:
-        _convert_write_gate.release()
