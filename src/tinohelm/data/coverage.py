@@ -72,6 +72,7 @@ async def plan_submission_slices(
     end: date,
     *,
     storage=None,
+    exclude_job_ids: set[str] | None = None,
 ) -> list[tuple[date, date]]:
     requested_slices = plan_catalog_missing_slices(
         catalog_path=catalog_path,
@@ -84,14 +85,15 @@ async def plan_submission_slices(
     )
     if not requested_slices:
         return []
-    rows = (await db.execute(
-        select(DataFetchJob).where(
-            DataFetchJob.symbol == symbol,
-            DataFetchJob.data_type == data_type,
-            DataFetchJob.interval.is_(interval) if interval is None else DataFetchJob.interval == interval,
-            DataFetchJob.status.in_(["queued", "running"]),
-            DataFetchJob.start_date <= end,
-            DataFetchJob.end_date >= start,
-        )
-    )).scalars().all()
+    query = select(DataFetchJob).where(
+        DataFetchJob.symbol == symbol,
+        DataFetchJob.data_type == data_type,
+        DataFetchJob.interval.is_(interval) if interval is None else DataFetchJob.interval == interval,
+        DataFetchJob.status.in_(["queued", "running"]),
+        DataFetchJob.start_date <= end,
+        DataFetchJob.end_date >= start,
+    )
+    if exclude_job_ids:
+        query = query.where(DataFetchJob.job_id.not_in(exclude_job_ids))
+    rows = (await db.execute(query)).scalars().all()
     return _subtract_active_slices(requested_slices, list(rows))

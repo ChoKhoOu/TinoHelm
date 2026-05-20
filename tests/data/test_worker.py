@@ -6,8 +6,10 @@ import json
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
 from tinohelm.data import worker as dw
@@ -607,6 +609,51 @@ class TestDrainOnce:
 # ---------------------------------------------------------------------------
 
 class TestRecoverInterruptedJobs:
+    async def _build_factory(self):
+        import pytest_asyncio  # noqa: F401
+        from datetime import date, datetime
+
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession,
+            async_sessionmaker,
+            create_async_engine,
+        )
+
+        from tinohelm.db.models import Base, DataFetchJob
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def _seed(rows):
+            async with factory() as db:
+                for row in rows:
+                    db.add(row)
+                await db.commit()
+
+        def _row(
+            status: str,
+            *,
+            job_id: str | None = None,
+            start_date: date | None = None,
+            end_date: date | None = None,
+        ):
+            return DataFetchJob(
+                job_id=job_id or str(uuid4()),
+                batch_id=None,
+                symbol="BTCUSDT",
+                data_type="klines",
+                interval="1m",
+                start_date=start_date or date(2026, 1, 1),
+                end_date=end_date or date(2026, 1, 1),
+                asset_class="um",
+                status=status,
+                created_at=datetime(2026, 1, 1, 12, 0, 0),
+            )
+
+        return factory, _seed, _row, engine, DataFetchJob
+
     async def test_flips_running_to_queued_and_clears_redis_list(self, monkeypatch):
         """Issue #164: recovery must not repush per-job payloads onto Redis.
 
@@ -632,6 +679,99 @@ class TestRecoverInterruptedJobs:
 
         assert count == 4
         assert flipped == {"factory": factory_marker, "model": dw.DataFetchJob}
+
+    async def test_recovery_reslices_running_job_against_other_active_rows(self, monkeypatch):
+        from datetime import date
+
+        factory, _seed, _row, engine, _model = await self._build_factory()
+        current_job_id = "current-job"
+        other_job_id = "other-job"
+        try:
+            await _seed([
+                _row("running", job_id=current_job_id, start_date=date(2024, 1, 1), end_date=date(2024, 1, 10)),
+                _row("queued", job_id=other_job_id, start_date=date(2024, 1, 4), end_date=date(2024, 1, 6)),
+            ])
+            monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+            rds = AsyncMock()
+
+            recovered = await dw.recover_interrupted_jobs(rds)
+
+            assert recovered == 1
+            async with factory() as db:
+                rows = (await db.execute(select(dw.DataFetchJob).order_by(dw.DataFetchJob.start_date, dw.DataFetchJob.job_id))).scalars().all()
+            assert [(row.job_id, row.status, row.start_date, row.end_date) for row in rows] == [
+                (current_job_id, "queued", date(2024, 1, 1), date(2024, 1, 3)),
+                (other_job_id, "queued", date(2024, 1, 4), date(2024, 1, 6)),
+                (rows[2].job_id, "queued", date(2024, 1, 7), date(2024, 1, 10)),
+            ]
+            assert rows[2].batch_id is None
+            assert rows[2].symbol == "BTCUSDT"
+            assert rows[2].data_type == "klines"
+            assert rows[2].interval == "1m"
+            assert rows[2].asset_class == "um"
+            rds.lpush.assert_awaited_once_with("tino:data:queue", dw.WAKE_TOKEN)
+        finally:
+            await engine.dispose()
+
+    async def test_marks_running_job_completed_when_recovery_finds_no_missing_slices(self, monkeypatch):
+        from datetime import date
+
+        factory, _seed, _row, engine, _model = await self._build_factory()
+        current_job_id = "current-job"
+        try:
+            await _seed([
+                _row("running", job_id=current_job_id, start_date=date(2024, 1, 1), end_date=date(2024, 1, 10)),
+            ])
+            monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+            monkeypatch.setattr(dw, "get_settings", lambda: None)
+            monkeypatch.setattr(dw, "get_active_catalog_root", lambda _cfg: "irrelevant")
+            monkeypatch.setattr(dw, "get_catalog_storage", lambda **_kwargs: None)
+            monkeypatch.setattr(dw, "plan_submission_slices", AsyncMock(return_value=[]))
+            monkeypatch.setattr(dw, "_count_queued_jobs", AsyncMock(return_value=0))
+            rds = AsyncMock()
+
+            recovered = await dw.recover_interrupted_jobs(rds)
+
+            assert recovered == 1
+            async with factory() as db:
+                rows = (await db.execute(select(dw.DataFetchJob))).scalars().all()
+            assert len(rows) == 1
+            row = rows[0]
+            assert row.job_id == current_job_id
+            assert row.status == "completed"
+            assert row.progress == 100
+            assert row.started_at is None
+            assert row.completed_at is not None
+            assert row.message == "Recovered after restart: already covered"
+            rds.lpush.assert_not_awaited()
+        finally:
+            await engine.dispose()
+
+    async def test_recovery_of_overlapping_running_jobs_does_not_duplicate_slices(self, monkeypatch):
+        from datetime import date
+
+        factory, _seed, _row, engine, _model = await self._build_factory()
+        try:
+            await _seed([
+                _row("running", job_id="job-a", start_date=date(2024, 1, 1), end_date=date(2024, 1, 10)),
+                _row("running", job_id="job-b", start_date=date(2024, 1, 5), end_date=date(2024, 1, 8)),
+            ])
+            monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+            rds = AsyncMock()
+
+            recovered = await dw.recover_interrupted_jobs(rds)
+
+            assert recovered == 2
+            async with factory() as db:
+                rows = (await db.execute(select(dw.DataFetchJob).where(dw.DataFetchJob.status == "queued").order_by(dw.DataFetchJob.start_date, dw.DataFetchJob.end_date, dw.DataFetchJob.job_id))).scalars().all()
+            assert [(row.job_id, row.start_date, row.end_date) for row in rows] == [
+                ("job-a", date(2024, 1, 1), date(2024, 1, 4)),
+                ("job-b", date(2024, 1, 5), date(2024, 1, 8)),
+                (rows[2].job_id, date(2024, 1, 9), date(2024, 1, 10)),
+            ]
+            rds.lpush.assert_awaited_once_with("tino:data:queue", dw.WAKE_TOKEN)
+        finally:
+            await engine.dispose()
 
     async def test_pushes_one_wake_token_when_queued_work_exists(self, monkeypatch):
         """With queued rows still present, recovery must wake exactly ONE
