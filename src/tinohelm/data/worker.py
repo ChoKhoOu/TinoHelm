@@ -33,6 +33,8 @@ from tinohelm.core.async_queue_worker import (
 )
 from tinohelm.core.config import get_settings
 from tinohelm.data import catalog_locks as _catalog_locking
+from tinohelm.data.coverage import plan_submission_slices
+from tinohelm.data.storage import get_active_catalog_root, get_catalog_storage
 from tinohelm.db.models import DataFetchJob
 from tinohelm.db.session import get_session_factory
 
@@ -89,24 +91,73 @@ async def enqueue_job(rds: aioredis.Redis, job_id: str) -> None:
 
 
 async def _flip_running_to_queued(factory, model_cls) -> int:
-    """Flip every ``status='running'`` row back to ``queued``.
+    """Reslice interrupted ``DataFetchJob`` rows against current coverage."""
+    cfg = get_settings()
+    catalog_root = get_active_catalog_root(cfg)
+    storage = get_catalog_storage(settings=cfg, catalog_root=catalog_root)
 
-    Returns the number of rows touched. Used only during startup recovery —
-    once the worker is live, scheduling runs via ``claim_next_queued_job``.
-    """
     async with factory() as db:
-        result = await db.execute(
-            update(model_cls)
+        rows = (await db.execute(
+            select(model_cls)
             .where(model_cls.status == STATUS_RUNNING)
-            .values(
-                status=STATUS_QUEUED,
-                progress=0,
-                message="Recovered after restart",
-                started_at=None,
+            .order_by(
+                model_cls.batch_id,
+                model_cls.symbol,
+                model_cls.data_type,
+                model_cls.interval,
+                model_cls.start_date,
+                model_cls.id,
             )
-        )
+        )).scalars().all()
+        recovered = 0
+        for job in rows:
+            recovered += 1
+            await db.flush()
+            slices = await plan_submission_slices(
+                db=db,
+                catalog_path=catalog_root,
+                symbol=job.symbol,
+                data_type=job.data_type,
+                interval=job.interval,
+                start=job.start_date,
+                end=job.end_date,
+                storage=storage,
+                exclude_job_ids={job.job_id},
+            )
+            if not slices:
+                job.status = STATUS_COMPLETED
+                job.progress = 100
+                job.message = "Recovered after restart: already covered"
+                job.started_at = None
+                job.completed_at = _utcnow_naive()
+                job.error = None
+                continue
+
+            first_start, first_end = slices[0]
+            job.status = STATUS_QUEUED
+            job.progress = 0
+            job.message = "Recovered after restart"
+            job.started_at = None
+            job.completed_at = None
+            job.error = None
+            job.start_date = first_start
+            job.end_date = first_end
+
+            for slice_start, slice_end in slices[1:]:
+                db.add(model_cls(
+                    batch_id=job.batch_id,
+                    symbol=job.symbol,
+                    data_type=job.data_type,
+                    interval=job.interval,
+                    start_date=slice_start,
+                    end_date=slice_end,
+                    asset_class=job.asset_class,
+                    status=STATUS_QUEUED,
+                    progress=0,
+                    message="Recovered after restart",
+                ))
         await db.commit()
-    return result.rowcount or 0
+    return recovered
 
 
 async def _count_queued_jobs(factory, model_cls) -> int:
@@ -125,14 +176,15 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
 
     Recovery does two things:
 
-    1. Flip every ``status='running'`` row back to ``queued`` — whoever
-       was in flight when the process died re-enters the runnable pool.
+    1. Recompute submission slices for every ``status='running'`` row and
+       recover the interrupted work as newly queued slices, or mark the row
+       completed when coverage is already satisfied.
     2. If any queued work exists, push a single ``WAKE_TOKEN`` so the
        first idle consumer immediately drains the backlog. No wake is
        needed when the DB is empty — new fetch requests will push their
        own wake tokens as they arrive.
 
-    Returns the number of rows flipped running → queued.
+    Returns the number of interrupted rows recovered.
     """
     factory = get_session_factory()
     recovered = await _flip_running_to_queued(factory, DataFetchJob)
