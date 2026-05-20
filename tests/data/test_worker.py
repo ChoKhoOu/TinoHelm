@@ -609,7 +609,7 @@ class TestDrainOnce:
 # ---------------------------------------------------------------------------
 
 class TestRecoverInterruptedJobs:
-    async def _build_factory(self):
+    async def _build_factory(self, *, autoflush: bool = True):
         import pytest_asyncio  # noqa: F401
         from datetime import date, datetime
 
@@ -624,7 +624,12 @@ class TestRecoverInterruptedJobs:
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        factory = async_sessionmaker(
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=autoflush,
+        )
 
         async def _seed(rows):
             async with factory() as db:
@@ -776,6 +781,34 @@ class TestRecoverInterruptedJobs:
                 (rows[2].job_id, date(2024, 1, 9), date(2024, 1, 10)),
             ]
             rds.lpush.assert_awaited_once_with("tino:data:queue", dw.WAKE_TOKEN)
+        finally:
+            await engine.dispose()
+
+    async def test_recovery_of_overlapping_running_jobs_is_stable_with_autoflush_disabled(self, monkeypatch):
+        from datetime import date
+
+        factory, _seed, _row, engine, _model = await self._build_factory(autoflush=False)
+        try:
+            await _seed([
+                _row("running", job_id="job-a", start_date=date(2024, 1, 1), end_date=date(2024, 1, 10)),
+                _row("running", job_id="job-b", start_date=date(2024, 1, 5), end_date=date(2024, 1, 8)),
+            ])
+            monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+            monkeypatch.setattr(dw, "get_settings", lambda: None)
+            monkeypatch.setattr(dw, "get_active_catalog_root", lambda _cfg: "irrelevant")
+            monkeypatch.setattr(dw, "get_catalog_storage", lambda **_kwargs: None)
+            rds = AsyncMock()
+
+            recovered = await dw.recover_interrupted_jobs(rds)
+
+            assert recovered == 2
+            async with factory() as db:
+                rows = (await db.execute(select(dw.DataFetchJob).where(dw.DataFetchJob.status == "queued").order_by(dw.DataFetchJob.start_date, dw.DataFetchJob.end_date, dw.DataFetchJob.job_id))).scalars().all()
+            assert [(row.job_id, row.start_date, row.end_date) for row in rows] == [
+                ("job-a", date(2024, 1, 1), date(2024, 1, 4)),
+                ("job-b", date(2024, 1, 5), date(2024, 1, 8)),
+                (rows[2].job_id, date(2024, 1, 9), date(2024, 1, 10)),
+            ]
         finally:
             await engine.dispose()
 

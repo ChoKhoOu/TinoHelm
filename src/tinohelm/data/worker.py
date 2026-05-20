@@ -112,6 +112,7 @@ async def _flip_running_to_queued(factory, model_cls) -> int:
         recovered = 0
         for job in rows:
             recovered += 1
+            await db.flush()
             slices = await plan_submission_slices(
                 db=db,
                 catalog_path=catalog_root,
