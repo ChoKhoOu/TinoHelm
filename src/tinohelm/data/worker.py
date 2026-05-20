@@ -175,14 +175,15 @@ async def recover_interrupted_jobs(rds: aioredis.Redis) -> int:
 
     Recovery does two things:
 
-    1. Flip every ``status='running'`` row back to ``queued`` — whoever
-       was in flight when the process died re-enters the runnable pool.
+    1. Recompute submission slices for every ``status='running'`` row and
+       recover the interrupted work as newly queued slices, or mark the row
+       completed when coverage is already satisfied.
     2. If any queued work exists, push a single ``WAKE_TOKEN`` so the
        first idle consumer immediately drains the backlog. No wake is
        needed when the DB is empty — new fetch requests will push their
        own wake tokens as they arrive.
 
-    Returns the number of rows flipped running → queued.
+    Returns the number of interrupted rows recovered.
     """
     factory = get_session_factory()
     recovered = await _flip_running_to_queued(factory, DataFetchJob)

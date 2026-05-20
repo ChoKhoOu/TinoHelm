@@ -692,6 +692,9 @@ class TestRecoverInterruptedJobs:
                 _row("queued", job_id=other_job_id, start_date=date(2024, 1, 4), end_date=date(2024, 1, 6)),
             ])
             monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+            monkeypatch.setattr(dw, "get_settings", lambda: None)
+            monkeypatch.setattr(dw, "get_active_catalog_root", lambda _cfg: "irrelevant")
+            monkeypatch.setattr(dw, "get_catalog_storage", lambda **_kwargs: None)
             rds = AsyncMock()
 
             recovered = await dw.recover_interrupted_jobs(rds)
@@ -757,6 +760,9 @@ class TestRecoverInterruptedJobs:
                 _row("running", job_id="job-b", start_date=date(2024, 1, 5), end_date=date(2024, 1, 8)),
             ])
             monkeypatch.setattr(dw, "get_session_factory", lambda: factory)
+            monkeypatch.setattr(dw, "get_settings", lambda: None)
+            monkeypatch.setattr(dw, "get_active_catalog_root", lambda _cfg: "irrelevant")
+            monkeypatch.setattr(dw, "get_catalog_storage", lambda **_kwargs: None)
             rds = AsyncMock()
 
             recovered = await dw.recover_interrupted_jobs(rds)
