@@ -1,0 +1,64 @@
+x-common-env: &common-env
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  TINO_TRADER_ID: ${TINO_TRADER_ID:-TINO-001}
+  TINO_LOG_LEVEL: ${TINO_LOG_LEVEL:-INFO}
+  TINO_MODE: ${TINO_MODE:-live}
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: tinohelm-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  notifier:
+    build:
+      context: .
+      dockerfile: docker/notifier.Dockerfile
+    container_name: tinohelm-notifier
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      <<: *common-env
+      TINO_NOTIFIER_CONFIG: /app/configs/notifier.toml
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./strategies:/app/strategies:ro
+
+  # ─── strategy services ───────────────────────────────────────────────
+  # 一策略一 service。新增策略时复制下面的块，把 example 改成你的 STRATEGY 名。
+  # docker compose profile = `strategy-<name>`，让 `make run STRATEGY=example`
+  # 只起对应的容器，不会唤醒其他策略。
+  strategy-example:
+    build:
+      context: .
+      dockerfile: docker/strategy.Dockerfile
+    profiles: ["strategy-example"]
+    container_name: tinohelm-strategy-example
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      <<: *common-env
+      TINO_STRATEGY_CONFIG: /app/configs/strategies/example.toml
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./strategies:/app/strategies:ro
+      - ./logs:/app/logs
+
+volumes:
+  redis-data:
