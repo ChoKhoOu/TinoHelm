@@ -9,7 +9,7 @@ import pytest
 
 discord = pytest.importorskip("discord")
 
-from tinohelm.notifier.handlers import envelope_for, parse_payload, render_embed
+from tinohelm.notifier.handlers import envelope_for, parse_payload, render_embed  # noqa: E402
 
 
 def test_parse_msgpack_payload() -> None:

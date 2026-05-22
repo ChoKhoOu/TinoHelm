@@ -81,7 +81,7 @@ class _PatchedBridgeActor(BridgeActor):
     """
 
     @property  # type: ignore[override]
-    def trader(self) -> Any:  # noqa: D401 — NT property override
+    def trader(self) -> Any:
         return self._test_trader  # type: ignore[attr-defined]
 
     @property  # type: ignore[override]

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import discord
@@ -57,7 +57,7 @@ def envelope_for(topic: str, raw: Any) -> EventEnvelope:
     return EventEnvelope(
         topic=topic,
         body=parse_payload(raw),
-        received_at=datetime.now(tz=timezone.utc),
+        received_at=datetime.now(tz=UTC),
     )
 
 

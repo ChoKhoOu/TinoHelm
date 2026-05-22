@@ -23,7 +23,8 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, time as dtime, timezone
+from datetime import UTC, datetime
+from datetime import time as dtime
 from typing import Any
 
 import discord
@@ -62,7 +63,7 @@ class NotifierActor(Actor):
         self,
         config: NotifierActorConfig,
         *,
-        forwarder: "DiscordForwarder",
+        forwarder: DiscordForwarder,
     ) -> None:
         super().__init__(config=config)
         self._forwarder = forwarder
@@ -75,7 +76,7 @@ class NotifierActor(Actor):
             f"NotifierActor subscribed to {self.SUBSCRIBE_PATTERNS} -> channel={self._channel_id}",
         )
 
-    def _make_handler(self, pattern: str):  # noqa: ANN202 — closure
+    def _make_handler(self, pattern: str):
         def _handle(msg: Any) -> None:
             try:
                 env = envelope_for(pattern, msg)
@@ -104,7 +105,7 @@ class DiscordForwarder:
         self._channel_id = channel_id
         self._semaphore = asyncio.Semaphore(rate_limit)
 
-    def enqueue(self, env) -> None:  # noqa: ANN001
+    def enqueue(self, env) -> None:
         # NT handlers run on the asyncio loop already (ActorExecutor), but to
         # stay safe we go through ``run_coroutine_threadsafe`` — it's a no-op
         # when called from the same loop. We check the loop is open *before*
@@ -118,7 +119,7 @@ class DiscordForwarder:
         except RuntimeError:
             logger.warning("event loop closed; dropping event")
 
-    async def _send(self, env) -> None:  # noqa: ANN001
+    async def _send(self, env) -> None:
         channel = self._client.get_channel(self._channel_id)
         if channel is None:
             try:
@@ -197,7 +198,7 @@ def _build_discord_client(
         await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
 
     @client.event
-    async def on_ready() -> None:  # noqa: D401 — discord.py event
+    async def on_ready() -> None:
         if guild_obj:
             await tree.sync(guild=guild_obj)
         else:
@@ -212,7 +213,7 @@ def _build_discord_client(
 
 def _parse_hh_mm(value: str) -> dtime:
     h, m = value.split(":", 1)
-    return dtime(int(h), int(m), tzinfo=timezone.utc)
+    return dtime(int(h), int(m), tzinfo=UTC)
 
 
 async def _daily_summary_loop(
@@ -222,8 +223,8 @@ async def _daily_summary_loop(
     redis_client: redis.Redis,
 ) -> None:
     while True:
-        now = datetime.now(tz=timezone.utc)
-        target = datetime.combine(now.date(), when_utc, tzinfo=timezone.utc)
+        now = datetime.now(tz=UTC)
+        target = datetime.combine(now.date(), when_utc, tzinfo=UTC)
         if target <= now:
             target = target.replace(day=target.day + 1)
         delay = (target - now).total_seconds()

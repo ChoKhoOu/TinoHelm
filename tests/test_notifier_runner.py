@@ -7,7 +7,8 @@ would silently break the daily summary or event delivery if regressed.
 
 from __future__ import annotations
 
-from datetime import time as dtime, timezone
+from datetime import UTC
+from datetime import time as dtime
 
 from tinohelm.notifier.runner import _parse_hh_mm
 
@@ -20,7 +21,7 @@ def test_parse_hh_mm_returns_utc_time_object() -> None:
     """
 
     parsed = _parse_hh_mm("14:00")
-    assert parsed == dtime(14, 0, tzinfo=timezone.utc)
+    assert parsed == dtime(14, 0, tzinfo=UTC)
 
 
 def test_parse_hh_mm_rejects_invalid_format() -> None:
@@ -48,6 +49,7 @@ def test_forwarder_enqueue_swallows_closed_loop() -> None:
     """
 
     import asyncio
+
     from tinohelm.notifier.handlers import envelope_for
     from tinohelm.notifier.runner import DiscordForwarder
 

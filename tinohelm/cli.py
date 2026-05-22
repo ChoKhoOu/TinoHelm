@@ -16,7 +16,6 @@ import json
 import os
 import sys
 import time
-from typing import Optional
 
 import redis
 import typer
@@ -60,7 +59,7 @@ def resume(strategy_id: str = typer.Option(..., "--strategy-id", "-s")) -> None:
 @app.command()
 def flatten(
     strategy_id: str = typer.Option(..., "--strategy-id", "-s"),
-    reason: Optional[str] = typer.Option(None, "--reason", "-r"),
+    reason: str | None = typer.Option(None, "--reason", "-r"),
 ) -> None:
     """Tell strategy pod to call ``trader.market_exit_strategy``.
 
@@ -80,7 +79,7 @@ def ping(strategy_id: str = typer.Option(..., "--strategy-id", "-s")) -> None:
 
 
 @app.command()
-def status(strategy: Optional[str] = typer.Option(None, "--strategy-id", "-s")) -> None:
+def status(strategy: str | None = typer.Option(None, "--strategy-id", "-s")) -> None:
     """Print pod heartbeats / latest events from Redis (best-effort)."""
 
     client = _client()

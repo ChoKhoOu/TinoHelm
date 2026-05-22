@@ -53,7 +53,7 @@ class BridgeActor(Actor):
         # The wildcard pattern NT's switchboard expects.
         self._pattern = f"{config.command_topic}.*"
 
-    def on_start(self) -> None:  # noqa: D401 — NT lifecycle hook
+    def on_start(self) -> None:
         self.msgbus.subscribe(topic=self._pattern, handler=self._on_command)
         self.log.info(f"BridgeActor subscribed to {self._pattern}")
 
