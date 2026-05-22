@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# uv
+.uv-cache/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Env
+.env
+.env.local
+*.local
+
+# Runtime
+var/
+!var/.gitkeep
+logs/
+*.log
+
+# uv lock kept; pip-tools artifacts ignored
+requirements*.txt
+
+# NT runtime artifacts
+.nautilus/
+catalog/
+
+# Claude Code local settings (per-user permission allowlist)
+.claude/settings.local.json
