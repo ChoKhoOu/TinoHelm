@@ -1,0 +1,967 @@
+"""Unit tests for ``tinohelm.factor.backend.PolarsBackend``.
+
+Coverage (per task spec — 10 core algorithms)
+---------------------------------------------
+1. ``rolling`` — mean / std / sum
+2. ``shift``
+3. ``diff``
+4. ``pct_change``
+5. ``rank`` (axis=0 cross-sectional, axis=1 time-series)
+6. ``zscore`` (axis=0 cross-sectional, axis=1 time-series)
+7. ``clip``
+8. ``fillna``
+
+Plus the supplementary algorithms exposed by the
+:class:`~tinohelm.factor.backend.base.AbstractBackend` Protocol:
+``ewm``, ``log``, ``abs``.
+
+Also asserts:
+- ``isinstance(PolarsBackend(), AbstractBackend)`` succeeds via the
+  ``@runtime_checkable`` Protocol decorator.
+- Cross-sectional (``axis=0``) and time-series (``axis=1``) semantics
+  are preserved separately by the rank/zscore operators.
+- The returned panel preserves the original ``ts`` column and the
+  original symbol-column ordering (regression test for the unpivot/pivot
+  round-trip).
+"""
+from __future__ import annotations
+
+import datetime as dt
+import math
+
+import polars as pl
+import pytest
+
+from tinohelm.factor.backend import AbstractBackend, PolarsBackend
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+T_BARS = 20
+N_SYMBOLS = 5
+SYMBOL_COLS = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+
+
+@pytest.fixture
+def backend() -> PolarsBackend:
+    return PolarsBackend()
+
+
+@pytest.fixture
+def panel() -> pl.DataFrame:
+    """Deterministic (T=20, N=5) panel with no nulls.
+
+    Each symbol is a slow trend (``base + i + j * scale``) so cross-section
+    and time-series stats are easy to reason about.
+    """
+    ts = pl.datetime_range(
+        start=dt.datetime(2024, 1, 1),
+        end=dt.datetime(2024, 1, 20),
+        interval="1d",
+        eager=True,
+    )
+    data: dict[str, list[float]] = {"ts": ts.to_list()}
+    for j, sym in enumerate(SYMBOL_COLS):
+        # Rising trend: each symbol has its own slope and offset.
+        data[sym] = [100.0 + 5.0 * j + 1.0 * i + 0.1 * (i * j) for i in range(T_BARS)]
+    return pl.DataFrame(data)
+
+
+@pytest.fixture
+def panel_with_null() -> pl.DataFrame:
+    """Same shape as ``panel`` but injects nulls to validate null handling."""
+    ts = pl.datetime_range(
+        start=dt.datetime(2024, 1, 1),
+        end=dt.datetime(2024, 1, 20),
+        interval="1d",
+        eager=True,
+    )
+    data: dict[str, list[float | None]] = {"ts": ts.to_list()}
+    for j, sym in enumerate(SYMBOL_COLS):
+        col = [100.0 + 5.0 * j + 1.0 * i + 0.1 * (i * j) for i in range(T_BARS)]
+        data[sym] = col  # type: ignore[assignment]
+    df = pl.DataFrame(data)
+    # Null out a few cells to test propagation.
+    df = df.with_columns(
+        pl.when(pl.int_range(0, T_BARS).cast(pl.Int64) == 0)
+        .then(None)
+        .otherwise(pl.col("ETH"))
+        .alias("ETH")
+    )
+    df = df.with_columns(
+        pl.when(pl.int_range(0, T_BARS).cast(pl.Int64) == 5)
+        .then(None)
+        .otherwise(pl.col("SOL"))
+        .alias("SOL")
+    )
+    return df
+
+
+@pytest.fixture
+def panel_with_nan() -> pl.DataFrame:
+    """Panel where some cells carry NaN (not null) — simulates DataLayer PIT
+    universe markers and rolling warmup missingness.
+
+    ``BTC`` is NaN at row 0 (not in universe at ts=0).
+    ``SOL`` is NaN at row 5 (warmup not yet matured).
+    All other cells are valid finite floats.
+    """
+    ts = pl.datetime_range(
+        start=dt.datetime(2024, 1, 1),
+        end=dt.datetime(2024, 1, 20),
+        interval="1d",
+        eager=True,
+    )
+    data: dict[str, list[float]] = {"ts": ts.to_list()}
+    for j, sym in enumerate(SYMBOL_COLS):
+        data[sym] = [100.0 + 5.0 * j + 1.0 * i + 0.1 * (i * j) for i in range(T_BARS)]
+    df = pl.DataFrame(data)
+    # Inject NaN (not null) via arithmetic — Polars preserves NaN as Float64.
+    df = df.with_columns(
+        pl.when(pl.int_range(0, T_BARS).cast(pl.Int64) == 0)
+        .then(pl.lit(float("nan")))
+        .otherwise(pl.col("BTC"))
+        .alias("BTC")
+    )
+    df = df.with_columns(
+        pl.when(pl.int_range(0, T_BARS).cast(pl.Int64) == 5)
+        .then(pl.lit(float("nan")))
+        .otherwise(pl.col("SOL"))
+        .alias("SOL")
+    )
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Protocol / runtime_checkable
+# ---------------------------------------------------------------------------
+
+
+class TestProtocolRuntimeCheckable:
+    def test_isinstance_check_passes(self, backend: PolarsBackend) -> None:
+        """``@runtime_checkable`` Protocol enables structural ``isinstance``."""
+        assert isinstance(backend, AbstractBackend)
+
+    def test_polars_backend_does_not_subclass_protocol(self) -> None:
+        """:class:`PolarsBackend` satisfies the Protocol structurally,
+        without explicit subclassing — no ``ABC.register``-style coupling."""
+        assert AbstractBackend not in PolarsBackend.__mro__
+
+
+# ---------------------------------------------------------------------------
+# Panel-shape preservation
+# ---------------------------------------------------------------------------
+
+
+class TestShapePreservation:
+    def test_shift_preserves_ts_and_column_order(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.shift(panel, 3)
+        assert result.columns == ["ts", *SYMBOL_COLS]
+        assert result.height == panel.height
+        # ts column is identical.
+        assert result["ts"].to_list() == panel["ts"].to_list()
+
+    def test_rank_axis0_preserves_column_order(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        """Cross-sectional rank goes through unpivot/pivot — verify column
+        ordering survives the round-trip (this is the regression case)."""
+        result = backend.rank(panel, axis=0, pct=True)
+        assert result.columns == ["ts", *SYMBOL_COLS]
+        assert result["ts"].to_list() == panel["ts"].to_list()
+
+    def test_zscore_axis0_preserves_column_order(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.zscore(panel, axis=0)
+        assert result.columns == ["ts", *SYMBOL_COLS]
+
+
+# ---------------------------------------------------------------------------
+# shift
+# ---------------------------------------------------------------------------
+
+
+class TestShift:
+    def test_shift_positive_introduces_nulls_at_start(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.shift(panel, 2)
+        # First 2 rows of every symbol column must be null.
+        for col in SYMBOL_COLS:
+            assert result[col][0] is None
+            assert result[col][1] is None
+            assert result[col][2] == panel[col][0]
+
+    def test_shift_negative_introduces_nulls_at_end(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.shift(panel, -1)
+        for col in SYMBOL_COLS:
+            assert result[col][-1] is None
+            assert result[col][0] == panel[col][1]
+
+    def test_shift_zero_returns_identical_values(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.shift(panel, 0)
+        for col in SYMBOL_COLS:
+            assert result[col].to_list() == panel[col].to_list()
+
+    def test_shift_does_not_mutate_input(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        original = panel.clone()
+        backend.shift(panel, 3)
+        assert panel.equals(original)
+
+
+# ---------------------------------------------------------------------------
+# rolling — mean / std / sum
+# ---------------------------------------------------------------------------
+
+
+class TestRolling:
+    def test_rolling_mean_first_window_minus_one_rows_are_null(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.rolling(panel, window=3, op="mean")
+        for col in SYMBOL_COLS:
+            assert result[col][0] is None
+            assert result[col][1] is None
+            # 3rd row should equal the mean of the first 3 input rows.
+            expected = sum(panel[col][:3].to_list()) / 3
+            assert result[col][2] == pytest.approx(expected, rel=1e-12)
+
+    def test_rolling_sum_value_correctness(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.rolling(panel, window=4, op="sum")
+        for col in SYMBOL_COLS:
+            expected = sum(panel[col][:4].to_list())
+            assert result[col][3] == pytest.approx(expected, rel=1e-12)
+
+    def test_rolling_std_value_correctness(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.rolling(panel, window=5, op="std")
+        # Compare against polars' direct call (this is the contract).
+        expected = panel.select(
+            pl.col("BTC").rolling_std(window_size=5, min_samples=None).alias("BTC")
+        )["BTC"].to_list()
+        actual = result["BTC"].to_list()
+        for a, e in zip(actual, expected):
+            if a is None:
+                assert e is None
+            else:
+                assert a == pytest.approx(e, rel=1e-12)
+
+    def test_rolling_min_periods_one(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        """With ``min_periods=1`` the first row should already be filled."""
+        result = backend.rolling(panel, window=3, op="mean", min_periods=1)
+        for col in SYMBOL_COLS:
+            assert result[col][0] == pytest.approx(panel[col][0], rel=1e-12)
+
+    def test_rolling_invalid_op_raises(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        with pytest.raises(ValueError, match="Unsupported rolling op"):
+            backend.rolling(panel, window=3, op="variance")  # type: ignore[arg-type]
+
+    def test_rolling_invalid_window_raises(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        with pytest.raises(ValueError, match="window must be >= 1"):
+            backend.rolling(panel, window=0, op="mean")
+
+
+# ---------------------------------------------------------------------------
+# diff
+# ---------------------------------------------------------------------------
+
+
+class TestDiff:
+    def test_diff_default_first_row_null(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.diff(panel)
+        for col in SYMBOL_COLS:
+            assert result[col][0] is None
+            assert result[col][1] == pytest.approx(
+                panel[col][1] - panel[col][0], rel=1e-12
+            )
+
+    def test_diff_n2_first_two_rows_null(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.diff(panel, n=2)
+        for col in SYMBOL_COLS:
+            assert result[col][0] is None
+            assert result[col][1] is None
+            assert result[col][2] == pytest.approx(
+                panel[col][2] - panel[col][0], rel=1e-12
+            )
+
+
+# ---------------------------------------------------------------------------
+# pct_change
+# ---------------------------------------------------------------------------
+
+
+class TestPctChange:
+    def test_pct_change_default(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.pct_change(panel)
+        for col in SYMBOL_COLS:
+            assert result[col][0] is None
+            expected = (panel[col][1] - panel[col][0]) / panel[col][0]
+            assert result[col][1] == pytest.approx(expected, rel=1e-12)
+
+    def test_pct_change_n3(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.pct_change(panel, n=3)
+        for col in SYMBOL_COLS:
+            assert result[col][0] is None
+            assert result[col][1] is None
+            assert result[col][2] is None
+            expected = (panel[col][3] - panel[col][0]) / panel[col][0]
+            assert result[col][3] == pytest.approx(expected, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# ewm
+# ---------------------------------------------------------------------------
+
+
+class TestEwm:
+    def test_ewm_span_mean(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.ewm(panel, span=3, op="mean")
+        # First row of ewm(span) equals the input.
+        for col in SYMBOL_COLS:
+            assert result[col][0] == pytest.approx(panel[col][0], rel=1e-12)
+
+    def test_ewm_alpha_mean(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.ewm(panel, alpha=0.5, op="mean")
+        for col in SYMBOL_COLS:
+            assert result[col][0] == pytest.approx(panel[col][0], rel=1e-12)
+
+    def test_ewm_both_span_and_alpha_raises(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        with pytest.raises(ValueError, match="Exactly one"):
+            backend.ewm(panel, span=3, alpha=0.5)
+
+    def test_ewm_neither_raises(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        with pytest.raises(ValueError, match="Exactly one"):
+            backend.ewm(panel)
+
+    def test_ewm_invalid_op_raises(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        with pytest.raises(ValueError, match="Unsupported ewm op"):
+            backend.ewm(panel, span=3, op="sum")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# rank — cross-sectional (axis=0) and time-series (axis=1)
+# ---------------------------------------------------------------------------
+
+
+class TestRankCrossSectional:
+    """``axis=0`` ranks across symbols at each timestamp.
+
+    For our deterministic fixture every row is strictly increasing in
+    ``j`` (the symbol index), so the cross-sectional rank at every row
+    is exactly ``[1, 2, 3, 4, 5]`` (unscaled) or ``[0.2, 0.4, 0.6, 0.8,
+    1.0]`` (pct=True).
+    """
+
+    def test_rank_cross_section_pct_values_in_unit_interval(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.rank(panel, axis=0, pct=True)
+        for col in SYMBOL_COLS:
+            for v in result[col].to_list():
+                assert 0.0 < v <= 1.0
+
+    def test_rank_cross_section_pct_value_correctness(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        """Per-row rank pct must equal ``(j+1)/N`` for our monotone fixture."""
+        result = backend.rank(panel, axis=0, pct=True)
+        for j, col in enumerate(SYMBOL_COLS, start=1):
+            expected = j / N_SYMBOLS
+            for v in result[col].to_list():
+                assert v == pytest.approx(expected, rel=1e-12)
+
+    def test_rank_cross_section_no_pct_integer_ranks(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.rank(panel, axis=0, pct=False)
+        for j, col in enumerate(SYMBOL_COLS, start=1):
+            for v in result[col].to_list():
+                assert v == pytest.approx(float(j), rel=1e-12)
+
+    def test_rank_cross_section_null_propagates(
+        self,
+        backend: PolarsBackend,
+        panel_with_null: pl.DataFrame,
+    ) -> None:
+        result = backend.rank(panel_with_null, axis=0, pct=True)
+        # ETH row 0 was nulled — must remain null.
+        assert result["ETH"][0] is None
+        # SOL row 5 was nulled — must remain null.
+        assert result["SOL"][5] is None
+        # Other cells remain valid.
+        assert result["BTC"][0] is not None
+
+    def test_rank_cross_section_nan_excluded_as_non_universe(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """NaN cells (DataLayer PIT / warmup markers) must be treated the same
+        as null: excluded from cross-sectional ranking and producing null output.
+
+        Regression: previously Polars treated NaN as a valid Float64, which
+        caused it to be ranked (as the lowest value) and contaminated the pct
+        denominator, giving wrong ranks to valid symbols on the same row.
+        """
+        result = backend.rank(panel_with_nan, axis=0, pct=True)
+        # BTC row 0 was NaN — output must be null, not a numeric rank.
+        assert result["BTC"][0] is None, (
+            f"BTC[0] (NaN input) must be null, got {result['BTC'][0]}"
+        )
+        # SOL row 5 was NaN — output must be null.
+        assert result["SOL"][5] is None, (
+            f"SOL[5] (NaN input) must be null, got {result['SOL'][5]}"
+        )
+        # At row 0, BTC is NaN so only 4 symbols are in the cross-section.
+        # All valid symbols at row 0 must have pct ranks in (0, 1].
+        for col in SYMBOL_COLS:
+            if col == "BTC":
+                continue
+            v = result[col][0]
+            assert v is not None and 0.0 < v <= 1.0, (
+                f"{col}[0]: expected valid pct rank in (0,1], got {v}"
+            )
+        # Pct denominator at row 0 must be 4 (not 5), so the highest rank is 1.0.
+        # In our monotone fixture ETH < SOL < BNB < XRP at every row (j ordering).
+        assert result["XRP"][0] == pytest.approx(1.0, rel=1e-12), (
+            f"XRP[0] should be 1.0 (rank 4/4), got {result['XRP'][0]}"
+        )
+
+
+class TestRankTimeSeries:
+    """``axis=1`` ranks each symbol's history independently.
+
+    The fixture is strictly increasing along time within each symbol, so
+    the time-series rank at row *i* is ``i+1`` (or ``(i+1)/T`` in pct mode).
+    """
+
+    def test_rank_time_series_pct_first_row_lowest(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.rank(panel, axis=1, pct=True)
+        for col in SYMBOL_COLS:
+            assert result[col][0] == pytest.approx(1.0 / T_BARS, rel=1e-12)
+            assert result[col][-1] == pytest.approx(1.0, rel=1e-12)
+
+    def test_rank_time_series_pct_value_correctness(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.rank(panel, axis=1, pct=True)
+        for col in SYMBOL_COLS:
+            for i, v in enumerate(result[col].to_list()):
+                assert v == pytest.approx((i + 1) / T_BARS, rel=1e-12)
+
+    def test_rank_time_series_distinct_from_cross_section(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        """Sanity check that ``axis=0`` and ``axis=1`` produce different
+        results — guards against silent axis swaps in the implementation."""
+        cross = backend.rank(panel, axis=0, pct=True)
+        time = backend.rank(panel, axis=1, pct=True)
+        assert not cross.equals(time)
+
+    def test_rank_time_series_nan_excluded_from_pct_denominator(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """NaN at BTC[0] must produce null output and must not inflate the
+        per-column pct denominator from 19 (valid) to 20 (all rows).
+
+        Regression: ``is_not_null().sum()`` returned 20 for NaN columns
+        because NaN is not null in Polars, causing pct values to be off
+        by factor 19/20.
+        """
+        result = backend.rank(panel_with_nan, axis=1, pct=True)
+        # BTC row 0 is NaN — output must be null.
+        assert result["BTC"][0] is None, (
+            f"BTC[0] (NaN input) must be null, got {result['BTC'][0]}"
+        )
+        # BTC has 19 valid values (rows 1-19).  The highest-valued row (index 19)
+        # must have pct = 19/19 = 1.0.
+        assert result["BTC"][-1] == pytest.approx(1.0, rel=1e-12), (
+            f"BTC[-1] should be 1.0 (rank 19/19), got {result['BTC'][-1]}"
+        )
+        # SOL has 19 valid values (rows 0-4, 6-19); pct of last row = 1.0.
+        assert result["SOL"][5] is None, (
+            f"SOL[5] (NaN input) must be null, got {result['SOL'][5]}"
+        )
+        assert result["SOL"][-1] == pytest.approx(1.0, rel=1e-12), (
+            f"SOL[-1] should be 1.0 (rank 19/19), got {result['SOL'][-1]}"
+        )
+
+
+class TestRankInvalidAxis:
+    def test_rank_axis_must_be_0_or_1(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        with pytest.raises(ValueError, match="axis must be 0 or 1"):
+            backend.rank(panel, axis=2)
+
+
+# ---------------------------------------------------------------------------
+# Regression: axis=0 round-trip must not assume unique timestamps.
+#
+# Bug: rank(axis=0) / zscore(axis=0) used ``pivot(index="ts")`` after the
+# long-form round-trip.  Duplicate timestamps caused Polars to collapse rows
+# and raise ``ComputeError``.  Axis=0 is row-wise cross-sectional semantics, so
+# duplicate ``ts`` values must remain distinct rows.
+# ---------------------------------------------------------------------------
+
+
+class TestCrossSectionalDuplicateTimestampRegression:
+    def test_rank_axis0_preserves_duplicate_ts_rows(
+        self, backend: PolarsBackend
+    ) -> None:
+        ts0 = dt.datetime(2024, 1, 1)
+        panel = pl.DataFrame(
+            {
+                "ts": [ts0, ts0, dt.datetime(2024, 1, 2)],
+                "BTC": [1.0, 3.0, 2.0],
+                "ETH": [2.0, 1.0, 4.0],
+                "SOL": [3.0, 2.0, 6.0],
+            }
+        )
+
+        result = backend.rank(panel, axis=0, pct=True)
+
+        assert result["ts"].to_list() == panel["ts"].to_list()
+        assert result.height == panel.height
+        assert result["BTC"].to_list() == pytest.approx([1 / 3, 1.0, 1 / 3])
+        assert result["ETH"].to_list() == pytest.approx([2 / 3, 1 / 3, 2 / 3])
+        assert result["SOL"].to_list() == pytest.approx([1.0, 2 / 3, 1.0])
+
+    def test_zscore_axis0_preserves_duplicate_ts_rows(
+        self, backend: PolarsBackend
+    ) -> None:
+        ts0 = dt.datetime(2024, 1, 1)
+        panel = pl.DataFrame(
+            {
+                "ts": [ts0, ts0, dt.datetime(2024, 1, 2)],
+                "BTC": [1.0, 3.0, 2.0],
+                "ETH": [2.0, 1.0, 4.0],
+                "SOL": [3.0, 2.0, 6.0],
+            }
+        )
+
+        result = backend.zscore(panel, axis=0)
+
+        assert result["ts"].to_list() == panel["ts"].to_list()
+        assert result.height == panel.height
+        assert result["BTC"].to_list() == pytest.approx([-1.0, 1.0, -1.0])
+        assert result["ETH"].to_list() == pytest.approx([0.0, -1.0, 0.0])
+        assert result["SOL"].to_list() == pytest.approx([1.0, 0.0, 1.0])
+
+
+# ---------------------------------------------------------------------------
+# zscore — cross-sectional (axis=0) and time-series (axis=1)
+# ---------------------------------------------------------------------------
+
+
+class TestZscoreCrossSectional:
+    def test_zscore_cross_section_row_means_near_zero(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.zscore(panel, axis=0)
+        # Each row's symbols must average to ~0.
+        for i in range(T_BARS):
+            row_vals = [result[col][i] for col in SYMBOL_COLS]
+            row_mean = sum(row_vals) / len(row_vals)
+            assert row_mean == pytest.approx(0.0, abs=1e-10)
+
+    def test_zscore_cross_section_row_stds_near_one(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.zscore(panel, axis=0)
+        for i in range(T_BARS):
+            row_vals = [result[col][i] for col in SYMBOL_COLS]
+            mean = sum(row_vals) / len(row_vals)
+            # Sample std (n-1 denominator), matching polars' default.
+            var = sum((v - mean) ** 2 for v in row_vals) / (len(row_vals) - 1)
+            std = math.sqrt(var)
+            assert std == pytest.approx(1.0, rel=1e-10)
+
+
+class TestZscoreCrossSectionalNaN:
+    """Cross-sectional zscore with NaN cells (DataLayer PIT / warmup markers)."""
+
+    def test_zscore_cross_section_nan_produces_null_output(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """NaN input → null output; valid cells on the same row use the
+        correct (NaN-excluded) mean and std.
+
+        Regression: previously NaN propagated through ``mean().over("ts")``
+        and ``std().over("ts")``, turning the entire cross-section into NaN.
+        """
+        result = backend.zscore(panel_with_nan, axis=0)
+        # BTC row 0 is NaN — must be null in output, not NaN.
+        assert result["BTC"][0] is None, (
+            f"BTC[0] (NaN input) must be null, got {result['BTC'][0]}"
+        )
+        # SOL row 5 is NaN — must be null.
+        assert result["SOL"][5] is None, (
+            f"SOL[5] (NaN input) must be null, got {result['SOL'][5]}"
+        )
+        # Valid cells on row 0 (ETH, SOL, BNB, XRP — 4 symbols) must be finite.
+        for col in SYMBOL_COLS:
+            if col == "BTC":
+                continue
+            v = result[col][0]
+            assert v is not None and math.isfinite(v), (
+                f"{col}[0]: expected finite zscore, got {v}"
+            )
+        # Cross-section mean of valid cells at row 0 must be ~0.
+        row0_vals = [result[col][0] for col in SYMBOL_COLS if col != "BTC"]
+        row0_mean = sum(row0_vals) / len(row0_vals)  # type: ignore[arg-type]
+        assert row0_mean == pytest.approx(0.0, abs=1e-10), (
+            f"Row 0 cross-section mean (excl. BTC NaN) should be ~0, got {row0_mean}"
+        )
+
+
+class TestZscoreTimeSeries:
+    def test_zscore_time_series_col_means_near_zero(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.zscore(panel, axis=1)
+        for col in SYMBOL_COLS:
+            vals = result[col].to_list()
+            assert sum(vals) / len(vals) == pytest.approx(0.0, abs=1e-10)
+
+    def test_zscore_time_series_col_stds_near_one(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.zscore(panel, axis=1)
+        for col in SYMBOL_COLS:
+            vals = result[col].to_list()
+            mean = sum(vals) / len(vals)
+            var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
+            std = math.sqrt(var)
+            assert std == pytest.approx(1.0, rel=1e-10)
+
+
+class TestZscoreAxisSemantics:
+    def test_zscore_axis0_and_axis1_differ(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        cross = backend.zscore(panel, axis=0)
+        time = backend.zscore(panel, axis=1)
+        assert not cross.equals(time)
+
+    def test_zscore_invalid_axis_raises(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        with pytest.raises(ValueError, match="axis must be 0 or 1"):
+            backend.zscore(panel, axis=2)
+
+
+# ---------------------------------------------------------------------------
+# clip
+# ---------------------------------------------------------------------------
+
+
+class TestClip:
+    def test_clip_both_bounds(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.clip(panel, low=110.0, high=140.0)
+        for col in SYMBOL_COLS:
+            for v in result[col].to_list():
+                assert 110.0 <= v <= 140.0
+
+    def test_clip_low_only(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.clip(panel, low=110.0, high=None)
+        for col in SYMBOL_COLS:
+            for v in result[col].to_list():
+                assert v >= 110.0
+
+    def test_clip_high_only(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.clip(panel, low=None, high=120.0)
+        for col in SYMBOL_COLS:
+            for v in result[col].to_list():
+                assert v <= 120.0
+
+    def test_clip_no_bounds_identity(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.clip(panel, low=None, high=None)
+        assert result.equals(panel)
+
+
+# ---------------------------------------------------------------------------
+# log / abs
+# ---------------------------------------------------------------------------
+
+
+class TestLog:
+    def test_log_positive_values(
+        self, backend: PolarsBackend, panel: pl.DataFrame
+    ) -> None:
+        result = backend.log(panel)
+        for col in SYMBOL_COLS:
+            for x_in, x_out in zip(panel[col].to_list(), result[col].to_list()):
+                assert x_out == pytest.approx(math.log(x_in), rel=1e-12)
+
+
+class TestAbs:
+    def test_abs_makes_negative_positive(
+        self, backend: PolarsBackend
+    ) -> None:
+        ts = pl.datetime_range(
+            start=dt.datetime(2024, 1, 1),
+            end=dt.datetime(2024, 1, 3),
+            interval="1d",
+            eager=True,
+        )
+        df = pl.DataFrame({"ts": ts.to_list(), "BTC": [-1.0, 0.0, 2.0]})
+        result = PolarsBackend().abs(df)
+        assert result["BTC"].to_list() == [1.0, 0.0, 2.0]
+
+
+# ---------------------------------------------------------------------------
+# fillna
+# ---------------------------------------------------------------------------
+
+
+class TestFillna:
+    def test_fillna_replaces_nulls_with_value(
+        self, backend: PolarsBackend, panel_with_null: pl.DataFrame
+    ) -> None:
+        result = backend.fillna(panel_with_null, value=0.0)
+        # No nulls remain.
+        for col in SYMBOL_COLS:
+            assert result[col].null_count() == 0
+        # Original null cells now hold the fill value.
+        assert result["ETH"][0] == pytest.approx(0.0, abs=1e-12)
+        assert result["SOL"][5] == pytest.approx(0.0, abs=1e-12)
+
+    def test_fillna_preserves_non_null_values(
+        self,
+        backend: PolarsBackend,
+        panel_with_null: pl.DataFrame,
+    ) -> None:
+        result = backend.fillna(panel_with_null, value=-999.0)
+        # BTC has no nulls in the fixture — must be unchanged.
+        assert result["BTC"].to_list() == panel_with_null["BTC"].to_list()
+
+
+# ---------------------------------------------------------------------------
+# Empty value-column edge case
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyValueColumns:
+    def test_shift_with_only_ts_column_returns_clone(
+        self, backend: PolarsBackend
+    ) -> None:
+        ts = pl.datetime_range(
+            start=dt.datetime(2024, 1, 1),
+            end=dt.datetime(2024, 1, 3),
+            interval="1d",
+            eager=True,
+        )
+        df = pl.DataFrame({"ts": ts.to_list()})
+        result = backend.shift(df, 1)
+        assert result.equals(df)
+
+    def test_missing_ts_column_raises(
+        self, backend: PolarsBackend
+    ) -> None:
+        df = pl.DataFrame({"BTC": [1.0, 2.0, 3.0]})
+        with pytest.raises(ValueError, match="expects a column named 'ts'"):
+            backend.shift(df, 1)
+
+
+# ---------------------------------------------------------------------------
+# Regression: zscore axis=1 must not let a single NaN warmup cell contaminate
+# the entire column's mean/std.
+#
+# Bug: the axis=1 path called ``pl.col(c).mean()`` / ``pl.col(c).std()``
+# directly on the panel *without* masking NaN to null first.  Polars includes
+# NaN in the aggregation, producing a NaN mean and NaN std for the whole
+# column.  After the fix, _mask_nonfinite_to_null is applied first so only
+# null-masked NaN cells are excluded from mean/std, matching the axis=0 path.
+# ---------------------------------------------------------------------------
+
+
+class TestZscoreTimeSeriesNaNRegression:
+    """axis=1 zscore: NaN warmup/PIT cell → null output; other finite rows
+    in the same column must still produce finite zscores.
+    """
+
+    def test_nan_cell_produces_null_output(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """BTC[0] is NaN → zscore output for BTC[0] must be null (not NaN).
+
+        Regression: previously the NaN propagated through mean/std, turning
+        every BTC zscore to NaN instead of leaving finite rows unaffected.
+        """
+        result = backend.zscore(panel_with_nan, axis=1)
+        # NaN input → null output (masked to null before aggregation).
+        assert result["BTC"][0] is None, (
+            f"BTC[0] (NaN input) must be null after axis=1 zscore, got {result['BTC'][0]}"
+        )
+        assert result["SOL"][5] is None, (
+            f"SOL[5] (NaN input) must be null after axis=1 zscore, got {result['SOL'][5]}"
+        )
+
+    def test_other_finite_rows_remain_finite_after_nan_in_column(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """Finite rows in a column that also contains a NaN row must still
+        produce finite zscore values — the NaN must not poison the mean/std.
+
+        Regression: without the mask, BTC[1] through BTC[19] all became NaN
+        because ``pl.col('BTC').mean()`` propagated the BTC[0] NaN to the
+        aggregated mean, and then every subtraction became NaN.
+        """
+        result = backend.zscore(panel_with_nan, axis=1)
+        for i in range(1, T_BARS):
+            v = result["BTC"][i]
+            assert v is not None and math.isfinite(v), (
+                f"BTC[{i}] should be finite zscore; got {v}. "
+                "NaN at BTC[0] must not contaminate other rows."
+            )
+        # SOL[5] is NaN; all other SOL rows must be finite.
+        for i in range(T_BARS):
+            if i == 5:
+                continue
+            v = result["SOL"][i]
+            assert v is not None and math.isfinite(v), (
+                f"SOL[{i}] should be finite zscore; got {v}. "
+                "NaN at SOL[5] must not contaminate other rows."
+            )
+
+    def test_column_mean_near_zero_excluding_nan(
+        self,
+        backend: PolarsBackend,
+        panel_with_nan: pl.DataFrame,
+    ) -> None:
+        """The mean of valid (non-null) zscore values per column must be ~0,
+        confirming that mean/std were computed over the 19 valid rows only.
+        """
+        result = backend.zscore(panel_with_nan, axis=1)
+        # BTC has 1 NaN (row 0); 19 finite zscores must average to ~0.
+        btc_vals = [v for v in result["BTC"].to_list() if v is not None]
+        assert len(btc_vals) == T_BARS - 1, (
+            f"Expected {T_BARS - 1} valid BTC zscores, got {len(btc_vals)}"
+        )
+        assert sum(btc_vals) / len(btc_vals) == pytest.approx(0.0, abs=1e-9), (
+            "BTC column mean of valid zscores should be ~0"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Regression: fillna must replace BOTH null and NaN.
+#
+# Bug: the implementation called only ``fill_null(value)`` which does not
+# touch NaN (a valid IEEE-754 Float64 value in Polars).  Callers that invoke
+# fillna on a DataLayer panel (which uses NaN for PIT / warmup missingness)
+# would silently leave NaN cells unchanged.
+# ---------------------------------------------------------------------------
+
+
+class TestFillnaHandlesNaNAndNull:
+    """fillna(value) must replace both null and NaN in symbol columns."""
+
+    def test_fillna_replaces_nan(
+        self, backend: PolarsBackend, panel_with_nan: pl.DataFrame
+    ) -> None:
+        """NaN cells must be replaced by ``value``; they must not survive."""
+        result = backend.fillna(panel_with_nan, value=0.0)
+        # After fill, no NaN should remain in any symbol column.
+        for col in SYMBOL_COLS:
+            for v in result[col].to_list():
+                assert v is not None and math.isfinite(v), (
+                    f"{col}: unexpected NaN/null after fillna, got {v}"
+                )
+        # Confirm the specific NaN cells were replaced.
+        assert result["BTC"][0] == pytest.approx(0.0), (
+            "BTC[0] was NaN; fillna(0.0) must replace it with 0.0"
+        )
+        assert result["SOL"][5] == pytest.approx(0.0), (
+            "SOL[5] was NaN; fillna(0.0) must replace it with 0.0"
+        )
+
+    def test_fillna_replaces_null_and_nan_simultaneously(
+        self, backend: PolarsBackend
+    ) -> None:
+        """Panel with both null and NaN cells: fillna replaces both."""
+        ts = pl.datetime_range(
+            start=dt.datetime(2024, 1, 1),
+            end=dt.datetime(2024, 1, 3),
+            interval="1d",
+            eager=True,
+        )
+        # Row 0: BTC = null; ETH = NaN; SOL = 1.0 (valid).
+        # Row 1: BTC = NaN;  ETH = null; SOL = 2.0 (valid).
+        # Row 2: BTC = 3.0;  ETH = 4.0;  SOL = NaN.
+        df = pl.DataFrame(
+            {
+                "ts": ts.to_list(),
+                "BTC": [None, float("nan"), 3.0],
+                "ETH": [float("nan"), None, 4.0],
+                "SOL": [1.0, 2.0, float("nan")],
+            }
+        )
+        result = backend.fillna(df, value=-1.0)
+        # All null/NaN cells replaced with -1.0.
+        assert result["BTC"][0] == pytest.approx(-1.0), "BTC[0] was null"
+        assert result["BTC"][1] == pytest.approx(-1.0), "BTC[1] was NaN"
+        assert result["ETH"][0] == pytest.approx(-1.0), "ETH[0] was NaN"
+        assert result["ETH"][1] == pytest.approx(-1.0), "ETH[1] was null"
+        assert result["SOL"][2] == pytest.approx(-1.0), "SOL[2] was NaN"
+        # Valid cells remain unchanged.
+        assert result["SOL"][0] == pytest.approx(1.0), "SOL[0] should be unchanged"
+        assert result["SOL"][1] == pytest.approx(2.0), "SOL[1] should be unchanged"
+        assert result["BTC"][2] == pytest.approx(3.0), "BTC[2] should be unchanged"
+        assert result["ETH"][2] == pytest.approx(4.0), "ETH[2] should be unchanged"

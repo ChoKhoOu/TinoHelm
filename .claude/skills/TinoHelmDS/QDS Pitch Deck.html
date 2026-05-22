@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TinoHelm QDS Warm · Pitch Deck</title>
+<link rel="stylesheet" href="colors_and_type.css">
+<script src="deck-stage.js"></script>
+<style>
+/* Force dark theme across the deck for authority */
+html { color-scheme: dark; }
+body { margin: 0; background: #000; }
+
+/* Slide base */
+.slide {
+  background: var(--bg-s);
+  color: var(--t0);
+  font-family: var(--font-u);
+  padding: 96px 120px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.slide-alt { background: var(--bg-p); }
+.slide-deep { background: #1a1a18; }
+
+/* Universal label + slide number */
+.slide::after {
+  content: attr(data-num);
+  position: absolute;
+  top: 36px; right: 48px;
+  font-family: var(--font-d);
+  font-size: 14px;
+  color: var(--t3);
+  letter-spacing: .1em;
+}
+.slide::before {
+  content: attr(data-section);
+  position: absolute;
+  top: 36px; left: 120px;
+  font-family: var(--font-d);
+  font-size: 14px;
+  color: var(--acc);
+  letter-spacing: .15em;
+  text-transform: uppercase;
+}
+.slide-cover::before, .slide-cover::after { display: none; }
+
+/* Typography scale */
+.eyebrow {
+  font-family: var(--font-d);
+  font-size: 16px;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--acc);
+  margin-bottom: 28px;
+  display: inline-flex; align-items: center; gap: 14px;
+}
+.eyebrow::after {
+  content: ''; width: 80px; height: 1px; background: var(--acc); opacity: .5;
+}
+.title {
+  font-family: var(--font-u);
+  font-size: 88px;
+  font-weight: 600;
+  letter-spacing: -.03em;
+  line-height: 1.02;
+  margin: 0 0 36px 0;
+  color: var(--t0);
+}
+.title .acc { color: var(--acc); }
+.subtitle {
+  font-family: var(--font-u);
+  font-size: 32px;
+  font-weight: 400;
+  color: var(--t1);
+  line-height: 1.35;
+  max-width: 1200px;
+  margin: 0;
+}
+.small-title {
+  font-family: var(--font-u);
+  font-size: 56px;
+  font-weight: 600;
+  letter-spacing: -.02em;
+  line-height: 1.05;
+  margin: 0 0 28px 0;
+  color: var(--t0);
+}
+.lede {
+  font-size: 26px;
+  line-height: 1.45;
+  color: var(--t1);
+  max-width: 1120px;
+}
+.mono { font-family: var(--font-d); font-feature-settings: 'tnum' 1; }
+
+/* Layouts */
+.fill { flex: 1; display: flex; flex-direction: column; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 40px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px; }
+.split { display: grid; grid-template-columns: 460px 1fr; gap: 80px; }
+.end-align { justify-content: flex-end; }
+
+/* Cards */
+.card {
+  background: var(--bg-p);
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  padding: 28px 32px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.card-label {
+  font-family: var(--font-d);
+  font-size: 13px;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--acc);
+}
+.card-title {
+  font-family: var(--font-u);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--t0);
+  letter-spacing: -.01em;
+  margin: 0;
+}
+.card-body {
+  font-family: var(--font-u);
+  font-size: 19px;
+  color: var(--t2);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* Swatches */
+.sw {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.sw .chip { height: 150px; }
+.sw .sw-meta { padding: 20px 22px; background: var(--bg-p); display: flex; flex-direction: column; gap: 6px; }
+.sw .sw-nm { font-family: var(--font-u); font-size: 22px; font-weight: 600; color: var(--t0); }
+.sw .sw-hex { font-family: var(--font-d); font-size: 15px; color: var(--t2); }
+.sw .sw-use { font-family: var(--font-u); font-size: 16px; color: var(--t3); }
+
+/* Big KPI */
+.kpi {
+  background: var(--bg-p);
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  padding: 32px;
+}
+.kpi-label { font-family: var(--font-d); font-size: 13px; letter-spacing: .15em; text-transform: uppercase; color: var(--acc); margin-bottom: 12px; }
+.kpi-value { font-family: var(--font-d); font-size: 72px; color: var(--t0); line-height: 1; letter-spacing: -.01em; font-weight: 500; }
+.kpi-cap { font-family: var(--font-u); font-size: 18px; color: var(--t2); margin-top: 10px; }
+
+/* Buttons (showcase) */
+.btn { font-family: var(--font-u); font-size: 20px; font-weight: 500; padding: 16px 32px; border-radius: 8px; border: 1px solid transparent; display: inline-flex; align-items: center; gap: 10px; cursor: default; }
+.btn-p { background: var(--acc); color: #fff; font-weight: 600; box-shadow: 0 2px 8px rgba(217,120,87,.2); }
+.btn-s { background: var(--bg-t); color: var(--t0); border-color: var(--bd); }
+.btn-g { background: transparent; color: var(--t1); }
+.btn-d { background: rgba(254,129,129,.15); color: var(--dan); border: 1px solid rgba(254,129,129,.3); }
+
+/* Badges */
+.badge { font-family: var(--font-d); font-size: 15px; font-weight: 500; padding: 8px 16px; border-radius: 100px; display: inline-flex; align-items: center; gap: 10px; letter-spacing: .04em; }
+.badge-sb { background: rgba(133,183,235,.14); color: var(--info); letter-spacing: .15em; text-transform: uppercase; }
+.badge-lv { background: rgba(254,129,129,.14); color: var(--dan); letter-spacing: .15em; text-transform: uppercase; }
+.badge-ok { background: rgba(54,136,75,.14); color: var(--suc); }
+.badge-fail { background: rgba(254,129,129,.14); color: var(--dan); }
+.badge-run { background: rgba(133,183,235,.14); color: var(--info); }
+
+/* List rows */
+.row { display: grid; grid-template-columns: 4px 1fr auto auto auto; gap: 20px; align-items: center; padding: 18px 22px; background: var(--bg-p); border-top: 1px solid var(--bd); }
+.row:first-child { border-radius: 12px 12px 0 0; border-top: 1px solid var(--bd); }
+.row:last-child { border-radius: 0 0 12px 12px; border-bottom: 1px solid var(--bd); }
+.row-stripe { width: 4px; height: 32px; border-radius: 2px; }
+.row-name { font-family: var(--font-u); font-size: 20px; color: var(--t0); font-weight: 500; }
+.row-val { font-family: var(--font-d); font-size: 19px; color: var(--t0); }
+
+/* Chart tiles */
+.chart-tile {
+  background: var(--bg-p);
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  padding: 22px;
+  display: flex; flex-direction: column; gap: 14px;
+  position: relative;
+  overflow: hidden;
+}
+.chart-tile .ctl { font-family: var(--font-d); font-size: 13px; letter-spacing: .12em; color: var(--acc); text-transform: uppercase; }
+.chart-tile .ctn { font-family: var(--font-u); font-size: 20px; color: var(--t0); font-weight: 600; }
+.chart-tile svg { width: 100%; height: 180px; }
+
+/* Do/Don't */
+.dd { border-radius: 14px; padding: 32px; border: 1px solid; }
+.dd-do { background: rgba(54,136,75,.06); border-color: rgba(54,136,75,.3); }
+.dd-dont { background: rgba(254,129,129,.05); border-color: rgba(254,129,129,.3); }
+.dd h3 { font-family: var(--font-d); font-size: 14px; letter-spacing: .15em; text-transform: uppercase; margin: 0 0 18px 0; display: flex; align-items: center; gap: 10px; }
+.dd-do h3 { color: var(--suc); }
+.dd-dont h3 { color: var(--dan); }
+.dd ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 16px; }
+.dd li { font-family: var(--font-u); font-size: 20px; color: var(--t0); line-height: 1.45; display: flex; gap: 14px; }
+.dd li .mark { font-family: var(--font-d); font-weight: 600; flex-shrink: 0; }
+.dd-do .mark { color: var(--suc); }
+.dd-dont .mark { color: var(--dan); }
+
+/* Motion cells */
+.mot-cell { background: var(--bg-p); border: 1px solid var(--bd); border-radius: 12px; padding: 26px; }
+.mot-name { font-family: var(--font-d); font-size: 13px; letter-spacing: .15em; color: var(--acc); text-transform: uppercase; margin-bottom: 8px; }
+.mot-val { font-family: var(--font-d); font-size: 40px; color: var(--t0); font-weight: 500; margin-bottom: 8px; }
+.mot-use { font-family: var(--font-u); font-size: 16px; color: var(--t2); line-height: 1.4; }
+
+/* Wordmark */
+.wordmark {
+  font-family: var(--font-d);
+  font-weight: 600;
+  letter-spacing: -.02em;
+}
+.wordmark .a { color: var(--acc); }
+
+/* Cover slide */
+.slide-cover {
+  background: radial-gradient(ellipse at 35% 50%, rgba(217,120,87,.08) 0%, transparent 55%), var(--bg-s);
+  justify-content: center;
+  padding: 96px 140px;
+}
+.slide-cover .cover-mark {
+  font-size: 200px;
+  letter-spacing: -.04em;
+  margin-bottom: 40px;
+}
+.cover-tag {
+  font-family: var(--font-d);
+  font-size: 20px;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--t2);
+  margin-bottom: 64px;
+  display: flex; align-items: center; gap: 20px;
+}
+.cover-tag .sep { width: 40px; height: 1px; background: var(--t3); }
+.cover-sub {
+  font-family: var(--font-u);
+  font-size: 36px;
+  color: var(--t1);
+  line-height: 1.35;
+  max-width: 1200px;
+  font-weight: 300;
+}
+.cover-footer {
+  position: absolute;
+  bottom: 64px; left: 140px; right: 140px;
+  display: flex; justify-content: space-between; align-items: flex-end;
+  font-family: var(--font-d);
+  font-size: 14px;
+  color: var(--t3);
+  letter-spacing: .08em;
+}
+
+/* Section heading slide */
+.slide-section {
+  background: var(--bg-p);
+  justify-content: center;
+}
+.section-num {
+  font-family: var(--font-d);
+  font-size: 220px;
+  font-weight: 300;
+  color: var(--acc);
+  line-height: 1;
+  letter-spacing: -.04em;
+  margin-bottom: 24px;
+  opacity: .85;
+}
+.section-ttl {
+  font-size: 72px;
+  font-weight: 600;
+  letter-spacing: -.02em;
+  margin: 0 0 20px 0;
+}
+.section-sub {
+  font-size: 28px;
+  color: var(--t2);
+  max-width: 1000px;
+  line-height: 1.4;
+}
+
+/* Closing */
+.slide-closing {
+  background: linear-gradient(180deg, var(--bg-s) 0%, #1a1a18 100%);
+  justify-content: center;
+}
+.closing-big {
+  font-size: 120px;
+  font-weight: 600;
+  letter-spacing: -.03em;
+  line-height: 1;
+  margin: 0 0 40px 0;
+}
+.closing-big .a { color: var(--acc); }
+
+/* Utility */
+.space-t { margin-top: 24px; }
+.space-tlg { margin-top: 48px; }
+.code { font-family: var(--font-d); color: var(--acc); }
+.divider-line { height: 1px; background: var(--bd); margin: 24px 0; }
+</style>
+
+<script type="application/json" id="__bundler_thumbnail">
+</script>
+</head>
+<body>
+
+<deck-stage width="1920" height="1080">
+
+<!-- ============= 01 COVER ============= -->
+<section class="slide slide-cover" data-label="Cover">
+  <div class="cover-tag"><span>TinoHelm</span><span class="sep"></span><span>Quantitative Design System · v1</span></div>
+  <div class="wordmark cover-mark"><span class="a">T</span>ino<span class="a">.</span>Helm</div>
+  <div class="cover-sub">QDS Warm — a warm, quant-focused design system for a NautilusTrader-powered trading platform. Bloomberg Terminal rigor, Claude.ai warmth, Chinese-first copy.</div>
+  <div class="cover-footer">
+    <div>warm charcoal · burnt orange · Inter + JetBrains Mono</div>
+    <div>v1 · 2025</div>
+  </div>
+</section>
+
+<!-- ============= 02 WHY ============= -->
+<section class="slide" data-section="01 · The Why" data-num="02 / 15" data-label="Why">
+  <div class="eyebrow">Opening</div>
+  <h1 class="title">A terminal that<br/>doesn't feel<span class="acc"> cold.</span></h1>
+  <p class="subtitle">Trading surfaces are either bright marketing sites dressed up as dashboards, or black Bloomberg clones built in the 90s. QDS Warm sits between them — the density and discipline of a terminal, the warmth and restraint of modern writing tools.</p>
+  <div class="fill end-align"></div>
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-label">Rigor</div>
+      <h3 class="card-title">Numbers first.</h3>
+      <p class="card-body">Every data point is monospaced. Typography is the primary hierarchy — not color, not shadow.</p>
+    </div>
+    <div class="card">
+      <div class="card-label">Warmth</div>
+      <h3 class="card-title">Warm charcoal ground.</h3>
+      <p class="card-body">Never pure black. The base is warm graphite with a single burnt-orange accent carrying brand weight.</p>
+    </div>
+    <div class="card">
+      <div class="card-label">Restraint</div>
+      <h3 class="card-title">One accent. Three surfaces.</h3>
+      <p class="card-body">Four text steps, three border steps. The system's power comes from what it refuses to include.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============= 03 PRINCIPLES ============= -->
+<section class="slide slide-alt" data-section="01 · The Why" data-num="03 / 15" data-label="Principles">
+  <div class="eyebrow">Five principles</div>
+  <h2 class="small-title">The rules we don't break.</h2>
+  <div class="fill"></div>
+  <div class="grid-4" style="gap:24px">
+    <div class="card">
+      <div class="card-label">01</div>
+      <h3 class="card-title">Data is monospaced.</h3>
+      <p class="card-body">Prices, IDs, timestamps, badges. Never sans-serif for a number.</p>
+    </div>
+    <div class="card">
+      <div class="card-label">02</div>
+      <h3 class="card-title">One accent only.</h3>
+      <p class="card-body">Burnt orange <span class="code">#D97857</span>. Everything else is neutral or semantic.</p>
+    </div>
+    <div class="card">
+      <div class="card-label">03</div>
+      <h3 class="card-title">Green up. Red down.</h3>
+      <p class="card-body">Semantic colors reserved for gain/loss, done/failed. Never decorative.</p>
+    </div>
+    <div class="card">
+      <div class="card-label">04</div>
+      <h3 class="card-title">Surfaces, not shadows.</h3>
+      <p class="card-body">Elevation via 4 warm-gray steps. Shadow used only for overlay and hover-lift.</p>
+    </div>
+  </div>
+  <div class="grid-4 space-t" style="gap:24px; grid-template-columns: repeat(4, 1fr);">
+    <div class="card" style="background:var(--bg-s); border-color:var(--bdh);">
+      <div class="card-label" style="color: var(--t0)">05 · The Big One</div>
+      <h3 class="card-title" style="color: var(--acc); font-size: 30px;">No filler. No slop.</h3>
+      <p class="card-body" style="font-size:18px">No decorative gradients. No stock illustration. No emoji. No 300ms spring bounce. No rounded-corner-with-left-accent-stripe hero cards. If it doesn't carry information, delete it.</p>
+    </div>
+    <div style="grid-column: span 3; display:flex; align-items:center; justify-content:center; color: var(--t3); font-family:var(--font-d); font-size:18px; letter-spacing:.1em;">
+      <div style="text-align:center; border: 1px dashed var(--bd); padding: 60px 40px; border-radius:14px;">
+        <div style="font-size:48px; font-weight:300; color:var(--t2); margin-bottom:10px; font-family:var(--font-u); letter-spacing:-.02em;">"One thousand no's for every yes."</div>
+        <div>the single most-quoted QDS rule in review</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= 04 COLOR ============= -->
+<section class="slide" data-section="02 · Visual Foundations" data-num="04 / 15" data-label="Color">
+  <div class="eyebrow">Color</div>
+  <h2 class="small-title">Warm charcoal ground.<br/>One accent hue.</h2>
+  <p class="lede" style="margin-bottom:36px">Every surface in the product is one of four warm grays. Color is reserved for one branded hue (orange) and four semantic signals (green/red/blue/amber) — each with a 12% alpha fill variant for tints.</p>
+  <div class="fill"></div>
+  <div class="grid-4">
+    <div class="sw">
+      <div class="chip" style="background:var(--acc)"></div>
+      <div class="sw-meta">
+        <div class="sw-nm">Accent · Burnt orange</div>
+        <div class="sw-hex">--acc · #D97857</div>
+        <div class="sw-use">Primary buttons, active nav, section labels, chart primary line.</div>
+      </div>
+    </div>
+    <div class="sw">
+      <div class="chip" style="background:var(--suc)"></div>
+      <div class="sw-meta">
+        <div class="sw-nm">Success · Green</div>
+        <div class="sw-hex">--suc · #36884B</div>
+        <div class="sw-use">Gains, filled orders, up-candles, done statuses.</div>
+      </div>
+    </div>
+    <div class="sw">
+      <div class="chip" style="background:var(--dan)"></div>
+      <div class="sw-meta">
+        <div class="sw-nm">Danger · Red</div>
+        <div class="sw-hex">--dan · #FE8181</div>
+        <div class="sw-use">Losses, down-candles, failed, drawdown fill.</div>
+      </div>
+    </div>
+    <div class="sw">
+      <div class="chip" style="background:var(--info)"></div>
+      <div class="sw-meta">
+        <div class="sw-nm">Info · Blue</div>
+        <div class="sw-hex">--info · #85B7EB</div>
+        <div class="sw-use">Running state, benchmarks, secondary chart lines.</div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-4 space-t">
+    <div class="sw"><div class="chip" style="background:var(--bg-s)"></div><div class="sw-meta"><div class="sw-nm">Surface · Base</div><div class="sw-hex">--bg-s · #1a1a18</div><div class="sw-use">Page ground. The warm floor.</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--bg-p)"></div><div class="sw-meta"><div class="sw-nm">Surface · Card</div><div class="sw-hex">--bg-p · #262624</div><div class="sw-use">Cards, panels — the main content surface.</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--bg-t)"></div><div class="sw-meta"><div class="sw-nm">Surface · Raised</div><div class="sw-hex">--bg-t · #302f2d</div><div class="sw-use">Hover state, secondary buttons, tab background.</div></div></div>
+    <div class="sw"><div class="chip" style="background:var(--bg-in)"></div><div class="sw-meta"><div class="sw-nm">Surface · Sunken</div><div class="sw-hex">--bg-in · #1d1d1b</div><div class="sw-use">Input wells, sidebar. Sinks below the page.</div></div></div>
+  </div>
+</section>
+
+<!-- ============= 05 TEXT HIERARCHY ============= -->
+<section class="slide slide-alt" data-section="02 · Visual Foundations" data-num="05 / 15" data-label="Text hierarchy">
+  <div class="eyebrow">Text hierarchy</div>
+  <h2 class="small-title">Four steps. No more.</h2>
+  <div class="fill"></div>
+  <div class="split">
+    <div>
+      <p class="lede" style="font-size:22px">A single palette of four text colors carries the entire product. Every text decision answers one question — which step? — and that's it.</p>
+      <div class="divider-line"></div>
+      <p style="font-family:var(--font-d); font-size:15px; color:var(--t3); letter-spacing:.12em; text-transform:uppercase; margin-bottom:12px">The 4-step rule</p>
+      <div class="mono" style="font-size:22px; color:var(--t1); line-height:1.8">
+        <div>primary text  &nbsp;→ headings, KPI values</div>
+        <div>body text     &nbsp;→ paragraphs, list items</div>
+        <div>muted text    &nbsp;→ captions, meta, axes</div>
+        <div>ghost text    &nbsp;→ placeholders, labels</div>
+      </div>
+    </div>
+    <div style="display:flex; flex-direction:column; justify-content:center; gap: 8px;">
+      <div style="padding: 22px 24px; background: var(--bg-s); border-radius: 10px; border: 1px solid var(--bd);">
+        <div style="font-family: var(--font-d); font-size: 13px; color: var(--t3); letter-spacing: .15em; text-transform: uppercase;">--t0 · #E8E6E0</div>
+        <div style="font-family: var(--font-u); font-size: 44px; color: var(--t0); font-weight: 600; letter-spacing: -.01em; margin-top:4px;">Primary · The headline.</div>
+      </div>
+      <div style="padding: 22px 24px; background: var(--bg-s); border-radius: 10px; border: 1px solid var(--bd);">
+        <div style="font-family: var(--font-d); font-size: 13px; color: var(--t3); letter-spacing: .15em; text-transform: uppercase;">--t1 · #C4C0B6</div>
+        <div style="font-family: var(--font-u); font-size: 30px; color: var(--t1); margin-top:4px;">Body — the readable paragraph text.</div>
+      </div>
+      <div style="padding: 22px 24px; background: var(--bg-s); border-radius: 10px; border: 1px solid var(--bd);">
+        <div style="font-family: var(--font-d); font-size: 13px; color: var(--t3); letter-spacing: .15em; text-transform: uppercase;">--t2 · #8E8A7F</div>
+        <div style="font-family: var(--font-u); font-size: 22px; color: var(--t2); margin-top:4px;">Muted — captions, meta, chart ticks.</div>
+      </div>
+      <div style="padding: 22px 24px; background: var(--bg-s); border-radius: 10px; border: 1px solid var(--bd);">
+        <div style="font-family: var(--font-d); font-size: 13px; color: var(--t3); letter-spacing: .15em; text-transform: uppercase;">--t3 · #6A665E</div>
+        <div style="font-family: var(--font-u); font-size: 18px; color: var(--t3); margin-top:4px;">Ghost — placeholders, subtle labels.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= 06 TYPE ============= -->
+<section class="slide" data-section="02 · Visual Foundations" data-num="06 / 15" data-label="Type">
+  <div class="eyebrow">Typography</div>
+  <h2 class="small-title">Sans for text.<br/>Mono for data.</h2>
+  <p class="lede" style="margin-bottom:40px">The single most important discipline in QDS. If a character represents a number, an ID, a timestamp, or a code — it's in <span class="code">JetBrains Mono</span>. Everything else is <span class="code">Inter</span>. No exceptions.</p>
+  <div class="fill"></div>
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-label">Inter · --font-u (sans)</div>
+      <div style="font-family: var(--font-u); font-weight: 600; font-size: 88px; line-height: 1; letter-spacing: -.02em; margin: 12px 0; color:var(--t0)">
+        Cold, precise,<br/>humanist.
+      </div>
+      <div style="font-family:var(--font-u); font-size: 21px; color: var(--t2); line-height: 1.5;">
+        UI copy · headings · buttons · body text · navigation · empty states · error messages.
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-label">JetBrains Mono · --font-d (data)</div>
+      <div style="font-family: var(--font-d); font-size: 64px; line-height: 1.1; font-weight: 500; margin: 12px 0; color:var(--t0); letter-spacing:-.01em">
+        <div>$127,438.92</div>
+        <div style="color:var(--suc)">+14.22%</div>
+        <div style="color:var(--t2); font-size: 36px">2025-03-14 09:32:04</div>
+      </div>
+      <div style="font-family:var(--font-u); font-size: 21px; color: var(--t2); line-height: 1.5;">
+        Prices · IDs · timestamps · symbols · code · badges · chart tick labels · section labels.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= 07 WORDMARK ============= -->
+<section class="slide slide-deep" data-section="02 · Visual Foundations" data-num="07 / 15" data-label="Wordmark">
+  <div class="eyebrow">Brand mark</div>
+  <h2 class="small-title">The wordmark is the logo.</h2>
+  <p class="lede" style="margin-bottom:0">No graphic icon. The product name in JetBrains Mono — with the leading T and the dot in accent orange — carries all brand weight. Simple, typographic, technical.</p>
+  <div class="fill" style="justify-content: center; align-items: center; display: flex;">
+    <div class="wordmark" style="font-size: 260px; letter-spacing: -.04em; line-height: 1;">
+      <span class="a">T</span>ino<span class="a">.</span>Helm
+    </div>
+  </div>
+  <div style="display:flex; justify-content:space-between; align-items:baseline; padding-top: 20px; border-top: 1px solid var(--bd);">
+    <div class="mono" style="font-size: 16px; color: var(--t2); letter-spacing: .1em;">JETBRAINS MONO · 600 · LETTER-SPACING -.04EM</div>
+    <div class="mono" style="font-size: 16px; color: var(--t3); letter-spacing: .1em;">Min size: 48px · Clear space: 0.5× cap height</div>
+  </div>
+</section>
+
+<!-- ============= 08 SPACING ============= -->
+<section class="slide slide-alt" data-section="02 · Visual Foundations" data-num="08 / 15" data-label="Spacing &amp; radius">
+  <div class="eyebrow">Spacing · Radius</div>
+  <h2 class="small-title">4-pixel grid. Three radii.</h2>
+  <p class="lede" style="margin-bottom:36px">The system uses a 4-px base grid throughout, and exactly three corner-radius tokens across the entire product. Pills exist for badges only.</p>
+  <div class="fill"></div>
+  <div class="grid-4">
+    <div class="kpi">
+      <div class="kpi-label">Small · --rs</div>
+      <div class="kpi-value">6<span style="color:var(--t3); font-size:36px">px</span></div>
+      <div class="kpi-cap">Buttons, inputs, small controls.</div>
+      <div style="margin-top:24px; height: 64px; background: var(--bg-t); border: 1px solid var(--bd); border-radius: 6px;"></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Medium · --rm</div>
+      <div class="kpi-value">10<span style="color:var(--t3); font-size:36px">px</span></div>
+      <div class="kpi-cap">Toasts, dropdowns, popovers.</div>
+      <div style="margin-top:24px; height: 64px; background: var(--bg-t); border: 1px solid var(--bd); border-radius: 10px;"></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Card · --r</div>
+      <div class="kpi-value">12<span style="color:var(--t3); font-size:36px">px</span></div>
+      <div class="kpi-cap">Cards, panels, dialogs.</div>
+      <div style="margin-top:24px; height: 64px; background: var(--bg-t); border: 1px solid var(--bd); border-radius: 12px;"></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Pill</div>
+      <div class="kpi-value">100<span style="color:var(--t3); font-size:36px">px</span></div>
+      <div class="kpi-cap">Badges, status pills — only.</div>
+      <div style="margin-top:24px; height: 64px; background: var(--bg-t); border: 1px solid var(--bd); border-radius: 100px;"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= 09 MOTION ============= -->
+<section class="slide" data-section="02 · Visual Foundations" data-num="09 / 15" data-label="Motion">
+  <div class="eyebrow">Motion</div>
+  <h2 class="small-title">Quiet. Fast. No overshoot.</h2>
+  <p class="lede" style="margin-bottom:40px">Two easings carry the entire product — one for enters, one for exits. Six duration tokens. No spring, no bounce, nothing that feels playful. Motion is confirmation, not decoration.</p>
+  <div class="fill"></div>
+  <div class="grid-3" style="gap: 20px;">
+    <div class="mot-cell"><div class="mot-name">--dur-fast</div><div class="mot-val mono">150ms</div><div class="mot-use">Hover, toggle, button press feedback.</div></div>
+    <div class="mot-cell"><div class="mot-name">--dur</div><div class="mot-val mono">280ms</div><div class="mot-use">Panel enter, tab switch, default transition.</div></div>
+    <div class="mot-cell"><div class="mot-name">--dur-slow</div><div class="mot-val mono">400ms</div><div class="mot-use">Data reveal, chart animate-in.</div></div>
+    <div class="mot-cell"><div class="mot-name">--dur-tick</div><div class="mot-val mono">600ms</div><div class="mot-use">Price tick flash — background green/red, then fade.</div></div>
+    <div class="mot-cell"><div class="mot-name">--dur-count</div><div class="mot-val mono">1.4s</div><div class="mot-use">Counter rolling — KPI values animate on load.</div></div>
+    <div class="mot-cell"><div class="mot-name">shimmer</div><div class="mot-val mono">2.5s</div><div class="mot-use">Progress-bar sheen, infinite. Running backtests only.</div></div>
+  </div>
+  <div style="margin-top: 36px; padding: 24px 32px; background: var(--bg-p); border: 1px solid var(--bd); border-radius: 12px; display:flex; justify-content:space-between; align-items:center;">
+    <div>
+      <div class="mot-name">Easing</div>
+      <div style="font-family: var(--font-d); font-size: 22px; color: var(--t0); margin-top: 6px;">
+        <span style="color:var(--acc)">--eo</span> cubic-bezier(.16, 1, .3, 1) <span style="color:var(--t3)">· enter</span>
+        &nbsp;&nbsp;&nbsp;
+        <span style="color:var(--acc)">--ei</span> cubic-bezier(.4, 0, 1, 1) <span style="color:var(--t3)">· exit</span>
+      </div>
+    </div>
+    <div style="font-family:var(--font-d); font-size:16px; color: var(--dan); letter-spacing:.08em;">NO SPRING · NO BOUNCE · NO OVERSHOOT</div>
+  </div>
+</section>
+
+<!-- ============= 10 COMPONENTS ============= -->
+<section class="slide slide-alt" data-section="03 · Components" data-num="10 / 15" data-label="Components">
+  <div class="eyebrow">Components · sampler</div>
+  <h2 class="small-title">One primary per view.</h2>
+  <p class="lede" style="margin-bottom:36px">Buttons come in four roles — primary, secondary, ghost, danger. Badges are always mono, always filled-tint, always pill-shaped. Mode pills <span class="mono" style="color:var(--info)">SANDBOX</span> and <span class="mono" style="color:var(--dan)">LIVE</span> get uppercase letter-spacing for a small-caps feel.</p>
+  <div class="fill"></div>
+
+  <div style="display:flex; gap:20px; flex-wrap:wrap; align-items:center; margin-bottom: 36px;">
+    <button class="btn btn-p">新建策略</button>
+    <button class="btn btn-s">重新扫描</button>
+    <button class="btn btn-g">取消</button>
+    <button class="btn btn-d">确认平仓</button>
+  </div>
+
+  <div style="display:flex; gap:16px; flex-wrap:wrap; margin-bottom: 40px;">
+    <span class="badge badge-sb">● Sandbox</span>
+    <span class="badge badge-lv">● Live</span>
+    <span class="badge badge-ok">✓ Done</span>
+    <span class="badge badge-run">◦ Running</span>
+    <span class="badge badge-fail">✕ Failed</span>
+    <span class="badge" style="background:rgba(250,199,117,.14); color: var(--warn);">⚠ Stale · 3m ago</span>
+  </div>
+
+  <div class="grid-4">
+    <div class="kpi" style="padding: 28px;">
+      <div class="kpi-label">Net PnL · 24h</div>
+      <div class="kpi-value" style="color:var(--suc); font-size: 56px;">+$12,384</div>
+      <div class="kpi-cap">+1.83% · vs yesterday</div>
+    </div>
+    <div class="kpi" style="padding: 28px;">
+      <div class="kpi-label">Active strategies</div>
+      <div class="kpi-value" style="font-size: 56px;">7<span style="color:var(--t3); font-size: 32px">/12</span></div>
+      <div class="kpi-cap">5 paused · 0 failed</div>
+    </div>
+    <div class="kpi" style="padding: 28px;">
+      <div class="kpi-label">Sharpe · 90d</div>
+      <div class="kpi-value" style="font-size: 56px;">1.42</div>
+      <div class="kpi-cap" style="color:var(--suc)">above 1.0 threshold</div>
+    </div>
+    <div class="kpi" style="padding: 28px;">
+      <div class="kpi-label">Max DD · 90d</div>
+      <div class="kpi-value" style="color:var(--dan); font-size: 56px;">-4.18%</div>
+      <div class="kpi-cap">within -10% cap</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============= 11 ROWS ============= -->
+<section class="slide" data-section="03 · Components" data-num="11 / 15" data-label="Rows">
+  <div class="eyebrow">Signature pattern</div>
+  <h2 class="small-title">The 3px status stripe.</h2>
+  <p class="lede" style="margin-bottom:36px">List rows carry state via a single 3-pixel left stripe — green for done, blue for running, red for failed, gray for queued. The user can triage a long table at a glance, with no icons, no avatars, no badges required.</p>
+  <div class="fill"></div>
+  <div style="border: 1px solid var(--bd); border-radius: 12px; overflow: hidden;">
+    <div class="row">
+      <div class="row-stripe" style="background: var(--suc)"></div>
+      <div class="row-name">BTC-ETH 对冲 · v2.3 <span class="mono" style="color:var(--t3); font-size:14px; margin-left:10px;">#bt-2847</span></div>
+      <div class="mono" style="color:var(--suc); font-size:19px;">+2.14%</div>
+      <div class="mono" style="color:var(--t2); font-size:16px;">12:34:18 / 00:04:12</div>
+      <span class="badge badge-ok" style="font-size:13px; padding:6px 12px;">✓ Done</span>
+    </div>
+    <div class="row">
+      <div class="row-stripe" style="background: var(--info)"></div>
+      <div class="row-name">动量均线交叉 · v1.8 <span class="mono" style="color:var(--t3); font-size:14px; margin-left:10px;">#bt-2848</span></div>
+      <div class="mono" style="color:var(--t2); font-size:19px;">—</div>
+      <div class="mono" style="color:var(--info); font-size:16px;">running · 00:02:41</div>
+      <span class="badge badge-run" style="font-size:13px; padding:6px 12px;">◦ Running</span>
+    </div>
+    <div class="row">
+      <div class="row-stripe" style="background: var(--dan)"></div>
+      <div class="row-name">波动率突破 · v3.1 <span class="mono" style="color:var(--t3); font-size:14px; margin-left:10px;">#bt-2849</span></div>
+      <div class="mono" style="color:var(--dan); font-size:19px;">-0.62%</div>
+      <div class="mono" style="color:var(--t2); font-size:16px;">12:30:02 / 00:00:58</div>
+      <span class="badge badge-fail" style="font-size:13px; padding:6px 12px;">✕ Failed</span>
+    </div>
+    <div class="row">
+      <div class="row-stripe" style="background: var(--t3)"></div>
+      <div class="row-name">因子混合 · experimental <span class="mono" style="color:var(--t3); font-size:14px; margin-left:10px;">#bt-2850</span></div>
+      <div class="mono" style="color:var(--t3); font-size:19px;">—</div>
+      <div class="mono" style="color:var(--t3); font-size:16px;">queued · position 2</div>
+      <span class="badge" style="background:rgba(110,106,100,.2); color:var(--t2); font-size:13px; padding:6px 12px;">◦ Queued</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============= 12 CHARTS OVERVIEW ============= -->
+<section class="slide slide-alt" data-section="04 · Charts" data-num="12 / 15" data-label="Chart vocabulary">
+  <div class="eyebrow">Chart vocabulary · 14 types</div>
+  <h2 class="small-title">A vocabulary, not a gallery.</h2>
+  <p class="lede" style="margin-bottom:36px">Every chart in the product picks from one of 14 pre-specified types, each with a fixed token, fixed shape, and fixed behavior. No designer picks a chart color — the data dimension picks it.</p>
+  <div class="fill"></div>
+
+  <div class="grid-4" style="gap:20px">
+    <div class="chart-tile">
+      <div class="ctl">Equity curve</div>
+      <svg viewBox="0 0 300 180" preserveAspectRatio="none">
+        <defs><linearGradient id="eqG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#D97857" stop-opacity=".3"/><stop offset="100%" stop-color="#D97857" stop-opacity="0"/></linearGradient></defs>
+        <path d="M0,150 L30,140 L60,130 L90,135 L120,115 L150,105 L180,112 L210,85 L240,70 L270,60 L300,45 L300,180 L0,180 Z" fill="url(#eqG)"/>
+        <path d="M0,150 L30,140 L60,130 L90,135 L120,115 L150,105 L180,112 L210,85 L240,70 L270,60 L300,45" stroke="#D97857" stroke-width="2" fill="none"/>
+      </svg>
+      <div class="ctn">NAV over time</div>
+    </div>
+    <div class="chart-tile">
+      <div class="ctl">Drawdown</div>
+      <svg viewBox="0 0 300 180" preserveAspectRatio="none">
+        <defs><linearGradient id="ddG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#FE8181" stop-opacity=".3"/><stop offset="100%" stop-color="#FE8181" stop-opacity="0"/></linearGradient></defs>
+        <path d="M0,20 L30,40 L60,70 L90,55 L120,95 L150,130 L180,110 L210,145 L240,125 L270,90 L300,30 L300,20 L0,20 Z" fill="url(#ddG)"/>
+        <path d="M0,20 L30,40 L60,70 L90,55 L120,95 L150,130 L180,110 L210,145 L240,125 L270,90 L300,30" stroke="#FE8181" stroke-width="1.6" fill="none"/>
+      </svg>
+      <div class="ctn">Peak-to-trough %</div>
+    </div>
+    <div class="chart-tile">
+      <div class="ctl">Candlestick</div>
+      <svg viewBox="0 0 300 180">
+        <g>
+          <line x1="20" y1="40" x2="20" y2="140" stroke="#36884B"/><rect x="14" y="60" width="12" height="50" fill="#36884B"/>
+          <line x1="50" y1="50" x2="50" y2="130" stroke="#FE8181"/><rect x="44" y="70" width="12" height="40" fill="#FE8181"/>
+          <line x1="80" y1="30" x2="80" y2="120" stroke="#36884B"/><rect x="74" y="50" width="12" height="45" fill="#36884B"/>
+          <line x1="110" y1="70" x2="110" y2="150" stroke="#FE8181"/><rect x="104" y="90" width="12" height="40" fill="#FE8181"/>
+          <line x1="140" y1="20" x2="140" y2="100" stroke="#36884B"/><rect x="134" y="35" width="12" height="55" fill="#36884B"/>
+          <line x1="170" y1="35" x2="170" y2="115" stroke="#36884B"/><rect x="164" y="50" width="12" height="50" fill="#36884B"/>
+          <line x1="200" y1="50" x2="200" y2="130" stroke="#FE8181"/><rect x="194" y="70" width="12" height="45" fill="#FE8181"/>
+          <line x1="230" y1="40" x2="230" y2="120" stroke="#36884B"/><rect x="224" y="55" width="12" height="50" fill="#36884B"/>
+          <line x1="260" y1="25" x2="260" y2="105" stroke="#36884B"/><rect x="254" y="40" width="12" height="55" fill="#36884B"/>
+        </g>
+      </svg>
+      <div class="ctn">OHLC · green up / red down</div>
+    </div>
+    <div class="chart-tile">
+      <div class="ctl">Volume bars</div>
+      <svg viewBox="0 0 300 180" preserveAspectRatio="none">
+        <g>
+          <rect x="10" y="60" width="20" height="120" fill="#36884B"/>
+          <rect x="40" y="90" width="20" height="90" fill="#FE8181"/>
+          <rect x="70" y="30" width="20" height="150" fill="#36884B"/>
+          <rect x="100" y="110" width="20" height="70" fill="#FE8181"/>
+          <rect x="130" y="40" width="20" height="140" fill="#36884B"/>
+          <rect x="160" y="75" width="20" height="105" fill="#36884B"/>
+          <rect x="190" y="100" width="20" height="80" fill="#FE8181"/>
+          <rect x="220" y="55" width="20" height="125" fill="#36884B"/>
+          <rect x="250" y="45" width="20" height="135" fill="#36884B"/>
+        </g>
+      </svg>
+      <div class="ctn">Volume · per-sign colored</div>
+    </div>
+    <div class="chart-tile">
+      <div class="ctl">Rolling Sharpe</div>
+      <svg viewBox="0 0 300 180" preserveAspectRatio="none">
+        <line x1="0" y1="90" x2="300" y2="90" stroke="#36884B" stroke-dasharray="4 3" stroke-width="1"/>
+        <path d="M0,110 Q30,80 60,85 T120,70 T180,100 T240,75 T300,60" stroke="#D97857" stroke-width="2" fill="none"/>
+        <path d="M0,95 Q30,105 60,100 T120,115 T180,88 T240,105 T300,92" stroke="#85B7EB" stroke-width="1.5" fill="none"/>
+      </svg>
+      <div class="ctn">Dual-axis · Sharpe + Beta</div>
+    </div>
+    <div class="chart-tile">
+      <div class="ctl">Returns hist</div>
+      <svg viewBox="0 0 300 180" preserveAspectRatio="none">
+        <g>
+          <rect x="10" y="150" width="20" height="30" fill="#D97857"/>
+          <rect x="35" y="130" width="20" height="50" fill="#D97857"/>
+          <rect x="60" y="90" width="20" height="90" fill="#D97857"/>
+          <rect x="85" y="50" width="20" height="130" fill="#D97857"/>
+          <rect x="110" y="30" width="20" height="150" fill="#D97857"/>
+          <rect x="135" y="20" width="20" height="160" fill="#D97857"/>
+          <rect x="160" y="40" width="20" height="140" fill="#D97857"/>
+          <rect x="185" y="75" width="20" height="105" fill="#D97857"/>
+          <rect x="210" y="115" width="20" height="65" fill="#D97857"/>
+          <rect x="235" y="140" width="20" height="40" fill="#D97857"/>
+          <rect x="260" y="155" width="20" height="25" fill="#D97857"/>
+          <line x1="150" y1="10" x2="150" y2="180" stroke="#E8E6E0" stroke-dasharray="4 3" stroke-width="1"/>
+        </g>
+      </svg>
+      <div class="ctn">Distribution · mean overlay</div>
+    </div>
+    <div class="chart-tile">
+      <div class="ctl">Correlation</div>
+      <svg viewBox="0 0 300 180">
+        <g>
+          <rect x="10"  y="10"  width="42" height="42" fill="#36884B" fill-opacity=".9"/>
+          <rect x="55"  y="10"  width="42" height="42" fill="#36884B" fill-opacity=".6"/>
+          <rect x="100" y="10"  width="42" height="42" fill="#FE8181" fill-opacity=".4"/>
+          <rect x="145" y="10"  width="42" height="42" fill="#36884B" fill-opacity=".3"/>
+          <rect x="10"  y="55"  width="42" height="42" fill="#36884B" fill-opacity=".6"/>
+          <rect x="55"  y="55"  width="42" height="42" fill="#36884B" fill-opacity=".9"/>
+          <rect x="100" y="55"  width="42" height="42" fill="#FE8181" fill-opacity=".5"/>
+          <rect x="145" y="55"  width="42" height="42" fill="#36884B" fill-opacity=".4"/>
+          <rect x="10"  y="100" width="42" height="42" fill="#FE8181" fill-opacity=".4"/>
+          <rect x="55"  y="100" width="42" height="42" fill="#FE8181" fill-opacity=".5"/>
+          <rect x="100" y="100" width="42" height="42" fill="#36884B" fill-opacity=".9"/>
+          <rect x="145" y="100" width="42" height="42" fill="#FE8181" fill-opacity=".6"/>
+        </g>
+      </svg>
+      <div class="ctn">Heatmap · diverging scale</div>
+    </div>
+    <div class="chart-tile">
+      <div class="ctl">Order book</div>
+      <svg viewBox="0 0 300 180" preserveAspectRatio="none">
+        <path d="M0,160 L30,150 L60,130 L90,115 L120,90 L150,80 L150,180 L0,180 Z" fill="#36884B" fill-opacity=".2"/>
+        <path d="M0,160 L30,150 L60,130 L90,115 L120,90 L150,80" stroke="#36884B" stroke-width="1.5" fill="none"/>
+        <path d="M150,80 L180,95 L210,115 L240,135 L270,155 L300,170 L300,180 L150,180 Z" fill="#FE8181" fill-opacity=".2"/>
+        <path d="M150,80 L180,95 L210,115 L240,135 L270,155 L300,170" stroke="#FE8181" stroke-width="1.5" fill="none"/>
+        <line x1="150" y1="10" x2="150" y2="180" stroke="#D97857" stroke-width="1"/>
+      </svg>
+      <div class="ctn">Depth · mirrored step</div>
+    </div>
+  </div>
+  <div style="margin-top: 24px; display: flex; justify-content: flex-end; font-family: var(--font-d); font-size: 15px; color: var(--t3); letter-spacing: .08em;">+ pair spread · tick trail · PnL calendar heatmap · QQ plot · factor scatter · ranking bars →</div>
+</section>
+
+<!-- ============= 13 CHART RULES ============= -->
+<section class="slide" data-section="04 · Charts" data-num="13 / 15" data-label="Chart rules">
+  <div class="eyebrow">Chart rules · the 10 commandments</div>
+  <h2 class="small-title">Ten rules, applied everywhere.</h2>
+  <p class="lede" style="margin-bottom:36px">The chart system is Recharts-based. These rules aren't style preferences — they're enforced in shared defaults every chart imports.</p>
+  <div class="fill"></div>
+  <div class="grid-2" style="gap: 28px;">
+    <ol style="margin: 0; padding-left: 24px; font-family:var(--font-u); font-size: 19px; color: var(--t1); line-height: 1.8; list-style: decimal; list-style-position: outside;">
+      <li><b style="color:var(--t0)">Monospaced tick labels.</b> Always. Never sans.</li>
+      <li><b style="color:var(--t0)">No axis line on top or right.</b> Bottom and left only.</li>
+      <li><b style="color:var(--t0)">Horizontal grid only.</b> Time already implies vertical structure.</li>
+      <li><b style="color:var(--t0)">Grid is whisper-faint.</b> 5% alpha. Data carries the eye.</li>
+      <li><b style="color:var(--t0)">One primary color per chart.</b> Use --acc. Semantic reserved for up/down.</li>
+    </ol>
+    <ol start="6" style="margin: 0; padding-left: 24px; font-family:var(--font-u); font-size: 19px; color: var(--t1); line-height: 1.8; list-style: decimal; list-style-position: outside;">
+      <li><b style="color:var(--t0)">Gradients are rare.</b> Only equity/drawdown area fill.</li>
+      <li><b style="color:var(--t0)">Tooltip is a card.</b> Same surface as every other card.</li>
+      <li><b style="color:var(--t0)">Dots off by default.</b> Only show on hover via activeDot.</li>
+      <li><b style="color:var(--t0)">Candlestick: green up, red down.</b> Western convention.</li>
+      <li><b style="color:var(--t0)">Reference lines are dashed accent.</b> For means, thresholds, entries.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============= 14 DO / DONT ============= -->
+<section class="slide slide-alt" data-section="05 · Voice" data-num="14 / 15" data-label="Do / Don't">
+  <div class="eyebrow">Copy voice</div>
+  <h2 class="small-title">Cold. Restrained. Technical.</h2>
+  <p class="lede" style="margin-bottom:40px">The product speaks like a senior trader, not a product marketer. Short Chinese phrases, financial terms left in English, never a sentence longer than it needs to be.</p>
+  <div class="fill"></div>
+  <div class="grid-2">
+    <div class="dd dd-do">
+      <h3><span>✓</span>QDS</h3>
+      <ul>
+        <li><span class="mark">button</span><span class="mono" style="color:var(--t0)">新建策略</span></li>
+        <li><span class="mark">banner</span><span class="mono" style="color:var(--t0)">SANDBOX · 模拟环境 · 不会产生真实交易</span></li>
+        <li><span class="mark">empty</span><span class="mono" style="color:var(--t0)">还没有回测记录 · 创建回测以验证策略</span></li>
+        <li><span class="mark">confirm</span><span class="mono" style="color:var(--t0)">此操作将平掉当前环境所有持仓。确认继续?</span></li>
+        <li><span class="mark">status</span><span class="mono" style="color:var(--t0)">排队中 · 运行中 · 已完成 · 失败</span></li>
+      </ul>
+    </div>
+    <div class="dd dd-dont">
+      <h3><span>✕</span>Not QDS</h3>
+      <ul>
+        <li><span class="mark">button</span><span style="color:var(--t2)">创建一个新的策略</span></li>
+        <li><span class="mark">banner</span><span style="color:var(--t2)">你现在处于安全的沙盒模式中!</span></li>
+        <li><span class="mark">empty</span><span style="color:var(--t2)">哎呀,这里空空如也~</span></li>
+        <li><span class="mark">confirm</span><span style="color:var(--t2)">你确定要这样做吗?这很危险哦</span></li>
+        <li><span class="mark">status</span><span style="color:var(--t2)">等待中~ · 跑着呢 · 搞定啦 · 挂了</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============= 15 CLOSING ============= -->
+<section class="slide slide-closing" data-label="Closing">
+  <div class="eyebrow">Ship it</div>
+  <h1 class="closing-big"><span class="a">Tino</span>.Helm<br/>runs on this.</h1>
+  <p class="subtitle" style="font-size:30px; max-width: 1400px;">Every screen in the product is assembled from the primitives you just saw. The system is the shortcut — pick the right token, trust the 4-step surface ladder, let the data do the talking.</p>
+  <div style="position:absolute; bottom:72px; left:140px; right:140px; display:grid; grid-template-columns: repeat(3, 1fr); gap: 40px; border-top: 1px solid var(--bd); padding-top: 32px;">
+    <div>
+      <div class="mono" style="font-size: 14px; color: var(--acc); letter-spacing:.15em; text-transform:uppercase; margin-bottom: 10px;">Source of truth</div>
+      <div style="font-family:var(--font-u); font-size: 22px; color: var(--t0); font-weight:500;">colors_and_type.css</div>
+      <div style="font-family:var(--font-u); font-size: 16px; color: var(--t2); margin-top: 6px;">All tokens, semantic classes</div>
+    </div>
+    <div>
+      <div class="mono" style="font-size: 14px; color: var(--acc); letter-spacing:.15em; text-transform:uppercase; margin-bottom: 10px;">Component reference</div>
+      <div style="font-family:var(--font-u); font-size: 22px; color: var(--t0); font-weight:500;">Web UI Kit.html</div>
+      <div style="font-family:var(--font-u); font-size: 16px; color: var(--t2); margin-top: 6px;">Buttons, KPI, rows, frame</div>
+    </div>
+    <div>
+      <div class="mono" style="font-size: 14px; color: var(--acc); letter-spacing:.15em; text-transform:uppercase; margin-bottom: 10px;">Chart spec</div>
+      <div style="font-family:var(--font-u); font-size: 22px; color: var(--t0); font-weight:500;">Charts Spec.html</div>
+      <div style="font-family:var(--font-u); font-size: 16px; color: var(--t2); margin-top: 6px;">14 types · live Recharts</div>
+    </div>
+  </div>
+</section>
+
+</deck-stage>
+
+</body>
+</html>

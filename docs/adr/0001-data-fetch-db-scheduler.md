@@ -1,0 +1,3 @@
+# Data fetch scheduling uses DB-selected jobs with batch-level FIFO and bucket fairness
+
+Data fetch no longer treats Redis list order as the source of scheduling truth. We use `DataFetchJob` rows as the scheduler source, add `batch_id` to represent a **FetchBatch**, keep batch-level soft FIFO across batches, and choose the next runnable job fairly across **FetchBucket** = `(symbol, data_type, interval)` within the active batch. We kept per-bucket chronological order and best-effort failure semantics because the previous Redis single-list ordering collapsed effective concurrency under the existing catalog lock boundary, while this approach improves fairness and throughput without relaxing catalog consistency.

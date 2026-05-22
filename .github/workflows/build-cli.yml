@@ -1,0 +1,205 @@
+name: Build CLI
+
+on:
+  push:
+    paths:
+      - 'cli/**'
+      - 'Makefile'
+      - '.github/workflows/build-cli.yml'
+  pull_request:
+    paths:
+      - 'cli/**'
+      - 'Makefile'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    name: Check CLI contract
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Rust CLI
+        working-directory: cli
+        run: |
+          cargo fmt --check
+          cargo check --locked
+          cargo test --locked
+          cargo clippy --all-targets -- -D warnings
+          cargo build --locked
+          ./target/debug/tino --help >/tmp/tino-help.txt
+          ./target/debug/tino version -f json | python3 -m json.tool >/tmp/tino-version.json
+
+          # ADR 0004: errors go to stderr as JSON, non-zero exit code
+          bad_home=$(mktemp -d)
+          mkdir -p "$bad_home/.tino/config" "$bad_home/bad-key-dir"
+          cat > "$bad_home/.tino/config/user.yaml" <<YAML
+          api:
+            url: http://127.0.0.1:8765/
+            key_file: $bad_home/bad-key-dir
+          YAML
+          HOME="$bad_home" ./target/debug/tino version | python3 -m json.tool >/tmp/tino-version-bad-creds.json
+          HOME="$bad_home" ./target/debug/tino auth logout | python3 -m json.tool >/tmp/tino-logout-bad-creds.json
+          set +e
+          HOME="$bad_home" ./target/debug/tino auth status >/tmp/tino-status-bad-creds.out 2>/tmp/tino-status-bad-creds.err
+          status_bad_creds=$?
+          set -e
+          test "$status_bad_creds" -ne 0
+          python3 - <<'PY'
+          import json
+          with open("/tmp/tino-status-bad-creds.err") as f:
+              payload = json.load(f)
+          assert "error" in payload
+          PY
+
+          cat >/tmp/tino-error-server.py <<'PY'
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          import json
+
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, *args):
+                  pass
+
+              def do_GET(self):
+                  if self.path.startswith("/api/backtest/failed/status"):
+                      self.send_response(200)
+                      self.send_header("Content-Type", "application/json")
+                      self.end_headers()
+                      self.wfile.write(json.dumps({
+                          "run_id": "failed",
+                          "status": "failed",
+                          "progress_pct": 100,
+                          "error": "typed failure",
+                          "result": None,
+                      }).encode())
+                      return
+                  self.send_response(418)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(json.dumps({"detail": "typed boom"}).encode())
+
+          HTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
+          PY
+          python3 /tmp/tino-error-server.py &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            python3 - <<'PY' && break || sleep 0.1
+          import socket
+          import sys
+          sock = socket.socket()
+          sock.settimeout(0.2)
+          sys.exit(0 if sock.connect_ex(("127.0.0.1", 8765)) == 0 else 1)
+          PY
+          done
+          set +e
+          TINO_API_URL=http://127.0.0.1:8765 ./target/debug/tino backtest status missing >/tmp/tino-typed-error.out 2>/tmp/tino-typed-error.err
+          typed_error_status=$?
+          set -e
+          test "$typed_error_status" -ne 0
+          python3 - <<'PY'
+          import json
+          with open("/tmp/tino-typed-error.err") as f:
+              payload = json.load(f)
+          assert "error" in payload
+          assert "418" in payload["error"] or "HTTP" in payload["error"]
+          PY
+
+          set +e
+          TINO_API_URL=http://127.0.0.1:8765 ./target/debug/tino backtest wait failed --timeout 1 >/tmp/tino-wait-failed.out 2>/tmp/tino-wait-failed.err
+          wait_failed_status=$?
+          ./target/debug/tino node kill sandbox --level 1 >/tmp/tino-kill-missing-strategy.out 2>/tmp/tino-kill-missing-strategy.err
+          kill_missing_strategy_status=$?
+          ./target/debug/tino node kill sandbox --level 4 >/tmp/tino-kill-bad-level.out 2>/tmp/tino-kill-bad-level.err
+          kill_bad_level_status=$?
+          set -e
+          test "$wait_failed_status" -ne 0
+          test "$kill_missing_strategy_status" -ne 0
+          test "$kill_bad_level_status" -ne 0
+          python3 - <<'PY'
+          import json
+          for path, expected in [
+              ("/tmp/tino-kill-missing-strategy.err", "strategy-id"),
+              ("/tmp/tino-kill-bad-level.err", "between 1 and 3"),
+          ]:
+              with open(path) as f:
+                  payload = json.load(f)
+              assert "error" in payload
+              assert expected in payload["error"]
+          PY
+
+          # Confirmation required: lifecycle flatten without --yes
+          set +e
+          ./target/debug/tino node lifecycle flatten --mode sandbox >/tmp/tino-confirm.out 2>/tmp/tino-confirm.err
+          confirmation_status=$?
+          set -e
+          test "$confirmation_status" -ne 0
+
+      - name: Verify Makefile install
+        run: |
+          make install BINDIR=/tmp/tino-bin
+          PATH="/tmp/tino-bin:$PATH" sh -c 'cd /tmp && tino --help >/tmp/tino-make-help.txt'
+          PATH="/tmp/tino-bin:$PATH" sh -c 'cd /tmp && tino version | python3 -m json.tool >/tmp/tino-make-version.json'
+
+  build:
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: tino-darwin-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: tino-darwin-x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: tino-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: tino-linux-arm64
+
+    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.artifact }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure linker (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p cli/.cargo
+          cat > cli/.cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build release binary
+        working-directory: cli
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          cp cli/target/${{ matrix.target }}/release/tino tino
+          chmod +x tino
+          tar czf ${{ matrix.artifact }}.tar.gz tino
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz

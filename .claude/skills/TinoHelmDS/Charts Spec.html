@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+<meta charset="utf-8">
+<title>TinoHelm QDS · Charts Spec</title>
+<link rel="stylesheet" href="colors_and_type.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+body { margin: 0; background: var(--bg-s); color: var(--t0); font-family: var(--font-u); }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 48px 40px 96px; }
+.hero { display: flex; justify-content: space-between; align-items: flex-end; padding-bottom: 28px; border-bottom: 1px solid var(--bd); margin-bottom: 40px; }
+.brand { font-family: var(--font-d); font-weight: 600; font-size: 1.7rem; letter-spacing: -.02em; }
+.brand .a { color: var(--acc); }
+.sub { color: var(--t2); font-family: var(--font-d); font-size: .7rem; margin-top: 6px; }
+.mode-toggle { display: inline-flex; background: var(--bg-in); border-radius: var(--rs); padding: 3px; gap: 2px; border: 1px solid var(--bd); }
+.mode-toggle button { font-family: var(--font-d); font-size: .7rem; padding: .4rem .85rem; border-radius: 4px; border: none; background: transparent; color: var(--t2); cursor: pointer; }
+.mode-toggle button.active { background: var(--bg-t); color: var(--t0); }
+
+.anchors { position: sticky; top: 0; background: var(--bg-s); z-index: 10; padding: 14px 0; border-bottom: 1px solid var(--bd); margin-bottom: 36px; display: flex; gap: 4px; flex-wrap: wrap; }
+.anchors a { font-family: var(--font-d); font-size: .68rem; padding: .35rem .7rem; border-radius: var(--rs); color: var(--t2); text-decoration: none; }
+.anchors a:hover { background: var(--bg-t); color: var(--t0); }
+
+.section { margin-bottom: 64px; }
+.section h2 { font-family: var(--font-d); font-size: 1.3rem; font-weight: 600; margin: 0 0 6px 0; letter-spacing: -.02em; }
+.section .desc { color: var(--t2); font-size: .85rem; margin-bottom: 20px; max-width: 720px; }
+
+.chart-card { background: var(--bg-p); border: 1px solid var(--bd); border-radius: var(--r); padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+.chart-head { display: flex; justify-content: space-between; align-items: center; }
+.chart-title { font-family: var(--font-d); font-size: .9rem; font-weight: 600; color: var(--t0); }
+.chart-meta { font-family: var(--font-d); font-size: .62rem; color: var(--t3); }
+.rules { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 18px; margin-top: 4px; }
+.rules li { font-family: var(--font-d); font-size: .6rem; color: var(--t2); list-style: none; padding-left: 14px; position: relative; }
+.rules li::before { content: '·'; color: var(--acc); position: absolute; left: 4px; top: -2px; font-weight: 700; }
+.two-col { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+
+/* Recharts overrides */
+.recharts-tooltip-wrapper { outline: none; }
+.qds-tooltip { background: var(--bg-p); border: 1px solid var(--bdh); border-radius: var(--rs); padding: 8px 10px; font-family: var(--font-d); font-size: .62rem; box-shadow: 0 8px 24px rgba(0,0,0,.15); }
+.qds-tooltip .lbl { color: var(--t2); margin-bottom: 4px; }
+.qds-tooltip .v { color: var(--t0); }
+.qds-tooltip .v .k { color: var(--t2); margin-right: 6px; }
+
+/* Tokens table */
+.tokens-table { width: 100%; border-collapse: collapse; font-family: var(--font-d); font-size: .7rem; }
+.tokens-table th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--bd); color: var(--t3); font-weight: 500; font-size: .56rem; letter-spacing: .12em; text-transform: uppercase; }
+.tokens-table td { padding: 8px 10px; border-bottom: 1px solid var(--bd); color: var(--t1); }
+.tokens-table td code { color: var(--acc); font-family: var(--font-d); font-size: .66rem; }
+.tokens-table .sw { width: 20px; height: 20px; border-radius: 4px; display: inline-block; vertical-align: middle; margin-right: 8px; border: 1px solid var(--bd); }
+
+.code-block { background: var(--bg-in); border: 1px solid var(--bd); border-radius: var(--rs); padding: 14px 16px; font-family: var(--font-d); font-size: .68rem; color: var(--t1); overflow-x: auto; white-space: pre; line-height: 1.55; }
+.code-block .c { color: var(--t3); }
+.code-block .k { color: var(--acc); }
+.code-block .s { color: var(--suc); }
+
+.grp { font-family: var(--font-d); font-size: .56rem; letter-spacing: .15em; text-transform: uppercase; color: var(--acc); display: flex; align-items: center; gap: .5rem; margin: 40px 0 14px; }
+.grp::after { content: ''; flex: 1; height: 1px; background: var(--bd); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo } = React;
+const R = Recharts;
+const {
+  ResponsiveContainer, LineChart, Line, AreaChart, Area, BarChart, Bar, ScatterChart, Scatter,
+  ComposedChart, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine, ReferenceArea,
+  Cell, ZAxis, LabelList
+} = R;
+
+// ---- Token literals (avoid getComputedStyle timing issues across theme flips) ----
+const LIGHT_TOKENS = {
+  acc: '#D97857', suc: '#36884B', dan: '#8A2425', info: '#3266AD', warn: '#854F0B',
+  t0: '#2c2c2a', t1: '#4a4846', t2: '#6e6a64', t3: '#9a938a',
+  bd: '#dedbd3', bdh: '#c9c4b8',
+  bgP: '#fbf9f3', bgIn: '#f2ede2',
+  grid: 'rgba(0,0,0,.05)', tick: 'rgba(44,44,42,.6)',
+};
+const DARK_TOKENS = {
+  acc: '#D97857', suc: '#36884B', dan: '#FE8181', info: '#85B7EB', warn: '#FAC775',
+  t0: '#E8E6E0', t1: '#C4C0B6', t2: '#8E8A7F', t3: '#6A665E',
+  bd: '#3b3a37', bdh: '#4f4d49',
+  bgP: '#262624', bgIn: '#1d1d1b',
+  grid: 'rgba(255,255,255,.05)', tick: 'rgba(232,230,224,.55)',
+};
+function useTokens(dark) {
+  return dark ? DARK_TOKENS : LIGHT_TOKENS;
+}
+
+// ---- Shared chart axis defaults ----
+function gridProps(T) {
+  return {
+    stroke: T.grid,
+    strokeDasharray: '0',
+    vertical: false,
+  };
+}
+function axisProps(T, extra = {}) {
+  return {
+    stroke: T.bd,
+    tick: { fill: T.tick, fontSize: 10, fontFamily: 'JetBrains Mono' },
+    tickLine: false,
+    axisLine: { stroke: T.bd },
+    ...extra,
+  };
+}
+function QDSTooltip({ active, payload, label, valueFormatter, labelFormatter }) {
+  if (!active || !payload || !payload.length) return null;
+  const fmt = valueFormatter || ((v) => v);
+  return (
+    <div className="qds-tooltip">
+      <div className="lbl">{labelFormatter ? labelFormatter(label) : label}</div>
+      {payload.map((p, i) => (
+        <div className="v" key={i}><span className="k" style={{color: p.color || p.stroke}}>{p.name}</span>{fmt(p.value, p)}</div>
+      ))}
+    </div>
+  );
+}
+
+// ============= Data generators =============
+function seededRng(seed) { let s = seed; return () => { s = (s * 9301 + 49297) % 233280; return s / 233280; }; }
+function equitySeries(n = 120, seed = 7) {
+  const r = seededRng(seed); let v = 1000000; const out = [];
+  for (let i = 0; i < n; i++) {
+    const drift = 0.0008 + (r() - 0.5) * 0.022;
+    v *= (1 + drift);
+    const d = new Date(2025, 0, 1); d.setDate(d.getDate() + i);
+    out.push({ t: `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`, equity: Math.round(v) });
+  }
+  // derive drawdown
+  let peak = -Infinity;
+  return out.map(d => { peak = Math.max(peak, d.equity); return { ...d, dd: (d.equity - peak) / peak * 100 }; });
+}
+function ohlcSeries(n = 60, seed = 21) {
+  const r = seededRng(seed); let p = 42000; const out = [];
+  for (let i = 0; i < n; i++) {
+    const vol = p * 0.012;
+    const o = p;
+    const c = o + (r() - 0.48) * vol * 1.6;
+    const h = Math.max(o, c) + r() * vol * 0.7;
+    const l = Math.min(o, c) - r() * vol * 0.7;
+    const v = Math.round(800 + r() * 1400);
+    p = c;
+    out.push({ i, o: +o.toFixed(1), h: +h.toFixed(1), l: +l.toFixed(1), c: +c.toFixed(1), v, up: c >= o });
+  }
+  return out;
+}
+function histogram(bins = 24, seed = 5) {
+  const r = seededRng(seed); const arr = [];
+  for (let i = 0; i < 2500; i++) {
+    // sum-of-12 ≈ normal, mean 0, std ~1
+    let s = 0; for (let k = 0; k < 12; k++) s += r();
+    arr.push((s - 6) * 0.9 + 0.08);
+  }
+  const min = -3.2, max = 3.2, w = (max - min) / bins;
+  const counts = Array(bins).fill(0);
+  arr.forEach(v => { const idx = Math.min(bins - 1, Math.max(0, Math.floor((v - min) / w))); counts[idx]++; });
+  return counts.map((c, i) => ({ bin: +(min + w * i + w / 2).toFixed(2), count: c }));
+}
+function qqPoints(n = 80, seed = 9) {
+  const r = seededRng(seed); const vals = [];
+  for (let i = 0; i < n; i++) {
+    let s = 0; for (let k = 0; k < 12; k++) s += r();
+    vals.push((s - 6) / Math.sqrt(1)); // standard normal-ish
+  }
+  vals.sort((a, b) => a - b);
+  // add mild fat-tail skew to show deviation
+  const skewed = vals.map((v, i) => v + Math.sign(v) * Math.pow(Math.abs(v), 2.2) * 0.06);
+  // theoretical quantiles via approximate inverse normal
+  const erfInv = (x) => { const a = 0.147; const ln = Math.log(1 - x * x); const t = 2/(Math.PI*a) + ln/2; return Math.sign(x) * Math.sqrt(Math.sqrt(t*t - ln/a) - t); };
+  return skewed.map((v, i) => {
+    const p = (i + 0.5) / n;
+    const theoretical = Math.SQRT2 * erfInv(2 * p - 1);
+    return { theoretical: +theoretical.toFixed(3), sample: +v.toFixed(3) };
+  });
+}
+function scatterPoints(n = 90, seed = 3) {
+  const r = seededRng(seed); const pts = [];
+  for (let i = 0; i < n; i++) {
+    const x = (r() - 0.5) * 4;
+    const noise = (r() - 0.5) * 0.8;
+    const y = 0.6 * x + noise;
+    const size = 6 + r() * 14;
+    pts.push({ x: +x.toFixed(2), y: +y.toFixed(2), z: +size.toFixed(1), tag: ['BTC','ETH','SOL','AVAX'][Math.floor(r()*4)] });
+  }
+  return pts;
+}
+function corrMatrix() {
+  const syms = ['BTC','ETH','SOL','AVAX','LINK','DOGE','ADA','GOLD'];
+  // Latent factor per asset — mostly +, two explicitly negative (GOLD, DOGE)
+  // ensures the diverging scale actually shows red cells.
+  const factor = { BTC:.9, ETH:.85, SOL:.75, AVAX:.7, LINK:.6, DOGE:-.35, ADA:.55, GOLD:-.6 };
+  const r = seededRng(12);
+  return syms.map((a) => syms.map((b) => {
+    if (a === b) return { x: b, y: a, v: 1 };
+    const v = Math.max(-0.9, Math.min(0.95, factor[a]*factor[b] + (r()-0.5)*0.2));
+    return { x: b, y: a, v: +v.toFixed(2) };
+  }));
+}
+function rollingSeries(n = 180, seed = 2) {
+  const r = seededRng(seed); let s = 1.3, b = 0.85; const out = [];
+  for (let i = 0; i < n; i++) {
+    s += (r() - 0.5) * 0.08; b += (r() - 0.5) * 0.04;
+    s = Math.max(-0.5, Math.min(3.0, s));
+    b = Math.max(0.2, Math.min(1.6, b));
+    out.push({ i, sharpe: +s.toFixed(2), beta: +b.toFixed(2) });
+  }
+  return out;
+}
+function pnlCalendar() {
+  const r = seededRng(17); const weeks = 26, days = 7; const out = [];
+  for (let w = 0; w < weeks; w++) {
+    for (let d = 0; d < days; d++) {
+      const v = +((r() - 0.45) * 6).toFixed(2);
+      out.push({ w, d, v });
+    }
+  }
+  return out;
+}
+function orderBook() {
+  const mid = 42180; const rows = 22; const r = seededRng(31);
+  const bids = []; const asks = [];
+  let cumB = 0, cumA = 0;
+  for (let i = 0; i < rows; i++) {
+    const sizeB = +(4 + r() * 6).toFixed(2); cumB += sizeB;
+    const sizeA = +(4 + r() * 6).toFixed(2); cumA += sizeA;
+    bids.push({ price: +(mid - (i+1) * 4).toFixed(1), size: sizeB, cum: +cumB.toFixed(2) });
+    asks.push({ price: +(mid + (i+1) * 4).toFixed(1), size: sizeA, cum: +cumA.toFixed(2) });
+  }
+  return { bids: bids.reverse(), asks };
+}
+function tickTrail(n = 60) {
+  const r = seededRng(41); let p = 42180; const out = [];
+  for (let i = 0; i < n; i++) {
+    const dir = r() > 0.5 ? 1 : -1;
+    p += dir * (0.5 + r() * 2);
+    out.push({ i, price: +p.toFixed(1), dir });
+  }
+  return out;
+}
+function ranking(n = 9, seed = 61) {
+  const r = seededRng(seed);
+  const names = ['ma_cross_v2','rsi_momentum','mean_rev_alpha','vol_breakout_v3','pair_btc_eth','carry_arb','factor_mix','news_nlp','xgb_signal_4h'];
+  return names.slice(0, n).map(n => ({ name: n, sharpe: +((r()*3) - 0.3).toFixed(2) })).sort((a,b) => b.sharpe - a.sharpe);
+}
+function spreadSeries(n = 140, seed = 11) {
+  const r = seededRng(seed); let a = 100, b = 100; const out = [];
+  for (let i = 0; i < n; i++) {
+    a += (r() - 0.5) * 1.2 + Math.sin(i/12)*0.4;
+    b += (r() - 0.5) * 1.15 + Math.sin(i/12 + 0.5)*0.38;
+    out.push({ i, a: +a.toFixed(2), b: +b.toFixed(2), spread: +(a - b).toFixed(2) });
+  }
+  return out;
+}
+
+// ============= Candlestick custom shape =============
+// (Recharts has no candlestick natively; render via Bar dataKey="hl" + custom shape.)
+function Candle({ x, y, width, height, payload, tokens }) {
+  const { o, h, l, c, up } = payload;
+  const color = up ? tokens.suc : tokens.dan;
+  const hlStroke = color;
+  // y/height passed by Bar correspond to the hl range (we set data-driven hl=[l,h])
+  // We need to compute pixel positions from domain — easier: use coordinate from props (y is top of bar range, height covers the whole [l..h])
+  const centerX = x + width / 2;
+  // body corresponds to the open-close rect
+  const highY = y;
+  const lowY = y + height;
+  const range = h - l; // value range mapped by Recharts
+  const openRatio = (h - o) / range;
+  const closeRatio = (h - c) / range;
+  const bodyTop = highY + openRatio * height;
+  const bodyBot = highY + closeRatio * height;
+  const bodyTopPx = Math.min(bodyTop, bodyBot);
+  const bodyHeight = Math.max(1, Math.abs(bodyBot - bodyTop));
+  const wickX = centerX;
+  const bodyX = x + 1.5;
+  const bodyW = Math.max(1, width - 3);
+  return (
+    <g>
+      <line x1={wickX} x2={wickX} y1={highY} y2={lowY} stroke={hlStroke} strokeWidth={1} />
+      <rect x={bodyX} y={bodyTopPx} width={bodyW} height={bodyHeight} fill={up ? color : color} opacity={up ? 1 : 1} />
+    </g>
+  );
+}
+
+// ============= Chart card wrapper =============
+function ChartCard({ title, meta, rules, height = 260, children }) {
+  return (
+    <div className="chart-card">
+      <div className="chart-head">
+        <div>
+          <div className="chart-title">{title}</div>
+          {meta && <div className="chart-meta" style={{marginTop:3}}>{meta}</div>}
+        </div>
+      </div>
+      <div style={{width:'100%', height}}>
+        <ResponsiveContainer>{children}</ResponsiveContainer>
+      </div>
+      {rules && (<ul className="rules">{rules.map((r, i) => <li key={i}>{r}</li>)}</ul>)}
+    </div>
+  );
+}
+
+function App() {
+  const [dark, setDark] = useState(false);
+  React.useEffect(() => {
+    document.documentElement.classList.toggle('light', !dark);
+    document.documentElement.classList.toggle('dark', dark);
+  }, [dark]);
+  const T = useTokens(dark);
+
+  // Data
+  const eq = useMemo(() => equitySeries(120, 7), []);
+  const ohlc = useMemo(() => ohlcSeries(48, 21), []);
+  const ohlcBar = useMemo(() => ohlc.map(d => ({ ...d, hl: [d.l, d.h] })), [ohlc]);
+  const hist = useMemo(() => histogram(26, 5), []);
+  const qq = useMemo(() => qqPoints(80, 9), []);
+  const sc = useMemo(() => scatterPoints(90, 3), []);
+  const corr = useMemo(() => corrMatrix(), []);
+  const rolling = useMemo(() => rollingSeries(180, 2), []);
+  const cal = useMemo(() => pnlCalendar(), []);
+  const ob = useMemo(() => orderBook(), []);
+  const tt = useMemo(() => tickTrail(60), []);
+  const rk = useMemo(() => ranking(9), []);
+  const sp = useMemo(() => spreadSeries(140, 11), []);
+
+  const fmtMoney = (v) => '$' + Math.round(v).toLocaleString();
+  const fmtPct = (v) => (v>0?'+':'') + v.toFixed(2) + '%';
+
+  return (
+    <div className="wrap">
+      <div className="hero">
+        <div>
+          <div className="brand"><span className="a">T</span>ino<span className="a">.</span>Helm · <span style={{color:'var(--t2)',fontWeight:400}}>Charts Spec</span></div>
+          <div className="sub">Quantitative chart vocabulary · Recharts 2.x · QDS Warm tokens · green up / red down · data-first, chrome-minimal</div>
+        </div>
+        <div className="mode-toggle">
+          <button className={!dark ? 'active' : ''} onClick={() => setDark(false)}>Light</button>
+          <button className={dark ? 'active' : ''} onClick={() => setDark(true)}>Dark</button>
+        </div>
+      </div>
+
+      <nav className="anchors">
+        <a href="#principles">Principles</a>
+        <a href="#tokens">Tokens</a>
+        <a href="#market">Market</a>
+        <a href="#perf">Performance</a>
+        <a href="#research">Research</a>
+        <a href="#micro">Microstructure</a>
+        <a href="#ranking">Ranking</a>
+        <a href="#snippets">Recharts snippets</a>
+      </nav>
+
+      {/* ================ PRINCIPLES ================ */}
+      <section className="section" id="principles">
+        <h2>Principles</h2>
+        <div className="desc">Every chart in TinoHelm follows the same ten rules. If you remember nothing else, remember these.</div>
+        <div className="chart-card">
+          <ol style={{margin:0,paddingLeft:18,fontFamily:'var(--font-d)',fontSize:'.72rem',lineHeight:1.8,color:'var(--t1)',columns:2,columnGap:32}}>
+            <li><b>Monospaced tick labels.</b> Always. <code style={{color:'var(--acc)'}}>fontFamily: 'JetBrains Mono', fontSize: 10, fill: var(--chart-tick)</code></li>
+            <li><b>No axis line on top/right.</b> Only bottom (X) and left (Y). Use <code style={{color:'var(--acc)'}}>axisLine={'{'}{'{'} stroke: 'var(--bd)' {'}'}{'}'}, tickLine={'{'}false{'}'}</code></li>
+            <li><b>Horizontal grid only.</b> No vertical grid — time already implies vertical structure. <code style={{color:'var(--acc)'}}>{'<CartesianGrid vertical={false} stroke="var(--chart-grid)" strokeDasharray="0" />'}</code></li>
+            <li><b>Grid is whisper-faint.</b> <code style={{color:'var(--acc)'}}>rgba(255,255,255,.05)</code> dark / <code style={{color:'var(--acc)'}}>rgba(0,0,0,.05)</code> light. Data, not chrome, carries the eye.</li>
+            <li><b>One primary color per chart.</b> Use <code style={{color:'var(--acc)'}}>--acc</code>. Semantic greens/reds are reserved for up/down, gain/loss, done/failed.</li>
+            <li><b>Gradients are rare.</b> Only the equity/drawdown area fill. 25% alpha at top → 0% at bottom.</li>
+            <li><b>Tooltip is a card.</b> Same <code style={{color:'var(--acc)'}}>--bg-p</code> + <code style={{color:'var(--acc)'}}>--bdh</code> border + 6px radius as all other cards. No arrows, no custom shadows.</li>
+            <li><b>Dots off by default.</b> <code style={{color:'var(--acc)'}}>dot={'{'}false{'}'}</code>. Only show dots on hover (<code style={{color:'var(--acc)'}}>activeDot</code>).</li>
+            <li><b>Candlestick: green up / red down</b> — <code style={{color:'var(--acc)'}}>--suc</code> / <code style={{color:'var(--acc)'}}>--dan</code>. Western convention.</li>
+            <li><b>Reference lines are dashed accent.</b> <code style={{color:'var(--acc)'}}>stroke="var(--acc)" strokeDasharray="4 3"</code> for entry/exit, means, thresholds.</li>
+          </ol>
+        </div>
+      </section>
+
+      {/* ================ TOKENS ================ */}
+      <section className="section" id="tokens">
+        <h2>Color tokens for charts</h2>
+        <div className="desc">These are the only colors a chart should use. The data dimension ("what is this series?") drives the token — never pick a hue for prettiness.</div>
+        <div className="chart-card" style={{padding:0}}>
+          <table className="tokens-table">
+            <thead><tr><th>Token</th><th>Hex (dark)</th><th>Hex (light)</th><th>Use</th></tr></thead>
+            <tbody>
+              <tr><td><span className="sw" style={{background:'var(--acc)'}}></span><code>--acc</code></td><td>#D97857</td><td>#D97857</td><td>Primary line / area / bar; reference lines (dashed)</td></tr>
+              <tr><td><span className="sw" style={{background:'var(--suc)'}}></span><code>--suc</code></td><td>#36884B</td><td>#36884B</td><td>Up candles, positive returns, gains, filled orders</td></tr>
+              <tr><td><span className="sw" style={{background:'var(--dan)'}}></span><code>--dan</code></td><td>#FE8181</td><td>#8A2425</td><td>Down candles, negative returns, losses, drawdown fill</td></tr>
+              <tr><td><span className="sw" style={{background:'var(--info)'}}></span><code>--info</code></td><td>#85B7EB</td><td>#3266AD</td><td>Secondary series (benchmark, second leg of pair)</td></tr>
+              <tr><td><span className="sw" style={{background:'var(--warn)'}}></span><code>--warn</code></td><td>#FAC775</td><td>#854F0B</td><td>Stale / caution overlays; ranges</td></tr>
+              <tr><td><span className="sw" style={{background:'var(--chart-grid)',borderColor:'var(--t3)'}}></span><code>--chart-grid</code></td><td>rgba(255,255,255,.05)</td><td>rgba(0,0,0,.05)</td><td>Horizontal grid lines only</td></tr>
+              <tr><td><span className="sw" style={{background:'var(--chart-tick)'}}></span><code>--chart-tick</code></td><td>rgba(232,230,224,.4)</td><td>rgba(44,44,42,.4)</td><td>Tick label fill</td></tr>
+              <tr><td><span className="sw" style={{background:'var(--bd)'}}></span><code>--bd</code></td><td>#3b3a37</td><td>#dedbd3</td><td>Axis lines, tooltip border</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* ================ MARKET ================ */}
+      <div className="grp" id="market">Market · time-series</div>
+
+      <div className="two-col">
+        <ChartCard title="Equity curve · area"
+          meta="AreaChart · linearGradient fill · --acc stroke"
+          rules={[
+            'dot={false}, activeDot radius 4, stroke --acc width 1.5',
+            'area fill via <linearGradient> — --acc 25% → 0%',
+            'single-line tooltip: date + $value',
+            'no Y-axis gridline at 0 unless relevant',
+            'reference line at initial capital (dashed --t2)',
+          ]}
+        >
+          <AreaChart data={eq} margin={{top:8,right:12,left:0,bottom:0}}>
+            <defs>
+              <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={T.acc} stopOpacity={0.25} />
+                <stop offset="100%" stopColor={T.acc} stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis dataKey="t" {...axisProps(T,{interval: 20})} />
+            <YAxis {...axisProps(T,{tickFormatter:(v)=>'$'+(v/1000).toFixed(0)+'k', width:56})} domain={['auto','auto']} />
+            <Tooltip content={<QDSTooltip valueFormatter={fmtMoney} />} />
+            <ReferenceLine y={1000000} stroke={T.t2} strokeDasharray="3 3" />
+            <Area type="monotone" dataKey="equity" stroke={T.acc} strokeWidth={1.5} fill="url(#eqGrad)" dot={false} activeDot={{r:4, strokeWidth:0, fill:T.acc}}/>
+          </AreaChart>
+        </ChartCard>
+
+        <ChartCard title="Drawdown · inverted area"
+          meta="AreaChart · --dan · always negative · Y anchored at 0"
+          rules={[
+            'Y-axis max is always 0; domain extends negative only',
+            'tokens: --dan stroke + fill (12% alpha)',
+            'tooltip: date + percent (2dp)',
+            'reference line at max DD threshold dashed --warn',
+            'labels as percent without trailing zeros',
+          ]}
+        >
+          <AreaChart data={eq} margin={{top:8,right:12,left:0,bottom:0}}>
+            <defs>
+              <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={T.dan} stopOpacity={0.3} />
+                <stop offset="100%" stopColor={T.dan} stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis dataKey="t" {...axisProps(T,{interval: 20})} />
+            <YAxis {...axisProps(T,{tickFormatter:(v)=>v.toFixed(1)+'%', width:44})} domain={['dataMin', 0]} />
+            <Tooltip content={<QDSTooltip valueFormatter={(v)=>v.toFixed(2)+'%'} />} />
+            <ReferenceLine y={-10} stroke={T.warn} strokeDasharray="4 3" label={{value:'-10% threshold', position:'insideBottomRight', fill:T.warn, fontSize:9, fontFamily:'JetBrains Mono'}}/>
+            <Area type="monotone" dataKey="dd" stroke={T.dan} strokeWidth={1.2} fill="url(#ddGrad)" dot={false}/>
+          </AreaChart>
+        </ChartCard>
+      </div>
+
+      <div className="two-col" style={{marginTop:20}}>
+        <ChartCard title="Candlestick · OHLC"
+          meta="Custom shape on Bar · green up / red down · wicks centered"
+          rules={[
+            'green = close ≥ open (--suc); red otherwise (--dan)',
+            'wick = vertical line at bar center, stroke-width 1',
+            'body = rect 60-70% of bar width',
+            'no gap between body and wick',
+            'hover: full-width cursor stripe at --bg-t',
+          ]}
+          height={280}
+        >
+          <BarChart data={ohlcBar} margin={{top:8,right:12,left:0,bottom:0}} barCategoryGap={2}>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis dataKey="i" {...axisProps(T,{interval: 7, tickFormatter:(v)=>'d'+v})} />
+            <YAxis {...axisProps(T,{tickFormatter:(v)=>'$'+(v/1000).toFixed(1)+'k',width:52})} domain={['auto','auto']}/>
+            <Tooltip cursor={{fill: T.bdh, opacity:.25}} content={<QDSTooltip valueFormatter={(v,p)=>{ const d=p.payload; return `O ${d.o} · H ${d.h} · L ${d.l} · C ${d.c}`; }} />}/>
+            <Bar dataKey="hl" shape={(props)=> <Candle {...props} tokens={T}/>} isAnimationActive={false}/>
+          </BarChart>
+        </ChartCard>
+
+        <ChartCard title="Volume · bar"
+          meta="Bar · --suc / --dan matched to OHLC · 40% opacity when paired"
+          rules={[
+            'bar color mirrors its candle (up green / down red)',
+            'opacity 1.0 when standalone, 0.5 when paired below candles',
+            'no Y-axis on a paired subchart; keep it on standalone only',
+            'format thousands: 1.4k / 24k / 2.1M',
+          ]}
+        >
+          <BarChart data={ohlc} margin={{top:8,right:12,left:0,bottom:0}} barCategoryGap={2}>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis dataKey="i" {...axisProps(T,{interval: 7, tickFormatter:(v)=>'d'+v})} />
+            <YAxis {...axisProps(T,{tickFormatter:(v)=>v>=1000?(v/1000).toFixed(1)+'k':v, width:40})} />
+            <Tooltip cursor={{fill: T.bdh, opacity:.25}} content={<QDSTooltip valueFormatter={(v)=>v.toLocaleString()} />}/>
+            <Bar dataKey="v" isAnimationActive={false}>
+              {ohlc.map((d,i)=> <Cell key={i} fill={d.up ? T.suc : T.dan} />)}
+            </Bar>
+          </BarChart>
+        </ChartCard>
+      </div>
+
+      <div className="two-col" style={{marginTop:20}}>
+        <ChartCard title="Spread · pair-trade line"
+          meta="LineChart · 3 series · primary --acc · secondary --info · spread --warn (dashed)"
+          rules={[
+            'lead leg = --acc, lag leg = --info — always the same pairing',
+            'spread line = --warn on a secondary Y-axis (right)',
+            'zero-reference line on spread axis: dashed --t2',
+            'legend inline at top-right, mono .62rem',
+          ]}
+          height={280}
+        >
+          <ComposedChart data={sp} margin={{top:8,right:12,left:0,bottom:0}}>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis dataKey="i" {...axisProps(T,{interval: 20})} />
+            <YAxis yAxisId="left" {...axisProps(T,{width:40})} />
+            <YAxis yAxisId="right" orientation="right" {...axisProps(T,{width:36})} />
+            <Tooltip content={<QDSTooltip valueFormatter={(v)=>v.toFixed(2)}/>}/>
+            <Legend wrapperStyle={{fontFamily:'JetBrains Mono',fontSize:10,color:T.t2}} />
+            <ReferenceLine yAxisId="right" y={0} stroke={T.t2} strokeDasharray="3 3"/>
+            <Line yAxisId="left" dataKey="a" name="BTC" stroke={T.acc} strokeWidth={1.4} dot={false}/>
+            <Line yAxisId="left" dataKey="b" name="ETH" stroke={T.info} strokeWidth={1.4} dot={false}/>
+            <Line yAxisId="right" dataKey="spread" name="spread" stroke={T.warn} strokeWidth={1.2} strokeDasharray="4 2" dot={false}/>
+          </ComposedChart>
+        </ChartCard>
+
+        <ChartCard title="Tick trail · last-N trades"
+          meta="LineChart · dots colored per-tick · no line smoothing"
+          rules={[
+            'line color = --t2 (neutral trail)',
+            'tick dot = --suc for uptick / --dan for downtick',
+            'type="stepAfter" — price steps, not curves',
+            'use in real-time panels; redraw at --dur-fast',
+          ]}
+        >
+          <LineChart data={tt} margin={{top:8,right:12,left:0,bottom:0}}>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis dataKey="i" {...axisProps(T,{interval:9})}/>
+            <YAxis {...axisProps(T,{width:52, tickFormatter:(v)=>'$'+v.toFixed(0)})} domain={['auto','auto']}/>
+            <Tooltip content={<QDSTooltip valueFormatter={(v)=>'$'+v.toFixed(1)} />}/>
+            <Line dataKey="price" type="stepAfter" stroke={T.t2} strokeWidth={1} dot={(props)=>{
+              const {cx,cy,payload,index}=props;
+              return <circle key={index} cx={cx} cy={cy} r={2.5} fill={payload.dir>0?T.suc:T.dan} />;
+            }} activeDot={{r:5,strokeWidth:0}}/>
+          </LineChart>
+        </ChartCard>
+      </div>
+
+      {/* ================ PERFORMANCE ================ */}
+      <div className="grp" id="perf">Performance · analytics</div>
+
+      <div className="two-col">
+        <ChartCard title="Rolling Sharpe & Beta"
+          meta="LineChart · dual-axis · --acc (Sharpe, left) + --info (Beta, right)"
+          rules={[
+            'Sharpe on left axis (primary) as --acc',
+            'Beta on right axis (secondary) as --info',
+            'reference lines: dashed --suc at Sharpe = 1.0, dashed --t2 at Beta = 1.0',
+            'window label in meta ("90d rolling")',
+          ]}
+          height={280}
+        >
+          <ComposedChart data={rolling} margin={{top:8,right:12,left:0,bottom:0}}>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis dataKey="i" {...axisProps(T,{interval: 30})} />
+            <YAxis yAxisId="l" {...axisProps(T,{width:36})} />
+            <YAxis yAxisId="r" orientation="right" {...axisProps(T,{width:36})} />
+            <Tooltip content={<QDSTooltip valueFormatter={(v)=>v.toFixed(2)} />}/>
+            <Legend wrapperStyle={{fontFamily:'JetBrains Mono',fontSize:10,color:T.t2}} />
+            <ReferenceLine yAxisId="l" y={1} stroke={T.suc} strokeDasharray="4 3" />
+            <ReferenceLine yAxisId="r" y={1} stroke={T.t2} strokeDasharray="3 3" />
+            <Line yAxisId="l" dataKey="sharpe" name="Sharpe" stroke={T.acc} strokeWidth={1.5} dot={false}/>
+            <Line yAxisId="r" dataKey="beta" name="Beta" stroke={T.info} strokeWidth={1.3} dot={false}/>
+          </ComposedChart>
+        </ChartCard>
+
+        <ChartCard title="Daily PnL · calendar heatmap"
+          meta="Custom SVG grid · bucketed --suc/--dan by sign, alpha by magnitude"
+          rules={[
+            '7 × N grid (rows = weekday, cols = week)',
+            'green for positive, red for negative, neutral --bg-t for zero/no-data',
+            'alpha proportional to |value| / p95(|value|)',
+            'cell 14×14px · 2px gap · 2px radius',
+          ]}
+          height={260}
+        >
+          <CalendarHeatmap data={cal} T={T} />
+        </ChartCard>
+      </div>
+
+      <div className="two-col" style={{marginTop:20}}>
+        <ChartCard title="Returns distribution · histogram"
+          meta="BarChart · single color --acc · overlay dashed mean line"
+          rules={[
+            'bars = --acc at 1.0 opacity, no stroke',
+            'mean line dashed --t0, width 1',
+            'median line dashed --info, width 1 (if shown)',
+            'X-axis shows bin center, not bin edges',
+            '+/- σ annotations via ReferenceArea at --acc-d',
+          ]}
+          height={260}
+        >
+          <BarChart data={hist} margin={{top:8,right:12,left:0,bottom:0}}>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis dataKey="bin" {...axisProps(T, {interval:3, tickFormatter:(v)=>v.toFixed(1)})} />
+            <YAxis {...axisProps(T,{width:36})} />
+            <Tooltip content={<QDSTooltip valueFormatter={(v)=>v+' obs'} labelFormatter={(v)=>'return ≈ '+v}/>}/>
+            <ReferenceArea x1={-1} x2={1} fill={T.acc} fillOpacity={0.08} />
+            <ReferenceLine x={0.08} stroke={T.t0} strokeDasharray="4 3" label={{value:'μ', position:'top', fill:T.t0, fontSize:10, fontFamily:'JetBrains Mono'}}/>
+            <Bar dataKey="count" fill={T.acc} isAnimationActive={false}/>
+          </BarChart>
+        </ChartCard>
+
+        <ChartCard title="QQ plot · normality check"
+          meta="ScatterChart · reference y=x dashed --t2 · tail deviations highlighted"
+          rules={[
+            'points = --acc, radius 3',
+            'reference line y = x dashed --t2 (the "normal" line)',
+            'tail points (beyond ±2σ theoretical) colored --warn',
+            'both axes labeled explicitly ("theoretical q" / "sample q")',
+          ]}
+          height={260}
+        >
+          <ScatterChart margin={{top:8,right:12,left:0,bottom:0}}>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis type="number" dataKey="theoretical" name="theoretical" {...axisProps(T,{width:36})} label={{value:'theoretical quantile', position:'insideBottom', offset:-2, fill:T.t3, fontSize:10, fontFamily:'JetBrains Mono'}}/>
+            <YAxis type="number" dataKey="sample" name="sample" {...axisProps(T,{width:40})} label={{value:'sample', angle:-90, position:'insideLeft', fill:T.t3, fontSize:10, fontFamily:'JetBrains Mono'}}/>
+            <Tooltip content={<QDSTooltip valueFormatter={(v)=>v.toFixed(2)}/>} cursor={{stroke:T.bdh}}/>
+            <ReferenceLine segment={[{x:-3,y:-3},{x:3,y:3}]} stroke={T.t2} strokeDasharray="4 3"/>
+            <Scatter data={qq} isAnimationActive={false}>
+              {qq.map((p,i)=> <Cell key={i} fill={Math.abs(p.theoretical)>2 ? T.warn : T.acc}/>)}
+            </Scatter>
+          </ScatterChart>
+        </ChartCard>
+      </div>
+
+      {/* ================ RESEARCH ================ */}
+      <div className="grp" id="research">Research · correlation & factor</div>
+
+      <div className="two-col">
+        <ChartCard title="Factor scatter · exposure vs return"
+          meta="ScatterChart + ZAxis · bubble size = |position| · quadrant tint --acc-d"
+          rules={[
+            'quadrant tints: NE/SW = --suc-d, NW/SE = --dan-d (optional)',
+            'bubble color = --acc at 0.8 opacity',
+            'bubble size via ZAxis range [6, 24]',
+            'x/y zero lines dashed --t2',
+            'label notable points only (top |z|) — not every point',
+          ]}
+          height={300}
+        >
+          <ScatterChart margin={{top:8,right:12,left:0,bottom:0}}>
+            <CartesianGrid {...gridProps(T)} />
+            <XAxis type="number" dataKey="x" name="factor exposure" {...axisProps(T,{width:36})} label={{value:'exposure', position:'insideBottom', offset:-2, fill:T.t3, fontSize:10, fontFamily:'JetBrains Mono'}}/>
+            <YAxis type="number" dataKey="y" name="return" {...axisProps(T,{width:40, tickFormatter:(v)=>v.toFixed(1)})} label={{value:'return', angle:-90, position:'insideLeft', fill:T.t3, fontSize:10, fontFamily:'JetBrains Mono'}}/>
+            <ZAxis type="number" dataKey="z" range={[24, 220]} />
+            <Tooltip content={<QDSTooltip valueFormatter={(v,p)=>{const d=p.payload; return `${d.tag} · x ${d.x} y ${d.y}`;}}/>} cursor={{stroke:T.bdh}}/>
+            <ReferenceLine x={0} stroke={T.t2} strokeDasharray="3 3"/>
+            <ReferenceLine y={0} stroke={T.t2} strokeDasharray="3 3"/>
+            <Scatter data={sc} fill={T.acc} fillOpacity={0.8} isAnimationActive={false}/>
+          </ScatterChart>
+        </ChartCard>
+
+        <ChartCard title="Correlation matrix · heatmap"
+          meta="Custom SVG grid · diverging scale: --dan −1 / --bg-p 0 / --suc +1"
+          rules={[
+            'diverging, not sequential — zero is the neutral midpoint',
+            'diagonal cells = 1.0, rendered with --bd border instead of fill',
+            'value printed in cell when |v| ≥ 0.5',
+            'axis labels in mono, left + bottom only',
+            'cell 44×28px (wide enough for value), 1px gap',
+          ]}
+          height={300}
+        >
+          <CorrHeat data={corr} T={T} />
+        </ChartCard>
+      </div>
+
+      {/* ================ MICROSTRUCTURE ================ */}
+      <div className="grp" id="micro">Microstructure · orderbook</div>
+
+      <div className="chart-card">
+        <div className="chart-head">
+          <div><div className="chart-title">Order book · cumulative depth</div><div className="chart-meta" style={{marginTop:3}}>Two AreaCharts mirrored across mid-price · stepAfter · --suc bids left / --dan asks right</div></div>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:0,height:240}}>
+          <ResponsiveContainer>
+            <AreaChart data={ob.bids} margin={{top:8,right:0,left:8,bottom:8}}>
+              <CartesianGrid {...gridProps(T)} />
+              <XAxis dataKey="price" {...axisProps(T, {interval:4, tickFormatter:(v)=>v.toFixed(0)})} reversed/>
+              <YAxis {...axisProps(T,{width:44, orientation:'left'})} />
+              <Tooltip content={<QDSTooltip valueFormatter={(v)=>v.toFixed(2)+' BTC'} labelFormatter={(v)=>'bid $'+v}/>}/>
+              <Area type="stepAfter" dataKey="cum" stroke={T.suc} strokeWidth={1.3} fill={T.suc} fillOpacity={0.15} isAnimationActive={false}/>
+            </AreaChart>
+          </ResponsiveContainer>
+          <ResponsiveContainer>
+            <AreaChart data={ob.asks} margin={{top:8,right:8,left:0,bottom:8}}>
+              <CartesianGrid {...gridProps(T)} />
+              <XAxis dataKey="price" {...axisProps(T, {interval:4, tickFormatter:(v)=>v.toFixed(0)})} />
+              <YAxis {...axisProps(T,{width:0, hide:true})} />
+              <Tooltip content={<QDSTooltip valueFormatter={(v)=>v.toFixed(2)+' BTC'} labelFormatter={(v)=>'ask $'+v}/>}/>
+              <Area type="stepAfter" dataKey="cum" stroke={T.dan} strokeWidth={1.3} fill={T.dan} fillOpacity={0.15} isAnimationActive={false}/>
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+        <ul className="rules">
+          <li>bid side mirrored (axis reversed), ask side natural</li>
+          <li>mid-price sits at the shared boundary — emphasize with 1px --acc divider</li>
+          <li>type="stepAfter" — depth is a step function, never smoothed</li>
+          <li>fill alpha 15%, stroke 1.3px — depth is a weight, not a line</li>
+          <li>hover: crosshair cursor at --bdh; tooltip reads "bid $42176 · 24.3 BTC"</li>
+          <li>for price-ladder (table variant), use List row component, not this chart</li>
+        </ul>
+      </div>
+
+      {/* ================ RANKING ================ */}
+      <div className="grp" id="ranking">Ranking · bars</div>
+
+      <ChartCard title="Strategy ranking · Sharpe"
+          meta="Horizontal BarChart · bar color = sign · value printed inline right"
+          rules={[
+            'bar color: --suc if ≥ 0, --dan if negative',
+            'no axis — category label + inline value is enough',
+            'sorted descending by default',
+            'value printed at bar end in mono .62rem',
+            'max bar height 22px, gap 6px',
+          ]}
+          height={320}
+        >
+          <BarChart data={rk} layout="vertical" margin={{top:4,right:40,left:100,bottom:4}}>
+            <CartesianGrid {...gridProps(T)} horizontal={false} vertical={true} />
+            <XAxis type="number" {...axisProps(T,{hide:true})} />
+            <YAxis type="category" dataKey="name" {...axisProps(T,{width:100})} />
+            <Tooltip content={<QDSTooltip valueFormatter={(v)=>v.toFixed(2)+' sharpe'}/>} cursor={{fill:T.bdh, opacity:.15}}/>
+            <ReferenceLine x={0} stroke={T.bd} />
+            <Bar dataKey="sharpe" isAnimationActive={false} barSize={16}>
+              {rk.map((d,i)=> <Cell key={i} fill={d.sharpe>=0 ? T.suc : T.dan}/>)}
+              <LabelList dataKey="sharpe" position="right" formatter={(v)=>v.toFixed(2)} style={{fill:T.t1, fontFamily:'JetBrains Mono', fontSize:10}}/>
+            </Bar>
+          </BarChart>
+        </ChartCard>
+
+      {/* ================ SNIPPETS ================ */}
+      <div className="grp" id="snippets">Recharts quick-reference</div>
+      <div className="chart-card">
+        <div className="chart-title" style={{marginBottom:8}}>Global defaults · wrap once, reuse everywhere</div>
+        <pre className="code-block">
+{`// QDS-flavored Recharts primitives — apply to every chart
+const QDS_GRID = { stroke: 'var(--chart-grid)', strokeDasharray: '0', vertical: false };
+const QDS_AXIS = {
+  stroke: 'var(--bd)',
+  tick: { fill: 'var(--chart-tick)', fontSize: 10, fontFamily: 'JetBrains Mono' },
+  tickLine: false,
+  axisLine: { stroke: 'var(--bd)' },
+};
+const QDS_TOOLTIP = {
+  contentStyle: {
+    background: 'var(--bg-p)', border: '1px solid var(--bdh)',
+    borderRadius: 6, fontFamily: 'JetBrains Mono', fontSize: 11,
+    boxShadow: '0 8px 24px rgba(0,0,0,.15)'
+  },
+  labelStyle: { color: 'var(--t2)' },
+  itemStyle:  { color: 'var(--t0)' },
+};
+
+// Area (equity, drawdown) — always with linearGradient
+<defs>
+  <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stopColor="var(--acc)" stopOpacity={0.25}/>
+    <stop offset="100%" stopColor="var(--acc)" stopOpacity={0}/>
+  </linearGradient>
+</defs>
+<Area type="monotone" dataKey="equity" stroke="var(--acc)" strokeWidth={1.5}
+      fill="url(#eqGrad)" dot={false} activeDot={{ r: 4, strokeWidth: 0 }}/>`}
+        </pre>
+      </div>
+
+      <div className="chart-card" style={{marginTop:16}}>
+        <div className="chart-title" style={{marginBottom:8}}>When to use what</div>
+        <table className="tokens-table">
+          <thead><tr><th>Use case</th><th>Chart</th><th>Key prop</th></tr></thead>
+          <tbody>
+            <tr><td>Equity / NAV over time</td><td>AreaChart + linearGradient</td><td>type="monotone"</td></tr>
+            <tr><td>Drawdown</td><td>AreaChart, domain [min, 0]</td><td>fill --dan, 30% top</td></tr>
+            <tr><td>OHLC bar</td><td>BarChart + custom shape</td><td>dataKey={`[low, high]`}</td></tr>
+            <tr><td>Volume</td><td>BarChart with Cell per sign</td><td>isAnimationActive={`{false}`}</td></tr>
+            <tr><td>Pair-trade spread</td><td>ComposedChart + 2 YAxis</td><td>right axis for spread</td></tr>
+            <tr><td>Tick trail (live)</td><td>LineChart, type=stepAfter</td><td>dot colored per tick</td></tr>
+            <tr><td>Rolling Sharpe/Beta</td><td>ComposedChart, dual axis</td><td>ReferenceLine @ 1</td></tr>
+            <tr><td>Returns distribution</td><td>BarChart</td><td>mean ReferenceLine</td></tr>
+            <tr><td>QQ plot</td><td>ScatterChart</td><td>y=x ReferenceLine</td></tr>
+            <tr><td>Factor scatter</td><td>ScatterChart + ZAxis</td><td>ZAxis range [24, 220]</td></tr>
+            <tr><td>Correlation heatmap</td><td>Custom SVG grid</td><td>diverging scale</td></tr>
+            <tr><td>PnL calendar</td><td>Custom SVG grid</td><td>7 × N, sign + alpha</td></tr>
+            <tr><td>Order book depth</td><td>Two AreaCharts mirrored</td><td>type=stepAfter</td></tr>
+            <tr><td>Ranking</td><td>Horizontal BarChart</td><td>Cell per sign + LabelList</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+  );
+}
+
+// Calendar heatmap (custom SVG, simple & aligned with QDS)
+function CalendarHeatmap({ data, T }) {
+  const weeks = Math.max(...data.map(d => d.w)) + 1;
+  const cell = 14, gap = 2, padL = 28, padT = 14;
+  const absMax = Math.max(...data.map(d => Math.abs(d.v))) * 0.9 || 1;
+  const dayLabels = ['M','T','W','T','F','S','S'];
+  return (
+    <svg width="100%" height="100%" viewBox={`0 0 ${padL + weeks*(cell+gap)} ${padT + 7*(cell+gap) + 12}`}>
+      {dayLabels.map((l,i)=> (
+        <text key={i} x={padL-6} y={padT + i*(cell+gap) + cell*0.8} textAnchor="end" fill={T.t3} fontFamily="JetBrains Mono" fontSize="8">{l}</text>
+      ))}
+      {data.map((d,i) => {
+        const a = Math.min(1, Math.abs(d.v) / absMax);
+        const fill = Math.abs(d.v) < 0.05 ? T.bdh : (d.v > 0 ? T.suc : T.dan);
+        return (
+          <rect key={i}
+            x={padL + d.w * (cell+gap)}
+            y={padT + d.d * (cell+gap)}
+            width={cell} height={cell} rx="2"
+            fill={fill} fillOpacity={Math.abs(d.v)<0.05 ? 0.15 : 0.15 + a*0.75}>
+            <title>{`week ${d.w+1} · ${dayLabels[d.d]} · ${d.v>0?'+':''}${d.v.toFixed(2)}%`}</title>
+          </rect>
+        );
+      })}
+      <g transform={`translate(${padL}, ${padT + 7*(cell+gap) + 4})`}>
+        <text x={0} y={6} fill={T.t3} fontFamily="JetBrains Mono" fontSize="8">less</text>
+        {[0.2,0.4,0.6,0.8,1].map((v,i)=>(
+          <rect key={i} x={22 + i*12} y={0} width={10} height={8} rx="1" fill={T.suc} fillOpacity={0.15 + v*0.75}/>
+        ))}
+        <text x={22 + 5*12 + 4} y={6} fill={T.t3} fontFamily="JetBrains Mono" fontSize="8">more</text>
+      </g>
+    </svg>
+  );
+}
+
+function CorrHeat({ data, T }) {
+  const syms = data.map(row => row[0].y); // labels
+  const n = syms.length;
+  const cell = 48, ch = 28, gap = 1, padL = 56, padT = 24;
+  const W = padL + n * (cell + gap);
+  const H = padT + n * (ch + gap) + 14;
+  const colorFor = (v) => {
+    if (v > 0) return T.suc;
+    if (v < 0) return T.dan;
+    return T.bdh;
+  };
+  return (
+    <svg width="100%" height="100%" viewBox={`0 0 ${W} ${H}`}>
+      {syms.map((s,i)=>(
+        <text key={'x'+i} x={padL + i*(cell+gap) + cell/2} y={padT-8} textAnchor="middle" fill={T.t2} fontFamily="JetBrains Mono" fontSize="10">{s}</text>
+      ))}
+      {syms.map((s,i)=>(
+        <text key={'y'+i} x={padL-8} y={padT + i*(ch+gap) + ch*0.66} textAnchor="end" fill={T.t2} fontFamily="JetBrains Mono" fontSize="10">{s}</text>
+      ))}
+      {data.flatMap((row,ri)=> row.map((c,ci)=>{
+        const diag = ri === ci;
+        const fill = diag ? 'transparent' : colorFor(c.v);
+        const alpha = diag ? 0 : Math.min(1, Math.abs(c.v));
+        return (
+          <g key={`${ri}-${ci}`}>
+            <rect
+              x={padL + ci*(cell+gap)}
+              y={padT + ri*(ch+gap)}
+              width={cell} height={ch} rx="2"
+              fill={fill} fillOpacity={0.12 + alpha*0.55}
+              stroke={diag ? T.bd : 'none'}/>
+            {Math.abs(c.v)>=0.5 && !diag && (
+              <text x={padL + ci*(cell+gap) + cell/2} y={padT + ri*(ch+gap) + ch*0.66}
+                    textAnchor="middle" fill={T.t0} fontFamily="JetBrains Mono" fontSize="10">
+                {c.v.toFixed(2)}
+              </text>
+            )}
+            {diag && (
+              <text x={padL + ci*(cell+gap) + cell/2} y={padT + ri*(ch+gap) + ch*0.66}
+                    textAnchor="middle" fill={T.t3} fontFamily="JetBrains Mono" fontSize="10">·</text>
+            )}
+          </g>
+        );
+      }))}
+    </svg>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+</script>
+</body>
+</html>
