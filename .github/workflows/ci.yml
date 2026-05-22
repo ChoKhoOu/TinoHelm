@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, tino-v1]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.4"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Lint
+        run: uv run ruff check tinohelm tests
+
+      - name: Type check
+        run: uv run mypy tinohelm
+        continue-on-error: true  # mypy strict mode pending follow-up
+
+      - name: Tests
+        run: uv run pytest -q --strict-markers
