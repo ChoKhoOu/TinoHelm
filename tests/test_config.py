@@ -1,0 +1,200 @@
+"""Smoke tests for tinohelm.config — TOML → NT config assembly."""
+
+from __future__ import annotations
+
+import os
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from tinohelm import control_stream_key
+from tinohelm.config import TinoStrategyFile, build_trading_node_config
+
+
+@pytest.fixture(autouse=True)
+def _redis_url(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.delenv("TINO_MODE", raising=False)
+
+
+@pytest.fixture()
+def strategy_toml(tmp_path: Path) -> Path:
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "FOO-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+        instrument_id = "BTCUSDT-PERP.BYBIT"
+
+        [message_bus]
+        redis_url = "redis://redis:6379/0"
+        streams_prefix = "stream"
+        stream_per_topic = true
+
+        [factories.data]
+        BYBIT = "nautilus_trader.adapters.bybit.factories:BybitLiveDataClientFactory"
+
+        [factories.exec]
+        BYBIT = "nautilus_trader.adapters.bybit.factories:BybitLiveExecClientFactory"
+
+        [data_clients.BYBIT]
+        path = "nautilus_trader.adapters.bybit.config:BybitDataClientConfig"
+        [data_clients.BYBIT.config]
+        api_key = "$ENV:BYBIT_API_KEY"
+        api_secret = "$ENV:BYBIT_API_SECRET"
+        product_types = ["LINEAR"]
+
+        [exec_clients.BYBIT]
+        path = "nautilus_trader.adapters.bybit.config:BybitExecClientConfig"
+        [exec_clients.BYBIT.config]
+        api_key = "$ENV:BYBIT_API_KEY"
+        api_secret = "$ENV:BYBIT_API_SECRET"
+        product_types = ["LINEAR"]
+
+        [sandbox]
+        starting_balances = ["100_000 USDT"]
+        """,
+    ).strip()
+    path = tmp_path / "foo.toml"
+    path.write_text(body)
+    return path
+
+
+def test_load_strategy_file(strategy_toml: Path) -> None:
+    file = TinoStrategyFile.load(strategy_toml)
+    assert file.strategy_id == "FOO-001"
+    assert file.trader_id == "TINO-001"
+    assert file.mode == "sandbox"
+    assert file.command_topic == "commands.tinohelm.FOO-001"
+
+
+def test_env_overrides_mode(strategy_toml: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TINO_MODE", "live")
+    file = TinoStrategyFile.load(strategy_toml)
+    assert file.mode == "live"
+
+
+def test_build_trading_node_config_injects_control_stream(strategy_toml: Path) -> None:
+    os.environ.setdefault("BYBIT_API_KEY", "test-key")  # NT validates API key strings exist
+    file = TinoStrategyFile.load(strategy_toml)
+    config = build_trading_node_config(file)
+    bus = config.message_bus
+    assert bus is not None
+    assert control_stream_key("FOO-001") in (bus.external_streams or [])
+    assert bus.streams_prefix == "stream"
+    assert bus.database is not None
+    assert bus.database.host == "localhost"  # REDIS_URL env var (fixture above)
+    # sandbox mode rewrites every venue's exec client
+    assert "BYBIT" in config.exec_clients
+
+
+def test_external_streams_preserves_user_entries_and_dedupes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """User-listed external_streams must survive; control stream auto-injects once.
+
+    Operators may want to subscribe a strategy pod to another pod's events
+    (cross-strategy sharing of signals, etc). Our auto-injection of the
+    TinoHelm control stream must not clobber that list, and must not double
+    up if the user already added it explicitly.
+    """
+
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    body = textwrap.dedent(
+        f"""
+        [strategy]
+        id = "BAR-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [message_bus]
+        external_streams = ["{control_stream_key('BAR-001')}", "trader-FOO:stream:events.order.FOO-001"]
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "bar.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    config = build_trading_node_config(file)
+    streams = list(config.message_bus.external_streams or [])
+
+    # User entry preserved
+    assert "trader-FOO:stream:events.order.FOO-001" in streams
+    # Control stream present exactly once
+    own = control_stream_key("BAR-001")
+    assert streams.count(own) == 1
+
+
+def test_sandbox_mode_swaps_every_venue_exec_client(strategy_toml: Path, monkeypatch) -> None:
+    """In sandbox mode, exec client config must be ``SandboxExecutionClientConfig``.
+
+    This is the contract that lets users flip a live config to sandbox via
+    ``TINO_MODE=sandbox`` without editing strategy code. If a venue's exec
+    client leaks through unswapped, real orders would hit the live exchange.
+    """
+
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setenv("TINO_MODE", "sandbox")
+
+    file = TinoStrategyFile.load(strategy_toml)
+    config = build_trading_node_config(file)
+
+    bybit_exec = config.exec_clients["BYBIT"]
+    serialized = repr(bybit_exec)
+    assert "Sandbox" in serialized
+    # And data clients must NOT be swapped — sandbox is exec-only.
+    bybit_data = config.data_clients["BYBIT"]
+    assert "Sandbox" not in repr(bybit_data)
+
+
+def test_missing_strategy_id_fails_loudly(tmp_path: Path) -> None:
+    """A misspelled or missing ``strategy.id`` must crash at load time.
+
+    Silent defaults would let two pods share a strategy_id and stomp each
+    other's events. The error message should name the file path so an
+    operator can fix it without grep.
+    """
+
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        '[strategy]\nclass = "x:Y"\n',  # no id
+    )
+    with pytest.raises(ValueError, match=r"strategy.id"):
+        TinoStrategyFile.load(bad)
+
+
+def test_env_refs_in_toml_get_expanded(strategy_toml: Path, monkeypatch) -> None:
+    """``"$ENV:NAME"`` in venue config must be replaced by the env var value.
+
+    Operators write ``api_key = "$ENV:BYBIT_API_KEY"`` so secrets stay in
+    .env, not in the TOML file. If this expansion regresses, NT would receive
+    the literal string ``$ENV:BYBIT_API_KEY`` and authentication would fail
+    with an opaque venue error.
+    """
+
+    monkeypatch.setenv("BYBIT_API_KEY", "supersecret-12345")
+    file = TinoStrategyFile.load(strategy_toml)
+    config = build_trading_node_config(file)
+    bybit_cfg = config.data_clients["BYBIT"]
+    # The build_data_clients passthrough may keep raw dicts or convert to NT
+    # ImportableConfig — either way, the resolved value must appear.
+    raw = getattr(bybit_cfg, "config", bybit_cfg) if not isinstance(bybit_cfg, dict) else bybit_cfg
+    serialized = repr(raw)
+    assert "supersecret-12345" in serialized
+    assert "$ENV:" not in serialized

@@ -1,0 +1,62 @@
+# Example strategy config.
+# Copy this file to {your-name}.toml and adjust to your venue.
+#
+# `mode` is overridden by the env var TINO_MODE if set (so `make sandbox`
+# flips a live config to sandbox without editing TOML).
+
+[strategy]
+id = "EXAMPLE-001"
+trader_id = "TINO-001"
+mode = "sandbox"  # "live" or "sandbox"
+class = "strategies.example.strategy:ExampleStrategy"
+config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+[strategy.params]
+instrument_id = "BTCUSDT-PERP.BYBIT"
+spread_threshold_bps = 5.0
+log_every_n = 100
+
+[message_bus]
+# REDIS_URL env var overrides this.
+redis_url = "redis://redis:6379/0"
+encoding = "msgpack"
+streams_prefix = "stream"
+stream_per_topic = true
+autotrim_mins = 60
+external_streams = []  # tinohelm:control:EXAMPLE-001 added automatically
+
+[cache]
+# Optional. If absent, NT runs in pure in-memory mode.
+redis_url = "redis://redis:6379/0"
+encoding = "msgpack"
+
+[logging]
+log_level = "INFO"
+
+# ─── Venue / exec wiring ─────────────────────────────────────────────────────
+[factories.data]
+BYBIT = "nautilus_trader.adapters.bybit.factories:BybitLiveDataClientFactory"
+
+[factories.exec]
+# In sandbox mode the runner overrides this with NT's SandboxLiveExecClientFactory.
+BYBIT = "nautilus_trader.adapters.bybit.factories:BybitLiveExecClientFactory"
+
+[data_clients.BYBIT]
+api_key = "$ENV:BYBIT_API_KEY"
+api_secret = "$ENV:BYBIT_API_SECRET"
+environment = "MAINNET"
+product_types = ["LINEAR"]
+
+[exec_clients.BYBIT]
+api_key = "$ENV:BYBIT_API_KEY"
+api_secret = "$ENV:BYBIT_API_SECRET"
+environment = "MAINNET"
+product_types = ["LINEAR"]
+
+# ─── Sandbox overrides ───────────────────────────────────────────────────────
+[sandbox]
+starting_balances = ["100_000 USDT"]
+oms_type = "NETTING"
+account_type = "MARGIN"
+book_type = "L1_MBP"
+default_leverage = 10

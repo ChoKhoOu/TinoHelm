@@ -1,0 +1,25 @@
+[notifier]
+trader_id = "TINO-NOTIFIER-001"
+discord_token_env = "DISCORD_BOT_TOKEN"
+discord_channel_id_env = "DISCORD_CHANNEL_ID"
+discord_guild_id_env = "DISCORD_GUILD_ID"
+daily_summary_utc = "14:00"  # 22:00 Asia/Shanghai
+strategies = ["EXAMPLE-001"]
+
+# 列出每个策略 pod 的 NT event stream key prefix。
+# stream_per_topic=true 时 publisher 会写 trader-{id}:stream:{topic}，
+# 所以这里一般只需 prefix；显式列举具体 topic 可获得最严的过滤。
+external_streams = []
+
+[message_bus]
+redis_url = "redis://redis:6379/0"
+encoding = "msgpack"
+streams_prefix = "stream"
+stream_per_topic = true
+
+[cache]
+redis_url = "redis://redis:6379/0"
+encoding = "msgpack"
+
+[logging]
+log_level = "INFO"
