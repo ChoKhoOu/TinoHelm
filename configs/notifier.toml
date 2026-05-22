@@ -1,14 +1,15 @@
 [notifier]
 trader_id = "TINO-NOTIFIER-001"
 discord_token_env = "DISCORD_BOT_TOKEN"
-discord_channel_id_env = "DISCORD_CHANNEL_ID"
+discord_channel_id_sandbox_env = "DISCORD_CHANNEL_ID_SANDBOX"
+discord_channel_id_live_env = "DISCORD_CHANNEL_ID_LIVE"
 discord_guild_id_env = "DISCORD_GUILD_ID"
 daily_summary_utc = "14:00"  # 22:00 Asia/Shanghai
-strategies = ["EXAMPLE-001"]
 
-# 列出每个策略 pod 的 NT event stream key prefix。
-# stream_per_topic=true 时 publisher 会写 trader-{id}:stream:{topic}，
-# 所以这里一般只需 prefix；显式列举具体 topic 可获得最严的过滤。
+# 策略由 notifier 自动发现：启动时从 `tinohelm:announce` 流回放历史，
+# 运行时通过 XREAD $ 跟进新的 announce，60s 兜底扫 `tinohelm:control:*`。
+# 不再需要 `strategies = [...]` 显式列表。
+# 如需固定额外 stream（未被 NT 自动派生覆盖），写在 external_streams：
 external_streams = []
 
 [message_bus]

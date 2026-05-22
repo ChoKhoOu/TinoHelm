@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -52,6 +52,21 @@ class TinoStrategyFile:
     command_topic: str = ""
 
     @classmethod
+    def load_for_id(
+        cls,
+        strategy_id: str,
+        *,
+        search_root: str | os.PathLike[str] | None = None,
+    ) -> TinoStrategyFile:
+        root = Path(search_root) if search_root else Path.cwd()
+        toml_path = root / "strategies" / strategy_id / "tinohelm.toml"
+        if not toml_path.is_file():
+            raise FileNotFoundError(
+                f"strategies/{strategy_id}/tinohelm.toml not found under {root}",
+            )
+        return cls.load(toml_path)
+
+    @classmethod
     def load(cls, path: str | os.PathLike[str]) -> TinoStrategyFile:
         path = Path(path).expanduser().resolve()
         with path.open("rb") as fp:
@@ -85,10 +100,10 @@ class TinoNotifierFile:
     path: Path
     trader_id: str = "TINO-NOTIFIER-001"
     discord_token_env: str = "DISCORD_BOT_TOKEN"
-    discord_channel_id_env: str = "DISCORD_CHANNEL_ID"
+    discord_channel_id_sandbox_env: str = "DISCORD_CHANNEL_ID_SANDBOX"
+    discord_channel_id_live_env: str = "DISCORD_CHANNEL_ID_LIVE"
     discord_guild_id_env: str = "DISCORD_GUILD_ID"
     daily_summary_utc: str = "14:00"
-    strategies: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> TinoNotifierFile:
@@ -101,16 +116,19 @@ class TinoNotifierFile:
             path=path,
             trader_id=notifier_section.get("trader_id", "TINO-NOTIFIER-001"),
             discord_token_env=notifier_section.get("discord_token_env", "DISCORD_BOT_TOKEN"),
-            discord_channel_id_env=notifier_section.get(
-                "discord_channel_id_env",
-                "DISCORD_CHANNEL_ID",
+            discord_channel_id_sandbox_env=notifier_section.get(
+                "discord_channel_id_sandbox_env",
+                "DISCORD_CHANNEL_ID_SANDBOX",
+            ),
+            discord_channel_id_live_env=notifier_section.get(
+                "discord_channel_id_live_env",
+                "DISCORD_CHANNEL_ID_LIVE",
             ),
             discord_guild_id_env=notifier_section.get("discord_guild_id_env", "DISCORD_GUILD_ID"),
             daily_summary_utc=notifier_section.get(
                 "daily_summary_utc",
                 os.environ.get("TINO_DAILY_SUMMARY_UTC", "14:00"),
             ),
-            strategies=list(notifier_section.get("strategies", [])),
         )
 
 

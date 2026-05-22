@@ -37,16 +37,16 @@ services:
       - ./configs:/app/configs:ro
       - ./strategies:/app/strategies:ro
 
-  # ─── strategy services ───────────────────────────────────────────────
-  # 一策略一 service。新增策略时复制下面的块，把 example 改成你的 STRATEGY 名。
-  # docker compose profile = `strategy-<name>`，让 `make run STRATEGY=example`
-  # 只起对应的容器，不会唤醒其他策略。
-  strategy-example:
+  # ─── strategy template ────────────────────────────────────────────────
+  # 通用策略 service。``make deploy STRATEGY=foo`` 会用 ``docker compose run``
+  # 实例化它（指定 --name tinohelm-strategy-foo 和 TINO_STRATEGY_ID=foo）。
+  # 不需要为每个策略复制一份 service 配置；用户只往 strategies/foo/ 丢代码即可。
+  # ``profiles: ["never"]`` 防止 ``docker compose up`` 自动唤醒它。
+  strategy:
     build:
       context: .
       dockerfile: docker/strategy.Dockerfile
-    profiles: ["strategy-example"]
-    container_name: tinohelm-strategy-example
+    profiles: ["never"]
     restart: unless-stopped
     depends_on:
       redis:
@@ -54,9 +54,8 @@ services:
     env_file: .env
     environment:
       <<: *common-env
-      TINO_STRATEGY_CONFIG: /app/configs/strategies/example.toml
+      TINO_STRATEGY_ID: ""  # set by ``docker compose run -e TINO_STRATEGY_ID=foo``
     volumes:
-      - ./configs:/app/configs:ro
       - ./strategies:/app/strategies:ro
       - ./logs:/app/logs
 

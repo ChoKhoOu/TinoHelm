@@ -2,15 +2,18 @@
 
 A minimal :class:`TradingNode` (no exec clients), wired up so that:
 
-* ``MessageBusConfig.external_streams`` lists every strategy pod's stream key
-  prefix, plus their TinoHelm control streams (so the notifier can echo
-  ``/pause`` etc. for observability).
-* A single :class:`NotifierActor` subscribes to the wildcard event topics NT
-  publishes automatically (``events.order.*`` / ``events.position.*`` /
-  ``events.account.*`` / ``data.Signal*``) and forwards them to Discord.
-* A small ``discord.py`` client is spun up alongside, sharing the asyncio loop
-  with NT, and translates slash commands into ``XADD`` on the strategy pod's
-  control stream (re-using :func:`tinohelm.cli._publish_command`).
+* The strategy registry is built at startup from the ``tinohelm:announce``
+  Redis stream (see :func:`load_announce_history`). New pods are picked up
+  on the fly via ``XREAD $`` (see :func:`read_new_announces`); a 60s
+  fallback also scans ``tinohelm:control:*`` for pods that came up
+  without an announce.
+* :class:`NotifierActor` subscribes to NT's wildcard event topics
+  (``events.order.*`` / ``events.position.*`` / ``events.account.*`` /
+  ``data.Signal*`` / ``events.system.*``) and routes each event to either
+  the sandbox or live Discord channel based on the registry.
+* A ``discord.py`` client provides slash commands (``/pause`` etc.)
+  that are channel-scoped: a command issued from #live cannot move a
+  sandbox strategy, and vice versa (see :func:`validate_command_channel`).
 """
 
 from __future__ import annotations
@@ -36,20 +39,168 @@ from nautilus_trader.live.node import TradingNode
 from tinohelm import COMMAND_TOPIC_PREFIX, control_stream_key
 from tinohelm.config import TinoNotifierFile, build_notifier_node_config
 from tinohelm.notifier.handlers import envelope_for, render_embed
+from tinohelm.strategy_runner import ANNOUNCE_STREAM
 
 logger = logging.getLogger("tinohelm.notifier")
+
+
+# ─── strategy registry (announce stream → mode lookup) ─────────────────────
+
+
+def read_new_announces(
+    redis_client: Any,
+    cursor: str,
+    *,
+    block_ms: int = 1_000,
+) -> tuple[list[tuple[str, str]], str]:
+    """Read announces written after ``cursor``; return ``(entries, new_cursor)``.
+
+    Use ``cursor="$"`` on the first call to skip pre-existing history (the
+    notifier already pulled that via :func:`load_announce_history`).
+    Subsequent calls pass the returned cursor to advance.
+
+    Returns an empty list when ``XREAD`` times out — the loop simply calls
+    again. ``block_ms`` is exposed mainly so tests don't hang.
+    """
+
+    response = redis_client.xread({ANNOUNCE_STREAM: cursor}, block=block_ms)
+    if not response:
+        return [], cursor
+    new_entries: list[tuple[str, str]] = []
+    new_cursor = cursor
+    for _stream_name, batch in response:
+        for entry_id, fields in batch:
+            sid = fields.get(b"strategy_id")
+            mode = fields.get(b"mode")
+            if sid is not None and mode is not None:
+                new_entries.append(
+                    (
+                        sid.decode() if isinstance(sid, bytes) else str(sid),
+                        mode.decode() if isinstance(mode, bytes) else str(mode),
+                    ),
+                )
+            new_cursor = entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
+    return new_entries, new_cursor
+
+
+def extract_strategy_id_from_topic(topic: str) -> str | None:
+    """Pull a strategy_id from an NT auto-published topic.
+
+    NT publishes per-strategy events under ``events.order.{id}`` and
+    ``events.position.{id}``; data signals follow ``data.Signal{Type}.{id}``.
+    Topics without a strategy scope (``events.account.*``, ``events.system.*``)
+    return ``None`` and the caller routes them to the default channel.
+    """
+
+    if topic.startswith(("events.order.", "events.position.")):
+        return topic.split(".", 2)[2] or None
+    if topic.startswith("data.Signal"):
+        parts = topic.split(".")
+        return parts[-1] if len(parts) >= 3 else None
+    return None
+
+
+class ChannelMismatch(Exception):
+    """Raised when a slash command is issued from the wrong Discord channel."""
+
+
+def validate_command_channel(
+    strategy_id: str,
+    *,
+    channel_mode: str,
+    registry: dict[str, str],
+) -> None:
+    """Reject slash commands that cross the sandbox/live boundary.
+
+    ``channel_mode`` is the mode the channel represents (``"live"`` or
+    ``"sandbox"``). Unknown strategies are treated as sandbox to match
+    :func:`route_channel`'s default, keeping UX consistent.
+    """
+
+    strategy_mode = registry.get(strategy_id, "sandbox")
+    effective = "live" if strategy_mode == "live" else "sandbox"
+    if effective != channel_mode:
+        raise ChannelMismatch(
+            f"{strategy_id} is {effective}; switch to the {effective} channel "
+            f"(command was sent from {channel_mode})",
+        )
+
+
+def route_channel(
+    strategy_id: str,
+    registry: dict[str, str],
+    *,
+    sandbox: int,
+    live: int,
+) -> int:
+    """Pick the Discord channel id for an event from ``strategy_id``.
+
+    Defaults to ``sandbox`` when the strategy isn't in the registry yet
+    or when ``mode`` isn't recognized. See module docstring for why.
+    """
+
+    return live if registry.get(strategy_id) == "live" else sandbox
+
+
+def apply_fallback_scan(redis_client: Any, registry: dict[str, str]) -> None:
+    """Scan ``tinohelm:control:*`` and add any unknown strategies to ``registry``.
+
+    The :data:`ANNOUNCE_STREAM` is the source of truth for ``mode``, but a
+    pod can come up under odd conditions (Redis flush wiped announces but
+    not the control stream that the pod recreates on each command). For
+    those, default the mode to ``"sandbox"`` — operators flip a strategy
+    from sandbox to live consciously, never the reverse, so this default
+    is the safer side of the bet.
+    """
+
+    for key in redis_client.keys("tinohelm:control:*"):
+        decoded = key.decode() if isinstance(key, bytes) else str(key)
+        sid = decoded.rsplit(":", 1)[-1]
+        registry.setdefault(sid, "sandbox")
+
+
+def load_announce_history(redis_client: Any) -> tuple[dict[str, str], str]:
+    """Replay :data:`ANNOUNCE_STREAM`; return ``(registry, last_entry_id)``.
+
+    Used at notifier startup to recover the channel-routing registry so a
+    notifier restart doesn't lose context until each pod re-announces.
+    Newer entries win on duplicate ``strategy_id``.
+
+    The returned cursor seeds :func:`read_new_announces` so the notifier
+    loop only sees entries written *after* startup.
+    """
+
+    registry: dict[str, str] = {}
+    last_id = "0-0"
+    for entry_id, fields in redis_client.xrange(ANNOUNCE_STREAM):
+        sid = fields.get(b"strategy_id")
+        mode = fields.get(b"mode")
+        last_id = entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
+        if sid is None or mode is None:
+            continue
+        registry[sid.decode() if isinstance(sid, bytes) else str(sid)] = (
+            mode.decode() if isinstance(mode, bytes) else str(mode)
+        )
+    return registry, last_id
 
 
 # ─── notifier actor ──────────────────────────────────────────────────────────
 
 
 class NotifierActorConfig(ActorConfig, frozen=True):
-    discord_channel_id: int
-    watched_strategies: list[str]
+    sandbox_channel_id: int
+    live_channel_id: int
 
 
 class NotifierActor(Actor):
-    """NT actor that funnels msgbus events into a Discord client."""
+    """NT actor that funnels msgbus events into a Discord client.
+
+    Events get routed to either the sandbox or live channel based on the
+    shared ``registry`` mapping (built from the announce stream). Topics
+    without a strategy scope (``events.account.*`` / ``events.system.*``)
+    fall through to the sandbox channel — that's where operators expect
+    cross-cutting noise.
+    """
 
     SUBSCRIBE_PATTERNS = (
         "events.order.*",
@@ -64,23 +215,34 @@ class NotifierActor(Actor):
         config: NotifierActorConfig,
         *,
         forwarder: DiscordForwarder,
+        registry: dict[str, str],
     ) -> None:
         super().__init__(config=config)
         self._forwarder = forwarder
-        self._channel_id = config.discord_channel_id
+        self._registry = registry
+        self._sandbox_channel_id = config.sandbox_channel_id
+        self._live_channel_id = config.live_channel_id
 
     def on_start(self) -> None:
         for pattern in self.SUBSCRIBE_PATTERNS:
             self.msgbus.subscribe(topic=pattern, handler=self._make_handler(pattern))
         self.log.info(
-            f"NotifierActor subscribed to {self.SUBSCRIBE_PATTERNS} -> channel={self._channel_id}",
+            f"NotifierActor subscribed to {self.SUBSCRIBE_PATTERNS} -> "
+            f"sandbox={self._sandbox_channel_id} live={self._live_channel_id}",
         )
 
     def _make_handler(self, pattern: str):
         def _handle(msg: Any) -> None:
             try:
                 env = envelope_for(pattern, msg)
-                self._forwarder.enqueue(env)
+                strategy_id = extract_strategy_id_from_topic(env.topic) or ""
+                channel_id = route_channel(
+                    strategy_id,
+                    self._registry,
+                    sandbox=self._sandbox_channel_id,
+                    live=self._live_channel_id,
+                )
+                self._forwarder.enqueue(env, channel_id=channel_id)
             except Exception as exc:  # pragma: no cover — defensive
                 self.log.error(f"NotifierActor failed on {pattern}: {exc}")
 
@@ -91,21 +253,33 @@ class NotifierActor(Actor):
 
 
 class DiscordForwarder:
-    """Cross-thread bridge between NT (sync handlers) and discord.py (async)."""
+    """Cross-thread bridge between NT (sync handlers) and discord.py (async).
+
+    Caller decides which channel id each event goes to (the routing
+    decision lives in :class:`NotifierActor` so this class stays
+    Discord-only). Rate-limit is per-channel so a noisy live channel
+    doesn't starve sandbox.
+    """
 
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
-        client: discord.Client,
-        channel_id: int,
+        client: discord.Client | None,
         rate_limit: int = 5,
     ) -> None:
         self._loop = loop
         self._client = client
-        self._channel_id = channel_id
-        self._semaphore = asyncio.Semaphore(rate_limit)
+        self._rate_limit = rate_limit
+        self._semaphores: dict[int, asyncio.Semaphore] = {}
 
-    def enqueue(self, env) -> None:
+    def _semaphore_for(self, channel_id: int) -> asyncio.Semaphore:
+        sem = self._semaphores.get(channel_id)
+        if sem is None:
+            sem = asyncio.Semaphore(self._rate_limit)
+            self._semaphores[channel_id] = sem
+        return sem
+
+    def enqueue(self, env, *, channel_id: int) -> None:
         # NT handlers run on the asyncio loop already (ActorExecutor), but to
         # stay safe we go through ``run_coroutine_threadsafe`` — it's a no-op
         # when called from the same loop. We check the loop is open *before*
@@ -115,19 +289,21 @@ class DiscordForwarder:
             logger.warning("event loop closed; dropping event")
             return
         try:
-            asyncio.run_coroutine_threadsafe(self._send(env), self._loop)
+            asyncio.run_coroutine_threadsafe(self._send(env, channel_id), self._loop)
         except RuntimeError:
             logger.warning("event loop closed; dropping event")
 
-    async def _send(self, env) -> None:
-        channel = self._client.get_channel(self._channel_id)
+    async def _send(self, env, channel_id: int) -> None:
+        if self._client is None:
+            return
+        channel = self._client.get_channel(channel_id)
         if channel is None:
             try:
-                channel = await self._client.fetch_channel(self._channel_id)
+                channel = await self._client.fetch_channel(channel_id)
             except discord.HTTPException as exc:
-                logger.error(f"discord fetch_channel({self._channel_id}) failed: {exc}")
+                logger.error(f"discord fetch_channel({channel_id}) failed: {exc}")
                 return
-        async with self._semaphore:
+        async with self._semaphore_for(channel_id):
             try:
                 await channel.send(embed=render_embed(env))
             except discord.HTTPException as exc:
@@ -139,11 +315,21 @@ def _build_discord_client(
     guild_id: int | None,
     notifier_cfg: TinoNotifierFile,
     redis_client: redis.Redis,
+    sandbox_channel_id: int,
+    live_channel_id: int,
+    registry: dict[str, str],
 ) -> tuple[discord.Client, discord.app_commands.CommandTree]:
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
     tree = discord.app_commands.CommandTree(client)
     guild_obj = discord.Object(id=guild_id) if guild_id else None
+
+    def _channel_mode(channel_id: int | None) -> str | None:
+        if channel_id == live_channel_id:
+            return "live"
+        if channel_id == sandbox_channel_id:
+            return "sandbox"
+        return None
 
     def _publish(strategy: str, action: str, reason: str | None = None) -> str:
         topic = f"{COMMAND_TOPIC_PREFIX}.{strategy}.{action}"
@@ -156,16 +342,35 @@ def _build_discord_client(
         )
         return topic
 
+    async def _command(
+        interaction: discord.Interaction,
+        strategy: str,
+        action: str,
+        reason: str | None = None,
+    ) -> None:
+        channel_mode = _channel_mode(interaction.channel_id)
+        if channel_mode is None:
+            await interaction.response.send_message(
+                "this channel is not registered as sandbox or live",
+                ephemeral=True,
+            )
+            return
+        try:
+            validate_command_channel(strategy, channel_mode=channel_mode, registry=registry)
+        except ChannelMismatch as exc:
+            await interaction.response.send_message(f"rejected: {exc}", ephemeral=True)
+            return
+        topic = await asyncio.to_thread(_publish, strategy, action, reason)
+        await interaction.response.send_message(f"sent `{topic}`", ephemeral=True)
+
     @tree.command(name="pause", description="Stop a strategy without exiting positions")
     @discord.app_commands.describe(strategy="Strategy ID, e.g. FOO-001")
     async def pause_cmd(interaction: discord.Interaction, strategy: str) -> None:
-        topic = await asyncio.to_thread(_publish, strategy, "pause")
-        await interaction.response.send_message(f"sent `{topic}`", ephemeral=True)
+        await _command(interaction, strategy, "pause")
 
     @tree.command(name="resume", description="Restart a previously paused strategy")
     async def resume_cmd(interaction: discord.Interaction, strategy: str) -> None:
-        topic = await asyncio.to_thread(_publish, strategy, "resume")
-        await interaction.response.send_message(f"sent `{topic}`", ephemeral=True)
+        await _command(interaction, strategy, "resume")
 
     @tree.command(name="flatten", description="Market-exit and stop a strategy")
     async def flatten_cmd(
@@ -173,21 +378,23 @@ def _build_discord_client(
         strategy: str,
         reason: str | None = None,
     ) -> None:
-        topic = await asyncio.to_thread(_publish, strategy, "flatten", reason)
-        await interaction.response.send_message(f"sent `{topic}`", ephemeral=True)
+        await _command(interaction, strategy, "flatten", reason)
 
     @tree.command(name="ping", description="Round-trip check via the bridge actor")
     async def ping_cmd(interaction: discord.Interaction, strategy: str) -> None:
-        topic = await asyncio.to_thread(_publish, strategy, "ping")
-        await interaction.response.send_message(f"sent `{topic}`", ephemeral=True)
+        await _command(interaction, strategy, "ping")
 
     @tree.command(name="status", description="List known TinoHelm streams in Redis")
     async def status_cmd(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
+        channel_mode = _channel_mode(interaction.channel_id)
         keys: list[str] = []
         for pattern in ("trader-*:stream:events.*", "tinohelm:control:*"):
             for key in await asyncio.to_thread(redis_client.keys, pattern):
                 keys.append(key.decode() if isinstance(key, bytes) else str(key))
+        # Narrow by channel mode when the channel maps to one
+        if channel_mode is not None:
+            keys = [k for k in keys if registry.get(k.rsplit(":", 1)[-1], "sandbox") == channel_mode]
         if not keys:
             await interaction.followup.send("no streams found", ephemeral=True)
             return
@@ -203,7 +410,10 @@ def _build_discord_client(
             await tree.sync(guild=guild_obj)
         else:
             await tree.sync()
-        logger.info(f"discord bot ready as {client.user} channel={notifier_cfg.discord_channel_id_env}")
+        logger.info(
+            f"discord bot ready as {client.user} "
+            f"sandbox={sandbox_channel_id} live={live_channel_id}",
+        )
 
     return client, tree
 
@@ -221,6 +431,8 @@ async def _daily_summary_loop(
     when_utc: dtime,
     cache_provider,  # callable returning current Cache snapshot or None
     redis_client: redis.Redis,
+    sandbox_channel_id: int,
+    live_channel_id: int,
 ) -> None:
     while True:
         now = datetime.now(tz=UTC)
@@ -252,7 +464,10 @@ async def _daily_summary_loop(
             summary["redis_streams_seen"] = stream_count
 
             env = _envelope_for("tinohelm.daily_summary", summary)
-            forwarder.enqueue(env)
+            # Daily summary is a cross-cutting view; mirror it to both channels.
+            forwarder.enqueue(env, channel_id=sandbox_channel_id)
+            if live_channel_id != sandbox_channel_id:
+                forwarder.enqueue(env, channel_id=live_channel_id)
         except Exception as exc:  # pragma: no cover — defensive
             logger.error(f"daily summary failed: {exc}")
 
@@ -272,6 +487,43 @@ def _resolve_int_env(env_name: str, *, allow_none: bool = False) -> int | None:
         raise SystemExit(f"env var {env_name} must be int, got {value!r}") from exc
 
 
+async def _autodiscover_loop(
+    redis_client: Any,
+    registry: dict[str, str],
+    cursor: str,
+    *,
+    fallback_interval_s: float = 60.0,
+) -> None:
+    """Keep ``registry`` fresh: announce stream + periodic control-key scan.
+
+    Two paths to the same registry update:
+      1. ``read_new_announces`` (fast: reflects pod boots in <1s)
+      2. ``apply_fallback_scan`` every 60s (slow: catches pods that came up
+         while Redis was wedged or whose announce got trimmed)
+    """
+
+    last_fallback = 0.0
+    while True:
+        try:
+            new_entries, cursor = await asyncio.to_thread(
+                read_new_announces,
+                redis_client,
+                cursor,
+                block_ms=500,
+            )
+            for sid, mode in new_entries:
+                registry[sid] = mode
+            now = asyncio.get_event_loop().time()
+            if now - last_fallback >= fallback_interval_s:
+                await asyncio.to_thread(apply_fallback_scan, redis_client, registry)
+                last_fallback = now
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.error(f"autodiscover loop error: {exc}")
+            await asyncio.sleep(1.0)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="TinoHelm Discord notifier")
     parser.add_argument(
@@ -287,57 +539,69 @@ def main(argv: list[str] | None = None) -> int:
     discord_token = os.environ.get(notifier_cfg.discord_token_env, "")
     if not discord_token:
         raise SystemExit(f"env var {notifier_cfg.discord_token_env} missing")
-    channel_id = _resolve_int_env(notifier_cfg.discord_channel_id_env)
+    sandbox_channel_id = _resolve_int_env(notifier_cfg.discord_channel_id_sandbox_env)
+    live_channel_id = _resolve_int_env(notifier_cfg.discord_channel_id_live_env)
     guild_id = _resolve_int_env(notifier_cfg.discord_guild_id_env, allow_none=True)
     when_utc = _parse_hh_mm(notifier_cfg.daily_summary_utc)
 
-    # external_streams: every strategy's NT event stream key prefix + its
-    # control stream. NT writes per-topic streams when stream_per_topic=True
-    # (see crates/infrastructure/src/redis/msgbus.rs:382), so callers may have
-    # to expand explicit topics; here we list the base prefixes and rely on
-    # users adding more under [notifier].external_streams if needed.
-    external_streams: list[str] = []
-    for sid in notifier_cfg.strategies:
-        external_streams.append(control_stream_key(sid))
+    redis_client = redis.Redis.from_url(
+        os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        decode_responses=False,
+    )
+
+    # Bootstrap the strategy registry from announce history.
+    registry, cursor = load_announce_history(redis_client)
+    apply_fallback_scan(redis_client, registry)
+    logger.info(f"notifier startup: known strategies = {registry}")
+
+    # NT msgbus subscribes via XREAD on stream-prefix patterns; keep the
+    # explicit list empty (NT auto-derives from streams_prefix + topic
+    # patterns). Users can pin extra streams under [notifier].external_streams.
     extra = notifier_cfg.raw.get("notifier", {}).get("external_streams") or []
-    for stream in extra:
-        if stream not in external_streams:
-            external_streams.append(stream)
+    external_streams = list(extra)
 
     config = build_notifier_node_config(notifier_cfg, external_streams=external_streams)
     node = TradingNode(config=config)
     node.build()
 
     loop = node.kernel.loop
-    redis_client = redis.Redis.from_url(
-        os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-        decode_responses=False,
+    discord_client, _tree = _build_discord_client(
+        discord_token,
+        guild_id,
+        notifier_cfg,
+        redis_client,
+        sandbox_channel_id,
+        live_channel_id,
+        registry,
     )
-    discord_client, _tree = _build_discord_client(discord_token, guild_id, notifier_cfg, redis_client)
 
-    forwarder = DiscordForwarder(loop=loop, client=discord_client, channel_id=channel_id)
+    forwarder = DiscordForwarder(loop=loop, client=discord_client)
     actor = NotifierActor(
         NotifierActorConfig(
-            discord_channel_id=channel_id,
-            watched_strategies=notifier_cfg.strategies,
+            sandbox_channel_id=sandbox_channel_id,
+            live_channel_id=live_channel_id,
         ),
         forwarder=forwarder,
+        registry=registry,
     )
     node.trader.add_actor(actor)
 
     discord_task = loop.create_task(discord_client.start(discord_token))
+    autodiscover_task = loop.create_task(_autodiscover_loop(redis_client, registry, cursor))
     summary_task = loop.create_task(
         _daily_summary_loop(
             forwarder,
             when_utc,
             cache_provider=lambda: node.kernel.cache,
             redis_client=redis_client,
+            sandbox_channel_id=sandbox_channel_id,
+            live_channel_id=live_channel_id,
         ),
     )
 
     def _handle_sig(signum: int, _frame: Any) -> None:
         logger.info(f"received {signal.Signals(signum).name}")
-        for task in (discord_task, summary_task):
+        for task in (discord_task, autodiscover_task, summary_task):
             if not task.done():
                 task.cancel()
         node.stop()
