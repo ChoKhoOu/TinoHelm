@@ -190,7 +190,7 @@ async def get_strategy_params(
 
     # Filter out internal params (injected by loader)
     internal_params = {"instrument_id", "instrument_ids", "bar_type", "bar_types",
-                       "symbols", "interval", "resolved_bar_types",
+                       "symbols", "interval",
                        "order_id_tag", "manage_stop", "manage_gtd_expiry",
                        "oms_type", "external_order_claims", "manage_contingent_orders",
                        "symbol_params"}

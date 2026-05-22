@@ -64,10 +64,10 @@ def create_strategies(
 ) -> list[Any]:
     """Create a single strategy instance from a ``StrategyBundle``.
 
-    The strategy receives ``symbols``, ``interval``, and
-    ``resolved_bar_types`` in its config.  For backward compatibility, when
-    the strategy's config class still declares ``instrument_id`` /
-    ``bar_type`` fields, the first symbol's values are injected.
+    The strategy receives ``symbols`` and ``interval`` in its config.
+    For backward compatibility, when the strategy's config class still
+    declares ``instrument_id`` / ``bar_type`` fields, the first symbol's
+    values are injected.
 
     ``order_id_tags`` (plural) is accepted for backward compatibility with
     the pre-portfolio list-based signature; the first element is used.

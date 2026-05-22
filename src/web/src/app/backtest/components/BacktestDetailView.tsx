@@ -176,8 +176,10 @@ export function BacktestDetailView({
           <div className="text-[0.72rem] text-muted-foreground">
             {(() => {
               const syms = selectedRun.symbol.split(",").map((s) => s.trim()).filter(Boolean);
-              return syms.length <= 3 ? syms.join(", ") : `${syms.slice(0, 3).join(", ")} +${syms.length - 3}`;
-            })()} · {selectedRun.interval} · {selectedRun.start_date?.slice(0, 10)} → {selectedRun.end_date?.slice(0, 10)}
+              const label = syms.length <= 3 ? syms.join(", ") : `${syms.slice(0, 3).join(", ")} +${syms.length - 3}`;
+              const dateRange = `${selectedRun.start_date?.slice(0, 10)} → ${selectedRun.end_date?.slice(0, 10)}`;
+              return selectedRun.interval ? `${label} · ${selectedRun.interval} · ${dateRange}` : `${label} · ${dateRange}`;
+            })()}
           </div>
         </div>
         <div className="ml-auto flex gap-1.5">

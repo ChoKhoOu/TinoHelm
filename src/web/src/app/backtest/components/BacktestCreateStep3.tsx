@@ -124,7 +124,6 @@ export function BacktestCreateStep3({
         if (v.trim()) params[k] = v.trim();
       }
       const barSubs = subscriptions.filter((s) => s.granularity === "bar");
-      const interval = barSubs.length > 0 ? (barSubs[0].timeframe || "5m") : "5m";
 
       // Construct fill_model
       const fill_model: Record<string, unknown> = {};
@@ -143,7 +142,6 @@ export function BacktestCreateStep3({
       return apiPost("/api/backtest/run", {
         strategy: strategy_name,
         symbols: [...new Set(subscriptions.map((s) => s.symbol))],
-        interval,
         start_date,
         end_date,
         initial_capital: capitalNum,

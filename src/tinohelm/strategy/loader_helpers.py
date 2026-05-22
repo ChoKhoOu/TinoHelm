@@ -284,10 +284,8 @@ def build_strategy_params(
     Rules
     -----
     * Always injects ``symbols`` and ``interval``.
-    * Injects ``resolved_bar_types`` when non-empty.
     * Injects ``instrument_id`` (first symbol) when the config accepts it.
-    * Injects ``bar_type`` (first resolved bar type, or derived from first
-      symbol + interval) when the config accepts it.
+    * Injects ``bar_type`` (derived from first symbol + interval) when the config accepts it.
     * Order-id tag preference: ``order_id_tag`` > ``order_id_tags[0]`` >
       ``bundle.tag`` > ``"000"``.  Only overwrites an existing
       ``order_id_tag`` when an explicit tag is supplied.
@@ -301,8 +299,6 @@ def build_strategy_params(
     params: dict[str, Any] = dict(bundle.params)
     params["symbols"] = bundle.symbols
     params["interval"] = bundle.interval
-    if bundle.resolved_bar_types:
-        params["resolved_bar_types"] = bundle.resolved_bar_types
 
     if config_fields and "instrument_id" in config_fields and bundle.symbols:
         params["instrument_id"] = normalize_symbol(bundle.symbols[0])
@@ -312,10 +308,7 @@ def build_strategy_params(
         and bundle.symbols
         and bundle.interval
     ):
-        if bundle.resolved_bar_types:
-            params["bar_type"] = bundle.resolved_bar_types[0]
-        else:
-            params["bar_type"] = make_bar_type_str(bundle.symbols[0], bundle.interval)
+        params["bar_type"] = make_bar_type_str(bundle.symbols[0], bundle.interval)
 
     effective_tag = order_id_tag
     if effective_tag is None and order_id_tags:

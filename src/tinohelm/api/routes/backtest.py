@@ -79,7 +79,7 @@ class BacktestRunRequest(BaseModel):
             if self.interval is not None:
                 self.intervals = [self.interval]
             else:
-                self.intervals = ["1m"]
+                self.intervals = []
         # Filter out empty strings
         self.intervals = [i for i in self.intervals if i.strip()]
         return self
@@ -137,7 +137,6 @@ class BacktestEstimateRequest(BaseModel):
     """Request body for POST /estimate."""
 
     symbols: list[str]
-    interval: str  # e.g. "5m", "15m", "1h"
     start_date: str  # "2026-01-01"
     end_date: str  # "2026-03-31"
 
@@ -269,7 +268,7 @@ async def estimate_backtest(body: BacktestEstimateRequest) -> BacktestEstimateRe
     except (ValueError, TypeError):
         return BacktestEstimateResponse(total_bars=0, estimated_seconds=0, estimated_label="—")
 
-    bars_per_day = _calc_bars_per_day(body.interval.lower())
+    bars_per_day = _calc_bars_per_day("1m")
     num_symbols = len([s for s in body.symbols if s.strip()])
     total_bars = days * bars_per_day * max(1, num_symbols)
     estimated_seconds = max(1, total_bars // _BARS_PER_SEC) if total_bars > 0 else 0

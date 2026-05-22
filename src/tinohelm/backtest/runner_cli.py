@@ -158,7 +158,7 @@ def _run_queue_mode(run_id: str) -> int:
         intervals = job.get("intervals")
         if intervals is None:
             ivl = job.get("interval")
-            intervals = [ivl] if ivl else ["1m"]
+            intervals = [ivl] if ivl else []
 
         from tinohelm.data.storage import get_active_catalog_root
         catalog_root = get_active_catalog_root(cfg)
@@ -444,7 +444,7 @@ def _run_fold_mode(fold_config_path: str) -> int:
             strategy_params=cfg_dict.get("params", {}),
             catalog_path=cfg_dict["catalog_path"],
             symbol=cfg_dict.get("symbol", ""),
-            interval=cfg_dict.get("interval", "1m"),
+            interval=cfg_dict.get("interval", ""),
             start=start_dt,
             end=end_dt,
             data_type=cfg_dict.get("data_type", "klines"),

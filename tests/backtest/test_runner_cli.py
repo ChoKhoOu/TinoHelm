@@ -42,6 +42,25 @@ _FAKE_RESULTS = {
 
 
 # ---------------------------------------------------------------------------
+# Request normalization for pure-NT mode
+# ---------------------------------------------------------------------------
+
+
+def test_backtest_request_leaves_intervals_empty_when_unspecified():
+    """Pure NT mode must not invent a default interval when caller omits it."""
+    from tinohelm.api.routes.backtest import BacktestRunRequest
+
+    req = BacktestRunRequest(
+        strategy="trend_pullback_v3",
+        start_date="2025-01-01",
+        end_date="2025-02-01",
+    )
+
+    assert req.symbols == []
+    assert req.intervals == []
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
@@ -74,6 +93,42 @@ def _sync_run(coro):
 # ---------------------------------------------------------------------------
 # T1: test_run_id_success
 # ---------------------------------------------------------------------------
+
+def test_queue_mode_passes_empty_intervals_when_job_omits_them(tmp_path, monkeypatch):
+    """Pure NT mode must not invent a default interval inside queue mode."""
+    from tinohelm.backtest import runner_cli
+
+    settings = _mock_settings(tmp_path)
+    r = _mock_redis()
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.redis.from_url", lambda url: r)
+
+    job = dict(_MINIMAL_JOB)
+    job.pop("interval", None)
+    job.pop("intervals", None)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(job)))
+
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.update_db_status", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_completed", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_progress", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.publish_stats", MagicMock())
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.sanitize_for_json", lambda x: x)
+    monkeypatch.setattr("tinohelm.backtest.runner_cli.asyncio.run", _sync_run)
+
+    captured = {}
+
+    def _fake_runner(**kwargs):
+        captured.update(kwargs)
+        inst = MagicMock()
+        inst.run = AsyncMock(return_value=_FAKE_RESULTS)
+        return inst
+
+    with patch("tinohelm.backtest.runner.BacktestRunner", side_effect=_fake_runner):
+        rc = runner_cli._run_queue_mode("r-1")
+
+    assert rc == 0
+    assert captured["intervals"] == []
+
 
 def test_run_id_success(tmp_path, monkeypatch):
     """_run_queue_mode returns 0 and calls update_db_status with status='completed'."""

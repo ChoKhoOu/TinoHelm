@@ -252,7 +252,6 @@ export function BacktestCreateStep1({
     }
     apiGet<{
       symbols: string[];
-      interval: string | null;
       subscriptions?: Array<{
         exchange: string;
         symbol: string;
@@ -282,7 +281,7 @@ export function BacktestCreateStep1({
             }),
           );
         } else if (d.symbols?.length) {
-          const parsed = parseTimeframe(d.interval || DEFAULT_TIMEFRAME);
+          const parsed = parseTimeframe(DEFAULT_TIMEFRAME);
           onSubscriptionsChange(
             d.symbols.map((sym) => ({
               exchange: "binance",

@@ -128,8 +128,6 @@ export function BacktestCreateStep2({
   // 300ms debounced estimate fetch
   useEffect(() => {
     const symbols = [...new Set(subscriptions.map((s) => s.symbol))];
-    const barSubs = subscriptions.filter((s) => s.granularity === "bar");
-    const interval = barSubs.length > 0 ? (barSubs[0].timeframe ?? "5m") : "5m";
 
     if (symbols.length === 0 || !form.start_date || !form.end_date || !dateValid) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- reason: reset estimate when inputs become invalid
@@ -139,11 +137,9 @@ export function BacktestCreateStep2({
 
     const timer = setTimeout(() => {
       apiPost<{ total_bars: number; estimated_label: string }>("/api/backtest/estimate", {
-        subscriptions,
         start_date: form.start_date,
         end_date: form.end_date,
         symbols,
-        interval,
       })
         .then((d) => d && setEstimate(d))
         .catch(() => setEstimate(null));

@@ -126,6 +126,46 @@ class TestBackwardCompatAliases:
         )
 
 
+class TestSubprocessPayload:
+    def test_fold_subprocess_payload_omits_interval_when_empty(self, monkeypatch, tmp_path):
+        opt = optimizer.BacktestOptimizer(
+            strategy_path="fake/strat.py:FakeStrategy",
+            config_path="fake/strat.py:FakeStrategyConfig",
+            symbol="BTCUSDT-PERP",
+            interval="",
+            start_date=__import__("datetime").date(2026, 1, 1),
+            end_date=__import__("datetime").date(2026, 2, 1),
+            catalog_path="/tmp/catalog",
+            n_trials=1,
+            fitness_objective="sharpe",
+            train_pct=0.8,
+            db_url="sqlite:///:memory:",
+            redis_url="redis://localhost:6379",
+            optimization_id=1,
+        )
+
+        captured = {}
+
+        class _TmpFile:
+            name = str(tmp_path / "fold.json")
+            def write(self, s):
+                captured.setdefault("writes", []).append(s)
+            def flush(self):
+                return None
+            def close(self):
+                return None
+
+        monkeypatch.setattr(optimizer.tempfile, "NamedTemporaryFile", lambda **kwargs: _TmpFile())
+        monkeypatch.setattr(optimizer.json, "dump", lambda payload, fh: captured.setdefault("payload", payload))
+        monkeypatch.setattr(optimizer.subprocess, "run", lambda *args, **kwargs: type("P", (), {"returncode": 0, "stdout": '{"status":"ok","fitness":1.0,"metrics":{}}', "stderr": ""})())
+        monkeypatch.setattr(optimizer.os, "unlink", lambda path: None)
+
+        result = opt._run_backtest_subprocess({}, __import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 1, 10))
+
+        assert result["_fitness"] == 1.0
+        assert "interval" not in captured["payload"]
+
+
 class TestPublicRexports:
     """The new public re-exports that ``run()`` consumes must be accessible
     via ``from tinohelm.backtest.optimizer import X`` so they're a single

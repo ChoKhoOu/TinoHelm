@@ -65,9 +65,6 @@ class StrategyBundle:
     # Strategy params (passed to config constructor)
     params: dict[str, Any] = field(default_factory=dict)
 
-    # Resolved bar types (injected by runner for composite aggregation)
-    resolved_bar_types: list[str] = field(default_factory=list)
-
     # Actors (optional)
     actors: list[ActorRef] = field(default_factory=list)
 

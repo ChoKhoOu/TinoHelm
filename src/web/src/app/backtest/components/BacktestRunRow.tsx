@@ -183,7 +183,7 @@ export function BacktestRunRow({ run, progress, progressDetail, expandedId, onTo
           {/* sub-row: interval · dateRange; on <lg also show run_id short */}
           <div className="flex items-center gap-2 font-mono text-[0.68rem] text-muted-foreground">
             <span className="lg:hidden text-qds-t3">{run.run_id.slice(0, 8)} ·</span>
-            {run.interval} · {dateRange}
+            {run.interval ? `${run.interval} · ${dateRange}` : dateRange}
           </div>
         </div>
 
@@ -438,7 +438,7 @@ export function BacktestHistoryRow({ run, expanded, onToggleExpand, onViewDetail
           {/* sub-row: interval · dateRange; on <lg also show run_id short */}
           <div className="flex items-center gap-2 font-mono text-[0.68rem] text-muted-foreground">
             <span className="lg:hidden text-qds-t3">{run.run_id.slice(0, 8)} ·</span>
-            {run.interval} · {dateRange}
+            {run.interval ? `${run.interval} · ${dateRange}` : dateRange}
           </div>
         </div>
 

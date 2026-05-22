@@ -92,9 +92,6 @@ pub enum BacktestCmd {
         /// Symbol
         #[arg(long)]
         symbol: String,
-        /// Interval
-        #[arg(long, default_value = "5m")]
-        interval: String,
         /// Start date
         #[arg(long)]
         start: String,
@@ -734,14 +731,12 @@ pub async fn dispatch(cmd: BacktestCmd, client: &ApiClient, format: OutputFormat
         BacktestCmd::Estimate {
             strategy,
             symbol,
-            interval,
             start,
             end,
         } => {
             let body = serde_json::json!({
                 "strategy": strategy,
-                "symbol": symbol,
-                "interval": interval,
+                "symbols": [symbol],
                 "start_date": start,
                 "end_date": end,
             });
@@ -1068,5 +1063,19 @@ mod tests {
             body["extra_data_types"],
             serde_json::json!(["bookTicker", "aggTrades"])
         );
+    }
+
+    #[test]
+    fn estimate_request_uses_symbols_array_without_interval() {
+        let body = serde_json::json!({
+            "strategy": "trend_pullback_v3",
+            "symbols": ["BTCUSDT-PERP"],
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-02",
+        });
+
+        assert_eq!(body["symbols"], serde_json::json!(["BTCUSDT-PERP"]));
+        assert!(body.get("interval").is_none());
+        assert!(body.get("symbol").is_none());
     }
 }

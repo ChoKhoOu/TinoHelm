@@ -84,13 +84,12 @@ class {class_name}Config(StrategyConfig):
 
     由 loader 自动注入的字段（不要手动设置）:
         order_id_tag, manage_stop, manage_gtd_expiry,
-        oms_type, external_order_claims, resolved_bar_types
+        oms_type, external_order_claims
 
     在下方添加你的策略参数。
     """
     symbols: list[str] = []              # 交易品种，如 ["BTCUSDT-PERP"]
     interval: str = "5m"                 # K线周期
-    resolved_bar_types: list[str] = []   # 由 runner 注入（复合聚合）
     symbol_params: dict = {{}}             # 按品种覆盖参数
     trade_size: Decimal = Decimal("0.01")
     sl_pct: float = 0.02                 # 止损距离（2%）
@@ -128,7 +127,6 @@ class {class_name}(Strategy):
         self.trade_size = config.trade_size
         self.sl_pct = config.sl_pct
         self.tp_pct = config.tp_pct
-        self._resolved_bar_types = config.resolved_bar_types
         self._symbol_params = config.symbol_params
 
         # 在 on_start 中填充
@@ -172,12 +170,6 @@ class {class_name}(Strategy):
         """
         from tinohelm.strategy.loader import normalize_symbol, make_bar_type_str
 
-        # 构建 resolved bar_types 查找表
-        resolved_map = {{}}
-        for bt_str in self._resolved_bar_types:
-            bt = BarType.from_str(bt_str)
-            resolved_map[str(bt.instrument_id)] = bt_str
-
         for symbol in self.symbols:
             nt_sym = normalize_symbol(symbol)
             inst = self.cache.instrument(InstrumentId.from_str(nt_sym))
@@ -190,12 +182,7 @@ class {class_name}(Strategy):
             # sp = self._symbol_params.get(symbol, {{}})
             # local_sl = sp.get("sl_pct", self.sl_pct)
 
-            # 订阅 bar
-            if nt_sym in resolved_map:
-                bt_str = resolved_map[nt_sym]
-            else:
-                bt_str = make_bar_type_str(symbol, self.interval)
-            bt = BarType.from_str(bt_str)
+            bt = BarType.from_str(make_bar_type_str(symbol, self.interval))
             self._bar_types[symbol] = bt
             self.subscribe_bars(bt)
 

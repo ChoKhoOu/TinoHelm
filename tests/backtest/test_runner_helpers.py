@@ -359,6 +359,15 @@ class TestCatalogCache:
 class TestBuildStrategyBundle:
     """Tests for the _build_strategy_bundle helper."""
 
+    def test_omitted_interval_stays_empty_for_pure_nt_mode(self):
+        runner = BacktestRunner(
+            strategy_path="strat.py:MyStrat",
+            config_path="strat.py:MyConfig",
+            symbol="BTCUSDT-PERP",
+        )
+        bundle = runner._build_strategy_bundle()
+        assert bundle.interval == ""
+
     def test_default_account_settings(self):
         runner = BacktestRunner(
             strategy_path="strat.py:MyStrat",

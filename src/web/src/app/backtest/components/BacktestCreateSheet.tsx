@@ -106,16 +106,23 @@ export function BacktestCreateSheet({
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reason: explicit prefill on retry flow, key-based remount ensures step resets
     setStep1Form({ strategy_name: retryPrefill.strategy_name });
 
-    // Prefill subscription from run's symbol + interval
-    if (retryPrefill.symbol && retryPrefill.interval) {
-      const prefillSub: Subscription = {
+    // Prefill subscription from run symbols; timeframe falls back to UI default.
+    if (retryPrefill.symbol) {
+      const symbols = retryPrefill.symbol
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const prefillSubs: Subscription[] = symbols.map((symbol) => ({
         exchange: "BINANCE",
-        symbol: retryPrefill.symbol,
+        symbol,
         granularity: "bar",
-        timeframe: retryPrefill.interval,
+        dataType: "klines",
+        timeframe: "5m",
+        timeframeValue: 5,
+        timeframeUnit: "m",
         auto: false,
-      };
-      setSubscriptions([prefillSub]);
+      }));
+      setSubscriptions(prefillSubs);
     }
 
     // Prefill dates (step 2)
@@ -198,7 +205,7 @@ export function BacktestCreateSheet({
         {fromRetry && (
           <div className="px-6 pt-3">
             <InlineError variant="hint">
-              已复制策略、标的、周期与时间区间，请确认资金与成本参数
+              已复制策略、标的与时间区间，请确认资金与成本参数
             </InlineError>
           </div>
         )}
