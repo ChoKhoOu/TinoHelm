@@ -1,0 +1,343 @@
+"""TOML → NautilusTrader config assembly.
+
+Strategy pod (:mod:`tinohelm.strategy_runner`) and notifier pod
+(:mod:`tinohelm.notifier.runner`) both consume TOML files produced by users.
+We never re-implement NT's config types — just deserialize TOML and hand the
+fields straight to ``MessageBusConfig`` / ``CacheConfig`` / ``TradingNodeConfig``
+/ ``ImportableStrategyConfig`` etc.
+"""
+
+from __future__ import annotations
+
+import os
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from nautilus_trader.cache.config import CacheConfig
+from nautilus_trader.common.config import (
+    DatabaseConfig,
+    ImportableActorConfig,
+    LoggingConfig,
+    MessageBusConfig,
+)
+from nautilus_trader.live.config import (
+    LiveDataEngineConfig,
+    LiveExecEngineConfig,
+    LiveRiskEngineConfig,
+    TradingNodeConfig,
+)
+from nautilus_trader.model.identifiers import TraderId
+from nautilus_trader.trading.config import ImportableStrategyConfig
+
+DEFAULT_STREAMS_PREFIX = "stream"
+DEFAULT_ENCODING = "msgpack"
+
+
+@dataclass
+class TinoStrategyFile:
+    """Parsed strategy TOML — kept around so the runner can swap modes."""
+
+    raw: dict[str, Any]
+    path: Path
+
+    # Derived shortcuts, populated in :meth:`load`.
+    strategy_id: str = ""
+    trader_id: str = ""
+    mode: str = "live"  # "live" | "sandbox"
+
+    # Discord-routed command topic for this strategy.
+    command_topic: str = ""
+
+    @classmethod
+    def load(cls, path: str | os.PathLike[str]) -> TinoStrategyFile:
+        path = Path(path).expanduser().resolve()
+        with path.open("rb") as fp:
+            raw = tomllib.load(fp)
+
+        strategy_section = raw.get("strategy", {})
+        strategy_id = _required_str(strategy_section, "id", path)
+        trader_id = strategy_section.get("trader_id") or os.environ.get(
+            "TINO_TRADER_ID",
+            "TINO-001",
+        )
+        mode = os.environ.get("TINO_MODE") or strategy_section.get("mode", "live")
+        if mode not in {"live", "sandbox"}:
+            raise ValueError(f"{path}: strategy.mode must be 'live' or 'sandbox', got {mode!r}")
+
+        return cls(
+            raw=raw,
+            path=path,
+            strategy_id=strategy_id,
+            trader_id=trader_id,
+            mode=mode,
+            command_topic=f"commands.tinohelm.{strategy_id}",
+        )
+
+
+@dataclass
+class TinoNotifierFile:
+    """Parsed notifier TOML."""
+
+    raw: dict[str, Any]
+    path: Path
+    trader_id: str = "TINO-NOTIFIER-001"
+    discord_token_env: str = "DISCORD_BOT_TOKEN"
+    discord_channel_id_env: str = "DISCORD_CHANNEL_ID"
+    discord_guild_id_env: str = "DISCORD_GUILD_ID"
+    daily_summary_utc: str = "14:00"
+    strategies: list[str] = field(default_factory=list)
+
+    @classmethod
+    def load(cls, path: str | os.PathLike[str]) -> TinoNotifierFile:
+        path = Path(path).expanduser().resolve()
+        with path.open("rb") as fp:
+            raw = tomllib.load(fp)
+        notifier_section = raw.get("notifier", {})
+        return cls(
+            raw=raw,
+            path=path,
+            trader_id=notifier_section.get("trader_id", "TINO-NOTIFIER-001"),
+            discord_token_env=notifier_section.get("discord_token_env", "DISCORD_BOT_TOKEN"),
+            discord_channel_id_env=notifier_section.get(
+                "discord_channel_id_env",
+                "DISCORD_CHANNEL_ID",
+            ),
+            discord_guild_id_env=notifier_section.get("discord_guild_id_env", "DISCORD_GUILD_ID"),
+            daily_summary_utc=notifier_section.get(
+                "daily_summary_utc",
+                os.environ.get("TINO_DAILY_SUMMARY_UTC", "14:00"),
+            ),
+            strategies=list(notifier_section.get("strategies", [])),
+        )
+
+
+# ─── builders ─────────────────────────────────────────────────────────────────
+
+
+def build_message_bus_config(
+    raw: dict[str, Any],
+    *,
+    external_streams: list[str] | None = None,
+) -> MessageBusConfig:
+    """Build :class:`MessageBusConfig` from the ``[message_bus]`` TOML section."""
+
+    section = raw.get("message_bus", {})
+    redis_url = os.environ.get("REDIS_URL") or section.get("redis_url", "redis://redis:6379/0")
+    db = _database_config_from_url(redis_url)
+
+    return MessageBusConfig(
+        database=db,
+        encoding=section.get("encoding", DEFAULT_ENCODING),
+        timestamps_as_iso8601=section.get("timestamps_as_iso8601", True),
+        buffer_interval_ms=section.get("buffer_interval_ms", 100),
+        autotrim_mins=section.get("autotrim_mins", 60),
+        use_trader_prefix=section.get("use_trader_prefix", True),
+        use_trader_id=section.get("use_trader_id", True),
+        use_instance_id=section.get("use_instance_id", False),
+        streams_prefix=section.get("streams_prefix", DEFAULT_STREAMS_PREFIX),
+        stream_per_topic=section.get("stream_per_topic", True),
+        external_streams=external_streams if external_streams is not None else section.get("external_streams"),
+        types_filter=section.get("types_filter"),
+    )
+
+
+def build_cache_config(raw: dict[str, Any]) -> CacheConfig | None:
+    """Optional ``[cache]`` section. If omitted, NT runs in pure in-memory mode."""
+
+    section = raw.get("cache")
+    if not section:
+        return None
+    redis_url = os.environ.get("REDIS_URL") or section.get("redis_url", "redis://redis:6379/0")
+    return CacheConfig(
+        database=_database_config_from_url(redis_url),
+        encoding=section.get("encoding", DEFAULT_ENCODING),
+        timestamps_as_iso8601=section.get("timestamps_as_iso8601", True),
+        buffer_interval_ms=section.get("buffer_interval_ms", 100),
+        flush_on_start=section.get("flush_on_start", False),
+    )
+
+
+def build_logging_config(raw: dict[str, Any]) -> LoggingConfig:
+    section = raw.get("logging", {})
+    return LoggingConfig(
+        log_level=os.environ.get("TINO_LOG_LEVEL") or section.get("log_level", "INFO"),
+        log_colors=section.get("log_colors", True),
+        bypass_logging=section.get("bypass_logging", False),
+    )
+
+
+def build_strategy_imports(file: TinoStrategyFile) -> list[ImportableStrategyConfig]:
+    """Translate the ``[strategy]`` block into NT's importable form.
+
+    NT will lazy-import ``strategy.path`` (``module:Class``) at build time. We
+    don't import the strategy class ourselves — that happens inside the kernel.
+    """
+
+    section = file.raw.get("strategy", {})
+    return [
+        ImportableStrategyConfig(
+            strategy_path=_required_str(section, "class", file.path),
+            config_path=section.get(
+                "config_class",
+                "nautilus_trader.trading.config:StrategyConfig",
+            ),
+            config={
+                "strategy_id": file.strategy_id,
+                **section.get("params", {}),
+            },
+        ),
+    ]
+
+
+def build_actor_imports(file: TinoStrategyFile) -> list[ImportableActorConfig]:
+    """Always inject the bridge actor; users may add more under ``[[actors]]``."""
+
+    actors: list[ImportableActorConfig] = [
+        ImportableActorConfig(
+            actor_path="tinohelm.bridge_actor:BridgeActor",
+            config_path="tinohelm.bridge_actor:BridgeActorConfig",
+            config={
+                "strategy_id": file.strategy_id,
+                "command_topic": file.command_topic,
+            },
+        ),
+    ]
+    for extra in file.raw.get("actors", []):
+        actors.append(
+            ImportableActorConfig(
+                actor_path=extra["class"],
+                config_path=extra.get("config_class", "nautilus_trader.common.config:ActorConfig"),
+                config=extra.get("params", {}),
+            ),
+        )
+    return actors
+
+
+def build_data_clients(file: TinoStrategyFile) -> dict[str, Any]:
+    """Pass venue ``data_clients`` straight through (dict form NT accepts)."""
+
+    clients: dict[str, Any] = {}
+    for venue, payload in file.raw.get("data_clients", {}).items():
+        clients[venue] = _resolve_env_refs(payload)
+    return clients
+
+
+def build_exec_clients(file: TinoStrategyFile) -> dict[str, Any]:
+    """In sandbox mode, route every venue through ``SandboxExecutionClientConfig``."""
+
+    raw_clients = file.raw.get("exec_clients", {})
+    if file.mode == "live":
+        return {venue: _resolve_env_refs(payload) for venue, payload in raw_clients.items()}
+
+    sandbox_section = file.raw.get("sandbox", {})
+    sandbox_clients: dict[str, Any] = {}
+    for venue, payload in raw_clients.items():
+        sandbox_clients[venue] = {
+            "path": "nautilus_trader.adapters.sandbox.config:SandboxExecutionClientConfig",
+            "config": {
+                "venue": venue,
+                "starting_balances": sandbox_section.get(
+                    "starting_balances",
+                    payload.get("starting_balances", ["100000 USDT"]),
+                ),
+                "base_currency": sandbox_section.get("base_currency"),
+                "oms_type": sandbox_section.get("oms_type", "NETTING"),
+                "account_type": sandbox_section.get("account_type", "MARGIN"),
+                "book_type": sandbox_section.get("book_type", "L1_MBP"),
+                "default_leverage": sandbox_section.get("default_leverage", 1.0),
+                "instrument_provider": payload.get("instrument_provider"),
+            },
+        }
+    return sandbox_clients
+
+
+def build_trading_node_config(file: TinoStrategyFile) -> TradingNodeConfig:
+    """Top-level assembler used by :mod:`tinohelm.strategy_runner`."""
+
+    from tinohelm import control_stream_key
+
+    # Always inject our control stream so the BridgeActor can hear CLI/Discord
+    # commands. Users can list additional streams under [message_bus].external_streams.
+    user_streams = list(file.raw.get("message_bus", {}).get("external_streams") or [])
+    extra = control_stream_key(file.strategy_id)
+    if extra not in user_streams:
+        user_streams.append(extra)
+
+    return TradingNodeConfig(
+        trader_id=TraderId(file.trader_id),
+        message_bus=build_message_bus_config(file.raw, external_streams=user_streams),
+        cache=build_cache_config(file.raw),
+        logging=build_logging_config(file.raw),
+        data_engine=LiveDataEngineConfig(),
+        risk_engine=LiveRiskEngineConfig(),
+        exec_engine=LiveExecEngineConfig(),
+        actors=build_actor_imports(file),
+        strategies=build_strategy_imports(file),
+        data_clients=build_data_clients(file),
+        exec_clients=build_exec_clients(file),
+        load_state=False,
+        save_state=False,
+    )
+
+
+def build_notifier_node_config(
+    notifier: TinoNotifierFile,
+    *,
+    external_streams: list[str],
+) -> TradingNodeConfig:
+    """Notifier pod = TradingNode without exec clients, only msgbus subscriber."""
+
+    return TradingNodeConfig(
+        trader_id=TraderId(notifier.trader_id),
+        message_bus=build_message_bus_config(
+            notifier.raw,
+            external_streams=external_streams,
+        ),
+        cache=build_cache_config(notifier.raw),
+        logging=build_logging_config(notifier.raw),
+        data_engine=LiveDataEngineConfig(),
+        risk_engine=LiveRiskEngineConfig(),
+        exec_engine=LiveExecEngineConfig(),
+        # The notifier actor itself is added by the runner via add_actor().
+    )
+
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _required_str(section: dict[str, Any], key: str, path: Path) -> str:
+    value = section.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{path}: required string field [strategy].{key} missing")
+    return value
+
+
+def _database_config_from_url(redis_url: str) -> DatabaseConfig:
+    parsed = urlparse(redis_url)
+    if parsed.scheme not in {"redis", "rediss"}:
+        raise ValueError(f"unsupported redis URL scheme: {redis_url!r}")
+    return DatabaseConfig(
+        type="redis",
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 6379,
+        username=parsed.username,
+        password=parsed.password,
+        ssl=parsed.scheme == "rediss",
+    )
+
+
+def _resolve_env_refs(payload: Any) -> Any:
+    """Recursively expand ``"$ENV:NAME"`` and ``"${NAME}"`` references in TOML values."""
+
+    if isinstance(payload, dict):
+        return {k: _resolve_env_refs(v) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return [_resolve_env_refs(v) for v in payload]
+    if isinstance(payload, str):
+        if payload.startswith("$ENV:"):
+            return os.environ.get(payload[5:], "")
+        return os.path.expandvars(payload)
+    return payload
