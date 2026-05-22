@@ -1,0 +1,1 @@
+"""TinoHelm Discord notifier pod."""
