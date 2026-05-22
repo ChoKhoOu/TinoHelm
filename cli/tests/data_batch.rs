@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::json;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn tino() -> Command {
@@ -199,4 +199,55 @@ async fn data_batch_cancel_hits_batch_endpoint() {
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(body["batch_id"], "batch-1");
     assert_eq!(body["cancelled_jobs"], 2);
+}
+
+#[tokio::test]
+async fn backtest_estimate_sends_symbols_array_without_interval() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/backtest/estimate"))
+        .and(body_partial_json(json!({
+            "strategy": "trend_pullback_v3",
+            "symbols": ["BTCUSDT-PERP"],
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-02"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total_bars": 1440,
+            "estimated_seconds": 1,
+            "estimated_label": "~1s"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = tino()
+        .env("TINO_API_URL", server.uri())
+        .env("TINO_API_KEY", "test")
+        .args([
+            "backtest",
+            "estimate",
+            "trend_pullback_v3",
+            "--symbol",
+            "BTCUSDT-PERP",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-02",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["total_bars"], 1440);
+    assert_eq!(body["estimated_label"], "~1s");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let sent: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(sent["symbols"], json!(["BTCUSDT-PERP"]));
+    assert!(sent.get("interval").is_none());
+    assert!(sent.get("symbol").is_none());
 }

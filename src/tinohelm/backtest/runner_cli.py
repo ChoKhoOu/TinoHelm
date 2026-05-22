@@ -180,7 +180,7 @@ def _run_queue_mode(run_id: str) -> int:
             data_type=job.get("data_type", "klines"),
             extra_data_types=job.get("extra_data_types") or [],
         )
-        # Enable bar-level progress tracking via ProgressReporter actor
+        # Keep queue-mode context on the runner for artifact/finalization hooks.
         runner._redis_client = r
         runner._run_id = run_id
         runner._job_start_time = job_start_time

@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from nautilus_trader.model import InstrumentId
 
 from tinohelm.strategy.loader import normalize_symbol
+
+
+_RUNTIME_STRATEGY_PATH = Path(
+    os.environ.get("TINO_TREND_PULLBACK_V3_PATH", "/root/.tino/strategies/trend_pullback_v3.py")
+)
+
+pytestmark = pytest.mark.skipif(
+    not _RUNTIME_STRATEGY_PATH.exists(),
+    reason=f"runtime strategy not found: {_RUNTIME_STRATEGY_PATH}",
+)
 
 
 class _MoneyLike:
@@ -26,8 +40,7 @@ class _InstrumentStub:
 def test_trend_pullback_v3_requests_and_subscribes_composite_bars(monkeypatch):
     from importlib.util import module_from_spec, spec_from_file_location
 
-    path = "/root/.tino/strategies/trend_pullback_v3.py"
-    spec = spec_from_file_location("trend_pullback_v3_runtime", path)
+    spec = spec_from_file_location("trend_pullback_v3_runtime", _RUNTIME_STRATEGY_PATH)
     assert spec and spec.loader
     module = module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -90,8 +103,7 @@ def test_trend_pullback_v3_requests_and_subscribes_composite_bars(monkeypatch):
 def test_trend_pullback_v3_on_historical_data_updates_same_routes():
     from importlib.util import module_from_spec, spec_from_file_location
 
-    path = "/root/.tino/strategies/trend_pullback_v3.py"
-    spec = spec_from_file_location("trend_pullback_v3_runtime_hist", path)
+    spec = spec_from_file_location("trend_pullback_v3_runtime_hist", _RUNTIME_STRATEGY_PATH)
     assert spec and spec.loader
     module = module_from_spec(spec)
     sys.modules[spec.name] = module

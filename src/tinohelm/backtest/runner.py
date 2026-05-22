@@ -131,6 +131,8 @@ class BacktestRunner:
         strategy_config = ImportableStrategyConfig(
             strategy_path=self.strategy_path,
             config_path=self.config_path,
+            # Force interval empty so pure-NT strategies ignore any caller-supplied
+            # timeframe override and derive their own composite subscriptions.
             config=dict(self.strategy_params) | {"symbols": self.symbols, "interval": ""},
         )
         venue_config = BacktestVenueConfig(

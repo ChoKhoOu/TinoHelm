@@ -1064,18 +1064,4 @@ mod tests {
             serde_json::json!(["bookTicker", "aggTrades"])
         );
     }
-
-    #[test]
-    fn estimate_request_uses_symbols_array_without_interval() {
-        let body = serde_json::json!({
-            "strategy": "trend_pullback_v3",
-            "symbols": ["BTCUSDT-PERP"],
-            "start_date": "2026-01-01",
-            "end_date": "2026-01-02",
-        });
-
-        assert_eq!(body["symbols"], serde_json::json!(["BTCUSDT-PERP"]));
-        assert!(body.get("interval").is_none());
-        assert!(body.get("symbol").is_none());
-    }
 }
