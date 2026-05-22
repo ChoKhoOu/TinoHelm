@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from typing import Any
 
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
@@ -20,6 +21,30 @@ from nautilus_trader.live.node import TradingNode
 from tinohelm.config import TinoStrategyFile, build_trading_node_config
 
 logger = logging.getLogger("tinohelm.runner")
+
+ANNOUNCE_STREAM = "tinohelm:announce"
+ANNOUNCE_MAXLEN = 1000
+
+
+def publish_announce(redis_client: Any, file: TinoStrategyFile) -> None:
+    """Broadcast this pod's identity so the notifier can autodiscover it.
+
+    Writes one entry to :data:`ANNOUNCE_STREAM` carrying ``strategy_id``,
+    ``mode``, ``trader_id`` and a millisecond-epoch ``ts``. Caps the stream
+    at :data:`ANNOUNCE_MAXLEN` (approximate) to bound Redis memory.
+    """
+
+    redis_client.xadd(
+        ANNOUNCE_STREAM,
+        {
+            "strategy_id": file.strategy_id,
+            "mode": file.mode,
+            "trader_id": file.trader_id,
+            "ts": str(int(time.time() * 1_000)),
+        },
+        maxlen=ANNOUNCE_MAXLEN,
+        approximate=True,
+    )
 
 
 def _load_factory(class_path: str) -> type:
@@ -84,20 +109,44 @@ def _install_signal_handlers(node: TradingNode) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a TinoHelm strategy pod")
     parser.add_argument(
+        "--strategy-id",
+        default=os.environ.get("TINO_STRATEGY_ID"),
+        help="Strategy id under strategies/<id>/ (default: $TINO_STRATEGY_ID)",
+    )
+    parser.add_argument(
         "--config",
         default=os.environ.get("TINO_STRATEGY_CONFIG"),
-        help="Path to a strategy TOML (default: $TINO_STRATEGY_CONFIG)",
+        help="Explicit path to a strategy TOML — escape hatch for non-standard layouts",
     )
     args = parser.parse_args(argv)
 
-    if not args.config:
-        parser.error("--config (or $TINO_STRATEGY_CONFIG) is required")
+    if args.strategy_id:
+        file = TinoStrategyFile.load_for_id(args.strategy_id)
+    elif args.config:
+        file = TinoStrategyFile.load(args.config)
+    else:
+        parser.error(
+            "one of --strategy-id (or $TINO_STRATEGY_ID) / --config is required",
+        )
 
-    file = TinoStrategyFile.load(args.config)
     logger.info(
         f"strategy={file.strategy_id} trader={file.trader_id} mode={file.mode} "
         f"config={file.path}",
     )
+
+    # Announce ourselves to the notifier before NT boots — if the pod crashes
+    # mid-build, the operator still sees "FOO-001 attempted to come up at <ts>"
+    # in the announce stream rather than silent absence.
+    try:
+        import redis as _redis
+
+        redis_client = _redis.Redis.from_url(
+            os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+            decode_responses=False,
+        )
+        publish_announce(redis_client, file)
+    except Exception as exc:  # pragma: no cover — best-effort
+        logger.warning(f"announce failed (notifier discovery degraded): {exc}")
 
     config = build_trading_node_config(file)
     node = TradingNode(config=config)

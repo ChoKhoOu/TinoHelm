@@ -56,8 +56,8 @@ def test_forwarder_enqueue_swallows_closed_loop() -> None:
     loop = asyncio.new_event_loop()
     loop.close()
 
-    forwarder = DiscordForwarder(loop=loop, client=None, channel_id=123)  # type: ignore[arg-type]
+    forwarder = DiscordForwarder(loop=loop, client=None)
     env = envelope_for("events.order.FOO", b"{}")
 
     # Should not raise
-    forwarder.enqueue(env)
+    forwarder.enqueue(env, channel_id=123)
