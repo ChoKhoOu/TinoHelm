@@ -16,9 +16,19 @@ _RUNTIME_STRATEGY_PATH = Path(
     os.environ.get("TINO_TREND_PULLBACK_V3_PATH", "/root/.tino/strategies/trend_pullback_v3.py")
 )
 
+
+def _runtime_strategy_readable(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.R_OK)
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+
+
 pytestmark = pytest.mark.skipif(
-    not _RUNTIME_STRATEGY_PATH.exists(),
-    reason=f"runtime strategy not found: {_RUNTIME_STRATEGY_PATH}",
+    not _runtime_strategy_readable(_RUNTIME_STRATEGY_PATH),
+    reason=f"runtime strategy not readable: {_RUNTIME_STRATEGY_PATH}",
 )
 
 

@@ -11,12 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-
-import pytest
 
 from tinohelm.backtest.runner import BacktestRunner
 
@@ -101,7 +98,7 @@ class TestAsyncioRunFromFreshLoop:
         result = asyncio.run(runner.run())
 
         assert result["statistics"] == {}
-        runner._run_via_backtest_node.assert_called_once()
+        assert runner._run_via_backtest_node.call_count == 1
 
     def test_builds_node_run_config_with_strategy_and_1m_source_data(self, monkeypatch):
         runner = BacktestRunner(
@@ -117,6 +114,9 @@ class TestAsyncioRunFromFreshLoop:
         class FakeNode:
             def __init__(self, configs):
                 captured["configs"] = configs
+
+            def build(self):
+                return None
 
             def run(self):
                 return [object()]
@@ -156,6 +156,9 @@ class TestAsyncioRunFromFreshLoop:
             def __init__(self, configs):
                 self._configs = configs
 
+            def build(self):
+                return None
+
             def run(self):
                 return [object()]
 
@@ -171,7 +174,8 @@ class TestAsyncioRunFromFreshLoop:
         result = runner._run_via_backtest_node()
 
         assert result["statistics"]["total_pnl"] == 1.0
-        runner._extract_results.assert_called_once_with(engine, 10000.0)
+        assert runner._extract_results.call_count == 1
+        assert runner._extract_results.call_args.args == (engine, 10000.0)
 
     def test_node_path_preserves_artifact_export_chain(self, monkeypatch, tmp_path):
         runner = BacktestRunner(
@@ -188,6 +192,9 @@ class TestAsyncioRunFromFreshLoop:
         class FakeNode:
             def __init__(self, configs):
                 self._configs = configs
+
+            def build(self):
+                return None
 
             def run(self):
                 return [object()]
@@ -213,7 +220,82 @@ class TestAsyncioRunFromFreshLoop:
         assert result == {"statistics": {}}
         assert events == ["terminalizing", "reports", "tearsheet", "enhance"]
 
-    def test_node_path_has_no_funding_auxiliary_or_auto_download_methods(self, monkeypatch):
+    def test_node_path_registers_builtin_and_custom_statistics_before_run(self, monkeypatch):
+        runner = BacktestRunner(
+            strategy_path="fake/strat.py:FakeStrategy",
+            config_path="fake/strat.py:FakeStrategyConfig",
+            symbol="BTCUSDT-PERP",
+            start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        analyzer = MagicMock()
+        engine = MagicMock()
+        engine.portfolio.analyzer = analyzer
+        builtin_calls = []
+        custom_register = MagicMock(return_value=17)
+
+        class FakeStat:
+            def __init__(self, name):
+                self.name = name
+
+        class FakeNode:
+            def __init__(self, configs):
+                self._configs = configs
+                self._engine = engine
+
+            def build(self):
+                return None
+
+            def run(self):
+                return [object()]
+
+            def get_engine(self, run_config_id):
+                return self._engine
+
+        monkeypatch.setattr("nautilus_trader.backtest.node.BacktestNode", FakeNode)
+        monkeypatch.setattr(
+            "nautilus_trader.analysis.MaxDrawdown",
+            lambda: builtin_calls.append("MaxDrawdown") or FakeStat("MaxDrawdown"),
+        )
+        monkeypatch.setattr(
+            "nautilus_trader.analysis.CalmarRatio",
+            lambda: builtin_calls.append("CalmarRatio") or FakeStat("CalmarRatio"),
+        )
+        monkeypatch.setattr(
+            "nautilus_trader.analysis.CAGR",
+            lambda: builtin_calls.append("CAGR") or FakeStat("CAGR"),
+        )
+        monkeypatch.setattr(
+            "nautilus_trader.analysis.ProfitFactor",
+            lambda: builtin_calls.append("ProfitFactor") or FakeStat("ProfitFactor"),
+        )
+        monkeypatch.setattr(
+            "tinohelm.backtest.custom_statistics.register_custom_statistics",
+            custom_register,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_extract_results",
+            MagicMock(return_value={"statistics": {"total_pnl": 1.0}, "trade_log": [], "equity_curve": []}),
+        )
+        monkeypatch.setattr(runner, "_prepare_funding_tracker", MagicMock(return_value=None), raising=False)
+        monkeypatch.setattr(runner, "_merge_funding_results", MagicMock(side_effect=lambda results: results), raising=False)
+
+        result = runner._run_via_backtest_node()
+
+        assert result["statistics"]["total_pnl"] == 1.0
+        assert builtin_calls == ["MaxDrawdown", "CalmarRatio", "CAGR", "ProfitFactor"]
+        assert analyzer.register_statistic.call_count == 4
+        assert [c.args[0].name for c in analyzer.register_statistic.call_args_list] == [
+            "MaxDrawdown",
+            "CalmarRatio",
+            "CAGR",
+            "ProfitFactor",
+        ]
+        custom_register.assert_called_once_with(analyzer)
+
+    def test_node_path_merges_funding_results_into_statistics(self, monkeypatch):
         runner = BacktestRunner(
             strategy_path="fake/strat.py:FakeStrategy",
             config_path="fake/strat.py:FakeStrategyConfig",
@@ -223,32 +305,70 @@ class TestAsyncioRunFromFreshLoop:
         )
 
         engine = MagicMock()
+        engine.portfolio.analyzer = MagicMock()
+        tracker = MagicMock()
+        tracker.get_results.return_value = {
+            "total_funding_cost": 12.3456,
+            "funding_event_count": 2,
+            "per_symbol_funding": {"BTCUSDT-PERP.BINANCE": 12.3456},
+            "funding_records": [{"timestamp": "t1"}, {"timestamp": "t2"}],
+        }
 
         class FakeNode:
             def __init__(self, configs):
                 self._configs = configs
+                self._engine = engine
+
+            def build(self):
+                return None
 
             def run(self):
                 return [object()]
 
             def get_engine(self, run_config_id):
-                return engine
+                return self._engine
 
+        monkeypatch.setattr("nautilus_trader.backtest.node.BacktestNode", FakeNode)
         monkeypatch.setattr(
-            "nautilus_trader.backtest.node.BacktestNode",
-            FakeNode,
+            runner,
+            "_extract_results",
+            MagicMock(return_value={"statistics": {"total_pnl": 100.0}, "trade_log": [], "equity_curve": []}),
         )
-        monkeypatch.setattr(runner, "_extract_results", MagicMock(return_value={"statistics": {}}))
+        monkeypatch.setattr(runner, "_register_analyzer_statistics", MagicMock(), raising=False)
+        monkeypatch.setattr(runner, "_prepare_funding_tracker", MagicMock(return_value=tracker), raising=False)
 
         result = runner._run_via_backtest_node()
 
-        assert result == {"statistics": {}}
-        assert not hasattr(runner, "_load_funding_rates")
-        assert not hasattr(runner, "_load_auxiliary_price_data")
-        assert not hasattr(runner, "_submit_and_wait_fetch")
+        assert result["funding"]["total_funding_cost"] == 12.3456
+        assert result["statistics"]["total_funding_cost"] == 12.3456
+        assert result["statistics"]["pnl_after_funding"] == 87.6544
 
 # ---------------------------------------------------------------------------
-# T3: static source-code guard
+# T3: funding event assembly
+# ---------------------------------------------------------------------------
+
+class TestFundingEventAssembly:
+    def test_build_funding_events_uses_latest_mark_price_at_or_before_funding(self):
+        funding_rows = [
+            SimpleNamespace(ts_event=2_000_000_000, rate=0.0001, interval=480),
+            SimpleNamespace(ts_event=5_000_000_000, rate=-0.0002, interval=480),
+        ]
+        mark_rows = [
+            SimpleNamespace(ts_event=1_000_000_000, value=100.0),
+            SimpleNamespace(ts_event=4_000_000_000, value=105.0),
+            SimpleNamespace(ts_event=6_000_000_000, value=110.0),
+        ]
+
+        events = BacktestRunner._build_funding_events("BTCUSDT-PERP.BINANCE", funding_rows, mark_rows)
+
+        assert len(events) == 2
+        assert events[0]["mark_price"] == 100.0
+        assert events[1]["mark_price"] == 105.0
+        assert events[0]["funding_interval_minutes"] == 480
+        assert events[1]["rate"] == -0.0002
+
+# ---------------------------------------------------------------------------
+# T4: static source-code guard
 # ---------------------------------------------------------------------------
 
 class TestNoNewEventLoopInRunner:

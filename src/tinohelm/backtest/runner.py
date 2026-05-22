@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from bisect import bisect_right
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -97,6 +98,7 @@ class BacktestRunner:
 
         self.start = start
         self.end = end
+        self.strategy_bundle = strategy_bundle
         self.fill_model_config = fill_model
         self.warmup_bars = warmup_bars
         self.tags = tags
@@ -108,11 +110,31 @@ class BacktestRunner:
         self._redis_client = None
         self._run_id: str = ""
         self._job_start_time: float = 0.0
+        self._funding_tracker = None
 
     async def run(self) -> dict[str, Any]:
         """Execute the backtest and return results dict."""
         logger.info("Starting backtest: %s on %s", self.strategy_path, self.symbols)
         return self._run_via_backtest_node()
+
+    def _build_strategy_bundle(self):
+        from tinohelm.portfolio.config import AccountSettings, StrategyBundle
+
+        if self.strategy_bundle is not None:
+            return self.strategy_bundle
+
+        return StrategyBundle(
+            strategy_class=self.strategy_path,
+            config_class=self.config_path,
+            symbols=list(self.symbols),
+            interval=self.interval,
+            params=dict(self.strategy_params),
+            account=AccountSettings(
+                starting_balance=float(self.strategy_params.get("starting_balance", 10000)),
+                leverage=int(self.strategy_params.get("leverage", 1)),
+            ),
+            implicit=True,
+        )
 
     def _run_via_backtest_node(self) -> dict[str, Any]:
         from nautilus_trader.backtest.config import (
@@ -165,16 +187,25 @@ class BacktestRunner:
             end=self.end.isoformat() if self.end else None,
         )
         node = BacktestNode(configs=[run_config])
-        node.run()
+        node.build()
         engine = node.get_engine(run_config.id)
         if engine is None:
             raise RuntimeError("BacktestNode did not produce an engine for result extraction")
+
+        self._engine = engine
         self._nt_symbols = nt_symbols
         self._all_bar_type_strs = []
         self._loaded_bar_type_strs = []
         self._total_bar_count = 0
         self._benchmark_daily_closes = {}
+
+        self._register_analyzer_statistics(engine)
+        self._funding_tracker = self._prepare_funding_tracker(engine)
+
+        node.run()
+
         results = self._extract_results(engine, starting_balance)
+        results = self._merge_funding_results(results)
         if self._before_artifact_export is not None:
             self._before_artifact_export()
         if self.artifacts_dir is not None:
@@ -182,6 +213,130 @@ class BacktestRunner:
             self._generate_tearsheet(engine, self._loaded_bar_type_strs)
             from tinohelm.backtest.tearsheet import enhance_tearsheet
             enhance_tearsheet(self.artifacts_dir, results)
+        return results
+
+    def _register_analyzer_statistics(self, engine: BacktestEngine) -> None:
+        analyzer = engine.portfolio.analyzer
+        try:
+            from nautilus_trader.analysis import MaxDrawdown, CalmarRatio, CAGR, ProfitFactor
+
+            analyzer.register_statistic(MaxDrawdown())
+            analyzer.register_statistic(CalmarRatio())
+            analyzer.register_statistic(CAGR())
+            analyzer.register_statistic(ProfitFactor())
+        except Exception:
+            logger.warning("Failed to register built-in backtest statistics", exc_info=True)
+
+        try:
+            from tinohelm.backtest.custom_statistics import register_custom_statistics
+
+            register_custom_statistics(analyzer)
+        except Exception:
+            logger.warning("Failed to register custom statistics", exc_info=True)
+
+    @staticmethod
+    def _build_funding_events(nt_symbol: str, funding_rows: list[Any], mark_rows: list[Any]) -> list[dict[str, Any]]:
+        if not funding_rows or not mark_rows:
+            return []
+
+        mark_times = [int(getattr(row, "ts_event", 0)) for row in mark_rows]
+        mark_prices = [
+            float(row.value.as_double()) if hasattr(row.value, "as_double") else float(row.value)
+            for row in mark_rows
+        ]
+        events: list[dict[str, Any]] = []
+
+        for row in funding_rows:
+            ts_ns = int(getattr(row, "ts_event", 0))
+            mark_idx = bisect_right(mark_times, ts_ns) - 1
+            if mark_idx < 0:
+                continue
+            events.append({
+                "timestamp_ns": ts_ns,
+                "timestamp_iso": datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=timezone.utc).isoformat(),
+                "symbol": nt_symbol,
+                "rate": float(getattr(row, "rate")),
+                "mark_price": mark_prices[mark_idx],
+                "funding_interval_minutes": getattr(row, "interval", None),
+            })
+
+        return events
+
+    def _load_funding_rates(self, nt_symbols: list[str]) -> list[dict[str, Any]]:
+        from nautilus_trader.model.data import FundingRateUpdate, MarkPriceUpdate
+        from nautilus_trader.model.identifiers import InstrumentId
+        from tinohelm.data.catalog import _catalog_for_root
+
+        if not self.start or not self.end:
+            return []
+
+        catalog = _catalog_for_root(self.catalog_path, self._storage)
+        events: list[dict[str, Any]] = []
+
+        for nt_symbol in nt_symbols:
+            instrument_id = str(InstrumentId.from_str(nt_symbol))
+            funding_rows = sorted(
+                catalog.query(
+                    FundingRateUpdate,
+                    identifiers=[instrument_id],
+                    start=self.start,
+                    end=self.end,
+                )
+                or [],
+                key=lambda row: int(getattr(row, "ts_event", 0)),
+            )
+            if not funding_rows:
+                continue
+
+            mark_lookback = 8 * 60
+            first_interval = getattr(funding_rows[0], "interval", None)
+            if first_interval is not None:
+                try:
+                    mark_lookback = int(first_interval)
+                except Exception:
+                    pass
+
+            mark_rows = sorted(
+                catalog.query(
+                    MarkPriceUpdate,
+                    identifiers=[instrument_id],
+                    start=self.start - timedelta(minutes=mark_lookback),
+                    end=self.end,
+                )
+                or [],
+                key=lambda row: int(getattr(row, "ts_event", 0)),
+            )
+            if not mark_rows:
+                logger.warning("Funding updates exist but mark prices are missing for %s", nt_symbol)
+                continue
+
+            events.extend(self._build_funding_events(nt_symbol, funding_rows, mark_rows))
+
+        return events
+
+    def _prepare_funding_tracker(self, engine: BacktestEngine):
+        from tinohelm.backtest.funding import _FundingCostTracker, _FundingCostTrackerConfig
+
+        funding_events = self._load_funding_rates(self._nt_symbols)
+        if not funding_events:
+            return None
+
+        _FundingCostTracker._funding_events = funding_events
+        _FundingCostTracker._bar_type_strs = self._loaded_bar_type_strs
+        tracker = _FundingCostTracker(config=_FundingCostTrackerConfig())
+        engine.add_actor(tracker)
+        return tracker
+
+    def _merge_funding_results(self, results: dict[str, Any]) -> dict[str, Any]:
+        if self._funding_tracker is None:
+            return results
+
+        funding_data = self._funding_tracker.get_results()
+        results["funding"] = funding_data
+        stats = results.setdefault("statistics", {})
+        funding_cost = funding_data["total_funding_cost"]
+        stats["total_funding_cost"] = funding_cost
+        stats["pnl_after_funding"] = round((stats.get("total_pnl", 0.0) or 0.0) - funding_cost, 4)
         return results
 
     def _export_reports(self, engine: BacktestEngine) -> None:
