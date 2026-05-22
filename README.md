@@ -134,4 +134,4 @@ docker exec tinohelm-redis redis-cli XLEN trader-TINO-001:stream:events.system.c
 
 ## License
 
-MIT.
+[AGPL-3.0](LICENSE).
