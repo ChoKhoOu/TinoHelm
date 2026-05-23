@@ -600,8 +600,12 @@ def _build_discord_client(
         # Subscribe before publish — otherwise a fast pod could reply before
         # the future is registered and we'd miss it.
         futures = {sid: forwarder.watch_positions_report(sid) for sid in targets}
-        for sid in targets:
-            await asyncio.to_thread(_publish, sid, "report")
+        # Fan-out the publishes in parallel: each ``_publish`` is a Redis
+        # XADD round-trip, and N targets sequentially would mean the slowest
+        # pod gets N*RTT into its 120s budget instead of 1*RTT.
+        await asyncio.gather(
+            *(asyncio.to_thread(_publish, sid, "report") for sid in targets)
+        )
 
         try:
             done = await asyncio.wait_for(
