@@ -24,7 +24,8 @@ services:
     image: ${TINO_NOTIFIER_IMAGE:-ghcr.io/chokhoou/tinohelm-notifier:latest}
     build:
       context: .
-      dockerfile: docker/notifier.Dockerfile
+      dockerfile: docker/Dockerfile
+      target: notifier
     container_name: tinohelm-notifier
     pull_policy: always
     restart: unless-stopped
@@ -48,7 +49,8 @@ services:
     image: ${TINO_STRATEGY_IMAGE:-ghcr.io/chokhoou/tinohelm-strategy:latest}
     build:
       context: .
-      dockerfile: docker/strategy.Dockerfile
+      dockerfile: docker/Dockerfile
+      target: strategy
     profiles: ["never"]
     pull_policy: always
     restart: unless-stopped

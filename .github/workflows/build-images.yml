@@ -55,9 +55,13 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/${{ matrix.component }}.Dockerfile
+          file: docker/Dockerfile
+          target: ${{ matrix.component }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.component }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          # Both matrix legs share the same base/deps/app layers — point them
+          # at one shared cache scope so the second build hits cache
+          # everywhere except its own ENTRYPOINT layer.
+          cache-from: type=gha,scope=tinohelm
+          cache-to: type=gha,mode=max,scope=tinohelm

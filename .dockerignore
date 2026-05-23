@@ -1,0 +1,44 @@
+# Keep build context tiny: COPY directives are explicit, but anything sent
+# to the daemon also affects ``COPY . .`` if it's ever added later, plus
+# uploads to remote builders. Mirror .gitignore plus a few build-only items.
+
+.git/
+.github/
+.claude/
+.idea/
+.vscode/
+
+# Python / tooling caches — never useful inside the image
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.uv-cache/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local-only state
+.env
+.env.local
+*.local
+logs/
+var/
+*.log
+.nautilus/
+catalog/
+
+# Tests don't need to be inside production images. Keep this list tight —
+# we still want strategies/, configs/, scripts/ to ship.
+tests/
+
+# OS junk
+.DS_Store
+*.swp
