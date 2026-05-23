@@ -112,11 +112,19 @@ def validate_command_channel(
 ) -> None:
     """Reject slash commands that cross the sandbox/live boundary.
 
-    ``channel_mode`` is the mode the channel represents (``"live"`` or
-    ``"sandbox"``). Unknown strategies are treated as sandbox to match
-    :func:`route_channel`'s default, keeping UX consistent.
+    ``channel_mode`` is the mode the channel represents (``"live"``,
+    ``"sandbox"``, or ``"logging"``). The logging channel is read-only;
+    every command from there is rejected regardless of strategy mode.
+    Unknown strategies are treated as sandbox to match
+    :func:`route_channel`'s default.
     """
 
+    if channel_mode == "logging":
+        raise ChannelMismatch(
+            f"the logging channel is read-only; send commands from the "
+            f"sandbox or live channel (command for {strategy_id} was sent "
+            f"from logging)",
+        )
     strategy_mode = registry.get(strategy_id, "sandbox")
     effective = "live" if strategy_mode == "live" else "sandbox"
     if effective != channel_mode:
@@ -132,13 +140,20 @@ def route_channel(
     *,
     sandbox: int,
     live: int,
+    logging: int,
 ) -> int:
     """Pick the Discord channel id for an event from ``strategy_id``.
 
-    Defaults to ``sandbox`` when the strategy isn't in the registry yet
-    or when ``mode`` isn't recognized. See module docstring for why.
+    Empty ``strategy_id`` means the topic carries no strategy scope
+    (events.system.*, events.account.*, tinohelm.*) — those go to the
+    logging channel so trade-flow channels stay clean.
+
+    For scoped topics, defaults to ``sandbox`` when the strategy isn't
+    in the registry yet or when ``mode`` isn't recognized.
     """
 
+    if not strategy_id:
+        return logging
     return live if registry.get(strategy_id) == "live" else sandbox
 
 
@@ -190,16 +205,17 @@ def load_announce_history(redis_client: Any) -> tuple[dict[str, str], str]:
 class NotifierActorConfig(ActorConfig, frozen=True):
     sandbox_channel_id: int
     live_channel_id: int
+    logging_channel_id: int
 
 
 class NotifierActor(Actor):
     """NT actor that funnels msgbus events into a Discord client.
 
-    Events get routed to either the sandbox or live channel based on the
-    shared ``registry`` mapping (built from the announce stream). Topics
-    without a strategy scope (``events.account.*`` / ``events.system.*``)
-    fall through to the sandbox channel — that's where operators expect
-    cross-cutting noise.
+    Events get routed to either the sandbox, live, or logging channel
+    based on the shared ``registry`` mapping (built from the announce
+    stream). Topics without a strategy scope (``events.account.*`` /
+    ``events.system.*`` / ``tinohelm.*``) go to the logging channel so
+    they don't drown out trade-flow signals in sandbox/live.
     """
 
     SUBSCRIBE_PATTERNS = (
@@ -222,13 +238,15 @@ class NotifierActor(Actor):
         self._registry = registry
         self._sandbox_channel_id = config.sandbox_channel_id
         self._live_channel_id = config.live_channel_id
+        self._logging_channel_id = config.logging_channel_id
 
     def on_start(self) -> None:
         for pattern in self.SUBSCRIBE_PATTERNS:
             self.msgbus.subscribe(topic=pattern, handler=self._make_handler(pattern))
         self.log.info(
             f"NotifierActor subscribed to {self.SUBSCRIBE_PATTERNS} -> "
-            f"sandbox={self._sandbox_channel_id} live={self._live_channel_id}",
+            f"sandbox={self._sandbox_channel_id} live={self._live_channel_id} "
+            f"logging={self._logging_channel_id}",
         )
 
     def _make_handler(self, pattern: str):
@@ -241,6 +259,7 @@ class NotifierActor(Actor):
                     self._registry,
                     sandbox=self._sandbox_channel_id,
                     live=self._live_channel_id,
+                    logging=self._logging_channel_id,
                 )
                 self._forwarder.enqueue(env, channel_id=channel_id)
             except Exception as exc:  # pragma: no cover — defensive
@@ -317,6 +336,7 @@ def _build_discord_client(
     redis_client: redis.Redis,
     sandbox_channel_id: int,
     live_channel_id: int,
+    logging_channel_id: int,
     registry: dict[str, str],
 ) -> tuple[discord.Client, discord.app_commands.CommandTree]:
     intents = discord.Intents.default()
@@ -329,6 +349,8 @@ def _build_discord_client(
             return "live"
         if channel_id == sandbox_channel_id:
             return "sandbox"
+        if channel_id == logging_channel_id:
+            return "logging"
         return None
 
     def _publish(strategy: str, action: str, reason: str | None = None) -> str:
@@ -351,7 +373,7 @@ def _build_discord_client(
         channel_mode = _channel_mode(interaction.channel_id)
         if channel_mode is None:
             await interaction.response.send_message(
-                "this channel is not registered as sandbox or live",
+                "this channel is not registered as sandbox, live, or logging",
                 ephemeral=True,
             )
             return
@@ -392,9 +414,13 @@ def _build_discord_client(
         for pattern in ("trader-*:stream:events.*", "tinohelm:control:*"):
             for key in await asyncio.to_thread(redis_client.keys, pattern):
                 keys.append(key.decode() if isinstance(key, bytes) else str(key))
-        # Narrow by channel mode when the channel maps to one
-        if channel_mode is not None:
-            keys = [k for k in keys if registry.get(k.rsplit(":", 1)[-1], "sandbox") == channel_mode]
+        # Narrow by channel mode when the channel maps to a strategy mode.
+        # The logging channel doesn't represent a strategy mode, so we list
+        # everything there to give operators a single read-only overview.
+        if channel_mode in ("sandbox", "live"):
+            keys = [
+                k for k in keys if registry.get(k.rsplit(":", 1)[-1], "sandbox") == channel_mode
+            ]
         if not keys:
             await interaction.followup.send("no streams found", ephemeral=True)
             return
@@ -412,7 +438,8 @@ def _build_discord_client(
             await tree.sync()
         logger.info(
             f"discord bot ready as {client.user} "
-            f"sandbox={sandbox_channel_id} live={live_channel_id}",
+            f"sandbox={sandbox_channel_id} live={live_channel_id} "
+            f"logging={logging_channel_id}",
         )
 
     return client, tree
@@ -426,13 +453,42 @@ def _parse_hh_mm(value: str) -> dtime:
     return dtime(int(h), int(m), tzinfo=UTC)
 
 
+def build_daily_summary(
+    *,
+    cache: Any,
+    redis_stream_count: int,
+    logging_channel_id: int,
+) -> tuple[Any, int]:
+    """Build the daily-summary envelope and pick its target channel.
+
+    Returns ``(envelope, channel_id)``. Pure function so the loop stays
+    thin and the routing decision is testable without asyncio.
+
+    The summary always lands on the logging channel — it's operational
+    information, not trade flow, so mirroring it to sandbox/live would
+    just dilute the trade-event signal those channels exist for.
+    """
+
+    from tinohelm.notifier.handlers import envelope_for as _envelope_for
+
+    summary: dict[str, Any] = {}
+    if cache is not None:
+        summary["positions_open"] = len(cache.positions_open() or [])
+        summary["positions_closed"] = len(cache.positions_closed() or [])
+        summary["orders_open"] = len(cache.orders_open() or [])
+    else:
+        summary["note"] = "Cache unavailable (notifier ran without [cache] section)"
+    summary["redis_streams_seen"] = redis_stream_count
+
+    return _envelope_for("tinohelm.daily_summary", summary), logging_channel_id
+
+
 async def _daily_summary_loop(
     forwarder: DiscordForwarder,
     when_utc: dtime,
     cache_provider,  # callable returning current Cache snapshot or None
     redis_client: redis.Redis,
-    sandbox_channel_id: int,
-    live_channel_id: int,
+    logging_channel_id: int,
 ) -> None:
     while True:
         now = datetime.now(tz=UTC)
@@ -448,26 +504,16 @@ async def _daily_summary_loop(
 
         cache = cache_provider() if callable(cache_provider) else None
         try:
-            from tinohelm.notifier.handlers import envelope_for as _envelope_for
-
-            summary: dict[str, Any] = {}
-            if cache is not None:
-                summary["positions_open"] = len(cache.positions_open() or [])
-                summary["positions_closed"] = len(cache.positions_closed() or [])
-                summary["orders_open"] = len(cache.orders_open() or [])
-            else:
-                summary["note"] = "Cache unavailable (notifier ran without [cache] section)"
             stream_count = sum(
                 len(redis_client.keys(p))
                 for p in ("trader-*:stream:events.*", "tinohelm:control:*")
             )
-            summary["redis_streams_seen"] = stream_count
-
-            env = _envelope_for("tinohelm.daily_summary", summary)
-            # Daily summary is a cross-cutting view; mirror it to both channels.
-            forwarder.enqueue(env, channel_id=sandbox_channel_id)
-            if live_channel_id != sandbox_channel_id:
-                forwarder.enqueue(env, channel_id=live_channel_id)
+            env, channel_id = build_daily_summary(
+                cache=cache,
+                redis_stream_count=stream_count,
+                logging_channel_id=logging_channel_id,
+            )
+            forwarder.enqueue(env, channel_id=channel_id)
         except Exception as exc:  # pragma: no cover — defensive
             logger.error(f"daily summary failed: {exc}")
 
@@ -541,6 +587,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"env var {notifier_cfg.discord_token_env} missing")
     sandbox_channel_id = _resolve_int_env(notifier_cfg.discord_channel_id_sandbox_env)
     live_channel_id = _resolve_int_env(notifier_cfg.discord_channel_id_live_env)
+    logging_channel_id = _resolve_int_env(notifier_cfg.discord_channel_id_logging_env)
     guild_id = _resolve_int_env(notifier_cfg.discord_guild_id_env, allow_none=True)
     when_utc = _parse_hh_mm(notifier_cfg.daily_summary_utc)
 
@@ -572,6 +619,7 @@ def main(argv: list[str] | None = None) -> int:
         redis_client,
         sandbox_channel_id,
         live_channel_id,
+        logging_channel_id,
         registry,
     )
 
@@ -580,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         NotifierActorConfig(
             sandbox_channel_id=sandbox_channel_id,
             live_channel_id=live_channel_id,
+            logging_channel_id=logging_channel_id,
         ),
         forwarder=forwarder,
         registry=registry,
@@ -594,8 +643,7 @@ def main(argv: list[str] | None = None) -> int:
             when_utc,
             cache_provider=lambda: node.kernel.cache,
             redis_client=redis_client,
-            sandbox_channel_id=sandbox_channel_id,
-            live_channel_id=live_channel_id,
+            logging_channel_id=logging_channel_id,
         ),
     )
 

@@ -102,6 +102,7 @@ class TinoNotifierFile:
     discord_token_env: str = "DISCORD_BOT_TOKEN"
     discord_channel_id_sandbox_env: str = "DISCORD_CHANNEL_ID_SANDBOX"
     discord_channel_id_live_env: str = "DISCORD_CHANNEL_ID_LIVE"
+    discord_channel_id_logging_env: str = "DISCORD_CHANNEL_ID_LOGGING"
     discord_guild_id_env: str = "DISCORD_GUILD_ID"
     daily_summary_utc: str = "14:00"
 
@@ -123,6 +124,10 @@ class TinoNotifierFile:
             discord_channel_id_live_env=notifier_section.get(
                 "discord_channel_id_live_env",
                 "DISCORD_CHANNEL_ID_LIVE",
+            ),
+            discord_channel_id_logging_env=notifier_section.get(
+                "discord_channel_id_logging_env",
+                "DISCORD_CHANNEL_ID_LOGGING",
             ),
             discord_guild_id_env=notifier_section.get("discord_guild_id_env", "DISCORD_GUILD_ID"),
             daily_summary_utc=notifier_section.get(
@@ -157,7 +162,9 @@ def build_message_bus_config(
         use_instance_id=section.get("use_instance_id", False),
         streams_prefix=section.get("streams_prefix", DEFAULT_STREAMS_PREFIX),
         stream_per_topic=section.get("stream_per_topic", True),
-        external_streams=external_streams if external_streams is not None else section.get("external_streams"),
+        external_streams=external_streams
+        if external_streams is not None
+        else section.get("external_streams"),
         types_filter=section.get("types_filter"),
     )
 

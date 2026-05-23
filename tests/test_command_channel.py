@@ -61,3 +61,24 @@ def test_unknown_strategy_treated_as_sandbox() -> None:
     # From live channel: rejected
     with pytest.raises(ChannelMismatch):
         validate_command_channel("GHOST-001", channel_mode="live", registry={})
+
+
+def test_logging_channel_rejects_all_commands() -> None:
+    """The logging channel is read-only (system events, daily summary).
+    Slash commands from there must always be rejected — regardless of the
+    strategy's mode — and the error tells the operator to retry from
+    sandbox or live so they're not stuck guessing.
+    """
+
+    with pytest.raises(ChannelMismatch, match=r"logging.*sandbox.*live"):
+        validate_command_channel(
+            "LIVE-001",
+            channel_mode="logging",
+            registry={"LIVE-001": "live"},
+        )
+    with pytest.raises(ChannelMismatch, match=r"logging.*sandbox.*live"):
+        validate_command_channel(
+            "SBX-001",
+            channel_mode="logging",
+            registry={"SBX-001": "sandbox"},
+        )
