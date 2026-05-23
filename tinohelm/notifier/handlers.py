@@ -121,7 +121,17 @@ def _guess_event_type(topic: str, body: dict[str, Any]) -> str:
 
 
 def _fmt_order(body: dict[str, Any]) -> str:
-    keys = ("strategy_id", "instrument_id", "side", "order_type", "quantity", "price", "last_qty", "last_px", "status")
+    keys = (
+        "strategy_id",
+        "instrument_id",
+        "side",
+        "order_type",
+        "quantity",
+        "price",
+        "last_qty",
+        "last_px",
+        "status",
+    )
     rows = [f"**{k}**: `{body[k]}`" for k in keys if k in body]
     if "client_order_id" in body:
         rows.append(f"**id**: `{body['client_order_id']}`")
@@ -129,7 +139,16 @@ def _fmt_order(body: dict[str, Any]) -> str:
 
 
 def _fmt_position(body: dict[str, Any]) -> str:
-    keys = ("strategy_id", "instrument_id", "side", "quantity", "avg_px_open", "avg_px_close", "realized_pnl", "unrealized_pnl")
+    keys = (
+        "strategy_id",
+        "instrument_id",
+        "side",
+        "quantity",
+        "avg_px_open",
+        "avg_px_close",
+        "realized_pnl",
+        "unrealized_pnl",
+    )
     rows = [f"**{k}**: `{body[k]}`" for k in keys if k in body]
     return "\n".join(rows) or f"```json\n{json.dumps(body, indent=2)[:1200]}\n```"
 

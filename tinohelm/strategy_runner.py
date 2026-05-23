@@ -130,8 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     logger.info(
-        f"strategy={file.strategy_id} trader={file.trader_id} mode={file.mode} "
-        f"config={file.path}",
+        f"strategy={file.strategy_id} trader={file.trader_id} mode={file.mode} config={file.path}",
     )
 
     # Announce ourselves to the notifier before NT boots — if the pod crashes

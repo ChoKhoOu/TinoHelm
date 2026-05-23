@@ -3,6 +3,7 @@ trader_id = "TINO-NOTIFIER-001"
 discord_token_env = "DISCORD_BOT_TOKEN"
 discord_channel_id_sandbox_env = "DISCORD_CHANNEL_ID_SANDBOX"
 discord_channel_id_live_env = "DISCORD_CHANNEL_ID_LIVE"
+discord_channel_id_logging_env = "DISCORD_CHANNEL_ID_LOGGING"
 discord_guild_id_env = "DISCORD_GUILD_ID"
 daily_summary_utc = "14:00"  # 22:00 Asia/Shanghai
 

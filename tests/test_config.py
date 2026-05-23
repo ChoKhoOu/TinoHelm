@@ -120,7 +120,7 @@ def test_external_streams_preserves_user_entries_and_dedupes(
         [strategy.params]
 
         [message_bus]
-        external_streams = ["{control_stream_key('BAR-001')}", "trader-FOO:stream:events.order.FOO-001"]
+        external_streams = ["{control_stream_key("BAR-001")}", "trader-FOO:stream:events.order.FOO-001"]
 
         [factories.data]
         [factories.exec]
@@ -177,6 +177,50 @@ def test_missing_strategy_id_fails_loudly(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match=r"strategy.id"):
         TinoStrategyFile.load(bad)
+
+
+def test_notifier_file_exposes_logging_channel_env(tmp_path: Path) -> None:
+    """The notifier TOML must surface a logging-channel env var so the runner
+    can resolve the third Discord channel at boot. Default name is
+    ``DISCORD_CHANNEL_ID_LOGGING`` to match the sandbox/live naming.
+
+    Without this, operators have no place to point the new channel and the
+    notifier would have to fall back to mirroring (which we just removed).
+    """
+
+    from tinohelm.config import TinoNotifierFile
+
+    body = textwrap.dedent(
+        """
+        [notifier]
+        trader_id = "TINO-NOTIFIER-001"
+        """,
+    ).strip()
+    path = tmp_path / "n.toml"
+    path.write_text(body)
+
+    cfg = TinoNotifierFile.load(path)
+    assert cfg.discord_channel_id_logging_env == "DISCORD_CHANNEL_ID_LOGGING"
+
+
+def test_notifier_file_allows_override_of_logging_env_name(tmp_path: Path) -> None:
+    """Custom env-var names must override the default. Same pattern as
+    ``discord_channel_id_sandbox_env`` already supports.
+    """
+
+    from tinohelm.config import TinoNotifierFile
+
+    body = textwrap.dedent(
+        """
+        [notifier]
+        discord_channel_id_logging_env = "MY_LOGGING_CHANNEL"
+        """,
+    ).strip()
+    path = tmp_path / "n.toml"
+    path.write_text(body)
+
+    cfg = TinoNotifierFile.load(path)
+    assert cfg.discord_channel_id_logging_env == "MY_LOGGING_CHANNEL"
 
 
 def test_env_refs_in_toml_get_expanded(strategy_toml: Path, monkeypatch) -> None:
