@@ -441,6 +441,24 @@ class DiscordForwarder:
         self._position_listeners.setdefault(strategy_id, []).append(future)
         return future
 
+    def drop_position_listener(self, strategy_id: str, future: asyncio.Future) -> None:
+        """Remove ``future`` from the wait list — used by ``/positions`` after
+        a timeout so the cancelled future doesn't sit in
+        ``_position_listeners`` forever if the pod never replies again.
+
+        Must be called from the loop thread.
+        """
+
+        listeners = self._position_listeners.get(strategy_id)
+        if not listeners:
+            return
+        try:
+            listeners.remove(future)
+        except ValueError:
+            return
+        if not listeners:
+            self._position_listeners.pop(strategy_id, None)
+
     def _dispatch_position_listeners(self, env) -> None:
         # Called from the loop thread (we hop over via call_soon_threadsafe
         # in :meth:`enqueue`). Pulling the whole list avoids an awkward
@@ -595,9 +613,13 @@ def _build_discord_client(
                 fut.result() if fut.done() and not fut.cancelled() else None
                 for fut in futures.values()
             ]
-            for fut in futures.values():
+            # Cancel + un-register so a permanently-dead pod's listener slot
+            # doesn't leak. Live envelopes that arrive later for the same
+            # sid will still resolve fresh /positions calls.
+            for sid, fut in futures.items():
                 if not fut.done():
                     fut.cancel()
+                forwarder.drop_position_listener(sid, fut)
 
         replied: list[str] = []
         missing: list[str] = []

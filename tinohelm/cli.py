@@ -100,15 +100,15 @@ def positions(
     # because those are merely a side-effect of past commands — a strategy
     # that's never been controlled won't have one.
     #
-    # ``count=1000`` caps the read at the most recent N entries — after
-    # months of pod restarts the announce stream can grow past tens of
-    # thousands of entries, and reading the whole thing back to dedupe N
-    # strategy ids is silly. 1000 entries comfortably covers any realistic
-    # active fleet (one entry per pod boot).
+    # ``xrevrange(..., count=1000)`` reads the *newest* 1000 entries (XRANGE
+    # reads oldest-first; on a months-old stream that would silently drop
+    # any strategy whose announce sits past the 1000-entry head). 1000
+    # entries comfortably covers any realistic active fleet — one entry
+    # per pod boot — while keeping the read bounded.
     from tinohelm.strategy_runner import ANNOUNCE_STREAM
 
     seen: dict[str, None] = {}
-    for _entry_id, fields in _client().xrange(ANNOUNCE_STREAM, count=1000):
+    for _entry_id, fields in _client().xrevrange(ANNOUNCE_STREAM, count=1000):
         sid = fields.get(b"strategy_id")
         if sid is None:
             continue

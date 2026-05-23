@@ -97,6 +97,32 @@ def test_forwarder_watch_positions_resolves_on_matching_envelope() -> None:
     assert result.body["strategy_id"] == "FOO-001"
 
 
+def test_forwarder_drop_position_listener_clears_dead_pod_slot() -> None:
+    """``/positions`` cancels its future on timeout and calls
+    ``drop_position_listener``; the forwarder's internal list must shed
+    the entry so a pod that's permanently gone doesn't accumulate
+    cancelled futures forever.
+    """
+
+    import asyncio
+
+    from tinohelm.notifier.runner import DiscordForwarder
+
+    async def _run() -> dict:
+        loop = asyncio.get_running_loop()
+        forwarder = DiscordForwarder(loop=loop, client=None)
+        future = forwarder.watch_positions_report("FOO-001")
+        # /positions timeout path: cancel + drop.
+        future.cancel()
+        forwarder.drop_position_listener("FOO-001", future)
+        # Reach in for the test — this is the only place we want to inspect
+        # the leak directly. Public surface is just the methods above.
+        return forwarder._position_listeners
+
+    listeners = asyncio.run(_run())
+    assert "FOO-001" not in listeners
+
+
 def test_forwarder_watch_positions_ignores_other_strategies() -> None:
     """A snapshot from BAR must not satisfy a future waiting on FOO."""
 
