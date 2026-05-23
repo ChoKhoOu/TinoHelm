@@ -773,6 +773,26 @@ def main(argv: list[str] | None = None) -> int:
     node.trader.add_actor(actor)
 
     discord_task = loop.create_task(discord_client.start(discord_token))
+
+    def _log_discord_task_result(task: asyncio.Task) -> None:
+        # discord_client.start() exits silently when the gateway connect
+        # fails, leaving the bot HTTP-reachable but offline. Surface the
+        # exception so operators can see what went wrong (token wrong,
+        # gateway blocked, intents rejected, etc.).
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            logger.info("discord client task exited cleanly")
+        else:
+            logger.error(
+                "discord client task crashed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=exc,
+            )
+
+    discord_task.add_done_callback(_log_discord_task_result)
     autodiscover_task = loop.create_task(
         _autodiscover_loop(
             redis_client,
