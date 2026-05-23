@@ -60,6 +60,64 @@ def test_parse_payload_does_not_crash_on_garbage_bytes() -> None:
     assert result is not None  # any non-raising return is acceptable here
 
 
+def test_parse_payload_uses_to_dict_for_nt_event_objects() -> None:
+    """NT publishes ``events.system.*`` as Python objects, not bytes.
+
+    Without this branch ``parse_payload`` would str() the object and the
+    embed would render as a useless ``{"raw": "ComponentStateChanged(...)"}``
+    JSON dump. Verify the ``to_dict`` static method on the class is used so
+    we end up with a real dict the formatters can read.
+    """
+
+    class _FakeNTEvent:
+        @staticmethod
+        def to_dict(obj):  # noqa: ARG004 — signature mirrors NT cdef classes
+            return {"type": "ComponentStateChanged", "state": "RUNNING"}
+
+    parsed = parse_payload(_FakeNTEvent())
+    assert isinstance(parsed, dict)
+    assert parsed["type"] == "ComponentStateChanged"
+    assert parsed["state"] == "RUNNING"
+
+
+def test_render_embed_routes_on_event_type_not_topic() -> None:
+    """ComponentStateChanged comes in on ``events.system.*`` — there is no
+    topic suffix to switch on. The renderer must look at the body's
+    ``type`` field and pick the structured formatter rather than dumping
+    JSON.
+    """
+
+    body = msgspec.msgpack.encode(
+        {
+            "type": "ComponentStateChanged",
+            "trader_id": "TINO-NOTIFIER-001",
+            "component_id": "NotifierActor",
+            "component_type": "NotifierActor",
+            "state": "RUNNING",
+            "config": {"lots": "of", "stuff": "here"},
+        },
+    )
+    env = envelope_for("events.system.*", body)
+    embed = render_embed(env)
+    description = embed.description or ""
+    assert "ComponentStateChanged" in (embed.title or "")
+    assert "NotifierActor" in description
+    assert "RUNNING" in description
+    # Config is noise on lifecycle events — it's a per-startup snapshot that
+    # gets repeated identically every transition.
+    assert "lots" not in description
+    assert "stuff" not in description
+
+
+def test_component_embed_includes_state_emoji() -> None:
+    body = {"type": "ComponentStateChanged", "component_id": "X", "component_type": "X", "state": "RUNNING"}
+    env = envelope_for("events.system.*", body)
+    description = render_embed(env).description or ""
+    # We don't lock the exact emoji here — just that one of the lifecycle
+    # markers shows up so the human can scan a stream of events visually.
+    assert any(marker in description for marker in ("🟢", "🟡", "🔴", "🟠", "⚪", "⚫", "▫️"))
+
+
 def test_render_embed_for_order_event() -> None:
     body = msgspec.msgpack.encode(
         {
