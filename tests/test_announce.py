@@ -93,6 +93,50 @@ def test_publish_announce_carries_live_mode(tmp_path: Path, redis_client) -> Non
     assert entries[0][1][b"mode"] == b"live"
 
 
+def test_publish_announce_carries_version_handshake(tmp_path: Path, redis_client) -> None:
+    """The announce envelope must carry both NT's version and our own protocol
+    version so the notifier can detect cross-version pods.
+
+    Without this, a strategy pod upgraded to a newer NT release that changed
+    an event field would silently feed broken payloads into a notifier still
+    pinned to the old NT — schema-tolerant decoding helps, but the operator
+    deserves a heads-up. ``tino_protocol_version`` lets us evolve the
+    announce / control wire without forcing a lock-step upgrade.
+    """
+
+    import nautilus_trader
+
+    from tinohelm.strategy_runner import TINO_PROTOCOL_VERSION
+
+    file = TinoStrategyFile.load(_write_strategy_dir(tmp_path, "FOO-001", "sandbox"))
+    publish_announce(redis_client, file)
+
+    entries = redis_client.xrange(ANNOUNCE_STREAM)
+    decoded = {k.decode(): v.decode() for k, v in entries[0][1].items()}
+    assert decoded["nt_version"] == nautilus_trader.__version__
+    assert decoded["tino_protocol_version"] == TINO_PROTOCOL_VERSION
+
+
+def test_read_new_announces_carries_versions(tmp_path: Path, redis_client) -> None:
+    """``read_new_announces`` must surface the version fields to the notifier
+    loop alongside ``(strategy_id, mode)`` — the notifier needs them to detect
+    drift. Old pods without versions get sentinel defaults so this stays
+    backward-compatible: a pod still on the previous announce schema doesn't
+    crash the notifier loop.
+    """
+
+    file = TinoStrategyFile.load(_write_strategy_dir(tmp_path, "FOO-001", "sandbox"))
+    publish_announce(redis_client, file)
+
+    new_entries, _cursor = read_new_announces(redis_client, "0", block_ms=10)
+    assert len(new_entries) == 1
+    sid, mode, nt_version, proto = new_entries[0]
+    assert sid == "FOO-001"
+    assert mode == "sandbox"
+    assert nt_version  # non-empty
+    assert proto  # non-empty
+
+
 def test_announce_stream_caps_at_thousand_entries(tmp_path: Path, redis_client) -> None:
     """Long-lived deployments must not unbounded-grow this stream.
 
@@ -204,7 +248,9 @@ def test_read_new_announces_returns_only_entries_after_cursor(
     publish_announce(redis_client, bar)
 
     new_entries, cursor = read_new_announces(redis_client, cursor, block_ms=10)
-    assert new_entries == [("BAR-001", "live")]
+    assert len(new_entries) == 1
+    assert new_entries[0][0] == "BAR-001"
+    assert new_entries[0][1] == "live"
 
     # Second call after no new writes yields empty.
     new_entries, cursor = read_new_announces(redis_client, cursor, block_ms=10)

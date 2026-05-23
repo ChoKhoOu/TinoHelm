@@ -218,7 +218,11 @@ def build_strategy_imports(file: TinoStrategyFile) -> list[ImportableStrategyCon
 
 
 def build_actor_imports(file: TinoStrategyFile) -> list[ImportableActorConfig]:
-    """Always inject the bridge actor; users may add more under ``[[actors]]``."""
+    """Inject the bridge actor + (by default) the reporting actor; users may add more under ``[[actors]]``.
+
+    ``[reporting] enabled = false`` skips the reporting actor — it's the only
+    moving part operators commonly want off during early development.
+    """
 
     actors: list[ImportableActorConfig] = [
         ImportableActorConfig(
@@ -230,6 +234,21 @@ def build_actor_imports(file: TinoStrategyFile) -> list[ImportableActorConfig]:
             },
         ),
     ]
+
+    reporting_section = file.raw.get("reporting", {})
+    if reporting_section.get("enabled", True):
+        actors.append(
+            ImportableActorConfig(
+                actor_path="tinohelm.reporting_actor:ReportingActor",
+                config_path="tinohelm.reporting_actor:ReportingActorConfig",
+                config={
+                    "strategy_id": file.strategy_id,
+                    "interval_minutes": reporting_section.get("interval_minutes", 30),
+                    "enabled": True,
+                },
+            ),
+        )
+
     for extra in file.raw.get("actors", []):
         actors.append(
             ImportableActorConfig(
@@ -291,6 +310,12 @@ def build_trading_node_config(file: TinoStrategyFile) -> TradingNodeConfig:
     if extra not in user_streams:
         user_streams.append(extra)
 
+    # NT's kernel persists Trader state to the cache on stop and reloads it on
+    # start when these flags are True (system/kernel.py:534 and :1049). Default
+    # them on so a strategy pod redeploy doesn't silently drop on_save() state
+    # or in-flight bracket-order tracking. Explicit opt-out via [recovery].
+    recovery_enabled = file.raw.get("recovery", {}).get("enabled", True)
+
     return TradingNodeConfig(
         trader_id=TraderId(file.trader_id),
         message_bus=build_message_bus_config(file.raw, external_streams=user_streams),
@@ -303,8 +328,8 @@ def build_trading_node_config(file: TinoStrategyFile) -> TradingNodeConfig:
         strategies=build_strategy_imports(file),
         data_clients=build_data_clients(file),
         exec_clients=build_exec_clients(file),
-        load_state=False,
-        save_state=False,
+        load_state=recovery_enabled,
+        save_state=recovery_enabled,
     )
 
 

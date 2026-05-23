@@ -54,13 +54,22 @@ logger = logging.getLogger("tinohelm.notifier")
 # ─── strategy registry (announce stream → mode lookup) ─────────────────────
 
 
+def _decode(value: Any) -> str:
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
 def read_new_announces(
     redis_client: Any,
     cursor: str,
     *,
     block_ms: int = 1_000,
-) -> tuple[list[tuple[str, str]], str]:
+) -> tuple[list[tuple[str, str, str, str]], str]:
     """Read announces written after ``cursor``; return ``(entries, new_cursor)``.
+
+    Each entry is ``(strategy_id, mode, nt_version, tino_protocol_version)``.
+    Pre-versioned announces (older pods) get ``""`` for the missing version
+    fields so the notifier loop stays backward-compatible — it can decide to
+    log a one-shot warning rather than crash.
 
     Use ``cursor="$"`` on the first call to skip pre-existing history (the
     notifier already pulled that via :func:`load_announce_history`).
@@ -73,20 +82,24 @@ def read_new_announces(
     response = redis_client.xread({ANNOUNCE_STREAM: cursor}, block=block_ms)
     if not response:
         return [], cursor
-    new_entries: list[tuple[str, str]] = []
+    new_entries: list[tuple[str, str, str, str]] = []
     new_cursor = cursor
     for _stream_name, batch in response:
         for entry_id, fields in batch:
             sid = fields.get(b"strategy_id")
             mode = fields.get(b"mode")
             if sid is not None and mode is not None:
+                nt_v = fields.get(b"nt_version", b"")
+                proto_v = fields.get(b"tino_protocol_version", b"")
                 new_entries.append(
                     (
-                        sid.decode() if isinstance(sid, bytes) else str(sid),
-                        mode.decode() if isinstance(mode, bytes) else str(mode),
+                        _decode(sid),
+                        _decode(mode),
+                        _decode(nt_v),
+                        _decode(proto_v),
                     ),
                 )
-            new_cursor = entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
+            new_cursor = _decode(entry_id)
     return new_entries, new_cursor
 
 
@@ -111,6 +124,47 @@ def extract_strategy_id_from_body(body: Any) -> str | None:
     if isinstance(sid, str) and sid:
         return sid
     return None
+
+
+def detect_protocol_drift(
+    announces: list[tuple[str, str, str, str]],
+    *,
+    expected_proto: str,
+    expected_nt_version: str,
+) -> list[Any]:
+    """Return one envelope per pod whose announce versions disagree with us.
+
+    Two ways a pod is considered drifting:
+      * its ``tino_protocol_version`` differs from ours (or is empty — that
+        means a pre-versioned pod from before the handshake was added);
+      * its ``nt_version`` differs (NT field-level schema changes can
+        silently mis-decode events even when the announce wire is fine).
+
+    Forward-compat by design: this is *information*, not enforcement. The
+    notifier still routes events normally; the operator decides whether to
+    upgrade. The envelopes use ``topic="tinohelm.protocol_mismatch"`` so
+    NotifierActor's existing ``tinohelm.*`` route lands them in #logging.
+    """
+
+    drifted: list[Any] = []
+    for sid, _mode, nt_v, proto_v in announces:
+        proto_skew = proto_v != expected_proto
+        nt_skew = nt_v != expected_nt_version
+        if not (proto_skew or nt_skew):
+            continue
+        drifted.append(
+            envelope_for(
+                "tinohelm.protocol_mismatch",
+                {
+                    "strategy_id": sid,
+                    "pod_proto": proto_v,
+                    "notifier_proto": expected_proto,
+                    "pod_nt_version": nt_v,
+                    "notifier_nt_version": expected_nt_version,
+                },
+            ),
+        )
+    return drifted
 
 
 class ChannelMismatch(Exception):
@@ -559,17 +613,28 @@ async def _autodiscover_loop(
     registry: dict[str, str],
     cursor: str,
     *,
+    forwarder: Any | None = None,
+    logging_channel_id: int | None = None,
+    expected_proto: str | None = None,
+    expected_nt_version: str | None = None,
     fallback_interval_s: float = 60.0,
 ) -> None:
-    """Keep ``registry`` fresh: announce stream + periodic control-key scan.
+    """Keep ``registry`` fresh and surface protocol drift.
 
     Two paths to the same registry update:
       1. ``read_new_announces`` (fast: reflects pod boots in <1s)
       2. ``apply_fallback_scan`` every 60s (slow: catches pods that came up
          while Redis was wedged or whose announce got trimmed)
+
+    If ``forwarder`` and ``logging_channel_id`` are provided, each new
+    announce is also passed through :func:`detect_protocol_drift` and any
+    mismatch yields a one-shot envelope on the logging channel. We dedupe
+    by ``(strategy_id, pod_proto, pod_nt_version)`` so a re-announcing pod
+    doesn't spam Discord every time the autodiscover poll wakes up.
     """
 
     last_fallback = 0.0
+    warned: set[tuple[str, str, str]] = set()
     while True:
         try:
             new_entries, cursor = await asyncio.to_thread(
@@ -578,8 +643,32 @@ async def _autodiscover_loop(
                 cursor,
                 block_ms=500,
             )
-            for sid, mode in new_entries:
+            for sid, mode, _nt_v, _proto_v in new_entries:
                 registry[sid] = mode
+
+            if (
+                forwarder is not None
+                and logging_channel_id is not None
+                and expected_proto is not None
+                and expected_nt_version is not None
+                and new_entries
+            ):
+                drift = detect_protocol_drift(
+                    new_entries,
+                    expected_proto=expected_proto,
+                    expected_nt_version=expected_nt_version,
+                )
+                for env in drift:
+                    key = (
+                        env.body["strategy_id"],
+                        env.body["pod_proto"],
+                        env.body["pod_nt_version"],
+                    )
+                    if key in warned:
+                        continue
+                    warned.add(key)
+                    forwarder.enqueue(env, channel_id=logging_channel_id)
+
             now = asyncio.get_event_loop().time()
             if now - last_fallback >= fallback_interval_s:
                 await asyncio.to_thread(apply_fallback_scan, redis_client, registry)
@@ -656,8 +745,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     node.trader.add_actor(actor)
 
+    import nautilus_trader
+
+    from tinohelm.strategy_runner import TINO_PROTOCOL_VERSION
+
     discord_task = loop.create_task(discord_client.start(discord_token))
-    autodiscover_task = loop.create_task(_autodiscover_loop(redis_client, registry, cursor))
+    autodiscover_task = loop.create_task(
+        _autodiscover_loop(
+            redis_client,
+            registry,
+            cursor,
+            forwarder=forwarder,
+            logging_channel_id=logging_channel_id,
+            expected_proto=TINO_PROTOCOL_VERSION,
+            expected_nt_version=nautilus_trader.__version__,
+        ),
+    )
     summary_task = loop.create_task(
         _daily_summary_loop(
             forwarder,
