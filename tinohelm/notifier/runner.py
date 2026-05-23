@@ -9,11 +9,18 @@ A minimal :class:`TradingNode` (no exec clients), wired up so that:
   without an announce.
 * :class:`NotifierActor` subscribes to NT's wildcard event topics
   (``events.order.*`` / ``events.position.*`` / ``events.account.*`` /
-  ``data.Signal*`` / ``events.system.*``) and routes each event to either
-  the sandbox or live Discord channel based on the registry.
+  ``data.Signal*`` / ``events.system.*``) and routes each event to one
+  of three Discord channels:
+
+  - per-strategy events (``events.order.*`` / ``events.position.*`` /
+    ``data.Signal*``) → sandbox or live based on the registry
+  - cross-cutting topics with no strategy scope (``events.system.*``,
+    ``events.account.*``, ``tinohelm.*`` such as the daily summary) →
+    logging channel, so trade-flow channels stay clean
 * A ``discord.py`` client provides slash commands (``/pause`` etc.)
   that are channel-scoped: a command issued from #live cannot move a
-  sandbox strategy, and vice versa (see :func:`validate_command_channel`).
+  sandbox strategy, and vice versa; the logging channel is read-only
+  and rejects all commands (see :func:`validate_command_channel`).
 """
 
 from __future__ import annotations
@@ -140,7 +147,7 @@ def route_channel(
     *,
     sandbox: int,
     live: int,
-    logging: int,
+    logging_channel_id: int,
 ) -> int:
     """Pick the Discord channel id for an event from ``strategy_id``.
 
@@ -150,10 +157,14 @@ def route_channel(
 
     For scoped topics, defaults to ``sandbox`` when the strategy isn't
     in the registry yet or when ``mode`` isn't recognized.
+
+    The kwarg is named ``logging_channel_id`` (not ``logging``) so it
+    can't shadow the module-level ``import logging`` if someone later
+    adds a ``logging.debug(...)`` call in here.
     """
 
     if not strategy_id:
-        return logging
+        return logging_channel_id
     return live if registry.get(strategy_id) == "live" else sandbox
 
 
@@ -259,7 +270,7 @@ class NotifierActor(Actor):
                     self._registry,
                     sandbox=self._sandbox_channel_id,
                     live=self._live_channel_id,
-                    logging=self._logging_channel_id,
+                    logging_channel_id=self._logging_channel_id,
                 )
                 self._forwarder.enqueue(env, channel_id=channel_id)
             except Exception as exc:  # pragma: no cover — defensive

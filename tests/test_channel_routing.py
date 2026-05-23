@@ -27,20 +27,20 @@ LOGGING = 33333
 
 def test_routes_live_strategy_to_live_channel() -> None:
     registry = {"BAR-001": "live"}
-    assert route_channel("BAR-001", registry, sandbox=SANDBOX, live=LIVE, logging=LOGGING) == LIVE
+    assert route_channel("BAR-001", registry, sandbox=SANDBOX, live=LIVE, logging_channel_id=LOGGING) == LIVE
 
 
 def test_routes_sandbox_strategy_to_sandbox_channel() -> None:
     registry = {"FOO-001": "sandbox"}
     assert (
-        route_channel("FOO-001", registry, sandbox=SANDBOX, live=LIVE, logging=LOGGING) == SANDBOX
+        route_channel("FOO-001", registry, sandbox=SANDBOX, live=LIVE, logging_channel_id=LOGGING) == SANDBOX
     )
 
 
 def test_unknown_strategy_defaults_to_sandbox_channel() -> None:
     registry: dict[str, str] = {}
     assert (
-        route_channel("GHOST-001", registry, sandbox=SANDBOX, live=LIVE, logging=LOGGING) == SANDBOX
+        route_channel("GHOST-001", registry, sandbox=SANDBOX, live=LIVE, logging_channel_id=LOGGING) == SANDBOX
     )
 
 
@@ -49,7 +49,7 @@ def test_unrecognized_mode_defaults_to_sandbox_channel() -> None:
 
     registry = {"WEIRD-001": "paper"}
     assert (
-        route_channel("WEIRD-001", registry, sandbox=SANDBOX, live=LIVE, logging=LOGGING) == SANDBOX
+        route_channel("WEIRD-001", registry, sandbox=SANDBOX, live=LIVE, logging_channel_id=LOGGING) == SANDBOX
     )
 
 
@@ -61,4 +61,4 @@ def test_unscoped_topic_routes_to_logging_channel() -> None:
     """
 
     registry: dict[str, str] = {"FOO-001": "live"}
-    assert route_channel("", registry, sandbox=SANDBOX, live=LIVE, logging=LOGGING) == LOGGING
+    assert route_channel("", registry, sandbox=SANDBOX, live=LIVE, logging_channel_id=LOGGING) == LOGGING
