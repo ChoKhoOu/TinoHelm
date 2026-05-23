@@ -14,7 +14,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-COPY pyproject.toml ./
+COPY pyproject.toml README.md LICENSE ./
 COPY tinohelm ./tinohelm
 
 RUN uv pip install --system --no-cache .
