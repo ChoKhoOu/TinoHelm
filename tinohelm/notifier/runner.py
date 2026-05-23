@@ -229,6 +229,33 @@ def route_channel(
     return live if registry.get(strategy_id) == "live" else sandbox
 
 
+def strategies_for_channel(
+    channel_mode: str | None,
+    registry: dict[str, str],
+) -> list[str]:
+    """Pick the strategy ids a ``/positions`` fan-out should target.
+
+    - From the live channel: only live strategies (we never want to surface
+      sandbox flow into a production audit channel).
+    - From the sandbox channel: only sandbox strategies. Match
+      ``"sandbox"`` exactly rather than "anything not live" — the registry
+      could grow modes outside of {live, sandbox} (e.g. a future
+      ``"logging"`` mode), and treating those as sandbox would fan out a
+      report request to pods the operator never asked for.
+    - From the logging channel (or an unrecognised channel): every
+      strategy in the registry — logging is the read-only overview.
+
+    Lifted out of ``_build_discord_client`` so it can be tested without
+    standing up a Discord client / event loop.
+    """
+
+    if channel_mode == "live":
+        return [s for s, m in registry.items() if m == "live"]
+    if channel_mode == "sandbox":
+        return [s for s, m in registry.items() if m == "sandbox"]
+    return list(registry.keys())
+
+
 def apply_fallback_scan(redis_client: Any, registry: dict[str, str]) -> None:
     """Scan ``tinohelm:control:*`` and add any unknown strategies to ``registry``.
 
@@ -521,22 +548,6 @@ def _build_discord_client(
         topic = await asyncio.to_thread(_publish, strategy, action, reason)
         await interaction.response.send_message(f"sent `{topic}`", ephemeral=True)
 
-    def _strategies_for_channel(channel_mode: str | None) -> list[str]:
-        """Pick the strategy ids a /positions fan-out should target.
-
-        - From the live channel: only live strategies (we never want to
-          surface sandbox flow into a production audit channel).
-        - From the sandbox channel: only sandbox strategies.
-        - From the logging channel (or an unrecognised channel): every
-          strategy in the registry — logging is the read-only overview.
-        """
-
-        if channel_mode == "live":
-            return [s for s, m in registry.items() if m == "live"]
-        if channel_mode == "sandbox":
-            return [s for s, m in registry.items() if m != "live"]
-        return list(registry.keys())
-
     async def _positions(
         interaction: discord.Interaction,
         strategy: str | None,
@@ -560,7 +571,7 @@ def _build_discord_client(
                 return
             targets = [strategy]
         else:
-            targets = _strategies_for_channel(channel_mode)
+            targets = strategies_for_channel(channel_mode, registry)
             if not targets:
                 await interaction.followup.send(
                     "no strategies known for this channel yet",

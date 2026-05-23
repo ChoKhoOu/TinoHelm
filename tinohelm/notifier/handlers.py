@@ -26,6 +26,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -354,19 +355,38 @@ def _fmt_daily_summary(body: dict[str, Any]) -> str:
     )
 
 
+def _display_width(text: str) -> int:
+    # CJK / fullwidth characters render as two columns in Discord's mono
+    # font. Counting code points (``len(s)``) under-allocates by half on
+    # those, so the separator line ends up shorter than the header above
+    # it — operators see a visibly skewed table. Use ``east_asian_width``:
+    # ``W`` (Wide) and ``F`` (Fullwidth) are the two-column buckets.
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in text)
+
+
+def _pad(text: str, width: int) -> str:
+    pad = width - _display_width(text)
+    return text + " " * max(pad, 0)
+
+
 def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
     # Hand-rolled because Discord doesn't render real Markdown tables — we
     # use a fixed-width text table inside a code block, which is the
     # convention everyone already knows from CLI tools.
-    widths = [len(h) for h in headers]
+    widths = [_display_width(h) for h in headers]
     for r in rows:
         for i, cell in enumerate(r):
             if i < len(widths):
-                widths[i] = max(widths[i], len(str(cell)))
+                widths[i] = max(widths[i], _display_width(str(cell)))
 
     def _row(cells: list[str]) -> str:
-        return "  ".join(str(c).ljust(widths[i]) for i, c in enumerate(cells))
+        return "  ".join(_pad(str(c), widths[i]) for i, c in enumerate(cells))
 
+    # ``─`` (U+2500) is East-Asian-width "A" (ambiguous), which our
+    # _display_width treats as 1 column — so repeating it ``width`` times
+    # matches the header above it on Discord's mono font. If we ever need
+    # to render in a CJK-default-wide environment, swap to a single-column
+    # ASCII ``-`` instead.
     lines = [_row(headers), _row(["─" * w for w in widths])]
     lines.extend(_row(r) for r in rows)
     return "\n".join(lines)

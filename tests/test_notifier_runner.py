@@ -12,7 +12,7 @@ from datetime import UTC
 from datetime import time as dtime
 from typing import Any
 
-from tinohelm.notifier.runner import _parse_hh_mm
+from tinohelm.notifier.runner import _parse_hh_mm, strategies_for_channel
 
 
 def test_parse_hh_mm_returns_utc_time_object() -> None:
@@ -39,6 +39,34 @@ def test_parse_hh_mm_rejects_invalid_format() -> None:
         _parse_hh_mm("14:00:00")
     with pytest.raises((ValueError, IndexError)):
         _parse_hh_mm("not-a-time")
+
+
+def test_strategies_for_channel_sandbox_excludes_non_sandbox_modes() -> None:
+    """Sandbox channel must match ``"sandbox"`` exactly — not "anything
+    that isn't live". Otherwise a registry entry with a mode value the
+    notifier doesn't recognise (e.g. a future ``"logging"`` mode, or a
+    typo'd announce) would get fan-out from the sandbox channel even
+    though the operator never asked for it.
+    """
+
+    registry = {
+        "FOO-001": "sandbox",
+        "BAR-002": "live",
+        "BAZ-003": "logging",  # unrecognised mode — must NOT leak into sandbox
+        "QUX-004": "",  # blank mode — same, must NOT leak
+    }
+
+    assert strategies_for_channel("sandbox", registry) == ["FOO-001"]
+
+
+def test_strategies_for_channel_live_excludes_sandbox() -> None:
+    registry = {"FOO-001": "sandbox", "BAR-002": "live"}
+    assert strategies_for_channel("live", registry) == ["BAR-002"]
+
+
+def test_strategies_for_channel_logging_returns_everything() -> None:
+    registry = {"FOO-001": "sandbox", "BAR-002": "live", "BAZ-003": "logging"}
+    assert sorted(strategies_for_channel("logging", registry)) == sorted(registry.keys())
 
 
 def test_forwarder_watch_positions_resolves_on_matching_envelope() -> None:

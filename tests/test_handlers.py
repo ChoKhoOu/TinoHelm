@@ -175,6 +175,46 @@ def test_positions_report_handles_empty_snapshot() -> None:
     assert "当前无持仓" in description
 
 
+def test_markdown_table_separator_matches_cjk_header_display_width() -> None:
+    """CJK headers like 标的 / 开仓均价 are double-width in mono fonts.
+
+    The previous implementation used ``len()``, so the separator under
+    ``开仓均价`` (code-point length 4, display width 8) came up only 4
+    dashes long — the table visibly skewed in Discord. Verify each
+    column's separator has display width ≥ the header's display width.
+    """
+
+    import unicodedata
+
+    from tinohelm.notifier.handlers import _markdown_table
+
+    def _w(s: str) -> int:
+        return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+    headers = ["标的", "方向", "开仓均价"]
+    rows = [["BTC", "L", "70000"]]
+    rendered = _markdown_table(headers, rows)
+    lines = rendered.splitlines()
+    assert len(lines) == 3
+
+    header_line, sep_line, _data_line = lines
+
+    # Header line and separator line must render to the same display
+    # width — that's the entire promise of an aligned table.
+    assert _w(header_line.rstrip()) == _w(sep_line.rstrip())
+
+    # Each separator cell (split on the literal "  " gutter) must be a
+    # pure run of dashes whose display width matches its header cell.
+    # ``"开仓均价"`` (display width 8) used to come out as 4 dashes under
+    # the old ``len()``-based implementation; pin that behaviour gone.
+    header_cells = header_line.rstrip().split("  ")
+    sep_cells = sep_line.rstrip().split("  ")
+    assert header_cells == ["标的", "方向", "开仓均价"]
+    for hcell, scell in zip(header_cells, sep_cells, strict=True):
+        assert set(scell) <= {"─"}, f"separator must be all dashes, got {scell!r}"
+        assert _w(scell) == _w(hcell)
+
+
 def test_daily_summary_renders_with_chinese_labels() -> None:
     body = {
         "positions_open": 3,
