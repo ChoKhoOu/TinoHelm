@@ -35,16 +35,18 @@ help:
 	@echo "  make lint                            # ruff + mypy"
 
 up:
-	$(COMPOSE) up -d redis notifier
+	$(COMPOSE) pull notifier
+	$(COMPOSE) up -d --force-recreate redis notifier
 
 down:
 	$(COMPOSE) down
 
 redis:
-	$(COMPOSE) up -d redis
+	$(COMPOSE) up -d --force-recreate redis
 
 notifier:
-	$(COMPOSE) up -d notifier
+	$(COMPOSE) pull notifier
+	$(COMPOSE) up -d --force-recreate notifier
 
 # ──── one-key deploy ─────────────────────────────────────────────────
 # `docker compose run` instantiates the generic ``strategy`` service with
@@ -52,6 +54,8 @@ notifier:
 # compose.yaml when adding a strategy.
 
 deploy: require-strategy
+	$(COMPOSE) pull strategy
+	-docker rm -f $(CONTAINER) 2>/dev/null
 	$(COMPOSE) run -d --name $(CONTAINER) \
 		-e TINO_STRATEGY_ID=$(STRATEGY) \
 		-e TINO_MODE=$(MODE) \
@@ -78,7 +82,9 @@ stop: require-strategy
 	docker stop $(CONTAINER) && docker rm $(CONTAINER)
 
 restart: require-strategy
-	docker restart $(CONTAINER)
+	@MODE=$$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $(CONTAINER) 2>/dev/null \
+		| sed -n 's/^TINO_MODE=//p' | head -n1); \
+	$(MAKE) deploy STRATEGY=$(STRATEGY) MODE=$${MODE:-$(MODE)}
 
 logs: require-strategy
 	docker logs -f $(CONTAINER)

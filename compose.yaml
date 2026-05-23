@@ -21,10 +21,12 @@ services:
       retries: 5
 
   notifier:
+    image: ${TINO_NOTIFIER_IMAGE:-ghcr.io/chokhoou/tinohelm-notifier:latest}
     build:
       context: .
       dockerfile: docker/notifier.Dockerfile
     container_name: tinohelm-notifier
+    pull_policy: always
     restart: unless-stopped
     depends_on:
       redis:
@@ -43,10 +45,12 @@ services:
   # 不需要为每个策略复制一份 service 配置；用户只往 strategies/foo/ 丢代码即可。
   # ``profiles: ["never"]`` 防止 ``docker compose up`` 自动唤醒它。
   strategy:
+    image: ${TINO_STRATEGY_IMAGE:-ghcr.io/chokhoou/tinohelm-strategy:latest}
     build:
       context: .
       dockerfile: docker/strategy.Dockerfile
     profiles: ["never"]
+    pull_policy: always
     restart: unless-stopped
     depends_on:
       redis:
