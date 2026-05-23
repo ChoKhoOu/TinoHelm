@@ -77,6 +77,56 @@ def test_xadd_entry_topic_field_matches_nt_contract(fake_redis: fakeredis.FakeRe
     assert entry[b"topic"] == b"commands.tinohelm.FOO-001.pause"
 
 
+def test_cli_positions_with_strategy_id_targets_one_pod(
+    fake_redis: fakeredis.FakeRedis,
+) -> None:
+    """`tinohelm positions -s FOO-001` writes a single ``report`` envelope."""
+
+    result = runner.invoke(cli_mod.app, ["positions", "--strategy-id", "FOO-001"])
+
+    assert result.exit_code == 0, result.output
+    entry = _entries(fake_redis, control_stream_key("FOO-001"))[0]
+    payload = json.loads(entry[b"payload"])
+    assert payload["action"] == "report"
+    assert entry[b"topic"] == b"commands.tinohelm.FOO-001.report"
+
+
+def test_cli_positions_without_strategy_fans_out_to_announce_stream(
+    fake_redis: fakeredis.FakeRedis,
+) -> None:
+    """Without ``-s``, the CLI must enumerate the announce stream and write
+    one ``report`` envelope per known strategy. This is what makes
+    `tinohelm positions` a sensible "show me everything" command.
+    """
+
+    from tinohelm.strategy_runner import ANNOUNCE_STREAM
+
+    fake_redis.xadd(ANNOUNCE_STREAM, {"strategy_id": "FOO-001", "mode": "live"})
+    fake_redis.xadd(ANNOUNCE_STREAM, {"strategy_id": "BAR-002", "mode": "sandbox"})
+    # Re-announce of FOO-001 (e.g. pod restart) must not yield a duplicate
+    # command write — operators expect "one snapshot per strategy".
+    fake_redis.xadd(ANNOUNCE_STREAM, {"strategy_id": "FOO-001", "mode": "live"})
+
+    result = runner.invoke(cli_mod.app, ["positions"])
+
+    assert result.exit_code == 0, result.output
+    foo_entries = _entries(fake_redis, control_stream_key("FOO-001"))
+    bar_entries = _entries(fake_redis, control_stream_key("BAR-002"))
+    assert len(foo_entries) == 1
+    assert len(bar_entries) == 1
+
+
+def test_cli_positions_without_strategy_when_no_announces(
+    fake_redis: fakeredis.FakeRedis,
+) -> None:
+    """Empty registry — print a hint, exit cleanly, no Redis writes."""
+
+    result = runner.invoke(cli_mod.app, ["positions"])
+
+    assert result.exit_code == 0, result.output
+    assert "no strategies known" in result.output
+
+
 def test_flatten_carries_reason_when_provided(fake_redis: fakeredis.FakeRedis) -> None:
     """`tinohelm flatten --reason "EOD"` must surface ``reason`` in payload.
 

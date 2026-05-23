@@ -41,6 +41,59 @@ def test_parse_hh_mm_rejects_invalid_format() -> None:
         _parse_hh_mm("not-a-time")
 
 
+def test_forwarder_watch_positions_resolves_on_matching_envelope() -> None:
+    """``/positions`` registers a future via :meth:`watch_positions_report`;
+    the next ``tinohelm.report.positions`` envelope passing through enqueue
+    must satisfy it. We exercise the loop-thread dispatch path so we know
+    the futures wire up correctly across the NT-handler / asyncio boundary.
+    """
+
+    import asyncio
+
+    from tinohelm.notifier.handlers import envelope_for
+    from tinohelm.notifier.runner import DiscordForwarder
+
+    async def _run() -> Any:
+        loop = asyncio.get_running_loop()
+        forwarder = DiscordForwarder(loop=loop, client=None)
+        future = forwarder.watch_positions_report("FOO-001")
+
+        env = envelope_for(
+            "tinohelm.report.positions",
+            {"strategy_id": "FOO-001", "row_count": 0, "csv": ""},
+        )
+        forwarder.enqueue(env, channel_id=123)
+        return await asyncio.wait_for(future, timeout=2.0)
+
+    result = asyncio.run(_run())
+    assert result.body["strategy_id"] == "FOO-001"
+
+
+def test_forwarder_watch_positions_ignores_other_strategies() -> None:
+    """A snapshot from BAR must not satisfy a future waiting on FOO."""
+
+    import asyncio
+
+    from tinohelm.notifier.handlers import envelope_for
+    from tinohelm.notifier.runner import DiscordForwarder
+
+    async def _run() -> bool:
+        loop = asyncio.get_running_loop()
+        forwarder = DiscordForwarder(loop=loop, client=None)
+        future = forwarder.watch_positions_report("FOO-001")
+
+        env = envelope_for(
+            "tinohelm.report.positions",
+            {"strategy_id": "BAR-002", "row_count": 0, "csv": ""},
+        )
+        forwarder.enqueue(env, channel_id=123)
+        # Give the loop a tick to deliver any (incorrect) dispatch.
+        await asyncio.sleep(0.05)
+        return future.done()
+
+    assert asyncio.run(_run()) is False
+
+
 def test_forwarder_enqueue_swallows_closed_loop() -> None:
     """During shutdown the asyncio loop closes before NT's actor stops.
 

@@ -45,7 +45,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
-ignore = ["E501"]
+# RUF001: 中文 Discord 文案使用全角标点（，（）等）是正确写法
+ignore = ["E501", "RUF001"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

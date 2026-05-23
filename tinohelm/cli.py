@@ -79,6 +79,45 @@ def ping(strategy_id: str = typer.Option(..., "--strategy-id", "-s")) -> None:
 
 
 @app.command()
+def positions(
+    strategy_id: str | None = typer.Option(None, "--strategy-id", "-s"),
+) -> None:
+    """Trigger an on-demand positions snapshot.
+
+    Without ``-s``, fan out to every strategy that ever announced itself —
+    each pod publishes its own ``tinohelm.report.positions`` envelope and
+    the notifier renders them into #logging. The CLI itself doesn't wait
+    for the response (no event loop here); operators see the result in
+    Discord. For a synchronous wait use the ``/positions`` slash command.
+    """
+
+    if strategy_id:
+        _publish_command(strategy_id, "report")
+        return
+
+    # Fan out via the announce stream. We deliberately don't reach into
+    # ``tinohelm:control:*`` keys (which the notifier uses as a fallback)
+    # because those are merely a side-effect of past commands — a strategy
+    # that's never been controlled won't have one.
+    from tinohelm.strategy_runner import ANNOUNCE_STREAM
+
+    seen: dict[str, None] = {}
+    for _entry_id, fields in _client().xrange(ANNOUNCE_STREAM):
+        sid = fields.get(b"strategy_id")
+        if sid is None:
+            continue
+        decoded = sid.decode() if isinstance(sid, bytes) else str(sid)
+        seen.setdefault(decoded, None)
+
+    if not seen:
+        typer.echo("no strategies known yet (have any pods announced themselves?)")
+        return
+
+    for sid in seen:
+        _publish_command(sid, "report")
+
+
+@app.command()
 def status(strategy: str | None = typer.Option(None, "--strategy-id", "-s")) -> None:
     """Print pod heartbeats / latest events from Redis (best-effort)."""
 

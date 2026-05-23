@@ -1,5 +1,12 @@
 """Convert NT events / bytes payloads into Discord embeds.
 
+Discord embeds are written in 简体中文 for the operational topics
+(``tinohelm.*``: positions snapshot, daily summary, /positions response).
+NT-native event types still render with their English field names — those
+strings come straight from NT and translating them in flight would just
+hide what the upstream actually emitted.
+
+
 External-stream messages arriving from Redis are delivered as raw ``bytes``
 (see ``crates/infrastructure/src/redis/msgbus.rs::decode_bus_message``). NT
 needs an explicit ``Serializer`` registered to inflate them back into typed
@@ -16,6 +23,8 @@ NT event class exposes and convert that way instead of stringifying.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -136,6 +145,12 @@ def render_embed(env: EventEnvelope, *, source_pod: str | None = None) -> discor
     # us "system" but the body says "ComponentStateChanged".
     if event_type == "ComponentStateChanged":
         description_lines.append(_fmt_component(body))
+    elif env.topic == "tinohelm.report.positions":
+        title = "[持仓快照]"
+        description_lines.append(_fmt_positions_report(body))
+    elif env.topic == "tinohelm.daily_summary":
+        title = "[每日摘要]"
+        description_lines.append(_fmt_daily_summary(body))
     elif env.topic.startswith("events.order."):
         description_lines.append(_fmt_order(body))
     elif env.topic.startswith("events.position."):
@@ -244,3 +259,114 @@ def _fmt_component(body: dict[str, Any]) -> str:
     if trader_id:
         return f"{head}\n_trader: `{trader_id}`_"
     return head
+
+
+# ─── operational topic formatters (中文) ────────────────────────────────────
+
+
+# Discord embed description caps at 4096 chars, but a code block becomes hard
+# to scan well before that. Cap row count so the operator sees the most
+# recent positions and gets a "...还有 N 条未显示" tail rather than a
+# silently-truncated table.
+_POSITIONS_TABLE_MAX_ROWS = 12
+
+
+def _fmt_positions_report(body: dict[str, Any]) -> str:
+    """Render ``tinohelm.report.positions`` as a Markdown table in 中文.
+
+    The wire format is ``{"strategy_id": ..., "row_count": N, "csv": ...}``
+    (see :func:`tinohelm.reporting_actor.build_positions_report_payload`).
+    CSV beats JSON on the wire because pandas writes it natively and it
+    compresses well; we pay the parse cost here so the operator gets a
+    table instead of a JSON dump.
+    """
+
+    strategy_id = body.get("strategy_id", "?")
+    row_count = body.get("row_count", 0)
+    csv_text = body.get("csv", "") or ""
+
+    header = f"**策略**: `{strategy_id}` · **持仓**: `{row_count}` 条"
+    if not csv_text or row_count == 0:
+        return f"{header}\n_当前无持仓_"
+
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    if not rows:
+        return f"{header}\n_无法解析持仓数据_"
+
+    columns = rows[0]
+    data_rows = rows[1:]
+
+    # Pick the columns operators actually skim for. Anything missing from
+    # the snapshot just gets dropped from the table — NT's column set has
+    # been stable across versions, but if it ever drifts we'd rather show
+    # fewer columns than render a malformed table.
+    preferred = (
+        "instrument_id",
+        "side",
+        "quantity",
+        "avg_px_open",
+        "avg_px_close",
+        "realized_pnl",
+        "unrealized_pnl",
+    )
+    label_zh = {
+        "instrument_id": "标的",
+        "side": "方向",
+        "quantity": "数量",
+        "avg_px_open": "开仓均价",
+        "avg_px_close": "平仓均价",
+        "realized_pnl": "已实现",
+        "unrealized_pnl": "浮动",
+    }
+    indices = [(label_zh[c], columns.index(c)) for c in preferred if c in columns]
+    if not indices:
+        # NT changed the column set under us — fall back to a count-only line
+        # so the operator at least sees the snapshot landed.
+        return f"{header}\n_(列名不识别，原始 CSV 见 stream)_"
+
+    headers = [zh for zh, _ in indices]
+    body_rows = [[r[i] if i < len(r) else "" for _, i in indices] for r in data_rows]
+    truncated = len(body_rows) > _POSITIONS_TABLE_MAX_ROWS
+    body_rows = body_rows[:_POSITIONS_TABLE_MAX_ROWS]
+
+    table = _markdown_table(headers, body_rows)
+    tail = f"\n_…还有 {len(data_rows) - _POSITIONS_TABLE_MAX_ROWS} 条未显示_" if truncated else ""
+    return f"{header}\n```\n{table}\n```{tail}"
+
+
+def _fmt_daily_summary(body: dict[str, Any]) -> str:
+    """Render ``tinohelm.daily_summary`` with 中文 field labels."""
+
+    if "note" in body:
+        # Notifier ran without ``[cache]`` section — the position counts
+        # aren't available, so just surface the note.
+        return f"_{body['note']}_"
+
+    open_n = body.get("positions_open", 0)
+    closed_n = body.get("positions_closed", 0)
+    orders_n = body.get("orders_open", 0)
+    streams_n = body.get("redis_streams_seen", 0)
+
+    return (
+        f"📊 **每日摘要**\n"
+        f"持仓中: **{open_n}** · 已平: **{closed_n}** · 挂单: **{orders_n}**\n"
+        f"_Redis 流数: {streams_n}_"
+    )
+
+
+def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    # Hand-rolled because Discord doesn't render real Markdown tables — we
+    # use a fixed-width text table inside a code block, which is the
+    # convention everyone already knows from CLI tools.
+    widths = [len(h) for h in headers]
+    for r in rows:
+        for i, cell in enumerate(r):
+            if i < len(widths):
+                widths[i] = max(widths[i], len(str(cell)))
+
+    def _row(cells: list[str]) -> str:
+        return "  ".join(str(c).ljust(widths[i]) for i, c in enumerate(cells))
+
+    lines = [_row(headers), _row(["─" * w for w in widths])]
+    lines.extend(_row(r) for r in rows)
+    return "\n".join(lines)

@@ -71,7 +71,7 @@ def test_parse_payload_uses_to_dict_for_nt_event_objects() -> None:
 
     class _FakeNTEvent:
         @staticmethod
-        def to_dict(obj):  # noqa: ARG004 — signature mirrors NT cdef classes
+        def to_dict(obj):  # signature mirrors NT cdef classes (obj unused)
             return {"type": "ComponentStateChanged", "state": "RUNNING"}
 
     parsed = parse_payload(_FakeNTEvent())
@@ -134,3 +134,63 @@ def test_render_embed_for_order_event() -> None:
     embed = render_embed(env)
     assert "OrderFilled" in embed.title
     assert "FOO-001" in (embed.description or "")
+
+
+def test_positions_report_renders_chinese_table_not_json() -> None:
+    """``tinohelm.report.positions`` must render as a 中文 markdown-ish table.
+
+    Previously this topic landed in the fallback JSON dump branch, so the
+    operator saw a JSON-encoded CSV — the worst of both worlds. We pin the
+    Chinese labels and the table shape so a refactor that re-routes this
+    topic into JSON would fail fast.
+    """
+
+    body = {
+        "strategy_id": "FOO-001",
+        "row_count": 2,
+        "csv": (
+            "instrument_id,side,quantity,avg_px_open,realized_pnl,unrealized_pnl\n"
+            "BTCUSDT.BYBIT,LONG,0.02,70000,12.5,3.0\n"
+            "ETHUSDT.BYBIT,SHORT,0.5,3200,0,-5.5\n"
+        ),
+    }
+    env = envelope_for("tinohelm.report.positions", body)
+    embed = render_embed(env)
+
+    description = embed.description or ""
+    assert "持仓快照" in (embed.title or "")
+    assert "FOO-001" in description
+    assert "标的" in description
+    assert "方向" in description
+    assert "BTCUSDT.BYBIT" in description
+    assert "ETHUSDT.BYBIT" in description
+    assert '"csv"' not in description  # no JSON dump
+
+
+def test_positions_report_handles_empty_snapshot() -> None:
+    body = {"strategy_id": "FOO-001", "row_count": 0, "csv": ""}
+    env = envelope_for("tinohelm.report.positions", body)
+    description = render_embed(env).description or ""
+    assert "FOO-001" in description
+    assert "当前无持仓" in description
+
+
+def test_daily_summary_renders_with_chinese_labels() -> None:
+    body = {
+        "positions_open": 3,
+        "positions_closed": 27,
+        "orders_open": 1,
+        "redis_streams_seen": 8,
+    }
+    env = envelope_for("tinohelm.daily_summary", body)
+    embed = render_embed(env)
+    description = embed.description or ""
+
+    assert "每日摘要" in (embed.title or "")
+    assert "持仓中" in description
+    assert "已平" in description
+    assert "挂单" in description
+    # Counts must show up as plain integers, not JSON-encoded.
+    assert "3" in description
+    assert "27" in description
+    assert '"positions_open"' not in description

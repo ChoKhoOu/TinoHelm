@@ -11,7 +11,14 @@ Topic format::
 
     commands.tinohelm.{strategy_id}.{action}
 
-Supported actions: ``pause``, ``resume``, ``flatten``, ``ping``.
+Supported actions: ``pause``, ``resume``, ``flatten``, ``ping``, ``report``.
+
+``report`` is the on-demand counterpart to :class:`tinohelm.reporting_actor.
+ReportingActor`'s 30-min timer — when the operator runs ``/positions``
+(or ``tinohelm positions``) the notifier writes a ``report`` command to
+this pod's control stream and we synthesize a fresh ``tinohelm.report.
+positions`` envelope that flows back through the same channel as the
+periodic snapshot.
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.config import ActorConfig
 from nautilus_trader.model.identifiers import StrategyId
 
-ACTIONS = {"pause", "resume", "flatten", "ping"}
+ACTIONS = {"pause", "resume", "flatten", "ping", "report"}
 
 
 class BridgeActorConfig(ActorConfig, frozen=True):
@@ -84,6 +91,14 @@ class BridgeActor(Actor):
             trader.market_exit_strategy(sid)
         elif action == "ping":
             self.log.info("BridgeActor: ping ack")
+        elif action == "report":
+            # Local import keeps bridge_actor importable from CLI contexts that
+            # don't ship pandas (the CLI never instantiates this class).
+            from tinohelm.reporting_actor import build_positions_report_payload
+
+            self.log.info(f"BridgeActor: report -> publish snapshot for {sid}")
+            topic, body = build_positions_report_payload(trader, strategy_id=str(sid))
+            self.msgbus.publish(topic=topic, msg=body)
 
     # ─── parsing ──────────────────────────────────────────────────────────────
 
