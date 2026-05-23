@@ -390,6 +390,62 @@ def test_detect_protocol_drift_treats_pre_versioned_pods_as_skew() -> None:
     assert envelopes[0].body["strategy_id"] == "FOO-001"
 
 
+def test_notifier_actor_subscribes_to_tinohelm_namespace() -> None:
+    """``tinohelm.*`` carries operational chatter (ReportingActor reports,
+    daily summary). Without subscribing to it the notifier silently drops
+    everything published on that namespace — exactly what would happen to
+    ReportingActor's per-30m positions report if this pattern were absent.
+    """
+
+    from tinohelm.notifier.runner import NotifierActor
+
+    assert "tinohelm.*" in NotifierActor.SUBSCRIBE_PATTERNS
+
+
+def test_notifier_actor_routes_tinohelm_report_to_logging_channel() -> None:
+    """A ``tinohelm.report.positions`` event carries a ``strategy_id`` in its
+    body (the report belongs to a single strategy). But the *channel* it
+    lands in must be logging, not the strategy's sandbox/live channel —
+    reports are operational chatter, not trade flow, and mirroring them to
+    the trade-flow channels would defeat the triple-channel split.
+
+    The actor must therefore treat ``tinohelm.*`` as unscoped regardless of
+    what the body contains.
+    """
+
+    import json
+
+    from tinohelm.notifier.runner import (
+        NotifierActor,
+        NotifierActorConfig,
+    )
+
+    sent: list[int] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(channel_id)
+
+    actor = NotifierActor(
+        NotifierActorConfig(
+            sandbox_channel_id=11,
+            live_channel_id=22,
+            logging_channel_id=33,
+        ),
+        forwarder=_FakeForwarder(),
+        registry={"FOO-001": "live"},
+    )
+
+    handler = actor._make_handler("tinohelm.*")
+    handler(
+        json.dumps(
+            {"strategy_id": "FOO-001", "row_count": 7, "csv": "..."},
+        ).encode(),
+    )
+
+    assert sent == [33]
+
+
 def test_notifier_actor_routes_account_event_to_logging() -> None:
     """``events.account.*`` is keyed by ``account_id``, not strategy_id —
     it's cross-cutting (one account funds many strategies). These belong in

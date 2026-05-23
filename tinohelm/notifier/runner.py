@@ -38,6 +38,7 @@ from datetime import time as dtime
 from typing import Any
 
 import discord
+import nautilus_trader
 import redis
 from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.config import ActorConfig
@@ -46,7 +47,7 @@ from nautilus_trader.live.node import TradingNode
 from tinohelm import COMMAND_TOPIC_PREFIX, control_stream_key
 from tinohelm.config import TinoNotifierFile, build_notifier_node_config
 from tinohelm.notifier.handlers import envelope_for, render_embed
-from tinohelm.strategy_runner import ANNOUNCE_STREAM
+from tinohelm.strategy_runner import ANNOUNCE_STREAM, TINO_PROTOCOL_VERSION
 
 logger = logging.getLogger("tinohelm.notifier")
 
@@ -295,6 +296,10 @@ class NotifierActor(Actor):
         "events.account.*",
         "data.Signal*",
         "events.system.*",
+        # Operational chatter (ReportingActor positions snapshots, daily
+        # summary, protocol-mismatch envelopes that are published rather
+        # than enqueued directly). Always logging — never trade flow.
+        "tinohelm.*",
     )
 
     def __init__(
@@ -328,7 +333,14 @@ class NotifierActor(Actor):
                 # subscription pattern (best we have for display/debug) and
                 # pull the strategy_id off the body where NT puts it.
                 env = envelope_for(pattern, msg)
-                strategy_id = extract_strategy_id_from_body(env.body) or ""
+                # tinohelm.* is operational chatter (reports, summaries,
+                # drift warnings). Even if the body carries a strategy_id
+                # — the positions report does — these belong in logging,
+                # not the strategy's sandbox/live channel.
+                if pattern.startswith("tinohelm."):
+                    strategy_id = ""
+                else:
+                    strategy_id = extract_strategy_id_from_body(env.body) or ""
                 channel_id = route_channel(
                     strategy_id,
                     self._registry,
@@ -669,7 +681,7 @@ async def _autodiscover_loop(
                     warned.add(key)
                     forwarder.enqueue(env, channel_id=logging_channel_id)
 
-            now = asyncio.get_event_loop().time()
+            now = asyncio.get_running_loop().time()
             if now - last_fallback >= fallback_interval_s:
                 await asyncio.to_thread(apply_fallback_scan, redis_client, registry)
                 last_fallback = now
@@ -744,10 +756,6 @@ def main(argv: list[str] | None = None) -> int:
         registry=registry,
     )
     node.trader.add_actor(actor)
-
-    import nautilus_trader
-
-    from tinohelm.strategy_runner import TINO_PROTOCOL_VERSION
 
     discord_task = loop.create_task(discord_client.start(discord_token))
     autodiscover_task = loop.create_task(
