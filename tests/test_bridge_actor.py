@@ -22,6 +22,7 @@ class TraderSpy:
     """A test double recording every Trader method called by the actor."""
 
     calls: list[tuple[str, Any]] = field(default_factory=list)
+    positions_df: Any = None
 
     def stop_strategy(self, strategy_id: StrategyId) -> None:
         self.calls.append(("stop_strategy", strategy_id))
@@ -31,6 +32,21 @@ class TraderSpy:
 
     def market_exit_strategy(self, strategy_id: StrategyId) -> None:
         self.calls.append(("market_exit_strategy", strategy_id))
+
+    def generate_positions_report(self) -> Any:
+        # ``report`` action funnels through ReportingActor's helper, which
+        # calls this method. Returning the configured DataFrame (or None)
+        # lets the test pick the empty-vs-rows shape.
+        self.calls.append(("generate_positions_report", None))
+        return self.positions_df
+
+
+@dataclass
+class MsgbusSpy:
+    publishes: list[tuple[str, Any]] = field(default_factory=list)
+
+    def publish(self, *, topic: str, msg: Any) -> None:
+        self.publishes.append((topic, msg))
 
 
 @dataclass
@@ -45,7 +61,11 @@ class LogSpy:
         self.warnings.append(msg)
 
 
-def _bridge_actor_under_test(strategy_id: str = "FOO-001") -> tuple[BridgeActor, TraderSpy, LogSpy]:
+def _bridge_actor_under_test(
+    strategy_id: str = "FOO-001",
+    *,
+    msgbus: MsgbusSpy | None = None,
+) -> tuple[BridgeActor, TraderSpy, LogSpy]:
     """Create a BridgeActor wired up with spies, bypassing NT registration.
 
     Calling ``BridgeActor(config)`` would chain into NT's ``Component.__cinit__``
@@ -68,6 +88,7 @@ def _bridge_actor_under_test(strategy_id: str = "FOO-001") -> tuple[BridgeActor,
     # Patch the @property descriptors so the handler code reads our spies.
     object.__setattr__(actor, "_test_trader", trader)
     object.__setattr__(actor, "_test_log", log)
+    object.__setattr__(actor, "_test_msgbus", msgbus or MsgbusSpy())
     actor.__class__ = _PatchedBridgeActor  # swap in a class that returns spies
     return actor, trader, log
 
@@ -75,9 +96,9 @@ def _bridge_actor_under_test(strategy_id: str = "FOO-001") -> tuple[BridgeActor,
 class _PatchedBridgeActor(BridgeActor):
     """BridgeActor variant whose ``trader`` and ``log`` attrs read test spies.
 
-    NT's base class declares ``trader`` and ``log`` as descriptors backed by
-    ``_register_base``. We override both to return the test fixtures so the
-    handler can run without a real TradingNode.
+    NT's base class declares ``trader``, ``log`` and ``msgbus`` as descriptors
+    backed by ``_register_base``. We override all three to return the test
+    fixtures so the handler can run without a real TradingNode.
     """
 
     @property  # type: ignore[override]
@@ -87,6 +108,10 @@ class _PatchedBridgeActor(BridgeActor):
     @property  # type: ignore[override]
     def log(self) -> Any:
         return self._test_log  # type: ignore[attr-defined]
+
+    @property  # type: ignore[override]
+    def msgbus(self) -> Any:
+        return self._test_msgbus  # type: ignore[attr-defined]
 
 
 # ─── First behavior under TDD ───────────────────────────────────────────────
@@ -135,6 +160,32 @@ def test_ping_acks_without_calling_trader() -> None:
 
     assert trader.calls == []
     assert any("ping" in entry for entry in log.infos)
+
+
+def test_report_action_publishes_positions_snapshot() -> None:
+    """Report envelope → trader.generate_positions_report() + msgbus.publish.
+
+    This is the on-demand counterpart to ReportingActor's 30-min timer; the
+    BridgeActor must drive the same helper so the snapshot lands on the
+    same topic the periodic snapshot uses (``tinohelm.report.positions``).
+    """
+
+    import pandas as pd
+
+    msgbus = MsgbusSpy()
+    actor, trader, _log = _bridge_actor_under_test("FOO-001", msgbus=msgbus)
+    trader.positions_df = pd.DataFrame(
+        {"strategy_id": ["FOO-001"], "side": ["LONG"], "quantity": [1.0]},
+    )
+
+    actor._on_command(json.dumps({"action": "report"}).encode("utf-8"))
+
+    assert ("generate_positions_report", None) in trader.calls
+    assert len(msgbus.publishes) == 1
+    topic, msg = msgbus.publishes[0]
+    assert topic == "tinohelm.report.positions"
+    assert msg["strategy_id"] == "FOO-001"
+    assert msg["row_count"] == 1
 
 
 def test_unknown_action_is_dropped_with_warning() -> None:

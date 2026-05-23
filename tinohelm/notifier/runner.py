@@ -229,6 +229,33 @@ def route_channel(
     return live if registry.get(strategy_id) == "live" else sandbox
 
 
+def strategies_for_channel(
+    channel_mode: str | None,
+    registry: dict[str, str],
+) -> list[str]:
+    """Pick the strategy ids a ``/positions`` fan-out should target.
+
+    - From the live channel: only live strategies (we never want to surface
+      sandbox flow into a production audit channel).
+    - From the sandbox channel: only sandbox strategies. Match
+      ``"sandbox"`` exactly rather than "anything not live" — the registry
+      could grow modes outside of {live, sandbox} (e.g. a future
+      ``"logging"`` mode), and treating those as sandbox would fan out a
+      report request to pods the operator never asked for.
+    - From the logging channel (or an unrecognised channel): every
+      strategy in the registry — logging is the read-only overview.
+
+    Lifted out of ``_build_discord_client`` so it can be tested without
+    standing up a Discord client / event loop.
+    """
+
+    if channel_mode == "live":
+        return [s for s, m in registry.items() if m == "live"]
+    if channel_mode == "sandbox":
+        return [s for s, m in registry.items() if m == "sandbox"]
+    return list(registry.keys())
+
+
 def apply_fallback_scan(redis_client: Any, registry: dict[str, str]) -> None:
     """Scan ``tinohelm:control:*`` and add any unknown strategies to ``registry``.
 
@@ -377,6 +404,22 @@ class DiscordForwarder:
         self._client = client
         self._rate_limit = rate_limit
         self._semaphores: dict[int, asyncio.Semaphore] = {}
+        # Strategy id → list of futures awaiting the next ``tinohelm.report.
+        # positions`` envelope from that pod. Used by the ``/positions``
+        # slash command to turn the existing fire-and-forget snapshot into
+        # a request/response. Multiple operators may run /positions at the
+        # same time — we keep a list so each gets satisfied.
+        self._position_listeners: dict[str, list[asyncio.Future]] = {}
+
+    def attach_client(self, client: discord.Client) -> None:
+        """Late-bind the discord client.
+
+        We construct the forwarder before the client because ``/positions``
+        needs a forwarder reference at command-tree build time. The client
+        is wired in here after :func:`_build_discord_client` returns.
+        """
+
+        self._client = client
 
     def _semaphore_for(self, channel_id: int) -> asyncio.Semaphore:
         sem = self._semaphores.get(channel_id)
@@ -384,6 +427,52 @@ class DiscordForwarder:
             sem = asyncio.Semaphore(self._rate_limit)
             self._semaphores[channel_id] = sem
         return sem
+
+    def watch_positions_report(self, strategy_id: str) -> asyncio.Future:
+        """Return a future that resolves the next time this pod's snapshot
+        passes through :meth:`enqueue`.
+
+        Must be called from the asyncio thread because we attach the future
+        to ``self._loop``. Each future is single-use; after it resolves the
+        caller should drop it.
+        """
+
+        future: asyncio.Future = self._loop.create_future()
+        self._position_listeners.setdefault(strategy_id, []).append(future)
+        return future
+
+    def drop_position_listener(self, strategy_id: str, future: asyncio.Future) -> None:
+        """Remove ``future`` from the wait list — used by ``/positions`` after
+        a timeout so the cancelled future doesn't sit in
+        ``_position_listeners`` forever if the pod never replies again.
+
+        Must be called from the loop thread.
+        """
+
+        listeners = self._position_listeners.get(strategy_id)
+        if not listeners:
+            return
+        try:
+            listeners.remove(future)
+        except ValueError:
+            return
+        if not listeners:
+            self._position_listeners.pop(strategy_id, None)
+
+    def _dispatch_position_listeners(self, env) -> None:
+        # Called from the loop thread (we hop over via call_soon_threadsafe
+        # in :meth:`enqueue`). Pulling the whole list avoids an awkward
+        # mid-iteration mutation if the listener fires another /positions
+        # synchronously inside its callback.
+        body = env.body if isinstance(env.body, dict) else None
+        if not body:
+            return
+        sid = body.get("strategy_id")
+        if not sid:
+            return
+        for fut in self._position_listeners.pop(sid, []):
+            if not fut.done():
+                fut.set_result(env)
 
     def enqueue(self, env, *, channel_id: int) -> None:
         # NT handlers run on the asyncio loop already (ActorExecutor), but to
@@ -394,6 +483,10 @@ class DiscordForwarder:
         if self._loop.is_closed():
             logger.warning("event loop closed; dropping event")
             return
+        # Snapshot envelopes also satisfy any pending /positions requests.
+        # We do this on the loop thread so future state stays single-threaded.
+        if getattr(env, "topic", None) == "tinohelm.report.positions":
+            self._loop.call_soon_threadsafe(self._dispatch_position_listeners, env)
         try:
             asyncio.run_coroutine_threadsafe(self._send(env, channel_id), self._loop)
         except RuntimeError:
@@ -425,6 +518,7 @@ def _build_discord_client(
     live_channel_id: int,
     logging_channel_id: int,
     registry: dict[str, str],
+    forwarder: DiscordForwarder,
 ) -> tuple[discord.Client, discord.app_commands.CommandTree]:
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
@@ -472,6 +566,78 @@ def _build_discord_client(
         topic = await asyncio.to_thread(_publish, strategy, action, reason)
         await interaction.response.send_message(f"sent `{topic}`", ephemeral=True)
 
+    async def _positions(
+        interaction: discord.Interaction,
+        strategy: str | None,
+    ) -> None:
+        # Defer because we wait up to 120s for the snapshot reply. Discord
+        # otherwise marks the interaction as failed at 3s.
+        await interaction.response.defer(ephemeral=True)
+        channel_mode = _channel_mode(interaction.channel_id)
+        if channel_mode is None:
+            await interaction.followup.send(
+                "this channel is not registered as sandbox, live, or logging",
+                ephemeral=True,
+            )
+            return
+
+        if strategy:
+            try:
+                validate_command_channel(strategy, channel_mode=channel_mode, registry=registry)
+            except ChannelMismatch as exc:
+                await interaction.followup.send(f"rejected: {exc}", ephemeral=True)
+                return
+            targets = [strategy]
+        else:
+            targets = strategies_for_channel(channel_mode, registry)
+            if not targets:
+                await interaction.followup.send(
+                    "no strategies known for this channel yet",
+                    ephemeral=True,
+                )
+                return
+
+        # Subscribe before publish — otherwise a fast pod could reply before
+        # the future is registered and we'd miss it.
+        futures = {sid: forwarder.watch_positions_report(sid) for sid in targets}
+        # Fan-out the publishes in parallel: each ``_publish`` is a Redis
+        # XADD round-trip, and N targets sequentially would mean the slowest
+        # pod gets N*RTT into its 120s budget instead of 1*RTT.
+        await asyncio.gather(
+            *(asyncio.to_thread(_publish, sid, "report") for sid in targets)
+        )
+
+        try:
+            done = await asyncio.wait_for(
+                asyncio.gather(*futures.values(), return_exceptions=True),
+                timeout=120,
+            )
+        except TimeoutError:
+            done = [
+                fut.result() if fut.done() and not fut.cancelled() else None
+                for fut in futures.values()
+            ]
+            # Cancel + un-register so a permanently-dead pod's listener slot
+            # doesn't leak. Live envelopes that arrive later for the same
+            # sid will still resolve fresh /positions calls.
+            for sid, fut in futures.items():
+                if not fut.done():
+                    fut.cancel()
+                forwarder.drop_position_listener(sid, fut)
+
+        replied: list[str] = []
+        missing: list[str] = []
+        for sid, env in zip(futures.keys(), done, strict=True):
+            if env is None or isinstance(env, BaseException):
+                missing.append(sid)
+                continue
+            replied.append(sid)
+
+        head_lines = [f"已收到 {len(replied)}/{len(targets)} 个策略的快照（已发送到 #logging）"]
+        if missing:
+            head_lines.append(f"超时未响应: {', '.join(f'`{s}`' for s in missing)}")
+        await interaction.followup.send("\n".join(head_lines), ephemeral=True)
+
     @tree.command(name="pause", description="Stop a strategy without exiting positions")
     @discord.app_commands.describe(strategy="Strategy ID, e.g. FOO-001")
     async def pause_cmd(interaction: discord.Interaction, strategy: str) -> None:
@@ -492,6 +658,17 @@ def _build_discord_client(
     @tree.command(name="ping", description="Round-trip check via the bridge actor")
     async def ping_cmd(interaction: discord.Interaction, strategy: str) -> None:
         await _command(interaction, strategy, "ping")
+
+    @tree.command(
+        name="positions",
+        description="Snapshot current positions (one strategy or all visible from this channel)",
+    )
+    @discord.app_commands.describe(strategy="Strategy ID; omit to fan-out to every visible strategy")
+    async def positions_cmd(
+        interaction: discord.Interaction,
+        strategy: str | None = None,
+    ) -> None:
+        await _positions(interaction, strategy)
 
     @tree.command(name="status", description="List known TinoHelm streams in Redis")
     async def status_cmd(interaction: discord.Interaction) -> None:
@@ -749,6 +926,11 @@ def main(argv: list[str] | None = None) -> int:
     node.build()
 
     loop = node.kernel.loop
+    # Forwarder is built first with a None client so /positions can hold a
+    # reference to it; we patch the client back in once it's constructed
+    # below. ``_send`` only dereferences the client when an event actually
+    # arrives, by which time we've assigned it.
+    forwarder = DiscordForwarder(loop=loop, client=None)
     discord_client, _tree = _build_discord_client(
         discord_token,
         guild_id,
@@ -758,9 +940,9 @@ def main(argv: list[str] | None = None) -> int:
         live_channel_id,
         logging_channel_id,
         registry,
+        forwarder=forwarder,
     )
-
-    forwarder = DiscordForwarder(loop=loop, client=discord_client)
+    forwarder.attach_client(discord_client)
     actor = NotifierActor(
         NotifierActorConfig(
             sandbox_channel_id=sandbox_channel_id,

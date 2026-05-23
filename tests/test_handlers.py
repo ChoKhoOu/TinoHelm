@@ -71,7 +71,7 @@ def test_parse_payload_uses_to_dict_for_nt_event_objects() -> None:
 
     class _FakeNTEvent:
         @staticmethod
-        def to_dict(obj):  # noqa: ARG004 — signature mirrors NT cdef classes
+        def to_dict(obj):  # signature mirrors NT cdef classes (obj unused)
             return {"type": "ComponentStateChanged", "state": "RUNNING"}
 
     parsed = parse_payload(_FakeNTEvent())
@@ -134,3 +134,103 @@ def test_render_embed_for_order_event() -> None:
     embed = render_embed(env)
     assert "OrderFilled" in embed.title
     assert "FOO-001" in (embed.description or "")
+
+
+def test_positions_report_renders_chinese_table_not_json() -> None:
+    """``tinohelm.report.positions`` must render as a 中文 markdown-ish table.
+
+    Previously this topic landed in the fallback JSON dump branch, so the
+    operator saw a JSON-encoded CSV — the worst of both worlds. We pin the
+    Chinese labels and the table shape so a refactor that re-routes this
+    topic into JSON would fail fast.
+    """
+
+    body = {
+        "strategy_id": "FOO-001",
+        "row_count": 2,
+        "csv": (
+            "instrument_id,side,quantity,avg_px_open,realized_pnl,unrealized_pnl\n"
+            "BTCUSDT.BYBIT,LONG,0.02,70000,12.5,3.0\n"
+            "ETHUSDT.BYBIT,SHORT,0.5,3200,0,-5.5\n"
+        ),
+    }
+    env = envelope_for("tinohelm.report.positions", body)
+    embed = render_embed(env)
+
+    description = embed.description or ""
+    assert "持仓快照" in (embed.title or "")
+    assert "FOO-001" in description
+    assert "标的" in description
+    assert "方向" in description
+    assert "BTCUSDT.BYBIT" in description
+    assert "ETHUSDT.BYBIT" in description
+    assert '"csv"' not in description  # no JSON dump
+
+
+def test_positions_report_handles_empty_snapshot() -> None:
+    body = {"strategy_id": "FOO-001", "row_count": 0, "csv": ""}
+    env = envelope_for("tinohelm.report.positions", body)
+    description = render_embed(env).description or ""
+    assert "FOO-001" in description
+    assert "当前无持仓" in description
+
+
+def test_markdown_table_separator_matches_cjk_header_display_width() -> None:
+    """CJK headers like 标的 / 开仓均价 are double-width in mono fonts.
+
+    The previous implementation used ``len()``, so the separator under
+    ``开仓均价`` (code-point length 4, display width 8) came up only 4
+    dashes long — the table visibly skewed in Discord. Verify each
+    column's separator has display width ≥ the header's display width.
+    """
+
+    import unicodedata
+
+    from tinohelm.notifier.handlers import _markdown_table
+
+    def _w(s: str) -> int:
+        return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+    headers = ["标的", "方向", "开仓均价"]
+    rows = [["BTC", "L", "70000"]]
+    rendered = _markdown_table(headers, rows)
+    lines = rendered.splitlines()
+    assert len(lines) == 3
+
+    header_line, sep_line, _data_line = lines
+
+    # Header line and separator line must render to the same display
+    # width — that's the entire promise of an aligned table.
+    assert _w(header_line.rstrip()) == _w(sep_line.rstrip())
+
+    # Each separator cell (split on the literal "  " gutter) must be a
+    # pure run of dashes whose display width matches its header cell.
+    # ``"开仓均价"`` (display width 8) used to come out as 4 dashes under
+    # the old ``len()``-based implementation; pin that behaviour gone.
+    header_cells = header_line.rstrip().split("  ")
+    sep_cells = sep_line.rstrip().split("  ")
+    assert header_cells == ["标的", "方向", "开仓均价"]
+    for hcell, scell in zip(header_cells, sep_cells, strict=True):
+        assert set(scell) <= {"─"}, f"separator must be all dashes, got {scell!r}"
+        assert _w(scell) == _w(hcell)
+
+
+def test_daily_summary_renders_with_chinese_labels() -> None:
+    body = {
+        "positions_open": 3,
+        "positions_closed": 27,
+        "orders_open": 1,
+        "redis_streams_seen": 8,
+    }
+    env = envelope_for("tinohelm.daily_summary", body)
+    embed = render_embed(env)
+    description = embed.description or ""
+
+    assert "每日摘要" in (embed.title or "")
+    assert "持仓中" in description
+    assert "已平" in description
+    assert "挂单" in description
+    # Counts must show up as plain integers, not JSON-encoded.
+    assert "3" in description
+    assert "27" in description
+    assert '"positions_open"' not in description

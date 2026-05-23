@@ -12,7 +12,7 @@ from datetime import UTC
 from datetime import time as dtime
 from typing import Any
 
-from tinohelm.notifier.runner import _parse_hh_mm
+from tinohelm.notifier.runner import _parse_hh_mm, strategies_for_channel
 
 
 def test_parse_hh_mm_returns_utc_time_object() -> None:
@@ -39,6 +39,113 @@ def test_parse_hh_mm_rejects_invalid_format() -> None:
         _parse_hh_mm("14:00:00")
     with pytest.raises((ValueError, IndexError)):
         _parse_hh_mm("not-a-time")
+
+
+def test_strategies_for_channel_sandbox_excludes_non_sandbox_modes() -> None:
+    """Sandbox channel must match ``"sandbox"`` exactly — not "anything
+    that isn't live". Otherwise a registry entry with a mode value the
+    notifier doesn't recognise (e.g. a future ``"logging"`` mode, or a
+    typo'd announce) would get fan-out from the sandbox channel even
+    though the operator never asked for it.
+    """
+
+    registry = {
+        "FOO-001": "sandbox",
+        "BAR-002": "live",
+        "BAZ-003": "logging",  # unrecognised mode — must NOT leak into sandbox
+        "QUX-004": "",  # blank mode — same, must NOT leak
+    }
+
+    assert strategies_for_channel("sandbox", registry) == ["FOO-001"]
+
+
+def test_strategies_for_channel_live_excludes_sandbox() -> None:
+    registry = {"FOO-001": "sandbox", "BAR-002": "live"}
+    assert strategies_for_channel("live", registry) == ["BAR-002"]
+
+
+def test_strategies_for_channel_logging_returns_everything() -> None:
+    registry = {"FOO-001": "sandbox", "BAR-002": "live", "BAZ-003": "logging"}
+    assert sorted(strategies_for_channel("logging", registry)) == sorted(registry.keys())
+
+
+def test_forwarder_watch_positions_resolves_on_matching_envelope() -> None:
+    """``/positions`` registers a future via :meth:`watch_positions_report`;
+    the next ``tinohelm.report.positions`` envelope passing through enqueue
+    must satisfy it. We exercise the loop-thread dispatch path so we know
+    the futures wire up correctly across the NT-handler / asyncio boundary.
+    """
+
+    import asyncio
+
+    from tinohelm.notifier.handlers import envelope_for
+    from tinohelm.notifier.runner import DiscordForwarder
+
+    async def _run() -> Any:
+        loop = asyncio.get_running_loop()
+        forwarder = DiscordForwarder(loop=loop, client=None)
+        future = forwarder.watch_positions_report("FOO-001")
+
+        env = envelope_for(
+            "tinohelm.report.positions",
+            {"strategy_id": "FOO-001", "row_count": 0, "csv": ""},
+        )
+        forwarder.enqueue(env, channel_id=123)
+        return await asyncio.wait_for(future, timeout=2.0)
+
+    result = asyncio.run(_run())
+    assert result.body["strategy_id"] == "FOO-001"
+
+
+def test_forwarder_drop_position_listener_clears_dead_pod_slot() -> None:
+    """``/positions`` cancels its future on timeout and calls
+    ``drop_position_listener``; the forwarder's internal list must shed
+    the entry so a pod that's permanently gone doesn't accumulate
+    cancelled futures forever.
+    """
+
+    import asyncio
+
+    from tinohelm.notifier.runner import DiscordForwarder
+
+    async def _run() -> dict:
+        loop = asyncio.get_running_loop()
+        forwarder = DiscordForwarder(loop=loop, client=None)
+        future = forwarder.watch_positions_report("FOO-001")
+        # /positions timeout path: cancel + drop.
+        future.cancel()
+        forwarder.drop_position_listener("FOO-001", future)
+        # Reach in for the test — this is the only place we want to inspect
+        # the leak directly. Public surface is just the methods above.
+        return forwarder._position_listeners
+
+    listeners = asyncio.run(_run())
+    assert "FOO-001" not in listeners
+
+
+def test_forwarder_watch_positions_ignores_other_strategies() -> None:
+    """A snapshot from BAR must not satisfy a future waiting on FOO."""
+
+    import asyncio
+
+    from tinohelm.notifier.handlers import envelope_for
+    from tinohelm.notifier.runner import DiscordForwarder
+
+    async def _run() -> bool:
+        loop = asyncio.get_running_loop()
+        forwarder = DiscordForwarder(loop=loop, client=None)
+        future = forwarder.watch_positions_report("FOO-001")
+
+        env = envelope_for(
+            "tinohelm.report.positions",
+            {"strategy_id": "BAR-002", "row_count": 0, "csv": ""},
+        )
+        forwarder.enqueue(env, channel_id=123)
+        # Give the loop a tick to deliver any (incorrect) dispatch.
+        await asyncio.sleep(0.05)
+        return future.done()
+
+    assert asyncio.run(_run()) is False
 
 
 def test_forwarder_enqueue_swallows_closed_loop() -> None:
