@@ -317,7 +317,7 @@ wheels = [
 
 [[package]]
 name = "nautilus-trader"
-version = "1.226.0"
+version = "1.227.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -331,12 +331,12 @@ dependencies = [
     { name = "tqdm" },
     { name = "uvloop", marker = "sys_platform != 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/c4/ef9790111868968d2cf080b7991697b9640b5b2b0071c0feccb444e7120e/nautilus_trader-1.226.0.tar.gz", hash = "sha256:0b899349c85acf097b6e95be251553469145c3b4ab714b328b001a3c27b82dc6", size = 6958189, upload-time = "2026-04-29T13:48:58.561Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/18/32/ec759e1464b136661b9fd64bda9b1f663bbb24eb4decc210bbc797d36f07/nautilus_trader-1.227.0.tar.gz", hash = "sha256:fbb9c1194f1f50f14fbf0933c35b81e05ea522ab944f584be3c75efb36887ca7", size = 7571723, upload-time = "2026-05-18T06:15:03.24Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bd/6b/75abadeb0fc64c83234801baafe1d727c598562221bf140dec7890e1fe6c/nautilus_trader-1.226.0-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:fc119d107f0bd794eac4217b9814c86f406a19fac1137a04d7a249fe443ce9ca", size = 138694677, upload-time = "2026-04-29T13:47:52.821Z" },
-    { url = "https://files.pythonhosted.org/packages/de/4d/2ac397dfadc7be19b09c6b57b30b71b152871cb73e88c9aa797fdfa2f68a/nautilus_trader-1.226.0-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:52ca254a5a926d8a35a37696a7eb190e08f193f94e127bb13455db9c9d00efd3", size = 154559642, upload-time = "2026-04-29T13:47:45.272Z" },
-    { url = "https://files.pythonhosted.org/packages/82/ef/799feaac082d9f507526d474c439ac9e8c6d8516eaa2595a469302b04015/nautilus_trader-1.226.0-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:d563609f3542072e4870a409764a835ecb22caedbf137d04cc8dcc82178f8a34", size = 162609550, upload-time = "2026-04-29T13:48:01.228Z" },
-    { url = "https://files.pythonhosted.org/packages/60/b7/9406a2d017ed3228eebc0d91658f04212ad6897cb70257f5b0d9c1b30827/nautilus_trader-1.226.0-cp312-cp312-win_amd64.whl", hash = "sha256:c90730c500bca84f0ed11fbbe4428b6f912af245e52ab6035ca91bb426a591a8", size = 98535494, upload-time = "2026-04-29T13:48:07.735Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/4e/606273a0e13ec0a24fa3d0520cc96d25b1f04b2adf97922d0cbc61b559ef/nautilus_trader-1.227.0-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:735fbbc0737be8f945ee641aeb0dbf0ea6b4c6111f11f10c244fe198f8158953", size = 145812901, upload-time = "2026-05-18T05:29:17.647Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/5f/aaaa800683bc2a780665195d0717ca7c9fc7ec9b689af313aa032e83c8ed/nautilus_trader-1.227.0-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:a557ae2e109c5a7f38e6115aff123d3a793c111f1712e333befe218f47d06187", size = 163211165, upload-time = "2026-05-18T05:30:01.959Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/f5/3dc279d12dae33ac77a3dd599a3e907c89d1571f027dfb092eb52d80a1ef/nautilus_trader-1.227.0-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:19482db9166560fc415019ddb1d7775c70b6b268bd0629da5c1ee20d951bf3d8", size = 171152190, upload-time = "2026-05-18T05:29:03.718Z" },
+    { url = "https://files.pythonhosted.org/packages/45/f6/d7d1174483a44cea00fab946d49c4abda2532c57d1691beed9c7a89cdf61/nautilus_trader-1.227.0-cp312-cp312-win_amd64.whl", hash = "sha256:777bd0693abceebd1cfc835ce1b411fe7f448cb8288a37e0db16753e6a4c9e7d", size = 101843474, upload-time = "2026-05-18T05:30:12.781Z" },
 ]
 
 [[package]]
@@ -653,7 +653,7 @@ requires-dist = [
     { name = "discord-py", specifier = ">=2.4,<3" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.23" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
-    { name = "nautilus-trader", extras = ["redis"], specifier = "==1.226.0" },
+    { name = "nautilus-trader", specifier = "==1.227.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
