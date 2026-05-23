@@ -692,7 +692,22 @@ async def _autodiscover_loop(
             await asyncio.sleep(1.0)
 
 
+def _configure_python_logging() -> None:
+    # NT logs through its own Rust pipeline, but our `logger.info(...)`
+    # calls go through the stdlib root logger, which defaults to WARNING
+    # — so milestones like "discord bot ready as ..." get silently
+    # dropped. Honour TINO_LOG_LEVEL (already used by NT) so both stay
+    # in sync.
+    level_name = os.environ.get("TINO_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, level_name, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        force=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_python_logging()
     parser = argparse.ArgumentParser(description="TinoHelm Discord notifier")
     parser.add_argument(
         "--config",

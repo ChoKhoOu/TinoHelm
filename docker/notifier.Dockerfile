@@ -15,6 +15,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE ./
 COPY tinohelm ./tinohelm
+COPY scripts ./scripts
 
 RUN uv pip install --system --no-cache .
 
