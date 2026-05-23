@@ -45,3 +45,11 @@ catalog/
 
 # Claude Code local settings (per-user permission allowlist)
 .claude/settings.local.json
+
+# User strategies — only the example template is tracked. Everything else
+# under strategies/ is treated as private (alpha logic, venue-baked params,
+# etc.) and stays local. Force-add with ``git add -f`` if you really want
+# to commit one.
+strategies/*
+!strategies/__init__.py
+!strategies/example/

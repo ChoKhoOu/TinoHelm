@@ -106,6 +106,11 @@ and routes events to either the sandbox or live Discord channel.
 4. `make deploy STRATEGY=myfoo` — done. The notifier picks it up via the
    `tinohelm:announce` stream within 1s.
 
+> `strategies/<id>/` is gitignored by default — only `strategies/example/`
+> is tracked, everything else stays local (your alpha logic, venue-baked
+> params, etc.). Use `git add -f strategies/myfoo/` if you want to commit
+> a strategy anyway.
+
 ## What's intentionally out of scope (v0.1)
 
 * **Backtesting** — NT already has `BacktestEngine`, run it directly.
