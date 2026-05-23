@@ -7,8 +7,10 @@ would silently break the daily summary or event delivery if regressed.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC
 from datetime import time as dtime
+from typing import Any
 
 from tinohelm.notifier.runner import _parse_hh_mm
 
@@ -239,6 +241,209 @@ def test_notifier_actor_routes_order_event_to_live_channel() -> None:
     )
 
     assert sent == [22]
+
+
+def test_detect_protocol_drift_warns_when_strategy_proto_differs() -> None:
+    """A strategy pod that announces a tino_protocol_version different from
+    what the notifier was built against indicates the wire format may be
+    drifting. The notifier must surface this to the logging channel — a
+    silent disagreement would mean events appear to flow but routing /
+    control-stream payloads might have subtly diverged.
+
+    Forward-compat is the goal: the notifier still processes events. It
+    just emits a one-shot envelope so an operator notices and decides
+    whether to upgrade the notifier.
+    """
+
+    from tinohelm.notifier.runner import detect_protocol_drift
+
+    announces = [
+        ("FOO-001", "sandbox", "1.226.0", "2"),  # newer proto than us
+        ("BAR-001", "live", "1.226.0", "1"),  # matches
+    ]
+
+    envelopes = detect_protocol_drift(
+        announces,
+        expected_proto="1",
+        expected_nt_version="1.226.0",
+    )
+
+    assert len(envelopes) == 1
+    env = envelopes[0]
+    assert env.topic == "tinohelm.protocol_mismatch"
+    assert env.body["strategy_id"] == "FOO-001"
+    assert env.body["pod_proto"] == "2"
+    assert env.body["notifier_proto"] == "1"
+
+
+def test_detect_protocol_drift_warns_on_nt_version_skew() -> None:
+    """Different NT versions carry a real risk of msgpack schema changes
+    silently mis-decoding fields. Surface this even when proto matches.
+    """
+
+    from tinohelm.notifier.runner import detect_protocol_drift
+
+    envelopes = detect_protocol_drift(
+        [("FOO-001", "live", "1.227.0", "1")],
+        expected_proto="1",
+        expected_nt_version="1.226.0",
+    )
+
+    assert len(envelopes) == 1
+    assert envelopes[0].body["pod_nt_version"] == "1.227.0"
+    assert envelopes[0].body["notifier_nt_version"] == "1.226.0"
+
+
+def test_detect_protocol_drift_silent_when_versions_match() -> None:
+    """No spam when everything agrees — the channel is read-only and we don't
+    want a noisy warning every minute for normal operation.
+    """
+
+    from tinohelm.notifier.runner import detect_protocol_drift
+
+    envelopes = detect_protocol_drift(
+        [("FOO-001", "live", "1.226.0", "1")],
+        expected_proto="1",
+        expected_nt_version="1.226.0",
+    )
+
+    assert envelopes == []
+
+
+def test_autodiscover_emits_drift_envelope_to_logging_channel() -> None:
+    """The discovery loop must hand drift envelopes to the forwarder pointed
+    at the logging channel id — wiring the pure detection function through to
+    Discord without that, the warning never reaches an operator.
+    """
+
+    import asyncio
+
+    import fakeredis
+
+    from tinohelm.notifier.runner import _autodiscover_loop
+
+    server = fakeredis.FakeServer()
+    rc = fakeredis.FakeRedis(server=server, decode_responses=False)
+    rc.xadd(
+        "tinohelm:announce",
+        {
+            "strategy_id": "FOO-001",
+            "mode": "live",
+            "trader_id": "TINO-001",
+            "ts": "1",
+            "nt_version": "1.227.0",  # drift vs notifier
+            "tino_protocol_version": "1",
+        },
+    )
+
+    sent: list[tuple[Any, int]] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append((env, channel_id))
+
+    registry: dict[str, str] = {}
+
+    async def _run_once():
+        task = asyncio.create_task(
+            _autodiscover_loop(
+                rc,
+                registry,
+                "0",
+                forwarder=_FakeForwarder(),
+                logging_channel_id=33,
+                expected_proto="1",
+                expected_nt_version="1.226.0",
+                fallback_interval_s=999.0,  # don't run fallback path
+            ),
+        )
+        # one tick — XREAD returns immediately, drift envelope queued, then
+        # we cancel before the next iteration so the test stays bounded.
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run_once())
+
+    assert any(
+        env.topic == "tinohelm.protocol_mismatch" and channel_id == 33
+        for env, channel_id in sent
+    )
+
+
+def test_detect_protocol_drift_treats_pre_versioned_pods_as_skew() -> None:
+    """A pod that came up before the version-handshake change writes empty
+    strings for the version fields. Treat that as a drift signal too — those
+    pods literally don't know about TINO_PROTOCOL_VERSION yet.
+    """
+
+    from tinohelm.notifier.runner import detect_protocol_drift
+
+    envelopes = detect_protocol_drift(
+        [("FOO-001", "live", "", "")],
+        expected_proto="1",
+        expected_nt_version="1.226.0",
+    )
+
+    assert len(envelopes) == 1
+    assert envelopes[0].body["strategy_id"] == "FOO-001"
+
+
+def test_notifier_actor_subscribes_to_tinohelm_namespace() -> None:
+    """``tinohelm.*`` carries operational chatter (ReportingActor reports,
+    daily summary). Without subscribing to it the notifier silently drops
+    everything published on that namespace — exactly what would happen to
+    ReportingActor's per-30m positions report if this pattern were absent.
+    """
+
+    from tinohelm.notifier.runner import NotifierActor
+
+    assert "tinohelm.*" in NotifierActor.SUBSCRIBE_PATTERNS
+
+
+def test_notifier_actor_routes_tinohelm_report_to_logging_channel() -> None:
+    """A ``tinohelm.report.positions`` event carries a ``strategy_id`` in its
+    body (the report belongs to a single strategy). But the *channel* it
+    lands in must be logging, not the strategy's sandbox/live channel —
+    reports are operational chatter, not trade flow, and mirroring them to
+    the trade-flow channels would defeat the triple-channel split.
+
+    The actor must therefore treat ``tinohelm.*`` as unscoped regardless of
+    what the body contains.
+    """
+
+    import json
+
+    from tinohelm.notifier.runner import (
+        NotifierActor,
+        NotifierActorConfig,
+    )
+
+    sent: list[int] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(channel_id)
+
+    actor = NotifierActor(
+        NotifierActorConfig(
+            sandbox_channel_id=11,
+            live_channel_id=22,
+            logging_channel_id=33,
+        ),
+        forwarder=_FakeForwarder(),
+        registry={"FOO-001": "live"},
+    )
+
+    handler = actor._make_handler("tinohelm.*")
+    handler(
+        json.dumps(
+            {"strategy_id": "FOO-001", "row_count": 7, "csv": "..."},
+        ).encode(),
+    )
+
+    assert sent == [33]
 
 
 def test_notifier_actor_routes_account_event_to_logging() -> None:

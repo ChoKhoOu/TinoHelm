@@ -94,6 +94,109 @@ def test_build_trading_node_config_injects_control_stream(strategy_toml: Path) -
     assert "BYBIT" in config.exec_clients
 
 
+def test_strategy_pod_load_and_save_state_default_on(strategy_toml: Path) -> None:
+    """Strategy pods should recover from restart by default.
+
+    NT's kernel saves trader state to the cache when the kernel stops
+    (kernel.py:1049 → _trader.save()) and reloads it on startup
+    (kernel.py:534 → _trader.load()), but only if the TradingNodeConfig has
+    load_state/save_state set to True. We had them hardcoded False, which
+    silently disabled NT's restart-recovery — a strategy pod redeploy would
+    lose its on_save() state and any in-flight bracket order tracking.
+
+    The default must be True so operators get recovery without ceremony;
+    the [recovery] TOML section is the explicit opt-out.
+    """
+
+    file = TinoStrategyFile.load(strategy_toml)
+    config = build_trading_node_config(file)
+    assert config.load_state is True
+    assert config.save_state is True
+
+
+def test_strategy_pod_includes_reporting_actor_by_default(strategy_toml: Path) -> None:
+    """A live pod should ship periodic positions reports out of the box.
+
+    The ReportingActor uses NT's Trader.generate_positions_report() (cache
+    snapshot) and publishes on tinohelm.report.positions, which the notifier
+    routes to the logging channel. Operators get visibility without writing
+    any glue.
+    """
+
+    file = TinoStrategyFile.load(strategy_toml)
+    actors = [a.actor_path for a in __import__(
+        "tinohelm.config", fromlist=["build_actor_imports"],
+    ).build_actor_imports(file)]
+    assert "tinohelm.reporting_actor:ReportingActor" in actors
+
+
+def test_strategy_pod_omits_reporting_actor_when_disabled(tmp_path: Path) -> None:
+    """``[reporting] enabled = false`` removes the actor entirely — saves
+    cycles on a strategy whose author wants minimal moving parts during
+    development.
+    """
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "QUIET-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [reporting]
+        enabled = false
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "quiet.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    from tinohelm.config import build_actor_imports
+
+    actors = [a.actor_path for a in build_actor_imports(file)]
+    assert "tinohelm.reporting_actor:ReportingActor" not in actors
+
+
+def test_strategy_pod_recovery_can_be_disabled_via_toml(tmp_path: Path) -> None:
+    """A user who genuinely wants a clean-slate boot — typical for the
+    first run of a new strategy, or after ``flush_on_start`` — sets
+    ``[recovery] enabled = false``. This must override the True default.
+    """
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "FRESH-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [recovery]
+        enabled = false
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "fresh.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    config = build_trading_node_config(file)
+    assert config.load_state is False
+    assert config.save_state is False
+
+
 def test_external_streams_preserves_user_entries_and_dedupes(
     tmp_path: Path,
     monkeypatch,

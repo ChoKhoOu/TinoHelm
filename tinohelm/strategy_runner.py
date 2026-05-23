@@ -14,6 +14,7 @@ import sys
 import time
 from typing import Any
 
+import nautilus_trader
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
 from nautilus_trader.live.factories import LiveDataClientFactory, LiveExecClientFactory
 from nautilus_trader.live.node import TradingNode
@@ -25,13 +26,22 @@ logger = logging.getLogger("tinohelm.runner")
 ANNOUNCE_STREAM = "tinohelm:announce"
 ANNOUNCE_MAXLEN = 1000
 
+# TinoHelm's own announce/control wire version — bump when we change the
+# announce envelope shape or control-stream payload semantics in a way the
+# notifier needs to react to. Independent of NT's version (broadcast as
+# ``nt_version`` in the same envelope).
+TINO_PROTOCOL_VERSION = "1"
+
 
 def publish_announce(redis_client: Any, file: TinoStrategyFile) -> None:
     """Broadcast this pod's identity so the notifier can autodiscover it.
 
     Writes one entry to :data:`ANNOUNCE_STREAM` carrying ``strategy_id``,
-    ``mode``, ``trader_id`` and a millisecond-epoch ``ts``. Caps the stream
-    at :data:`ANNOUNCE_MAXLEN` (approximate) to bound Redis memory.
+    ``mode``, ``trader_id``, a millisecond-epoch ``ts``, plus the version
+    handshake (``nt_version`` / ``tino_protocol_version``) so the notifier
+    can warn on cross-version drift instead of silently mis-decoding events.
+    Caps the stream at :data:`ANNOUNCE_MAXLEN` (approximate) to bound Redis
+    memory.
     """
 
     redis_client.xadd(
@@ -41,6 +51,8 @@ def publish_announce(redis_client: Any, file: TinoStrategyFile) -> None:
             "mode": file.mode,
             "trader_id": file.trader_id,
             "ts": str(int(time.time() * 1_000)),
+            "nt_version": nautilus_trader.__version__,
+            "tino_protocol_version": TINO_PROTOCOL_VERSION,
         },
         maxlen=ANNOUNCE_MAXLEN,
         approximate=True,

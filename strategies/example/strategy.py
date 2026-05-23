@@ -53,3 +53,14 @@ class ExampleStrategy(Strategy):
         if bps > Decimal(str(self.config.spread_threshold_bps)) and bps != self._last_signal_value:
             self.publish_signal(name="WideSpread", value=float(bps), ts_event=tick.ts_event)
             self._last_signal_value = bps
+
+    def on_save(self) -> dict[str, bytes]:
+        # Persisted by NT's Trader.save() into the cache; restored on next boot
+        # via on_load(). Keeping the schema dead simple (str→bytes) so users
+        # copying this template don't have to think about serializers.
+        return {"tick_count": str(self._tick_count).encode()}
+
+    def on_load(self, state: dict[str, bytes]) -> None:
+        raw = state.get("tick_count")
+        if raw:
+            self._tick_count = int(raw)
