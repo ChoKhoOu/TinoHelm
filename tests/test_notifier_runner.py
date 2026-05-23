@@ -64,16 +64,17 @@ def test_forwarder_enqueue_swallows_closed_loop() -> None:
 
 
 def test_notifier_actor_routes_unscoped_topic_to_logging() -> None:
-    """The actor's per-pattern handler must pass ``logging_channel_id`` to
-    :func:`route_channel`. Without this wiring the new ``logging`` kwarg
-    would default-trip and unscoped topics (events.system.*, etc.) would
-    keep landing in sandbox.
+    """``events.system.*`` events have no ``strategy_id`` field in their body
+    (they're cross-cutting: component lifecycle, not per-strategy). They must
+    land in the logging channel so trade-flow channels stay clean.
 
-    We exercise the public path: build the actor, fire a handler with a
-    payload from an unscoped topic, and observe which channel id the
-    forwarder was asked to use. The actor's interaction with NT's msgbus
-    is the only thing we mock — that needs a running TradingNode.
+    We exercise the public path: build the actor, fire a handler whose
+    ``pattern`` is the wildcard string NT actually passes to subscribe(),
+    feed it a serialized body with no ``strategy_id`` key, and assert the
+    forwarder was asked to use the logging channel.
     """
+
+    import json
 
     from tinohelm.notifier.runner import (
         NotifierActor,
@@ -96,11 +97,51 @@ def test_notifier_actor_routes_unscoped_topic_to_logging() -> None:
         registry={"FOO-001": "live"},
     )
 
-    # ``events.system.component_state_changed`` carries no strategy_id
-    handler = actor._make_handler("events.system.component_state_changed")
-    handler(b"{}")
+    # ``events.system.*`` is the actual subscription pattern.
+    # Component-state-changed bodies have no strategy_id.
+    handler = actor._make_handler("events.system.*")
+    handler(json.dumps({"component_id": "TraderId-FOO", "state": "STARTED"}).encode())
 
     assert sent == [33]
+
+
+def test_notifier_actor_routes_signal_to_strategy_channel() -> None:
+    """Regression for the bug Greptile flagged: ``data.Signal*`` events used
+    to fall through to logging because the actor was reading the subscription
+    pattern instead of the message body's ``strategy_id`` field.
+
+    Signals are per-strategy by design (a strategy emits them via
+    ``self.publish_signal()``); they must reach the live or sandbox channel
+    just like order/position events.
+    """
+
+    import json
+
+    from tinohelm.notifier.runner import (
+        NotifierActor,
+        NotifierActorConfig,
+    )
+
+    sent: list[int] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(channel_id)
+
+    actor = NotifierActor(
+        NotifierActorConfig(
+            sandbox_channel_id=11,
+            live_channel_id=22,
+            logging_channel_id=33,
+        ),
+        forwarder=_FakeForwarder(),
+        registry={"FOO-001": "live"},
+    )
+
+    handler = actor._make_handler("data.Signal*")
+    handler(json.dumps({"strategy_id": "FOO-001", "name": "buy", "value": 1}).encode())
+
+    assert sent == [22]  # FOO-001 is live → live channel
 
 
 def test_build_daily_summary_envelope_uses_logging_channel() -> None:
@@ -160,10 +201,16 @@ def test_build_daily_summary_handles_missing_cache() -> None:
     assert envelope.body["redis_streams_seen"] == 0
 
 
-def test_notifier_actor_still_routes_scoped_events_to_strategy_channel() -> None:
-    """Regression guard: live-strategy events must still reach the live
-    channel, not get swept into logging by the new wiring.
+def test_notifier_actor_routes_order_event_to_live_channel() -> None:
+    """An order event for a live strategy must reach the live channel.
+
+    NT's msgbus passes the subscription pattern (``events.order.*``) into
+    the handler closure, never the resolved topic. The strategy_id has to
+    come from the serialized body, where NT writes ``"strategy_id"`` for
+    every OrderEvent / PositionEvent / Signal.
     """
+
+    import json
 
     from tinohelm.notifier.runner import (
         NotifierActor,
@@ -186,8 +233,44 @@ def test_notifier_actor_still_routes_scoped_events_to_strategy_channel() -> None
         registry={"FOO-001": "live"},
     )
 
-    # Topic carries strategy_id "FOO-001", which is registered as live.
-    handler = actor._make_handler("events.order.FOO-001")
-    handler(b"{}")
+    handler = actor._make_handler("events.order.*")
+    handler(
+        json.dumps({"strategy_id": "FOO-001", "type": "OrderFilled"}).encode(),
+    )
 
     assert sent == [22]
+
+
+def test_notifier_actor_routes_account_event_to_logging() -> None:
+    """``events.account.*`` is keyed by ``account_id``, not strategy_id —
+    it's cross-cutting (one account funds many strategies). These belong in
+    the logging channel.
+    """
+
+    import json
+
+    from tinohelm.notifier.runner import (
+        NotifierActor,
+        NotifierActorConfig,
+    )
+
+    sent: list[int] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(channel_id)
+
+    actor = NotifierActor(
+        NotifierActorConfig(
+            sandbox_channel_id=11,
+            live_channel_id=22,
+            logging_channel_id=33,
+        ),
+        forwarder=_FakeForwarder(),
+        registry={"FOO-001": "live"},
+    )
+
+    handler = actor._make_handler("events.account.*")
+    handler(json.dumps({"account_id": "BYBIT-001", "balances": []}).encode())
+
+    assert sent == [33]

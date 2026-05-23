@@ -90,20 +90,26 @@ def read_new_announces(
     return new_entries, new_cursor
 
 
-def extract_strategy_id_from_topic(topic: str) -> str | None:
-    """Pull a strategy_id from an NT auto-published topic.
+def extract_strategy_id_from_body(body: Any) -> str | None:
+    """Pull a strategy_id out of a decoded NT event body.
 
-    NT publishes per-strategy events under ``events.order.{id}`` and
-    ``events.position.{id}``; data signals follow ``data.Signal{Type}.{id}``.
-    Topics without a strategy scope (``events.account.*``, ``events.system.*``)
-    return ``None`` and the caller routes them to the default channel.
+    NT serializes ``"strategy_id"`` as a top-level field on every
+    ``OrderEvent``, ``PositionEvent`` and published ``Signal``. Cross-cutting
+    events (``AccountState``, ``ComponentStateChanged``) don't carry one,
+    and ``parse_payload`` may also fall back to a string/hex preview when
+    decoding fails — in either case we return ``None`` so the caller routes
+    to the logging channel.
+
+    We can't pull this off the topic the way an outsider might assume, because
+    NT's ``MessageBus.subscribe(topic=pattern, handler=...)`` only passes the
+    decoded message to the handler; the topic itself never reaches us.
     """
 
-    if topic.startswith(("events.order.", "events.position.")):
-        return topic.split(".", 2)[2] or None
-    if topic.startswith("data.Signal"):
-        parts = topic.split(".")
-        return parts[-1] if len(parts) >= 3 else None
+    if not isinstance(body, dict):
+        return None
+    sid = body.get("strategy_id")
+    if isinstance(sid, str) and sid:
+        return sid
     return None
 
 
@@ -263,8 +269,12 @@ class NotifierActor(Actor):
     def _make_handler(self, pattern: str):
         def _handle(msg: Any) -> None:
             try:
+                # NT's msgbus only passes the message body; the resolved
+                # topic never reaches us. We label the envelope with the
+                # subscription pattern (best we have for display/debug) and
+                # pull the strategy_id off the body where NT puts it.
                 env = envelope_for(pattern, msg)
-                strategy_id = extract_strategy_id_from_topic(env.topic) or ""
+                strategy_id = extract_strategy_id_from_body(env.body) or ""
                 channel_id = route_channel(
                     strategy_id,
                     self._registry,
