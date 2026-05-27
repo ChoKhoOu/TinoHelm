@@ -889,13 +889,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--config",
         default=os.environ.get("TINO_NOTIFIER_CONFIG"),
-        help="Path to notifier TOML",
+        help="Path to notifier TOML (optional — omit to configure purely via env vars)",
     )
     args = parser.parse_args(argv)
-    if not args.config:
-        parser.error("--config (or $TINO_NOTIFIER_CONFIG) is required")
 
-    notifier_cfg = TinoNotifierFile.load(args.config)
+    if args.config:
+        notifier_cfg = TinoNotifierFile.load(args.config)
+    else:
+        notifier_cfg = TinoNotifierFile.from_env()
     discord_token = os.environ.get(notifier_cfg.discord_token_env, "")
     if not discord_token:
         raise SystemExit(f"env var {notifier_cfg.discord_token_env} missing")

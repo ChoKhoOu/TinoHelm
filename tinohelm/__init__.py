@@ -12,11 +12,53 @@ The package owns four pieces of glue code:
 Everything else is delegated to NautilusTrader's own primitives.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nautilus_trader.common.component import MessageBus
+
 __version__ = "0.1.0"
 
 # Topic prefix reserved for TinoHelm cross-process control messages.
 # Format: ``commands.tinohelm.{strategy_id}.{action}``.
 COMMAND_TOPIC_PREFIX = "commands.tinohelm"
+
+CUSTOM_MESSAGE_TOPIC = "tinohelm.message"
+
+
+def publish_message(
+    msgbus: MessageBus,
+    title: str,
+    text: str,
+    *,
+    color: int | None = None,
+) -> None:
+    """Publish a custom message that the notifier renders as a Discord embed.
+
+    Call from any Strategy or Actor that has access to ``self.msgbus``::
+
+        from tinohelm import publish_message
+        publish_message(self.msgbus, "风控警告", "当日回撤超过 **5%**，已暂停下单")
+
+    Parameters
+    ----------
+    msgbus : MessageBus
+        The NT message bus (``self.msgbus`` inside an Actor/Strategy).
+    title : str
+        Embed title (short, ≤256 chars per Discord limit).
+    text : str
+        Embed description body — supports Discord-flavoured Markdown.
+    color : int, optional
+        Hex color for the embed sidebar (e.g. ``0xE74C3C`` for red).
+        Defaults to a neutral blue on the notifier side.
+    """
+
+    payload: dict[str, str | int] = {"title": title, "text": text}
+    if color is not None:
+        payload["color"] = color
+    msgbus.publish(topic=CUSTOM_MESSAGE_TOPIC, msg=payload)
 
 
 def control_stream_key(strategy_id: str) -> str:

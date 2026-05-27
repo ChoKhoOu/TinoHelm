@@ -144,7 +144,9 @@ def render_embed(env: EventEnvelope, *, source_pod: str | None = None) -> discor
     # back to topic prefixes for payloads that don't carry one. This matters
     # for in-process events on ``events.system.*`` where the topic only tells
     # us "system" but the body says "ComponentStateChanged".
-    if event_type == "ComponentStateChanged":
+    if env.topic == "tinohelm.message":
+        return _render_custom_message(body, received_at=env.received_at, source_pod=source_pod)
+    elif event_type == "ComponentStateChanged":
         description_lines.append(_fmt_component(body))
     elif env.topic == "tinohelm.report.positions":
         title = "[持仓快照]"
@@ -174,6 +176,36 @@ def render_embed(env: EventEnvelope, *, source_pod: str | None = None) -> discor
     )
     embed.set_footer(text=env.topic)
     return embed
+
+
+_DEFAULT_CUSTOM_COLOR = 0x5865F2
+
+
+def _render_custom_message(
+    body: dict[str, Any] | str,
+    *,
+    received_at: datetime,
+    source_pod: str | None,
+) -> discord.Embed:
+    if isinstance(body, dict):
+        title = str(body.get("title", "通知"))
+        text = str(body.get("text", ""))
+        color = body.get("color", _DEFAULT_CUSTOM_COLOR)
+    else:
+        title = "通知"
+        text = str(body)
+        color = _DEFAULT_CUSTOM_COLOR
+
+    description = text[:4000]
+    if source_pod:
+        description += f"\n_pod: `{source_pod}`_"
+
+    return discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=received_at,
+    )
 
 
 def _guess_event_type(topic: str, body: dict[str, Any]) -> str:

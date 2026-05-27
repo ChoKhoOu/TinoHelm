@@ -97,4 +97,4 @@ CMD ["--config", "/app/configs/strategies/example.toml"]
 
 FROM app AS notifier
 ENTRYPOINT ["python", "-m", "tinohelm.notifier.runner"]
-CMD ["--config", "/app/configs/notifier.toml"]
+CMD []

@@ -94,10 +94,10 @@ class TinoStrategyFile:
 
 @dataclass
 class TinoNotifierFile:
-    """Parsed notifier TOML."""
+    """Parsed notifier config — from TOML or pure environment variables."""
 
     raw: dict[str, Any]
-    path: Path
+    path: Path | None
     trader_id: str = "TINO-NOTIFIER-001"
     discord_token_env: str = "DISCORD_BOT_TOKEN"
     discord_channel_id_sandbox_env: str = "DISCORD_CHANNEL_ID_SANDBOX"
@@ -105,6 +105,30 @@ class TinoNotifierFile:
     discord_channel_id_logging_env: str = "DISCORD_CHANNEL_ID_LOGGING"
     discord_guild_id_env: str = "DISCORD_GUILD_ID"
     daily_summary_utc: str = "14:00"
+
+    @classmethod
+    def from_env(cls) -> TinoNotifierFile:
+        """Build config purely from environment variables (no TOML needed).
+
+        Provides the same defaults that the TOML file would: msgpack encoding,
+        Redis cache enabled, stream_per_topic=True.
+        """
+
+        return cls(
+            raw={
+                "message_bus": {
+                    "encoding": "msgpack",
+                    "streams_prefix": "stream",
+                    "stream_per_topic": True,
+                },
+                "cache": {
+                    "encoding": "msgpack",
+                },
+            },
+            path=None,
+            trader_id=os.environ.get("TINO_NOTIFIER_TRADER_ID", "TINO-NOTIFIER-001"),
+            daily_summary_utc=os.environ.get("TINO_DAILY_SUMMARY_UTC", "14:00"),
+        )
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> TinoNotifierFile:
