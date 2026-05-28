@@ -25,7 +25,6 @@
 # Buildx GHA cache is shared between the two CI matrix legs.
 
 ARG PYTHON_VERSION=3.12
-ARG UV_VERSION=0.5.4
 
 # ─── base ───────────────────────────────────────────────────────────────────
 # Stable foundation. Touched only when bumping Python, uv, or apt deps.
@@ -44,10 +43,7 @@ RUN apt-get update \
         build-essential curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Re-declare UV_VERSION inside the stage so it's visible to ``COPY --from``.
-# Top-level ARGs leave scope at the first ``FROM``.
-ARG UV_VERSION
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
