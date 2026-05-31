@@ -18,6 +18,7 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+.codegraph/
 
 # Editors
 .idea/
