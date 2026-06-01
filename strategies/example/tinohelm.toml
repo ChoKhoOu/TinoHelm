@@ -30,6 +30,24 @@ external_streams = []  # tinohelm:control:EXAMPLE-001 added automatically
 redis_url = "redis://redis:6379/0"
 encoding = "msgpack"
 
+[exec]
+# Passes straight through to NT's LiveExecEngineConfig. All optional — omit
+# the whole section to keep TinoHelm's defaults shown below.
+#
+# Continuous reconciliation: poll the venue after startup to catch orders/fills
+# that drifted while the pod was down. NT defaults these to None (startup-only);
+# TinoHelm defaults them on. Mind your venue's API rate limits. Set to "none"
+# to fall back to NT's startup-only mode (TOML has no null literal).
+open_check_interval_secs = 10.0       # NT recommends 5-10s; "none" disables
+position_check_interval_secs = 60.0   # NT recommends 30-60s; "none" disables
+# Snapshots: append-only audit trail of every order/position state change,
+# written to the snapshots:orders / snapshots:positions Redis lists. NOT used
+# for restart recovery (that's [cache] + reconciliation) — purely for
+# analysis/PnL replay. NT does not auto-trim these lists (unbounded growth), so
+# they default OFF; opt in below only if you want the full history.
+snapshot_orders = false
+snapshot_positions = false
+
 [logging]
 log_level = "INFO"
 
