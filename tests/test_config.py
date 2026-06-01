@@ -114,6 +114,82 @@ def test_strategy_pod_load_and_save_state_default_on(strategy_toml: Path) -> Non
     assert config.save_state is True
 
 
+def test_exec_engine_enables_continuous_reconciliation_by_default(
+    strategy_toml: Path,
+) -> None:
+    """A strategy pod should keep reconciling against the venue after startup.
+
+    NT ships continuous reconciliation polling OFF (open_check_interval_secs /
+    position_check_interval_secs default to None — startup-only reconciliation).
+    Polling is what keeps a live pod catching venue drift (missed fills/cancels)
+    after boot, so TinoHelm turns it on by default — same pattern as
+    load_state/save_state. Values pass straight through to NT's
+    LiveExecEngineConfig; we never reinterpret their meaning.
+
+    Conservative default intervals (NT docs recommend 5-10s for open orders,
+    30-60s for positions) keep venue API rate-limit pressure low.
+
+    Order/position *snapshots* stay at NT's default OFF: they are an
+    append-only audit stream NT never auto-trims (Redis grows unbounded) and
+    they play no part in restart recovery — opt in per-strategy via [exec].
+    """
+
+    file = TinoStrategyFile.load(strategy_toml)
+    config = build_trading_node_config(file)
+    exec_cfg = config.exec_engine
+    assert exec_cfg is not None
+    assert exec_cfg.reconciliation is True  # NT default, asserted to pin it
+    assert exec_cfg.open_check_interval_secs == 10.0
+    assert exec_cfg.position_check_interval_secs == 60.0
+    # Snapshots are an opt-in audit feature, not a restart-recovery one.
+    assert exec_cfg.snapshot_orders is False
+    assert exec_cfg.snapshot_positions is False
+
+
+def test_exec_section_overrides_defaults_both_directions(tmp_path: Path) -> None:
+    """The ``[exec]`` TOML section tunes every exposed flag, both ways.
+
+    Two independent overrides exercised here:
+
+    * Opt OUT of continuous reconciliation (``..._interval_secs = "none"`` →
+      None, NT's startup-only mode) — for a venue with tight API rate limits.
+    * Opt IN to the snapshot audit stream — for a strategy whose operator wants
+      a full order/position history in Redis, accepting the unbounded growth.
+    """
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "AUDIT-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [exec]
+        open_check_interval_secs = "none"
+        position_check_interval_secs = "none"
+        snapshot_orders = true
+        snapshot_positions = true
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "audit.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    config = build_trading_node_config(file)
+    exec_cfg = config.exec_engine
+    assert exec_cfg.open_check_interval_secs is None
+    assert exec_cfg.position_check_interval_secs is None
+    assert exec_cfg.snapshot_orders is True
+    assert exec_cfg.snapshot_positions is True
+
+
 def test_strategy_pod_includes_reporting_actor_by_default(strategy_toml: Path) -> None:
     """A live pod should ship periodic positions reports out of the box.
 

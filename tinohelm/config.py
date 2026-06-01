@@ -209,6 +209,41 @@ def build_cache_config(raw: dict[str, Any]) -> CacheConfig | None:
     )
 
 
+def build_exec_engine_config(raw: dict[str, Any]) -> LiveExecEngineConfig:
+    """Build :class:`LiveExecEngineConfig` from the optional ``[exec]`` section.
+
+    Every field passes straight through to NT — we never reinterpret it. We
+    flip exactly one TinoHelm default away from NT's:
+
+    * **Continuous reconciliation polling (default ON).**
+      ``open_check_interval_secs`` / ``position_check_interval_secs`` are
+      ``None`` in NT (startup-only reconciliation). We default them to 10s /
+      60s — NT's recommended range (5-10s open orders, 30-60s positions) — so a
+      pod keeps catching venue drift (missed fills/cancels) after boot without
+      exhausting API rate limits. Set either to the string ``"none"`` to fall
+      back to NT's startup-only mode (TOML has no null literal).
+
+    We keep NT's defaults for everything else, notably:
+
+    * **Order/position state snapshots (default OFF).** ``snapshot_orders`` /
+      ``snapshot_positions`` write an append-only audit trail to the
+      ``snapshots:orders`` / ``snapshots:positions`` Redis lists. NT never
+      auto-trims them (unbounded growth) and they play no part in restart
+      recovery, so they stay opt-in: set ``snapshot_* = true`` under ``[exec]``
+      on a strategy whose operator wants the full history.
+    """
+
+    section = raw.get("exec", {})
+    return LiveExecEngineConfig(
+        open_check_interval_secs=_optional_interval(section.get("open_check_interval_secs", 10.0)),
+        position_check_interval_secs=_optional_interval(
+            section.get("position_check_interval_secs", 60.0),
+        ),
+        snapshot_orders=section.get("snapshot_orders", False),
+        snapshot_positions=section.get("snapshot_positions", False),
+    )
+
+
 def build_logging_config(raw: dict[str, Any]) -> LoggingConfig:
     section = raw.get("logging", {})
     return LoggingConfig(
@@ -347,7 +382,7 @@ def build_trading_node_config(file: TinoStrategyFile) -> TradingNodeConfig:
         logging=build_logging_config(file.raw),
         data_engine=LiveDataEngineConfig(),
         risk_engine=LiveRiskEngineConfig(),
-        exec_engine=LiveExecEngineConfig(),
+        exec_engine=build_exec_engine_config(file.raw),
         actors=build_actor_imports(file),
         strategies=build_strategy_imports(file),
         data_clients=build_data_clients(file),
@@ -380,6 +415,19 @@ def build_notifier_node_config(
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _optional_interval(value: Any) -> float | None:
+    """Map a TOML interval value to NT's ``float | None``.
+
+    TOML has no null literal, so an operator disables a polling interval by
+    writing the string ``"none"`` (case-insensitive). Any other value is passed
+    through verbatim for NT to validate.
+    """
+
+    if isinstance(value, str) and value.strip().lower() == "none":
+        return None
+    return value
 
 
 def _required_str(section: dict[str, Any], key: str, path: Path) -> str:
