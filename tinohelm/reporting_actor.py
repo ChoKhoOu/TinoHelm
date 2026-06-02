@@ -24,6 +24,33 @@ from nautilus_trader.common.config import ActorConfig
 REPORT_TOPIC_POSITIONS = "tinohelm.report.positions"
 
 
+def venues_from_cache(cache: Any) -> list[Any]:
+    """Distinct ``Venue`` objects the node has accounts for, for PnL queries.
+
+    NT's ``Portfolio.*_pnls`` take a ``Venue``; we derive the set from
+    ``cache.accounts()`` (``account.id.get_issuer()`` is the venue string,
+    wrapped back into a ``Venue``). Best-effort: any access failure yields an
+    empty list so a report still renders its positions table without the
+    account-PnL block.
+    """
+
+    from nautilus_trader.model.identifiers import Venue
+
+    try:
+        accounts = cache.accounts() or []
+    except Exception:  # pragma: no cover — defensive on partial NT runtimes
+        return []
+    seen: dict[str, Any] = {}
+    for account in accounts:
+        try:
+            issuer = account.id.get_issuer()
+        except Exception:  # pragma: no cover — defensive
+            continue
+        if issuer and issuer not in seen:
+            seen[issuer] = Venue(issuer)
+    return list(seen.values())
+
+
 class ReportingActorConfig(ActorConfig, frozen=True):
     """Config for :class:`ReportingActor`.
 
@@ -45,7 +72,13 @@ class ReportingActorConfig(ActorConfig, frozen=True):
     enabled: bool = True
 
 
-def build_positions_report_payload(trader: Any, *, strategy_id: str) -> tuple[str, dict[str, Any]]:
+def build_positions_report_payload(
+    trader: Any,
+    *,
+    strategy_id: str,
+    portfolio: Any | None = None,
+    venues: list[Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
     """Snapshot the trader's open+closed positions and encode for transport.
 
     Returns ``(topic, body)`` where ``body`` is plain Python types
@@ -53,21 +86,57 @@ def build_positions_report_payload(trader: Any, *, strategy_id: str) -> tuple[st
     CSV (rather than JSON) keeps the wire small for high-row days and means
     the operator can ``redis-cli xrange`` the stream and pipe straight to
     ``column -t -s,``.
+
+    When ``portfolio`` and ``venues`` are supplied, an ``account_pnl`` block is
+    added: account-level realized / unrealized PnL and net exposure per venue,
+    straight from NT's :class:`~nautilus_trader.portfolio.portfolio.Portfolio`
+    (we never compute PnL ourselves). Both are optional so the periodic timer
+    and CLI paths that only want the positions table stay backward-compatible.
     """
 
     df = trader.generate_positions_report()
+    body: dict[str, Any]
     if df is None or df.empty:
-        return REPORT_TOPIC_POSITIONS, {
+        body = {"strategy_id": strategy_id, "row_count": 0, "csv": ""}
+    else:
+        body = {
             "strategy_id": strategy_id,
-            "row_count": 0,
-            "csv": "",
+            "row_count": len(df),
+            "csv": df.to_csv(index=False),
         }
-    csv = df.to_csv(index=False)
-    return REPORT_TOPIC_POSITIONS, {
-        "strategy_id": strategy_id,
-        "row_count": len(df),
-        "csv": csv,
-    }
+
+    if portfolio is not None and venues:
+        # Account PnL is a strictly additive extra — never let a Portfolio
+        # access failure (NT not fully initialized, API drift across an
+        # upgrade) sink the whole report and leave /positions or /pnl hanging
+        # until Discord times out. Degrade exactly like venues_from_cache:
+        # drop the block, keep the positions table.
+        with contextlib.suppress(Exception):
+            body["account_pnl"] = _account_pnl(portfolio, venues)
+    return REPORT_TOPIC_POSITIONS, body
+
+
+def _account_pnl(portfolio: Any, venues: list[Any]) -> dict[str, Any]:
+    """Per-venue account PnL from NT's Portfolio, stringified for msgpack.
+
+    ``venues`` are NT ``Venue`` objects (NT's ``Portfolio.*_pnls`` require
+    them, not strings) — produced by :func:`venues_from_cache`. NT returns
+    ``dict[Currency, Money]``; we stringify both key (currency code) and value
+    (Money) so the wire stays plain types. ``net_exposures`` may be ``None``
+    for a venue with no open exposure — coerce to an empty dict.
+    """
+
+    def _str_map(mapping: Any) -> dict[str, str]:
+        return {str(k): str(v) for k, v in (mapping or {}).items()}
+
+    out: dict[str, Any] = {}
+    for venue in venues:
+        out[str(venue)] = {
+            "realized": _str_map(portfolio.realized_pnls(venue)),
+            "unrealized": _str_map(portfolio.unrealized_pnls(venue)),
+            "net_exposure": _str_map(portfolio.net_exposures(venue)),
+        }
+    return out
 
 
 class ReportingActor(Actor):
@@ -111,14 +180,33 @@ class ReportingActor(Actor):
     def _on_time_event(self, _event: Any) -> None:
         """NT clock callback — defers to :meth:`_tick` so tests stay clean."""
 
-        self._tick(trader=self.trader, msgbus=self.msgbus)
+        self._tick(
+            trader=self.trader,
+            msgbus=self.msgbus,
+            portfolio=self.portfolio,
+            venues=venues_from_cache(self.cache),
+        )
 
-    def _tick(self, *, trader: Any, msgbus: Any) -> None:
+    def _tick(
+        self,
+        *,
+        trader: Any,
+        msgbus: Any,
+        portfolio: Any | None = None,
+        venues: list[Any] | None = None,
+    ) -> None:
         """Pure-ish tick handler. Drives the report build + msgbus publish.
 
         Kept separate from :meth:`_on_time_event` so unit tests can supply
-        fake collaborators without instantiating a TradingNode.
+        fake collaborators without instantiating a TradingNode. ``portfolio``
+        and ``venues`` are optional so existing tests that only check the
+        positions table keep working.
         """
 
-        topic, body = build_positions_report_payload(trader, strategy_id=self._strategy_id)
+        topic, body = build_positions_report_payload(
+            trader,
+            strategy_id=self._strategy_id,
+            portfolio=portfolio,
+            venues=venues,
+        )
         msgbus.publish(topic=topic, msg=body)

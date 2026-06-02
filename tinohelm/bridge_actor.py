@@ -94,10 +94,18 @@ class BridgeActor(Actor):
         elif action == "report":
             # Local import keeps bridge_actor importable from CLI contexts that
             # don't ship pandas (the CLI never instantiates this class).
-            from tinohelm.reporting_actor import build_positions_report_payload
+            from tinohelm.reporting_actor import (
+                build_positions_report_payload,
+                venues_from_cache,
+            )
 
             self.log.info(f"BridgeActor: report -> publish snapshot for {sid}")
-            topic, body = build_positions_report_payload(trader, strategy_id=str(sid))
+            topic, body = build_positions_report_payload(
+                trader,
+                strategy_id=str(sid),
+                portfolio=self.portfolio,
+                venues=venues_from_cache(self.cache),
+            )
             self.msgbus.publish(topic=topic, msg=body)
 
     # ─── parsing ──────────────────────────────────────────────────────────────
