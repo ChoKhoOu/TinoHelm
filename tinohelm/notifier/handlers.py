@@ -102,6 +102,10 @@ _COLOR_MAP = {
     "OrderSubmitted": 0x95A5A6,
     "OrderCanceled": 0xF39C12,
     "OrderRejected": 0xE74C3C,
+    # Deeper red than OrderRejected: a denial means the order never left the
+    # engine (risk/instrument/position-id check failed), so it's the most
+    # likely to be mistaken for "nothing happened".
+    "OrderDenied": 0xC0392B,
     "OrderExpired": 0xE67E22,
     "OrderModified": 0x9B59B6,
     "PositionOpened": 0x1ABC9C,
@@ -133,6 +137,13 @@ _COMPONENT_STATE_EMOJI = {
 }
 
 
+# Order events that mean "this order will NOT execute" — surfaced prominently
+# because the failure is otherwise easy to miss in a stream of normal events.
+# OrderDenied = engine-side refusal (risk check, instrument not in cache,
+# NETTING position-id mismatch); OrderRejected = venue-side refusal.
+_REJECTION_EVENTS = frozenset({"OrderDenied", "OrderRejected"})
+
+
 def render_embed(env: EventEnvelope, *, source_pod: str | None = None) -> discord.Embed:
     body = env.body if isinstance(env.body, dict) else {"raw": env.body}
     event_type = _guess_event_type(env.topic, body)
@@ -146,6 +157,12 @@ def render_embed(env: EventEnvelope, *, source_pod: str | None = None) -> discor
     # us "system" but the body says "ComponentStateChanged".
     if env.topic == "tinohelm.message":
         return _render_custom_message(body, received_at=env.received_at, source_pod=source_pod)
+    elif event_type in _REJECTION_EVENTS:
+        # Route on event_type (not the events.order.* prefix) so denials stand
+        # out from normal order flow: a ⚠️ 中文 title + the deny reason. These
+        # are the 'looks placed, never reached the venue' events.
+        title = f"⚠️ [订单被拒 · {event_type}]"
+        description_lines.append(_fmt_rejection(body))
     elif event_type == "ComponentStateChanged":
         description_lines.append(_fmt_component(body))
     elif env.topic == "tinohelm.report.positions":
@@ -238,6 +255,24 @@ def _fmt_order(body: dict[str, Any]) -> str:
     if "client_order_id" in body:
         rows.append(f"**id**: `{body['client_order_id']}`")
     return "\n".join(rows) or f"```json\n{json.dumps(body, indent=2)[:1200]}\n```"
+
+
+def _fmt_rejection(body: dict[str, Any]) -> str:
+    """Render OrderDenied / OrderRejected with the reason front-and-centre.
+
+    The ``reason`` is the whole point — it tells the operator *why* the order
+    won't execute (instrument not found, NETTING position-id mismatch,
+    insufficient balance, rate limit, …). Identifying fields follow so they
+    can trace which order/instrument/strategy it was.
+    """
+
+    reason = body.get("reason")
+    lines = [f"**原因**: `{reason}`"] if reason else []
+    keys = ("strategy_id", "instrument_id", "side", "order_type", "quantity", "price")
+    lines.extend(f"**{k}**: `{body[k]}`" for k in keys if k in body)
+    if "client_order_id" in body:
+        lines.append(f"**id**: `{body['client_order_id']}`")
+    return "\n".join(lines) or f"```json\n{json.dumps(body, indent=2)[:1200]}\n```"
 
 
 def _fmt_position(body: dict[str, Any]) -> str:
