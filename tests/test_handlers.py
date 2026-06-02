@@ -227,6 +227,52 @@ def test_positions_report_renders_chinese_table_not_json() -> None:
     assert '"csv"' not in description  # no JSON dump
 
 
+def test_positions_report_renders_account_pnl_summary() -> None:
+    """When the snapshot carries an ``account_pnl`` block, the embed must show
+    an account-level summary (已实现 / 浮动 / 净敞口) under the positions table,
+    in 中文, with the venue and currency-coded amounts. This is the /pnl view
+    folded into the existing /positions reply.
+    """
+
+    body = {
+        "strategy_id": "FOO-001",
+        "row_count": 1,
+        "csv": "instrument_id,side,quantity\nBTCUSDT.BYBIT,LONG,0.02\n",
+        "account_pnl": {
+            "BYBIT": {
+                "realized": {"USDT": "120.50 USDT"},
+                "unrealized": {"USDT": "-15.00 USDT"},
+                "net_exposure": {"USDT": "5000.00 USDT"},
+            },
+        },
+    }
+    env = envelope_for("tinohelm.report.positions", body)
+    description = render_embed(env).description or ""
+
+    assert "账户汇总" in description
+    assert "已实现" in description
+    assert "浮动" in description
+    assert "BYBIT" in description
+    assert "120.50 USDT" in description
+    assert "-15.00 USDT" in description
+
+
+def test_positions_report_without_account_pnl_renders_table_only() -> None:
+    """No account_pnl key (old payload shape / portfolio unavailable) — render
+    the positions table as before, with no empty summary section.
+    """
+
+    body = {
+        "strategy_id": "FOO-001",
+        "row_count": 1,
+        "csv": "instrument_id,side,quantity\nBTCUSDT.BYBIT,LONG,0.02\n",
+    }
+    env = envelope_for("tinohelm.report.positions", body)
+    description = render_embed(env).description or ""
+    assert "账户汇总" not in description
+    assert "BTCUSDT.BYBIT" in description
+
+
 def test_positions_report_handles_empty_snapshot() -> None:
     body = {"strategy_id": "FOO-001", "row_count": 0, "csv": ""}
     env = envelope_for("tinohelm.report.positions", body)

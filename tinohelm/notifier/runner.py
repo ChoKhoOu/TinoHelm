@@ -670,6 +670,20 @@ def _build_discord_client(
     ) -> None:
         await _positions(interaction, strategy)
 
+    @tree.command(
+        name="pnl",
+        description="Account PnL summary — realized / unrealized / net exposure per venue",
+    )
+    @discord.app_commands.describe(strategy="Strategy ID; omit to fan-out to every visible strategy")
+    async def pnl_cmd(
+        interaction: discord.Interaction,
+        strategy: str | None = None,
+    ) -> None:
+        # The positions report already carries the account_pnl block, so /pnl
+        # is the money-focused entry point to the same on-demand snapshot —
+        # operators see the per-venue PnL summary under the positions table.
+        await _positions(interaction, strategy)
+
     @tree.command(name="status", description="List known TinoHelm streams in Redis")
     async def status_cmd(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)

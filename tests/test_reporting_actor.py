@@ -62,6 +62,70 @@ def test_build_positions_report_payload_emits_csv_envelope() -> None:
     assert "strategy_id,side,quantity,realized_pnl" in body["csv"]
 
 
+class _FakePortfolio:
+    """Stand-in for NT's Portfolio — returns per-currency PnL dicts.
+
+    NT's ``realized_pnls`` / ``unrealized_pnls`` / ``net_exposures`` return
+    ``dict[Currency, Money]`` keyed by a Currency object whose ``str()`` is the
+    code (e.g. 'USDT'). We mimic that with plain strings → values; the helper
+    must stringify keys and values so the payload stays msgpack-friendly.
+    """
+
+    def __init__(self, realized=None, unrealized=None, net_exposure=None) -> None:
+        self._realized = realized or {}
+        self._unrealized = unrealized or {}
+        self._net_exposure = net_exposure or {}
+
+    def realized_pnls(self, venue=None):
+        return self._realized
+
+    def unrealized_pnls(self, venue=None):
+        return self._unrealized
+
+    def net_exposures(self, venue=None):
+        return self._net_exposure
+
+
+def test_payload_includes_account_pnl_when_portfolio_supplied() -> None:
+    """With a portfolio + venues, the payload carries an ``account_pnl`` block
+    so the notifier can render an account-level summary under the positions
+    table. Values come straight from NT's Portfolio (we never compute PnL
+    ourselves) and are stringified for msgpack transport.
+    """
+
+    df = pd.DataFrame({"strategy_id": ["FOO-001"], "side": ["LONG"], "quantity": [1.0]})
+    portfolio = _FakePortfolio(
+        realized={"USDT": "120.50 USDT"},
+        unrealized={"USDT": "-15.00 USDT"},
+        net_exposure={"USDT": "5000.00 USDT"},
+    )
+
+    topic, body = build_positions_report_payload(
+        _FakeTrader(df),
+        strategy_id="FOO-001",
+        portfolio=portfolio,
+        venues=["BYBIT"],
+    )
+
+    assert topic == "tinohelm.report.positions"
+    pnl = body["account_pnl"]
+    # Keyed by venue, then by currency code; values are stringified Money.
+    assert pnl["BYBIT"]["realized"]["USDT"] == "120.50 USDT"
+    assert pnl["BYBIT"]["unrealized"]["USDT"] == "-15.00 USDT"
+    assert pnl["BYBIT"]["net_exposure"]["USDT"] == "5000.00 USDT"
+
+
+def test_payload_omits_account_pnl_without_portfolio() -> None:
+    """Backward-compatible: callers that don't pass a portfolio (or the old
+    positional-only form) get no ``account_pnl`` key — the notifier then just
+    renders the positions table as before.
+    """
+
+    df = pd.DataFrame({"strategy_id": ["FOO-001"], "side": ["LONG"]})
+    _topic, body = build_positions_report_payload(_FakeTrader(df), strategy_id="FOO-001")
+    assert "account_pnl" not in body
+
+
 def test_build_positions_report_payload_handles_empty_frame() -> None:
     """No open or closed positions yet (fresh pod) — return zero-row CSV
     rather than crashing. The notifier shouldn't have to special-case empty.

@@ -352,10 +352,11 @@ def _fmt_positions_report(body: dict[str, Any]) -> str:
     strategy_id = body.get("strategy_id", "?")
     row_count = body.get("row_count", 0)
     csv_text = body.get("csv", "") or ""
+    pnl_block = _fmt_account_pnl(body.get("account_pnl"))
 
     header = f"**策略**: `{strategy_id}` · **持仓**: `{row_count}` 条"
     if not csv_text or row_count == 0:
-        return f"{header}\n_当前无持仓_"
+        return f"{header}\n_当前无持仓_{pnl_block}"
 
     rows = list(csv.reader(io.StringIO(csv_text)))
     if not rows:
@@ -390,7 +391,7 @@ def _fmt_positions_report(body: dict[str, Any]) -> str:
     if not indices:
         # NT changed the column set under us — fall back to a count-only line
         # so the operator at least sees the snapshot landed.
-        return f"{header}\n_(列名不识别，原始 CSV 见 stream)_"
+        return f"{header}\n_(列名不识别，原始 CSV 见 stream)_{pnl_block}"
 
     headers = [zh for zh, _ in indices]
     body_rows = [[r[i] if i < len(r) else "" for _, i in indices] for r in data_rows]
@@ -399,7 +400,35 @@ def _fmt_positions_report(body: dict[str, Any]) -> str:
 
     table = _markdown_table(headers, body_rows)
     tail = f"\n_…还有 {len(data_rows) - _POSITIONS_TABLE_MAX_ROWS} 条未显示_" if truncated else ""
-    return f"{header}\n```\n{table}\n```{tail}"
+    return f"{header}\n```\n{table}\n```{tail}{pnl_block}"
+
+
+def _fmt_account_pnl(account_pnl: Any) -> str:
+    """Render the account-level PnL summary appended to a positions report.
+
+    ``account_pnl`` is ``{venue: {realized|unrealized|net_exposure: {ccy: str}}}``
+    (see :func:`tinohelm.reporting_actor._account_pnl`). Returns an empty string
+    when absent so the positions table renders unchanged — this keeps the /pnl
+    view strictly additive to the existing /positions reply.
+    """
+
+    if not isinstance(account_pnl, dict) or not account_pnl:
+        return ""
+
+    def _amounts(by_ccy: Any) -> str:
+        if not isinstance(by_ccy, dict) or not by_ccy:
+            return "`0`"
+        return " · ".join(f"`{v}`" for v in by_ccy.values())
+
+    lines = ["\n── 账户汇总 ──"]
+    for venue, blocks in account_pnl.items():
+        if not isinstance(blocks, dict):
+            continue
+        lines.append(f"**{venue}**")
+        lines.append(f"已实现: {_amounts(blocks.get('realized'))}")
+        lines.append(f"浮动: {_amounts(blocks.get('unrealized'))}")
+        lines.append(f"净敞口: {_amounts(blocks.get('net_exposure'))}")
+    return "\n".join(lines)
 
 
 def _fmt_daily_summary(body: dict[str, Any]) -> str:
