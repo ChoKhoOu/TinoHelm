@@ -115,6 +115,37 @@ def test_payload_includes_account_pnl_when_portfolio_supplied() -> None:
     assert pnl["BYBIT"]["net_exposure"]["USDT"] == "5000.00 USDT"
 
 
+def test_payload_degrades_when_portfolio_raises() -> None:
+    """A Portfolio access failure (NT not fully initialized, API drift) must
+    NOT sink the whole report — the positions table is the primary payload and
+    must survive. account_pnl is additive: drop it, keep the table. Mirrors
+    venues_from_cache's degrade-to-empty posture.
+    """
+
+    class _BoomPortfolio:
+        def realized_pnls(self, venue=None):
+            raise RuntimeError("NT portfolio not ready")
+
+        def unrealized_pnls(self, venue=None):
+            raise RuntimeError("NT portfolio not ready")
+
+        def net_exposures(self, venue=None):
+            raise RuntimeError("NT portfolio not ready")
+
+    df = pd.DataFrame({"strategy_id": ["FOO-001"], "side": ["LONG"], "quantity": [1.0]})
+    _topic, body = build_positions_report_payload(
+        _FakeTrader(df),
+        strategy_id="FOO-001",
+        portfolio=_BoomPortfolio(),
+        venues=["BYBIT"],
+    )
+
+    # Table survived; PnL block silently omitted.
+    assert body["row_count"] == 1
+    assert "csv" in body
+    assert "account_pnl" not in body
+
+
 def test_payload_omits_account_pnl_without_portfolio() -> None:
     """Backward-compatible: callers that don't pass a portfolio (or the old
     positional-only form) get no ``account_pnl`` key — the notifier then just

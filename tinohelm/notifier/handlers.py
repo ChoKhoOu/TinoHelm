@@ -360,7 +360,7 @@ def _fmt_positions_report(body: dict[str, Any]) -> str:
 
     rows = list(csv.reader(io.StringIO(csv_text)))
     if not rows:
-        return f"{header}\n_无法解析持仓数据_"
+        return f"{header}\n_无法解析持仓数据_{pnl_block}"
 
     columns = rows[0]
     data_rows = rows[1:]

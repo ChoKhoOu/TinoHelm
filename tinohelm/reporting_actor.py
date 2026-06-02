@@ -77,7 +77,7 @@ def build_positions_report_payload(
     *,
     strategy_id: str,
     portfolio: Any | None = None,
-    venues: list[str] | None = None,
+    venues: list[Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Snapshot the trader's open+closed positions and encode for transport.
 
@@ -106,16 +106,24 @@ def build_positions_report_payload(
         }
 
     if portfolio is not None and venues:
-        body["account_pnl"] = _account_pnl(portfolio, venues)
+        # Account PnL is a strictly additive extra — never let a Portfolio
+        # access failure (NT not fully initialized, API drift across an
+        # upgrade) sink the whole report and leave /positions or /pnl hanging
+        # until Discord times out. Degrade exactly like venues_from_cache:
+        # drop the block, keep the positions table.
+        with contextlib.suppress(Exception):
+            body["account_pnl"] = _account_pnl(portfolio, venues)
     return REPORT_TOPIC_POSITIONS, body
 
 
-def _account_pnl(portfolio: Any, venues: list[str]) -> dict[str, Any]:
+def _account_pnl(portfolio: Any, venues: list[Any]) -> dict[str, Any]:
     """Per-venue account PnL from NT's Portfolio, stringified for msgpack.
 
-    NT returns ``dict[Currency, Money]``; we stringify both key (currency code)
-    and value (Money) so the wire stays plain types. ``net_exposures`` may be
-    ``None`` for a venue with no open exposure — coerce to an empty dict.
+    ``venues`` are NT ``Venue`` objects (NT's ``Portfolio.*_pnls`` require
+    them, not strings) — produced by :func:`venues_from_cache`. NT returns
+    ``dict[Currency, Money]``; we stringify both key (currency code) and value
+    (Money) so the wire stays plain types. ``net_exposures`` may be ``None``
+    for a venue with no open exposure — coerce to an empty dict.
     """
 
     def _str_map(mapping: Any) -> dict[str, str]:
@@ -185,7 +193,7 @@ class ReportingActor(Actor):
         trader: Any,
         msgbus: Any,
         portfolio: Any | None = None,
-        venues: list[str] | None = None,
+        venues: list[Any] | None = None,
     ) -> None:
         """Pure-ish tick handler. Drives the report build + msgbus publish.
 
