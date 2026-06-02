@@ -136,6 +136,66 @@ def test_render_embed_for_order_event() -> None:
     assert "FOO-001" in (embed.description or "")
 
 
+def test_order_denied_renders_prominently_with_reason() -> None:
+    """OrderDenied is the silent killer behind 'looks placed, never reached the
+    venue' — instrument-not-in-cache and NETTING position-id mismatches both
+    surface as OrderDenied. It must stand out from normal order flow: a ⚠️ +
+    中文 title, the deny ``reason`` shown verbatim, and a red color (not the
+    grey OrderSubmitted/neutral tone) so an operator scanning the channel can't
+    miss it.
+
+    Fields come straight from NT's ``OrderDenied.to_dict()`` (type='OrderDenied'
+    + a ``reason`` string), confirmed against the installed NT.
+    """
+
+    body = msgspec.msgpack.encode(
+        {
+            "type": "OrderDenied",
+            "strategy_id": "FOO-001",
+            "instrument_id": "DELISTED-PERP.BYBIT",
+            "client_order_id": "O-19700101-000000-001",
+            "reason": "Instrument for DELISTED-PERP.BYBIT not found",
+        },
+    )
+    env = envelope_for("events.order.FOO-001", body)
+    embed = render_embed(env)
+
+    description = embed.description or ""
+    title = embed.title or ""
+    # Stands out: warning marker + 中文 so it's not just another order line.
+    assert "⚠️" in title
+    assert "被拒" in title
+    # The reason is the whole point — without it the operator can't tell why.
+    assert "Instrument for DELISTED-PERP.BYBIT not found" in description
+    assert "FOO-001" in description
+    # Red, not the neutral fallback grey.
+    assert embed.color is not None
+    assert embed.color.value != 0x99AAB5
+
+
+def test_order_rejected_also_renders_as_rejection() -> None:
+    """OrderRejected (venue-side refusal) shares the same 'failed, did you
+    notice?' risk as OrderDenied (engine-side), so it gets the same prominent
+    treatment and surfaces its reason.
+    """
+
+    body = msgspec.msgpack.encode(
+        {
+            "type": "OrderRejected",
+            "strategy_id": "BAR-001",
+            "instrument_id": "BTCUSDT-PERP.BYBIT",
+            "reason": "INSUFFICIENT_BALANCE",
+        },
+    )
+    env = envelope_for("events.order.BAR-001", body)
+    embed = render_embed(env)
+    title = embed.title or ""
+    description = embed.description or ""
+    assert "⚠️" in title
+    assert "被拒" in title
+    assert "INSUFFICIENT_BALANCE" in description
+
+
 def test_positions_report_renders_chinese_table_not_json() -> None:
     """``tinohelm.report.positions`` must render as a 中文 markdown-ish table.
 
