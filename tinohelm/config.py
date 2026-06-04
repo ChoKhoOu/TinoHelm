@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import msgspec
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.cache.config import CacheConfig
 from nautilus_trader.common.config import (
@@ -420,13 +421,18 @@ def build_exec_clients(file: TinoStrategyFile) -> dict[str, Any]:
             "trade_execution": sandbox_section.get("trade_execution", True),
             "use_reduce_only": sandbox_section.get("use_reduce_only", True),
         }
+        # Build via msgspec.convert (not a bare constructor) for the same reason
+        # as _upgrade_client_config: it coerces any typed field generically, so
+        # we never hand NT a raw string where it expects a parsed type. Then
+        # graft the data_clients provider subclass in via structs.replace.
+        sandbox_cfg = msgspec.convert(kwargs, type=SandboxExecutionClientConfig)
         # Only override NT's default base provider when the data_clients section
         # actually declares a venue-specific one (with a ``path``); otherwise let
         # NT supply its own default InstrumentProviderConfig.
         provider = _data_client_provider(file, venue)
         if provider is not None:
-            kwargs["instrument_provider"] = provider
-        sandbox_clients[venue] = SandboxExecutionClientConfig(**kwargs)
+            sandbox_cfg = msgspec.structs.replace(sandbox_cfg, instrument_provider=provider)
+        sandbox_clients[venue] = sandbox_cfg
     return sandbox_clients
 
 
@@ -588,6 +594,17 @@ def _upgrade_client_config(resolved: Any) -> Any:
     (``live/config.py:358``). The constructed instance is what NT's
     ``_parse_client_config`` passes through untouched (岔路1, ``live/config.py:347``).
 
+    We build via ``msgspec.convert`` (on the config dict minus the provider),
+    then ``msgspec.structs.replace`` the constructed provider subclass in — NOT
+    a bare ``client_cls(**kwargs)``. The reason: NT declares typed fields like
+    ``BinanceDataClientConfig.account_type`` as enums (``BinanceAccountType``),
+    and ``msgspec.convert`` is what coerces the TOML string ``"USDT_FUTURES"`` to
+    the enum member. A bare constructor stores the raw string, and NT later does
+    ``account_type.is_spot`` (``binance/common/urls.py:64``) → ``AttributeError:
+    'str' object has no attribute 'is_spot'`` at ``build_data_clients``. Letting
+    msgspec convert the whole config (sans provider) coerces *every* typed field
+    generically — no per-field enum handling here, so no NT-version coupling.
+
     No ``path`` on the provider → return ``resolved`` unchanged (dict passthrough).
     """
 
@@ -601,9 +618,14 @@ def _upgrade_client_config(resolved: Any) -> Any:
         return resolved
 
     client_cls = _load_config_cls(resolved["path"])
-    config_kwargs = {k: v for k, v in config_section.items() if k != "instrument_provider"}
-    config_kwargs["instrument_provider"] = _build_instrument_provider(provider_section)
-    return client_cls(**config_kwargs)
+    config_dict = {k: v for k, v in config_section.items() if k != "instrument_provider"}
+    # msgspec.convert coerces typed fields (e.g. account_type str→enum) the way
+    # NT's own decode path would; then graft the provider subclass instance in.
+    base: Any = msgspec.convert(config_dict, type=client_cls)
+    return msgspec.structs.replace(
+        base,
+        instrument_provider=_build_instrument_provider(provider_section),
+    )
 
 
 def _data_client_provider(file: TinoStrategyFile, venue: str) -> InstrumentProviderConfig | None:

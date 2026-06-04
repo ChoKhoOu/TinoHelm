@@ -513,6 +513,8 @@ def _binance_provider_toml(
         [data_clients.BINANCE.config]
         api_key = "$ENV:BINANCE_API_KEY"
         api_secret = "$ENV:BINANCE_API_SECRET"
+        account_type = "USDT_FUTURES"
+        environment = "LIVE"
         [data_clients.BINANCE.config.instrument_provider]
         {provider_path_line}query_commission_rates = true
         load_ids = ["DOGEUSDT-PERP.BINANCE", "BTCUSDT-PERP.BINANCE"]
@@ -522,6 +524,8 @@ def _binance_provider_toml(
         [exec_clients.BINANCE.config]
         api_key = "$ENV:BINANCE_API_KEY"
         api_secret = "$ENV:BINANCE_API_SECRET"
+        account_type = "USDT_FUTURES"
+        environment = "LIVE"
         """,
     ).strip()
 
@@ -544,6 +548,7 @@ def test_data_client_provider_path_builds_subclass_instance(tmp_path: Path) -> N
     the str→InstrumentId conversion NT's dec_hook would otherwise do).
     """
 
+    from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
     from nautilus_trader.adapters.binance.config import (
         BinanceDataClientConfig,
         BinanceInstrumentProviderConfig,
@@ -567,6 +572,14 @@ def test_data_client_provider_path_builds_subclass_instance(tmp_path: Path) -> N
             InstrumentId.from_str("BTCUSDT-PERP.BINANCE"),
         },
     )
+    # Regression: building the instance via msgspec.convert (not a bare
+    # constructor) must coerce the ``account_type`` TOML string to the
+    # ``BinanceAccountType`` enum. A bare ``BinanceDataClientConfig(**kwargs)``
+    # would leave it a raw str, and NT later does ``account_type.is_spot``
+    # (binance/common/urls.py) → ``AttributeError: 'str' object has no
+    # attribute 'is_spot'`` at node.build(). Assert it's the real enum.
+    assert isinstance(dc.account_type, BinanceAccountType)
+    assert dc.account_type is BinanceAccountType.USDT_FUTURES
 
 
 def test_provider_instance_passes_through_nt_parse_unchanged(tmp_path: Path) -> None:
