@@ -209,7 +209,7 @@ def build_cache_config(raw: dict[str, Any]) -> CacheConfig | None:
     )
 
 
-def build_exec_engine_config(raw: dict[str, Any]) -> LiveExecEngineConfig:
+def build_exec_engine_config(raw: dict[str, Any], *, mode: str = "live") -> LiveExecEngineConfig:
     """Build :class:`LiveExecEngineConfig` from the optional ``[exec]`` section.
 
     Every field passes straight through to NT — we never reinterpret it. We
@@ -231,10 +231,19 @@ def build_exec_engine_config(raw: dict[str, Any]) -> LiveExecEngineConfig:
       auto-trims them (unbounded growth) and they play no part in restart
       recovery, so they stay opt-in: set ``snapshot_* = true`` under ``[exec]``
       on a strategy whose operator wants the full history.
+
+    **Sandbox mode forces ``reconciliation=False`` (mode-aware, not a user
+    knob).** The ``SandboxExecutionClient`` runs an in-process simulated
+    exchange that returns EMPTY mass-status reports — startup reconciliation
+    against it produces spurious position-discrepancy noise and no value (there
+    is no real venue state to reconcile). NT's own sandbox examples disable it,
+    so we do too whenever ``mode == "sandbox"``. Live mode keeps NT's default
+    (reconciliation ON), so this is a safe default with no operator footgun.
     """
 
     section = raw.get("exec", {})
     return LiveExecEngineConfig(
+        reconciliation=False if mode == "sandbox" else True,
         open_check_interval_secs=_optional_interval(section.get("open_check_interval_secs", 10.0)),
         position_check_interval_secs=_optional_interval(
             section.get("position_check_interval_secs", 60.0),
@@ -258,9 +267,29 @@ def build_strategy_imports(file: TinoStrategyFile) -> list[ImportableStrategyCon
 
     NT will lazy-import ``strategy.path`` (``module:Class``) at build time. We
     don't import the strategy class ourselves — that happens inside the kernel.
+
+    **We inject ``order_id_tag``, NOT ``strategy_id``.** NT's ``StrategyConfig``
+    types ``strategy_id`` as ``StrategyId | None``, so passing a *string* there
+    makes msgspec coerce it into a ``StrategyId`` OBJECT during
+    ``StrategyFactory.create``. ``Strategy.__init__`` then does
+    ``component_id = config.strategy_id`` (now an object, not a str) and calls
+    ``Logger(name=component_id)`` — which requires ``str`` and raises
+    ``TypeError: Argument 'name' has incorrect type`` at ``node.build()``. NT
+    instead expects ``strategy_id`` to be left ``None`` so it derives the
+    component id from the class name, and builds the full id as
+    ``StrategyId(f"{ClassName}-{order_id_tag}")``. So we feed our control-plane
+    handle in as ``order_id_tag`` (a plain ``str | None`` field): the NT
+    ``StrategyId`` becomes ``"{ClassName}-{file.strategy_id}"`` (hyphen supplied
+    by the join, satisfying NT's hyphen requirement), while ``file.strategy_id``
+    stays the directory-name handle the control plane (CLI / BridgeActor /
+    Redis stream) uses. An explicit ``order_id_tag`` in ``[strategy]`` wins;
+    otherwise we default it to the strategy id.
     """
 
     section = file.raw.get("strategy", {})
+    params = dict(section.get("params", {}))
+    # Caller-provided order_id_tag (if any) takes precedence; else use the id handle.
+    params.setdefault("order_id_tag", section.get("order_id_tag", file.strategy_id))
     return [
         ImportableStrategyConfig(
             strategy_path=_required_str(section, "class", file.path),
@@ -268,10 +297,7 @@ def build_strategy_imports(file: TinoStrategyFile) -> list[ImportableStrategyCon
                 "config_class",
                 "nautilus_trader.trading.config:StrategyConfig",
             ),
-            config={
-                "strategy_id": file.strategy_id,
-                **section.get("params", {}),
-            },
+            config=params,
         ),
     ]
 
@@ -351,6 +377,13 @@ def build_exec_clients(file: TinoStrategyFile) -> dict[str, Any]:
                 "account_type": sandbox_section.get("account_type", "MARGIN"),
                 "book_type": sandbox_section.get("book_type", "L1_MBP"),
                 "default_leverage": sandbox_section.get("default_leverage", 1.0),
+                # Execution-matching knobs (NT defaults bar_execution/trade_execution/
+                # use_reduce_only all True). Passed through so a bar-signal strategy fed
+                # by a quote-only feeder can set trade_execution=false (avoid the
+                # "Skipping stale trade" flood) — generic, any sandbox strategy benefits.
+                "bar_execution": sandbox_section.get("bar_execution", True),
+                "trade_execution": sandbox_section.get("trade_execution", True),
+                "use_reduce_only": sandbox_section.get("use_reduce_only", True),
                 "instrument_provider": payload.get("instrument_provider"),
             },
         }
@@ -382,7 +415,7 @@ def build_trading_node_config(file: TinoStrategyFile) -> TradingNodeConfig:
         logging=build_logging_config(file.raw),
         data_engine=LiveDataEngineConfig(),
         risk_engine=LiveRiskEngineConfig(),
-        exec_engine=build_exec_engine_config(file.raw),
+        exec_engine=build_exec_engine_config(file.raw, mode=file.mode),
         actors=build_actor_imports(file),
         strategies=build_strategy_imports(file),
         data_clients=build_data_clients(file),

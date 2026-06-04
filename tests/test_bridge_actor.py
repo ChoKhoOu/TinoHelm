@@ -19,10 +19,22 @@ from tinohelm.bridge_actor import BridgeActor, BridgeActorConfig
 
 @dataclass
 class TraderSpy:
-    """A test double recording every Trader method called by the actor."""
+    """A test double recording every Trader method called by the actor.
+
+    ``loaded_ids`` is what ``Trader.strategy_ids()`` returns — the BridgeActor
+    resolves the live NT StrategyId from here at command time (it does NOT
+    reconstruct it from the control-plane handle, which is just the directory
+    name and may not even be a valid StrategyId).
+    """
 
     calls: list[tuple[str, Any]] = field(default_factory=list)
     positions_df: Any = None
+    loaded_ids: list[StrategyId] = field(
+        default_factory=lambda: [StrategyId("OIMomentum-foo")],
+    )
+
+    def strategy_ids(self) -> list[StrategyId]:
+        return self.loaded_ids
 
     def stop_strategy(self, strategy_id: StrategyId) -> None:
         self.calls.append(("stop_strategy", strategy_id))
@@ -53,6 +65,7 @@ class MsgbusSpy:
 class LogSpy:
     infos: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
     def info(self, msg: str) -> None:
         self.infos.append(msg)
@@ -60,11 +73,15 @@ class LogSpy:
     def warning(self, msg: str) -> None:
         self.warnings.append(msg)
 
+    def error(self, msg: str) -> None:
+        self.errors.append(msg)
+
 
 def _bridge_actor_under_test(
-    strategy_id: str = "FOO-001",
+    control_handle: str = "foo",
     *,
     msgbus: MsgbusSpy | None = None,
+    trader: TraderSpy | None = None,
 ) -> tuple[BridgeActor, TraderSpy, LogSpy]:
     """Create a BridgeActor wired up with spies, bypassing NT registration.
 
@@ -72,18 +89,25 @@ def _bridge_actor_under_test(
     and demand a registered ``MessageBus`` / ``Cache`` / ``Clock``. Since we're
     only testing the command-dispatch behavior, we sidestep ``__init__`` and
     install just the attributes ``_on_command`` actually reads.
+
+    ``control_handle`` is the TinoHelm control-plane handle (directory name);
+    it is deliberately NOT a valid StrategyId (no hyphen) to prove the actor
+    does not reconstruct the NT id from it but resolves it from the trader.
+    ``_strategy_id`` starts ``None`` so the first command exercises the real
+    ``_resolve_strategy_id`` → ``trader.strategy_ids()`` path.
     """
 
     config = BridgeActorConfig(
-        strategy_id=strategy_id,
-        command_topic=f"commands.tinohelm.{strategy_id}",
+        strategy_id=control_handle,
+        command_topic=f"commands.tinohelm.{control_handle}",
     )
     actor = BridgeActor.__new__(BridgeActor)
     # Mirror what BridgeActor.__init__ does, sans super().__init__():
-    actor._strategy_id = StrategyId(strategy_id)  # type: ignore[attr-defined]
+    actor._control_handle = config.strategy_id  # type: ignore[attr-defined]
+    actor._strategy_id = None  # type: ignore[attr-defined]  # resolved lazily from trader
     actor._command_topic = config.command_topic  # type: ignore[attr-defined]
     actor._pattern = f"{config.command_topic}.*"  # type: ignore[attr-defined]
-    trader = TraderSpy()
+    trader = trader or TraderSpy()
     log = LogSpy()
     # Patch the @property descriptors so the handler code reads our spies.
     object.__setattr__(actor, "_test_trader", trader)
@@ -118,33 +142,50 @@ class _PatchedBridgeActor(BridgeActor):
 
 
 def test_pause_command_calls_stop_strategy() -> None:
-    """Pause envelope → trader.stop_strategy(StrategyId)."""
+    """Pause envelope → trader.stop_strategy(<NT StrategyId resolved from trader>)."""
 
-    actor, trader, _log = _bridge_actor_under_test("FOO-001")
+    actor, trader, _log = _bridge_actor_under_test("foo")
 
     actor._on_command(json.dumps({"action": "pause"}).encode("utf-8"))
 
-    assert trader.calls == [("stop_strategy", StrategyId("FOO-001"))]
+    # Resolved from trader.strategy_ids(), NOT reconstructed from the "foo" handle.
+    assert trader.calls == [("stop_strategy", StrategyId("OIMomentum-foo"))]
 
 
 def test_resume_command_calls_start_strategy() -> None:
-    """Resume envelope → trader.start_strategy(StrategyId)."""
+    """Resume envelope → trader.start_strategy(<NT StrategyId resolved from trader>)."""
 
-    actor, trader, _log = _bridge_actor_under_test("FOO-001")
+    actor, trader, _log = _bridge_actor_under_test("foo")
 
     actor._on_command(json.dumps({"action": "resume"}).encode("utf-8"))
 
-    assert trader.calls == [("start_strategy", StrategyId("FOO-001"))]
+    assert trader.calls == [("start_strategy", StrategyId("OIMomentum-foo"))]
 
 
 def test_flatten_command_calls_market_exit_strategy() -> None:
-    """Flatten envelope → trader.market_exit_strategy(StrategyId)."""
+    """Flatten envelope → trader.market_exit_strategy(<NT StrategyId resolved from trader>)."""
 
-    actor, trader, _log = _bridge_actor_under_test("FOO-001")
+    actor, trader, _log = _bridge_actor_under_test("foo")
 
     actor._on_command(json.dumps({"action": "flatten", "reason": "EOD"}).encode("utf-8"))
 
-    assert trader.calls == [("market_exit_strategy", StrategyId("FOO-001"))]
+    assert trader.calls == [("market_exit_strategy", StrategyId("OIMomentum-foo"))]
+
+
+def test_command_when_no_strategy_loaded_logs_error_and_noops() -> None:
+    """If the pod has no strategy yet, a control command must no-op + log error.
+
+    Guards the resolve path: trader.strategy_ids() empty → _resolve_strategy_id
+    returns None → handler refuses to call any trader mutator.
+    """
+
+    trader = TraderSpy(loaded_ids=[])
+    actor, _trader, log = _bridge_actor_under_test("foo", trader=trader)
+
+    actor._on_command(json.dumps({"action": "pause"}).encode("utf-8"))
+
+    assert trader.calls == []
+    assert any("no strategy loaded" in e for e in log.errors)
 
 
 def test_ping_acks_without_calling_trader() -> None:
@@ -154,7 +195,7 @@ def test_ping_acks_without_calling_trader() -> None:
     that proves the bridge is alive without disturbing positions/strategies.
     """
 
-    actor, trader, log = _bridge_actor_under_test("FOO-001")
+    actor, trader, log = _bridge_actor_under_test("foo")
 
     actor._on_command(json.dumps({"action": "ping"}).encode("utf-8"))
 
@@ -173,9 +214,9 @@ def test_report_action_publishes_positions_snapshot() -> None:
     import pandas as pd
 
     msgbus = MsgbusSpy()
-    actor, trader, _log = _bridge_actor_under_test("FOO-001", msgbus=msgbus)
+    actor, trader, _log = _bridge_actor_under_test("foo", msgbus=msgbus)
     trader.positions_df = pd.DataFrame(
-        {"strategy_id": ["FOO-001"], "side": ["LONG"], "quantity": [1.0]},
+        {"strategy_id": ["OIMomentum-foo"], "side": ["LONG"], "quantity": [1.0]},
     )
 
     actor._on_command(json.dumps({"action": "report"}).encode("utf-8"))
@@ -184,7 +225,8 @@ def test_report_action_publishes_positions_snapshot() -> None:
     assert len(msgbus.publishes) == 1
     topic, msg = msgbus.publishes[0]
     assert topic == "tinohelm.report.positions"
-    assert msg["strategy_id"] == "FOO-001"
+    # report uses str(<resolved NT StrategyId>), not the control handle.
+    assert msg["strategy_id"] == "OIMomentum-foo"
     assert msg["row_count"] == 1
 
 
@@ -199,7 +241,7 @@ def test_unknown_action_is_dropped_with_warning() -> None:
     has a paper trail. This protects us from accidental control commands.
     """
 
-    actor, trader, log = _bridge_actor_under_test("FOO-001")
+    actor, trader, log = _bridge_actor_under_test("foo")
 
     actor._on_command(b"not-json{")
     actor._on_command(json.dumps({"action": "drop_database"}).encode("utf-8"))
