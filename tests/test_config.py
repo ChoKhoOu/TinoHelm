@@ -230,9 +230,13 @@ def test_strategy_pod_includes_reporting_actor_by_default(strategy_toml: Path) -
     """
 
     file = TinoStrategyFile.load(strategy_toml)
-    actors = [a.actor_path for a in __import__(
-        "tinohelm.config", fromlist=["build_actor_imports"],
-    ).build_actor_imports(file)]
+    actors = [
+        a.actor_path
+        for a in __import__(
+            "tinohelm.config",
+            fromlist=["build_actor_imports"],
+        ).build_actor_imports(file)
+    ]
     assert "tinohelm.reporting_actor:ReportingActor" in actors
 
 
@@ -451,3 +455,213 @@ def test_env_refs_in_toml_get_expanded(strategy_toml: Path, monkeypatch) -> None
     serialized = repr(raw)
     assert "supersecret-12345" in serialized
     assert "$ENV:" not in serialized
+
+
+# ─── instrument_provider subclass assembly ─────────────────────────────────────
+#
+# NT's ``BinanceDataClientConfig.instrument_provider`` field is *declared* as the
+# base ``InstrumentProviderConfig`` (adapters/binance/config.py:72), so msgspec
+# decodes a TOML ``instrument_provider`` dict against the base class and rejects
+# venue-specific fields like ``query_commission_rates`` with a ValidationError at
+# ``node.build()``. The fix lives in the config-assembly glue: when an
+# ``instrument_provider`` section carries a ``path`` pointing at the concrete
+# subclass FQN, we construct the whole venue client config as a NT *instance*
+# (provider subclass already built), which NT's
+# ``TradingNodeConfig._parse_client_config`` (live/config.py:342) passes through
+# untouched (verified in venv 1.227.0: ``parsed is client`` is True). No
+# ``path`` → unchanged dict passthrough, so venues without venue-specific
+# provider fields are unaffected.
+
+_BINANCE_IP_PATH = "nautilus_trader.adapters.binance.config:BinanceInstrumentProviderConfig"
+_BINANCE_DC_PATH = "nautilus_trader.adapters.binance.config:BinanceDataClientConfig"
+_BINANCE_EXEC_PATH = "nautilus_trader.adapters.binance.config:BinanceExecClientConfig"
+
+
+def _binance_provider_toml(
+    *,
+    mode: str = "live",
+    provider_path: str | None = _BINANCE_IP_PATH,
+) -> str:
+    """A strategy TOML whose BINANCE data client carries a venue-specific
+    ``instrument_provider`` (``query_commission_rates`` + ``load_ids``).
+
+    ``provider_path`` controls the ``path`` hint on the provider section:
+    a value enables the subclass upgrade; ``None`` omits it (legacy dict
+    passthrough). ``mode`` flips between the live and sandbox assembly paths.
+    """
+
+    provider_path_line = f'path = "{provider_path}"\n' if provider_path else ""
+    return textwrap.dedent(
+        f"""
+        [strategy]
+        id = "OI-001"
+        trader_id = "TINO-001"
+        mode = "{mode}"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [factories.data]
+        BINANCE = "nautilus_trader.adapters.binance.factories:BinanceLiveDataClientFactory"
+
+        [factories.exec]
+        BINANCE = "nautilus_trader.adapters.binance.factories:BinanceLiveExecClientFactory"
+
+        [data_clients.BINANCE]
+        path = "{_BINANCE_DC_PATH}"
+        [data_clients.BINANCE.config]
+        api_key = "$ENV:BINANCE_API_KEY"
+        api_secret = "$ENV:BINANCE_API_SECRET"
+        [data_clients.BINANCE.config.instrument_provider]
+        {provider_path_line}query_commission_rates = true
+        load_ids = ["DOGEUSDT-PERP.BINANCE", "BTCUSDT-PERP.BINANCE"]
+
+        [exec_clients.BINANCE]
+        path = "{_BINANCE_EXEC_PATH}"
+        [exec_clients.BINANCE.config]
+        api_key = "$ENV:BINANCE_API_KEY"
+        api_secret = "$ENV:BINANCE_API_SECRET"
+        """,
+    ).strip()
+
+
+@pytest.fixture(autouse=True)
+def _binance_keys(monkeypatch) -> None:
+    # NT validates that API key strings exist when constructing the config.
+    monkeypatch.setenv("BINANCE_API_KEY", "binance-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "binance-secret")
+
+
+def test_data_client_provider_path_builds_subclass_instance(tmp_path: Path) -> None:
+    """A provider section with ``path`` must yield a constructed NT subclass instance.
+
+    This is the crux: the venue client config comes back as a
+    ``BinanceDataClientConfig`` *instance* (not a dict), and its
+    ``.instrument_provider`` is the ``BinanceInstrumentProviderConfig`` subclass
+    carrying ``query_commission_rates`` — the field that crashed msgspec base-class
+    decoding. ``load_ids`` are real ``InstrumentId`` objects, not strings (we do
+    the str→InstrumentId conversion NT's dec_hook would otherwise do).
+    """
+
+    from nautilus_trader.adapters.binance.config import (
+        BinanceDataClientConfig,
+        BinanceInstrumentProviderConfig,
+    )
+    from nautilus_trader.model.identifiers import InstrumentId
+
+    from tinohelm.config import build_data_clients
+
+    path = tmp_path / "oi.toml"
+    path.write_text(_binance_provider_toml())
+    file = TinoStrategyFile.load(path)
+
+    clients = build_data_clients(file)
+    dc = clients["BINANCE"]
+    assert isinstance(dc, BinanceDataClientConfig)
+    assert isinstance(dc.instrument_provider, BinanceInstrumentProviderConfig)
+    assert dc.instrument_provider.query_commission_rates is True
+    assert dc.instrument_provider.load_ids == frozenset(
+        {
+            InstrumentId.from_str("DOGEUSDT-PERP.BINANCE"),
+            InstrumentId.from_str("BTCUSDT-PERP.BINANCE"),
+        },
+    )
+
+
+def test_provider_instance_passes_through_nt_parse_unchanged(tmp_path: Path) -> None:
+    """Regression guard + NT-upgrade canary: the constructed instance must survive
+    NT's ``_parse_client_config`` untouched.
+
+    NT routes a constructed ``LiveDataClientConfig`` instance through岔路1 —
+    returned as-is, zero decoding (live/config.py:347-351). Asserting
+    ``parsed is dc`` pins the dict-vs-instance success point: if a future NT
+    changes instance passthrough, this breaks loudly here rather than at a pod's
+    ``node.build()``.
+    """
+
+    from nautilus_trader.live.config import LiveDataClientConfig, TradingNodeConfig
+
+    from tinohelm.config import build_data_clients
+
+    path = tmp_path / "oi.toml"
+    path.write_text(_binance_provider_toml())
+    file = TinoStrategyFile.load(path)
+
+    dc = build_data_clients(file)["BINANCE"]
+    parsed = TradingNodeConfig._parse_client_config(dc, LiveDataClientConfig)
+    assert parsed is dc
+    assert parsed.instrument_provider.query_commission_rates is True
+
+
+def test_data_client_without_provider_path_stays_dict(tmp_path: Path) -> None:
+    """No ``path`` on the provider section → unchanged dict passthrough.
+
+    Venues with no venue-specific provider fields (the common case) must be
+    untouched: NT decodes their provider dict against the base class as before.
+    The upgrade is purely additive — only a ``path`` hint opts in. ``$ENV:`` refs
+    are still expanded in the passthrough dict.
+    """
+
+    from tinohelm.config import build_data_clients
+
+    path = tmp_path / "plain.toml"
+    path.write_text(_binance_provider_toml(provider_path=None))
+    file = TinoStrategyFile.load(path)
+
+    dc = build_data_clients(file)["BINANCE"]
+    assert isinstance(dc, dict)
+    serialized = repr(dc)
+    assert "binance-key" in serialized  # $ENV expanded
+    assert "$ENV:" not in serialized
+
+
+def test_sandbox_exec_client_receives_data_clients_provider(tmp_path: Path) -> None:
+    """Sandbox path: the provider declared under ``data_clients`` must flow into
+    the ``SandboxExecutionClientConfig`` instance.
+
+    This also fixes a pre-existing blind spot: ``build_exec_clients`` used to read
+    ``instrument_provider`` from the *exec_clients* section, where it never lives
+    (the universe's single source of truth is the data_clients section), so the
+    sandbox sim never received the per-symbol commission provider. The sandbox
+    venue is now a constructed ``SandboxExecutionClientConfig`` instance whose
+    ``.instrument_provider`` is the Binance subclass with
+    ``query_commission_rates``.
+    """
+
+    from nautilus_trader.adapters.binance.config import BinanceInstrumentProviderConfig
+    from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
+
+    from tinohelm.config import build_exec_clients
+
+    path = tmp_path / "oi-sandbox.toml"
+    path.write_text(_binance_provider_toml(mode="sandbox"))
+    file = TinoStrategyFile.load(path)
+    assert file.mode == "sandbox"
+
+    clients = build_exec_clients(file)
+    sb = clients["BINANCE"]
+    assert isinstance(sb, SandboxExecutionClientConfig)
+    assert isinstance(sb.instrument_provider, BinanceInstrumentProviderConfig)
+    assert sb.instrument_provider.query_commission_rates is True
+
+
+def test_provider_path_pointing_at_non_provider_raises(tmp_path: Path) -> None:
+    """A ``path`` that does not resolve to an ``InstrumentProviderConfig`` subclass
+    must fail loudly, naming the path.
+
+    This locks the zero-hardcoded-venue-table contract: every venue goes through
+    the same resolve-and-validate path, with an ``issubclass`` guard mirroring how
+    the runner validates factory class paths. A typo'd or wrong FQN crashes at
+    assembly with a clear message, not at an opaque NT decode.
+    """
+
+    from tinohelm.config import build_data_clients
+
+    bogus = "nautilus_trader.model.identifiers:InstrumentId"  # real class, wrong base
+    path = tmp_path / "bogus.toml"
+    path.write_text(_binance_provider_toml(provider_path=bogus))
+    file = TinoStrategyFile.load(path)
+
+    with pytest.raises(TypeError, match=bogus):
+        build_data_clients(file)
