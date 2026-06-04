@@ -74,3 +74,26 @@ def control_stream_key(strategy_id: str) -> str:
     """
 
     return f"tinohelm:control:{strategy_id}"
+
+
+def event_stream_key(trader_id: str, *, streams_prefix: str = "stream") -> str:
+    """Redis stream key a strategy pod writes its outbound events to.
+
+    This must reproduce NT's ``RedisMessageBusDatabase`` key layout *exactly* —
+    the notifier lists this literal key in its ``MessageBusConfig.external_streams``
+    so NT's stream task ``XREAD``s it (NT does no key globbing — see
+    ``msgbus.rs`` ``stream_messages`` / ``xread_options``; a ``*`` here would
+    never match). The Rust ``get_stream_key`` (msgbus core ``mod.rs``) joins
+    ``trader-{trader_id}`` + ``{streams_prefix}`` with ``:`` (``REDIS_DELIMITER``)
+    when ``use_trader_prefix`` + ``use_trader_id`` are on (TinoHelm's defaults,
+    see ``config.build_message_bus_config``) and ``use_instance_id`` is off.
+
+    This is the **aggregate** key used when ``stream_per_topic = false``: the pod
+    funnels every outbound event into this single stream. With
+    ``stream_per_topic = true`` NT instead appends ``:{topic}`` per message,
+    which is unenumerable up front (account_id / signal-name suffixes are only
+    known at runtime) — that's why strategy pods run with ``stream_per_topic =
+    false`` so the notifier can name one stable key per pod.
+    """
+
+    return f"trader-{trader_id}:{streams_prefix}"

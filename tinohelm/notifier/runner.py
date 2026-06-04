@@ -33,6 +33,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from datetime import time as dtime
 from typing import Any
@@ -44,7 +45,7 @@ from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.config import ActorConfig
 from nautilus_trader.live.node import TradingNode
 
-from tinohelm import COMMAND_TOPIC_PREFIX, control_stream_key
+from tinohelm import COMMAND_TOPIC_PREFIX, control_stream_key, event_stream_key
 from tinohelm.config import TinoNotifierFile, build_notifier_node_config
 from tinohelm.notifier.handlers import envelope_for, render_embed
 from tinohelm.strategy_runner import ANNOUNCE_STREAM, TINO_PROTOCOL_VERSION
@@ -296,6 +297,76 @@ def load_announce_history(redis_client: Any) -> tuple[dict[str, str], str]:
             mode.decode() if isinstance(mode, bytes) else str(mode)
         )
     return registry, last_id
+
+
+def load_trader_ids(redis_client: Any) -> set[str]:
+    """Replay :data:`ANNOUNCE_STREAM` and collect every pod's ``trader_id``.
+
+    The notifier consumes strategy events by listing each pod's NT event
+    stream in its own ``MessageBusConfig.external_streams`` (see
+    :func:`build_external_streams`). NT keys those streams by *trader_id*, not
+    strategy_id, so we recover the set of trader_ids that have ever announced.
+
+    Pre-versioned announces (before ``trader_id`` was added to the envelope)
+    simply contribute nothing — they're skipped, not crashed on, so an old pod
+    in the history doesn't break notifier startup.
+    """
+
+    trader_ids: set[str] = set()
+    for _entry_id, fields in redis_client.xrange(ANNOUNCE_STREAM):
+        tid = fields.get(b"trader_id")
+        if tid is None:
+            continue
+        trader_ids.add(tid.decode() if isinstance(tid, bytes) else str(tid))
+    return trader_ids
+
+
+def build_external_streams(trader_ids: Iterable[str]) -> list[str]:
+    """Turn announced trader_ids into the literal NT event-stream keys to XREAD.
+
+    NT does **no** key globbing on ``external_streams`` (its Rust stream task
+    issues a plain ``XREAD`` per key — see ``msgbus.rs``), so each entry must be
+    a complete key, not a ``trader-*:stream`` pattern. We delegate the exact key
+    layout to :func:`tinohelm.event_stream_key` (single source of truth, pinned
+    to NT's ``get_stream_key``) so this stays correct if NT changes the layout.
+
+    Sorted + de-duplicated so the resulting list is deterministic (stable logs,
+    stable test assertions) regardless of announce ordering.
+    """
+
+    return sorted({event_stream_key(tid) for tid in trader_ids})
+
+
+def register_streaming_types(msgbus: Any) -> list[type]:
+    """Whitelist the NT event types the notifier accepts off the external stream.
+
+    NT gates external-stream replay twice: the stream task only runs when
+    ``external_streams`` is non-empty (handled by :func:`build_external_streams`),
+    and *then* every deserialized message must pass
+    ``MessageBus.is_streaming_type(type(msg))`` — anything not registered via
+    ``add_streaming_type`` is silently dropped (``live/node.py`` ``publish_bus_message``).
+    A notifier has no data client, so NT's only auto-registration path
+    (``DataEngine`` registering external ``DataType``s) never fires for it; we
+    must register the event types ourselves or the notifier receives nothing
+    even with a correct ``external_streams``.
+
+    Types are pulled by reflection from NT's public ``model.events.__all__`` and
+    ``common.events.__all__`` rather than hard-coded, so an NT upgrade that adds
+    or renames an event class is picked up automatically (schema-tolerant, no
+    version pin). Returns the registered classes for logging/testing.
+    """
+
+    from nautilus_trader.common import events as common_events
+    from nautilus_trader.model import events as model_events
+
+    registered: list[type] = []
+    for module in (model_events, common_events):
+        for name in getattr(module, "__all__", ()):
+            obj = getattr(module, name, None)
+            if isinstance(obj, type):
+                msgbus.add_streaming_type(obj)
+                registered.append(obj)
+    return registered
 
 
 # ─── notifier actor ──────────────────────────────────────────────────────────
@@ -603,9 +674,7 @@ def _build_discord_client(
         # Fan-out the publishes in parallel: each ``_publish`` is a Redis
         # XADD round-trip, and N targets sequentially would mean the slowest
         # pod gets N*RTT into its 120s budget instead of 1*RTT.
-        await asyncio.gather(
-            *(asyncio.to_thread(_publish, sid, "report") for sid in targets)
-        )
+        await asyncio.gather(*(asyncio.to_thread(_publish, sid, "report") for sid in targets))
 
         try:
             done = await asyncio.wait_for(
@@ -663,7 +732,9 @@ def _build_discord_client(
         name="positions",
         description="Snapshot current positions (one strategy or all visible from this channel)",
     )
-    @discord.app_commands.describe(strategy="Strategy ID; omit to fan-out to every visible strategy")
+    @discord.app_commands.describe(
+        strategy="Strategy ID; omit to fan-out to every visible strategy"
+    )
     async def positions_cmd(
         interaction: discord.Interaction,
         strategy: str | None = None,
@@ -674,7 +745,9 @@ def _build_discord_client(
         name="pnl",
         description="Account PnL summary — realized / unrealized / net exposure per venue",
     )
-    @discord.app_commands.describe(strategy="Strategy ID; omit to fan-out to every visible strategy")
+    @discord.app_commands.describe(
+        strategy="Strategy ID; omit to fan-out to every visible strategy"
+    )
     async def pnl_cmd(
         interaction: discord.Interaction,
         strategy: str | None = None,
@@ -744,8 +817,7 @@ def _build_discord_client(
                 return
             synced_once = True
             logger.info(
-                f"synced {len(synced)} slash command(s) "
-                f"(guild={guild_id or 'global'})",
+                f"synced {len(synced)} slash command(s) (guild={guild_id or 'global'})",
             )
         logger.info(
             f"discord bot ready as {client.user} "
@@ -963,15 +1035,27 @@ def main(argv: list[str] | None = None) -> int:
     apply_fallback_scan(redis_client, registry)
     logger.info(f"notifier startup: known strategies = {registry}")
 
-    # NT msgbus subscribes via XREAD on stream-prefix patterns; keep the
-    # explicit list empty (NT auto-derives from streams_prefix + topic
-    # patterns). Users can pin extra streams under [notifier].external_streams.
+    # The notifier has no data/exec clients of its own — it only listens. To
+    # actually receive a pod's events it must (1) list that pod's NT event
+    # stream as an external stream so NT spins up its XREAD task, and (2)
+    # register the event types so they survive ``is_streaming_type`` replay
+    # gating (both done below). NT does no key globbing, so each pod needs a
+    # literal stream key, built from the trader_ids recovered from announce.
+    # Operators can still pin extra keys under [notifier].external_streams.
+    discovered = build_external_streams(load_trader_ids(redis_client))
     extra = notifier_cfg.raw.get("notifier", {}).get("external_streams") or []
-    external_streams = list(extra)
+    external_streams = sorted({*discovered, *extra})
+    logger.info(f"notifier listening to external streams: {external_streams}")
 
     config = build_notifier_node_config(notifier_cfg, external_streams=external_streams)
     node = TradingNode(config=config)
     node.build()
+
+    # Whitelist NT event types for external-stream replay. Without this, NT's
+    # publish_bus_message drops every message whose type wasn't registered —
+    # even with a correct external_streams the notifier would stay silent.
+    registered = register_streaming_types(node.kernel.msgbus)
+    logger.info(f"notifier registered {len(registered)} streaming event types")
 
     loop = node.kernel.loop
     # Forwarder is built first with a None client so /positions can hold a
