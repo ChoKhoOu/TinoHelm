@@ -16,10 +16,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.cache.config import CacheConfig
 from nautilus_trader.common.config import (
     DatabaseConfig,
     ImportableActorConfig,
+    InstrumentProviderConfig,
     LoggingConfig,
     MessageBusConfig,
 )
@@ -29,7 +31,7 @@ from nautilus_trader.live.config import (
     LiveRiskEngineConfig,
     TradingNodeConfig,
 )
-from nautilus_trader.model.identifiers import TraderId
+from nautilus_trader.model.identifiers import InstrumentId, TraderId
 from nautilus_trader.trading.config import ImportableStrategyConfig
 
 DEFAULT_STREAMS_PREFIX = "stream"
@@ -346,47 +348,85 @@ def build_actor_imports(file: TinoStrategyFile) -> list[ImportableActorConfig]:
 
 
 def build_data_clients(file: TinoStrategyFile) -> dict[str, Any]:
-    """Pass venue ``data_clients`` straight through (dict form NT accepts)."""
+    """Pass venue ``data_clients`` through, upgrading venue-specific providers.
+
+    Default behaviour is unchanged: each venue's ``{"path": ..., "config": {...}}``
+    dict goes straight to NT, which decodes it via ``_parse_client_config``
+    (``live/config.py:359`` → ``ImportableConfig``). But NT types
+    ``instrument_provider`` as the *base* ``InstrumentProviderConfig``
+    (``adapters/binance/config.py:72``), so a venue-specific provider field like
+    ``query_commission_rates`` makes msgspec reject the dict with
+    ``ValidationError`` at ``node.build()``.
+
+    The fix: when the provider section carries a ``path`` FQN (see
+    :func:`_build_instrument_provider`), we construct the whole venue config as a
+    NT *instance* — provider subclass already built — which NT passes through
+    untouched (``live/config.py:347-351``, ``parsed is client`` verified on NT
+    1.227.0). No ``path`` → unchanged dict passthrough, so venues without
+    venue-specific provider fields are entirely unaffected (purely additive).
+    """
 
     clients: dict[str, Any] = {}
     for venue, payload in file.raw.get("data_clients", {}).items():
-        clients[venue] = _resolve_env_refs(payload)
+        resolved = _resolve_env_refs(payload)
+        clients[venue] = _upgrade_client_config(resolved)
     return clients
 
 
 def build_exec_clients(file: TinoStrategyFile) -> dict[str, Any]:
-    """In sandbox mode, route every venue through ``SandboxExecutionClientConfig``."""
+    """In sandbox mode, route every venue through ``SandboxExecutionClientConfig``.
+
+    Live mode mirrors :func:`build_data_clients`: a venue whose exec client
+    carries a provider with a ``path`` is upgraded to an instance the same way
+    (the base-class decode hazard applies to exec clients too); everything else
+    passes through as a dict.
+
+    Sandbox mode builds a ``SandboxExecutionClientConfig`` *instance* per venue
+    (NT passes constructed instances through untouched, verified on 1.227.0). Its
+    ``instrument_provider`` is taken from the **data_clients** section — the
+    universe's single source of truth — not from ``exec_clients``: the sim needs
+    the same per-symbol commission provider the live data client uses, and the
+    ``exec_clients`` section never declares one. (The previous code read
+    ``payload.get("instrument_provider")`` off the exec_clients payload, where it
+    never lives, so the sandbox sim silently ran without it.)
+    """
 
     raw_clients = file.raw.get("exec_clients", {})
     if file.mode == "live":
-        return {venue: _resolve_env_refs(payload) for venue, payload in raw_clients.items()}
+        return {
+            venue: _upgrade_client_config(_resolve_env_refs(payload))
+            for venue, payload in raw_clients.items()
+        }
 
     sandbox_section = file.raw.get("sandbox", {})
     sandbox_clients: dict[str, Any] = {}
     for venue, payload in raw_clients.items():
-        sandbox_clients[venue] = {
-            "path": "nautilus_trader.adapters.sandbox.config:SandboxExecutionClientConfig",
-            "config": {
-                "venue": venue,
-                "starting_balances": sandbox_section.get(
-                    "starting_balances",
-                    payload.get("starting_balances", ["100000 USDT"]),
-                ),
-                "base_currency": sandbox_section.get("base_currency"),
-                "oms_type": sandbox_section.get("oms_type", "NETTING"),
-                "account_type": sandbox_section.get("account_type", "MARGIN"),
-                "book_type": sandbox_section.get("book_type", "L1_MBP"),
-                "default_leverage": sandbox_section.get("default_leverage", 1.0),
-                # Execution-matching knobs (NT defaults bar_execution/trade_execution/
-                # use_reduce_only all True). Passed through so a bar-signal strategy fed
-                # by a quote-only feeder can set trade_execution=false (avoid the
-                # "Skipping stale trade" flood) — generic, any sandbox strategy benefits.
-                "bar_execution": sandbox_section.get("bar_execution", True),
-                "trade_execution": sandbox_section.get("trade_execution", True),
-                "use_reduce_only": sandbox_section.get("use_reduce_only", True),
-                "instrument_provider": payload.get("instrument_provider"),
-            },
+        kwargs: dict[str, Any] = {
+            "venue": venue,
+            "starting_balances": sandbox_section.get(
+                "starting_balances",
+                payload.get("starting_balances", ["100000 USDT"]),
+            ),
+            "base_currency": sandbox_section.get("base_currency"),
+            "oms_type": sandbox_section.get("oms_type", "NETTING"),
+            "account_type": sandbox_section.get("account_type", "MARGIN"),
+            "book_type": sandbox_section.get("book_type", "L1_MBP"),
+            "default_leverage": sandbox_section.get("default_leverage", 1.0),
+            # Execution-matching knobs (NT defaults bar_execution/trade_execution/
+            # use_reduce_only all True). Passed through so a bar-signal strategy fed
+            # by a quote-only feeder can set trade_execution=false (avoid the
+            # "Skipping stale trade" flood) — generic, any sandbox strategy benefits.
+            "bar_execution": sandbox_section.get("bar_execution", True),
+            "trade_execution": sandbox_section.get("trade_execution", True),
+            "use_reduce_only": sandbox_section.get("use_reduce_only", True),
         }
+        # Only override NT's default base provider when the data_clients section
+        # actually declares a venue-specific one (with a ``path``); otherwise let
+        # NT supply its own default InstrumentProviderConfig.
+        provider = _data_client_provider(file, venue)
+        if provider is not None:
+            kwargs["instrument_provider"] = provider
+        sandbox_clients[venue] = SandboxExecutionClientConfig(**kwargs)
     return sandbox_clients
 
 
@@ -482,6 +522,109 @@ def _database_config_from_url(redis_url: str) -> DatabaseConfig:
         password=parsed.password,
         ssl=parsed.scheme == "rediss",
     )
+
+
+def _load_config_cls(class_path: str) -> type:
+    """Import an NT config class via ``"pkg.mod:Class"`` notation.
+
+    Same mechanism :func:`tinohelm.strategy_runner._load_factory` uses for
+    factory FQNs — we don't invent a second resolver. The venue→subclass mapping
+    is expressed entirely as a ``path`` string in TOML, so there is no hardcoded
+    ``if venue == "BINANCE"`` branch and no NT version coupling: NT relocating a
+    subclass only touches the TOML, never this code.
+    """
+
+    if ":" not in class_path:
+        raise ValueError(f"config class must be in 'pkg.mod:Class' form, got {class_path!r}")
+    mod_name, cls_name = class_path.split(":", 1)
+    mod = __import__(mod_name, fromlist=[cls_name])
+    return getattr(mod, cls_name)
+
+
+def _build_instrument_provider(section: Any) -> InstrumentProviderConfig | Any:
+    """Upgrade an ``instrument_provider`` TOML section to a venue-specific instance.
+
+    NT declares ``BinanceDataClientConfig.instrument_provider`` as the base
+    ``InstrumentProviderConfig`` (``adapters/binance/config.py:72``), so msgspec
+    rejects venue-specific fields like ``query_commission_rates`` when decoding a
+    dict. When the section names the concrete subclass via a ``path`` FQN, we
+    build it directly in Python — bypassing msgspec decoding entirely — and feed
+    the resulting instance into the venue client config.
+
+    * **With ``path``** → resolve the subclass, convert ``load_ids`` strings to
+      ``frozenset[InstrumentId]`` (the same str→``InstrumentId`` mapping NT's
+      msgspec ``dec_hook`` would do, done in Python instead so nothing is lost),
+      and construct the subclass instance. A ``path`` that doesn't resolve to an
+      ``InstrumentProviderConfig`` subclass raises ``TypeError`` naming the path
+      (mirrors the runner's ``issubclass`` guard on factory paths).
+    * **Without ``path``** → return the section unchanged for NT to decode against
+      the base class (the common case for venues with no venue-specific fields).
+
+    The ``section`` is expected to already have ``$ENV:`` refs expanded.
+    """
+
+    if not isinstance(section, dict) or "path" not in section:
+        return section
+
+    kwargs = {k: v for k, v in section.items() if k != "path"}
+    cls = _load_config_cls(section["path"])
+    if not issubclass(cls, InstrumentProviderConfig):
+        raise TypeError(
+            f"instrument_provider path {section['path']!r} does not resolve to an "
+            f"InstrumentProviderConfig subclass (got {cls!r})",
+        )
+    if "load_ids" in kwargs and kwargs["load_ids"] is not None:
+        kwargs["load_ids"] = frozenset(InstrumentId.from_str(s) for s in kwargs["load_ids"])
+    return cls(**kwargs)
+
+
+def _upgrade_client_config(resolved: Any) -> Any:
+    """Upgrade a ``{"path": ..., "config": {...}}`` venue dict to an NT instance.
+
+    Only kicks in when the nested ``instrument_provider`` section carries a
+    ``path`` (see :func:`_build_instrument_provider`). In that case we must
+    construct the *whole* venue client config as an instance — embedding a
+    constructed provider inside a dict would be re-encoded by msgspec and broken
+    (``live/config.py:358``). The constructed instance is what NT's
+    ``_parse_client_config`` passes through untouched (岔路1, ``live/config.py:347``).
+
+    No ``path`` on the provider → return ``resolved`` unchanged (dict passthrough).
+    """
+
+    if not isinstance(resolved, dict):
+        return resolved
+    config_section = resolved.get("config")
+    if not isinstance(config_section, dict):
+        return resolved
+    provider_section = config_section.get("instrument_provider")
+    if not isinstance(provider_section, dict) or "path" not in provider_section:
+        return resolved
+
+    client_cls = _load_config_cls(resolved["path"])
+    config_kwargs = {k: v for k, v in config_section.items() if k != "instrument_provider"}
+    config_kwargs["instrument_provider"] = _build_instrument_provider(provider_section)
+    return client_cls(**config_kwargs)
+
+
+def _data_client_provider(file: TinoStrategyFile, venue: str) -> InstrumentProviderConfig | None:
+    """Build the venue's instrument provider instance from its data_clients section.
+
+    Sandbox exec clients reuse the live data client's provider so the in-process
+    sim charges the same per-symbol commissions. Returns ``None`` when the venue
+    has no data_clients entry or its provider section lacks a ``path`` (so the
+    caller can fall back to NT's default base provider).
+    """
+
+    payload = file.raw.get("data_clients", {}).get(venue)
+    if not isinstance(payload, dict):
+        return None
+    config_section = _resolve_env_refs(payload).get("config")
+    if not isinstance(config_section, dict):
+        return None
+    provider_section = config_section.get("instrument_provider")
+    if not isinstance(provider_section, dict) or "path" not in provider_section:
+        return None
+    return _build_instrument_provider(provider_section)
 
 
 def _resolve_env_refs(payload: Any) -> Any:
