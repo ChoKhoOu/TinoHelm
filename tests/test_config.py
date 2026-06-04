@@ -481,6 +481,7 @@ def _binance_provider_toml(
     *,
     mode: str = "live",
     provider_path: str | None = _BINANCE_IP_PATH,
+    environment: str = "LIVE",
 ) -> str:
     """A strategy TOML whose BINANCE data client carries a venue-specific
     ``instrument_provider`` (``query_commission_rates`` + ``load_ids``).
@@ -488,6 +489,10 @@ def _binance_provider_toml(
     ``provider_path`` controls the ``path`` hint on the provider section:
     a value enables the subclass upgrade; ``None`` omits it (legacy dict
     passthrough). ``mode`` flips between the live and sandbox assembly paths.
+    ``environment`` is written verbatim into both the data and exec client
+    ``config`` sections (TinoHelm just transports the string; NT's
+    ``BinanceEnvironment`` enum coerces and routes it) — used to exercise the
+    DEMO switch where both clients route to ``demo-fapi``.
     """
 
     provider_path_line = f'path = "{provider_path}"\n' if provider_path else ""
@@ -514,7 +519,7 @@ def _binance_provider_toml(
         api_key = "$ENV:BINANCE_API_KEY"
         api_secret = "$ENV:BINANCE_API_SECRET"
         account_type = "USDT_FUTURES"
-        environment = "LIVE"
+        environment = "{environment}"
         [data_clients.BINANCE.config.instrument_provider]
         {provider_path_line}query_commission_rates = true
         load_ids = ["DOGEUSDT-PERP.BINANCE", "BTCUSDT-PERP.BINANCE"]
@@ -525,7 +530,7 @@ def _binance_provider_toml(
         api_key = "$ENV:BINANCE_API_KEY"
         api_secret = "$ENV:BINANCE_API_SECRET"
         account_type = "USDT_FUTURES"
-        environment = "LIVE"
+        environment = "{environment}"
         """,
     ).strip()
 
@@ -678,3 +683,172 @@ def test_provider_path_pointing_at_non_provider_raises(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError, match=bogus):
         build_data_clients(file)
+
+
+# ─── Binance DEMO (testnet real matching) assembly ─────────────────────────────
+#
+# Switching oi_momentum_lowvol from sandbox to Binance DEMO is a config-assembly
+# concern, not a code one: NT's BinanceEnvironment enum already has a DEMO member
+# (adapters/binance/common/enums.py) that routes the HTTP/WS base URLs to
+# demo-fapi.binance.com (adapters/binance/common/urls.py), and DEMO runs the same
+# real BinanceLiveExecClientFactory / BinanceFuturesExecutionClient as LIVE — only
+# the base_url differs. So in TinoHelm terms DEMO == ``mode=live`` (real exec
+# client + reconciliation ON + load_state/save_state ON) plus a TOML
+# ``environment="DEMO"`` string that TinoHelm only TRANSPORTS — it never reads,
+# imports, or branches on the value (NT owns the routing). These tests pin that
+# the existing mode=live assembly already produces the DEMO shape, with NT doing
+# the enum coercion. They never start a real TradingNode and never reach the
+# network: NT's decode is simulated via ``msgspec.convert`` exactly as
+# ``TradingNodeConfig._parse_client_config`` would do at ``node.build()``.
+#
+# Note the asymmetric seam (design §2.1 vs §2.2): the exec_clients section has no
+# ``instrument_provider.path`` so ``_upgrade_client_config`` returns the dict
+# untouched (config.py:617) — NT decodes it later. The data_clients section DOES
+# carry a provider ``path`` so it is upgraded to a constructed instance here. Both
+# end up coercing ``environment="DEMO"`` through msgspec, but via different paths,
+# so the exec and data cases are asserted separately (test 1 vs test 4).
+
+
+def test_demo_exec_client_is_real_binance_pointed_at_demo(tmp_path: Path) -> None:
+    """mode=live + environment=DEMO assembles a real BinanceExecClientConfig (NOT
+    sandbox) whose environment coerces to ``BinanceEnvironment.DEMO``.
+
+    This is the core contract of the sandbox→DEMO switch: the exec client must be
+    the *real* one (so orders hit the demo venue and reconciliation has a backend
+    to replay), and its ``environment`` must route to demo-fapi. The exec section
+    carries no ``instrument_provider.path``, so ``build_exec_clients`` hands NT the
+    untouched dict (design §2.1); we simulate NT's decode with ``msgspec.convert``
+    — the same coercion ``_parse_client_config`` performs at ``node.build()`` —
+    and assert the enum lands on DEMO with ``is_live`` False (DEMO is a non-live
+    environment per enums.py, yet still a real exec client). The mirror image of
+    ``test_sandbox_mode_swaps_every_venue_exec_client``: there the venue becomes
+    Sandbox, here it must NOT.
+    """
+
+    import msgspec
+    from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
+    from nautilus_trader.adapters.binance.config import BinanceExecClientConfig
+    from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
+
+    from tinohelm.config import build_exec_clients
+
+    path = tmp_path / "oi-demo.toml"
+    path.write_text(_binance_provider_toml(mode="live", environment="DEMO"))
+    file = TinoStrategyFile.load(path)
+    assert file.mode == "live"
+
+    exec_client = build_exec_clients(file)["BINANCE"]
+    # mode=live must NOT swap the venue to the in-process sim.
+    assert not isinstance(exec_client, SandboxExecutionClientConfig)
+    assert "Sandbox" not in repr(exec_client)
+    # exec section has no provider path → dict passthrough (design §2.1).
+    assert isinstance(exec_client, dict)
+    assert exec_client["config"]["environment"] == "DEMO"
+
+    # Simulate NT's decode (no TradingNode, no network): the string coerces to the
+    # DEMO enum member, and the config type is the real exec client.
+    decoded = msgspec.convert(exec_client["config"], type=BinanceExecClientConfig)
+    assert decoded.environment is BinanceEnvironment.DEMO
+    assert decoded.environment.is_live is False  # DEMO is a non-live environment
+
+
+def test_demo_runs_with_reconciliation_on(tmp_path: Path) -> None:
+    """mode=live (which DEMO reuses) keeps continuous reconciliation ON.
+
+    Reconciliation against the demo venue is the whole point of the switch —
+    it is what replays the real account/positions/orders after a pod restart
+    (the sandbox in-process sim returns empty reports, so it cannot). The gate
+    is ``reconciliation = mode != "sandbox"`` (config.py), so DEMO=mode=live
+    yields True with no extra logic — the exact opposite of
+    ``test_exec_engine_disables_reconciliation_in_sandbox``.
+    """
+
+    from tinohelm.config import build_exec_engine_config
+
+    path = tmp_path / "oi-demo.toml"
+    path.write_text(_binance_provider_toml(mode="live", environment="DEMO"))
+    file = TinoStrategyFile.load(path)
+
+    exec_cfg = build_exec_engine_config(file.raw, mode=file.mode)
+    assert exec_cfg.reconciliation is True
+
+
+def test_demo_persists_state_when_toml_flips_ephemeral_switches(tmp_path: Path) -> None:
+    """DEMO must persist state across restarts: flush_on_start OFF, load/save ON.
+
+    Sandbox is ephemeral (``[cache] flush_on_start=true`` + ``[recovery]
+    enabled=false``); DEMO inverts both so the Redis cache survives a restart for
+    reconciliation to replay against, and the Trader's own state (in-flight
+    bracket tracking etc.) reloads. These are pure TOML reads —
+    ``build_cache_config`` maps ``flush_on_start`` straight through, and
+    ``[recovery].enabled`` drives ``load_state``/``save_state`` — so the switch is
+    config-only, no code. flush_on_start=true would make NT skip ``load_cache()``
+    and actively flush the cache on boot, which directly defeats recovery.
+    """
+
+    from tinohelm.config import build_cache_config, build_trading_node_config
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "OI-DEMO-001"
+        trader_id = "TINO-001"
+        mode = "live"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [cache]
+        flush_on_start = false
+
+        [recovery]
+        enabled = true
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "oi-demo-persist.toml"
+    path.write_text(body)
+    file = TinoStrategyFile.load(path)
+
+    cache_cfg = build_cache_config(file.raw)
+    assert cache_cfg is not None
+    assert cache_cfg.flush_on_start is False
+
+    node_cfg = build_trading_node_config(file)
+    assert node_cfg.load_state is True
+    assert node_cfg.save_state is True
+
+
+def test_demo_data_client_coerces_environment_via_instance_upgrade(tmp_path: Path) -> None:
+    """data side: environment=DEMO coerces through the instance-upgrade path.
+
+    Unlike exec (dict passthrough), the data_clients section carries an
+    ``instrument_provider.path``, so ``build_data_clients`` builds a constructed
+    ``BinanceDataClientConfig`` instance (design §2.2/§2.3). The data side MUST
+    also switch to DEMO: NT's ``load_ids_async`` unconditionally hits the signed
+    ``/fapi/v2/account`` endpoint, so leaving data on LIVE with the demo key (or a
+    mainnet key the switch is meant to escape) would fail at universe load. Assert
+    the constructed instance's ``environment`` is the DEMO enum and the provider
+    subclass survives the upgrade.
+    """
+
+    from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
+    from nautilus_trader.adapters.binance.config import (
+        BinanceDataClientConfig,
+        BinanceInstrumentProviderConfig,
+    )
+
+    from tinohelm.config import build_data_clients
+
+    path = tmp_path / "oi-demo.toml"
+    path.write_text(_binance_provider_toml(mode="live", environment="DEMO"))
+    file = TinoStrategyFile.load(path)
+
+    dc = build_data_clients(file)["BINANCE"]
+    assert isinstance(dc, BinanceDataClientConfig)
+    assert dc.environment is BinanceEnvironment.DEMO
+    assert isinstance(dc.instrument_provider, BinanceInstrumentProviderConfig)
+    assert dc.instrument_provider.query_commission_rates is True
