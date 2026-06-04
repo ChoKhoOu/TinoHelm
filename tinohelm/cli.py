@@ -5,18 +5,19 @@ from inside any container without booting a TradingNode). It speaks the same
 Redis Streams wire format that NT's ``RedisMessageBusDatabase`` uses on the
 read side: ``XADD <stream_key> * topic <topic> payload <bytes>``.
 
-Decoded by ``crates/infrastructure/src/redis/msgbus.rs::decode_bus_message``
-and replayed onto the in-process msgbus, so the strategy pod's BridgeActor
-sees the command via the normal subscribe path.
+``payload`` is **msgpack-encoded** (via ``msgspec.msgpack``) so that NT's
+``MsgSpecSerializer.deserialize`` (which uses msgpack by default) can decode it
+in ``publish_bus_message``. The decoded dict is then published onto the in-process
+msgbus where BridgeActor's wildcard subscription delivers it to ``_on_command``.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
 
+import msgspec.msgpack
 import redis
 import typer
 
@@ -35,7 +36,7 @@ def _publish_command(strategy_id: str, action: str, *, reason: str | None = None
     payload: dict[str, str | int] = {"action": action, "ts": int(time.time() * 1_000)}
     if reason:
         payload["reason"] = reason
-    body = json.dumps(payload).encode("utf-8")
+    body = msgspec.msgpack.encode(payload)
 
     stream_key = control_stream_key(strategy_id)
     _client().xadd(stream_key, {"topic": topic, "payload": body})

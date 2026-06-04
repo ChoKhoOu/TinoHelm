@@ -163,6 +163,10 @@ def main(argv: list[str] | None = None) -> int:
     node = TradingNode(config=config)
     _register_factories(node, file)
     node.build()
+    # Control-stream commands deserialize to plain dict (no NT type tag). Without
+    # this, NT's publish_bus_message gate (is_streaming_type) silently drops them
+    # even after the msgpack encoding fix in cli.py.
+    node.kernel.msgbus.add_streaming_type(dict)
     _install_signal_handlers(node)
 
     try:

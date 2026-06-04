@@ -8,7 +8,7 @@ wire shape is exercised end-to-end without a real broker.
 
 from __future__ import annotations
 
-import json
+import msgspec.msgpack
 
 import fakeredis
 import pytest
@@ -44,20 +44,20 @@ def test_cli_pause_writes_to_control_stream(fake_redis: fakeredis.FakeRedis) -> 
     assert len(entries) == 1
 
 
-def test_payload_field_is_decodable_json_with_action_and_ts(
+def test_payload_field_is_msgpack_with_action_and_ts(
     fake_redis: fakeredis.FakeRedis,
 ) -> None:
-    """The ``payload`` field must be JSON bytes BridgeActor can decode.
+    """The ``payload`` field must be msgpack bytes NT's MsgSpecSerializer can decode.
 
-    BridgeActor.._extract_action calls ``json.loads(payload)`` and reads
-    ``action``. We also enshrine ``ts`` (millis since epoch) so any future
-    operator can audit the order events fired in.
+    NT's external-stream replay calls ``msgbus_serializer.deserialize(payload)``
+    with msgpack encoding (the TinoHelm default). We also enshrine ``ts``
+    (millis since epoch) so operators can audit when a command was issued.
     """
 
     runner.invoke(cli_mod.app, ["resume", "--strategy-id", "FOO-001"])
 
     entry = _entries(fake_redis, control_stream_key("FOO-001"))[0]
-    payload = json.loads(entry[b"payload"])
+    payload = msgspec.msgpack.decode(entry[b"payload"])
     assert payload["action"] == "resume"
     assert isinstance(payload["ts"], int)
     assert payload["ts"] > 0
@@ -86,7 +86,7 @@ def test_cli_positions_with_strategy_id_targets_one_pod(
 
     assert result.exit_code == 0, result.output
     entry = _entries(fake_redis, control_stream_key("FOO-001"))[0]
-    payload = json.loads(entry[b"payload"])
+    payload = msgspec.msgpack.decode(entry[b"payload"])
     assert payload["action"] == "report"
     assert entry[b"topic"] == b"commands.tinohelm.FOO-001.report"
 
@@ -141,6 +141,6 @@ def test_flatten_carries_reason_when_provided(fake_redis: fakeredis.FakeRedis) -
 
     assert result.exit_code == 0, result.output
     entry = _entries(fake_redis, control_stream_key("FOO-001"))[0]
-    payload = json.loads(entry[b"payload"])
+    payload = msgspec.msgpack.decode(entry[b"payload"])
     assert payload["action"] == "flatten"
     assert payload["reason"] == "EOD-circuit-breaker"

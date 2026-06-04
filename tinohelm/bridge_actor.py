@@ -152,9 +152,14 @@ class BridgeActor(Actor):
 
         We accept three on-wire shapes (msgbus delivers what publishers wrote):
 
-        * ``str``        — entire body is the action ("pause").
-        * ``bytes``      — JSON body, e.g. ``{"action": "pause"}``.
-        * ``dict``       — already decoded JSON body.
+        * ``dict``  — primary path: CLI writes msgpack, NT's MsgSpecSerializer
+                      decodes it to a plain dict before publish_bus_message
+                      delivers it here (no ``type`` tag → deserialize returns
+                      obj_dict as-is).
+        * ``bytes`` — fallback for callers that publish raw bytes directly onto
+                      the msgbus (e.g. test helpers or future custom publishers).
+                      Attempted as JSON first for backwards-compat.
+        * ``str``   — action name written directly, e.g. ``"pause"``.
 
         Topic-based action extraction is also supported if the publisher uses
         the convention ``{command_topic}.{action}`` and an empty payload — we
