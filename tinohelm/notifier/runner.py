@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import msgspec.msgpack as _msgpack
 import logging
 import os
 import signal
@@ -612,7 +613,7 @@ def _build_discord_client(
             body["reason"] = reason
         redis_client.xadd(
             control_stream_key(strategy),
-            {"topic": topic, "payload": json.dumps(body).encode("utf-8")},
+            {"topic": topic, "payload": _msgpack.encode(body)},
         )
         return topic
 
