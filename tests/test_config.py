@@ -114,10 +114,11 @@ def test_strategy_pod_load_and_save_state_default_on(strategy_toml: Path) -> Non
     assert config.save_state is True
 
 
-def test_exec_engine_enables_continuous_reconciliation_by_default(
+def test_exec_engine_enables_continuous_reconciliation_in_live(
     strategy_toml: Path,
+    monkeypatch,
 ) -> None:
-    """A strategy pod should keep reconciling against the venue after startup.
+    """A LIVE strategy pod should keep reconciling against the venue after startup.
 
     NT ships continuous reconciliation polling OFF (open_check_interval_secs /
     position_check_interval_secs default to None — startup-only reconciliation).
@@ -134,14 +135,43 @@ def test_exec_engine_enables_continuous_reconciliation_by_default(
     they play no part in restart recovery — opt in per-strategy via [exec].
     """
 
+    monkeypatch.setenv("TINO_MODE", "live")  # fixture toml is sandbox; force live
     file = TinoStrategyFile.load(strategy_toml)
     config = build_trading_node_config(file)
     exec_cfg = config.exec_engine
     assert exec_cfg is not None
-    assert exec_cfg.reconciliation is True  # NT default, asserted to pin it
+    assert exec_cfg.reconciliation is True  # live default ON (NT default), asserted to pin it
     assert exec_cfg.open_check_interval_secs == 10.0
     assert exec_cfg.position_check_interval_secs == 60.0
     # Snapshots are an opt-in audit feature, not a restart-recovery one.
+    assert exec_cfg.snapshot_orders is False
+    assert exec_cfg.snapshot_positions is False
+
+
+def test_exec_engine_disables_reconciliation_in_sandbox(
+    strategy_toml: Path,
+    monkeypatch,
+) -> None:
+    """A SANDBOX pod must DISABLE startup reconciliation (mode-aware override).
+
+    The SandboxExecutionClient runs an in-process simulated exchange that returns
+    EMPTY mass-status reports — startup reconciliation against it produces spurious
+    position-discrepancy noise and reconciles nothing of value. So whenever
+    ``mode == "sandbox"`` build_exec_engine_config forces ``reconciliation=False``
+    (NT's own sandbox examples do the same). The polling intervals / snapshot
+    defaults are unchanged — only the reconciliation gate flips by mode.
+    """
+
+    monkeypatch.setenv("TINO_MODE", "sandbox")  # fixture toml is already sandbox; pin it
+    file = TinoStrategyFile.load(strategy_toml)
+    assert file.mode == "sandbox"
+    config = build_trading_node_config(file)
+    exec_cfg = config.exec_engine
+    assert exec_cfg is not None
+    assert exec_cfg.reconciliation is False  # sandbox override
+    # Everything else stays at TinoHelm's defaults regardless of mode.
+    assert exec_cfg.open_check_interval_secs == 10.0
+    assert exec_cfg.position_check_interval_secs == 60.0
     assert exec_cfg.snapshot_orders is False
     assert exec_cfg.snapshot_positions is False
 

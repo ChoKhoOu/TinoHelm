@@ -55,14 +55,39 @@ class BridgeActor(Actor):
 
     def __init__(self, config: BridgeActorConfig) -> None:
         super().__init__(config=config)
-        self._strategy_id = StrategyId(config.strategy_id)
+        # config.strategy_id is the TinoHelm CONTROL-PLANE handle (= the strategy
+        # directory name, e.g. "oi_momentum_lowvol"), NOT the NT StrategyId. NT derives
+        # its own id as "{StrategyClassName}-{order_id_tag}" (config.py:build_strategy_imports),
+        # which is what trader.{start,stop,market_exit}_strategy require. We do NOT try to
+        # reconstruct that here (the control handle may not even be a valid StrategyId — it
+        # has no hyphen) — instead we resolve the live StrategyId from the trader at command
+        # time (this pod runs exactly one strategy). Resolved lazily so __init__ stays free
+        # of trader access (not yet registered).
+        self._control_handle = config.strategy_id
+        self._strategy_id: StrategyId | None = None
         self._command_topic = config.command_topic
         # The wildcard pattern NT's switchboard expects.
         self._pattern = f"{config.command_topic}.*"
 
+    def _resolve_strategy_id(self) -> StrategyId | None:
+        """Return this pod's live NT StrategyId (cached). None if no strategy is loaded."""
+        if self._strategy_id is None:
+            ids = self.trader.strategy_ids()
+            if not ids:
+                return None
+            if len(ids) > 1:
+                # TinoHelm pods are 1:1 with a strategy; warn but act on the first.
+                self.log.warning(
+                    f"BridgeActor: expected 1 strategy in this pod, found {len(ids)}: {ids}",
+                )
+            self._strategy_id = ids[0]
+        return self._strategy_id
+
     def on_start(self) -> None:
         self.msgbus.subscribe(topic=self._pattern, handler=self._on_command)
-        self.log.info(f"BridgeActor subscribed to {self._pattern}")
+        self.log.info(
+            f"BridgeActor subscribed to {self._pattern} (control handle={self._control_handle})",
+        )
 
     def on_stop(self) -> None:
         self.msgbus.unsubscribe(topic=self._pattern, handler=self._on_command)
@@ -78,8 +103,22 @@ class BridgeActor(Actor):
             self.log.warning(f"BridgeActor: unknown action {action!r}")
             return
 
+        # ``ping`` is a liveness probe: it only confirms this BridgeActor is alive
+        # and processing commands, so it MUST be independent of whether a strategy
+        # is loaded (a pod whose strategy failed to load is still a live bridge we
+        # want to be able to reach). Ack it before resolving the strategy id — the
+        # remaining actions all act on a strategy and genuinely need ``sid``.
+        if action == "ping":
+            self.log.info("BridgeActor: ping ack")
+            return
+
         trader = self.trader
-        sid = self._strategy_id
+        sid = self._resolve_strategy_id()
+        if sid is None:
+            self.log.error(
+                f"BridgeActor: no strategy loaded in this pod; cannot apply {action!r}",
+            )
+            return
         if action == "pause":
             self.log.info(f"BridgeActor: pause -> trader.stop_strategy({sid})")
             trader.stop_strategy(sid)
@@ -89,8 +128,6 @@ class BridgeActor(Actor):
         elif action == "flatten":
             self.log.info(f"BridgeActor: flatten -> trader.market_exit_strategy({sid})")
             trader.market_exit_strategy(sid)
-        elif action == "ping":
-            self.log.info("BridgeActor: ping ack")
         elif action == "report":
             # Local import keeps bridge_actor importable from CLI contexts that
             # don't ship pandas (the CLI never instantiates this class).

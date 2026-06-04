@@ -15,6 +15,9 @@ dependencies = [
   "typer>=0.12,<1",
   "uvloop>=0.19; sys_platform != 'win32'",
   "python-dotenv>=1.0,<2",
+  # OIFeedActor reaches Binance's OI/funding REST endpoints (no native NT support)
+  # from a worker thread via run_in_executor → blocking httpx client.
+  "httpx>=0.27,<1",
 ]
 
 [project.optional-dependencies]
