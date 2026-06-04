@@ -203,6 +203,26 @@ def test_ping_acks_without_calling_trader() -> None:
     assert any("ping" in entry for entry in log.infos)
 
 
+def test_ping_acks_even_when_no_strategy_loaded() -> None:
+    """Ping must ack independently of strategy state.
+
+    Regression: ping is a liveness probe — a pod whose strategy failed to load
+    is still a live bridge we want to reach. Previously the handler resolved the
+    strategy id before dispatching, so ``trader.strategy_ids()`` empty made ping
+    log a spurious "no strategy loaded" error and return WITHOUT acking. Ping is
+    now handled before the resolve, so it acks regardless.
+    """
+
+    trader = TraderSpy(loaded_ids=[])
+    actor, _trader, log = _bridge_actor_under_test("foo", trader=trader)
+
+    actor._on_command(json.dumps({"action": "ping"}).encode("utf-8"))
+
+    assert trader.calls == []
+    assert any("ping" in entry for entry in log.infos)
+    assert not any("no strategy loaded" in e for e in log.errors)
+
+
 def test_report_action_publishes_positions_snapshot() -> None:
     """Report envelope → trader.generate_positions_report() + msgbus.publish.
 

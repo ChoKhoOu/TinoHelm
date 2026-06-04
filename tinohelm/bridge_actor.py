@@ -103,6 +103,15 @@ class BridgeActor(Actor):
             self.log.warning(f"BridgeActor: unknown action {action!r}")
             return
 
+        # ``ping`` is a liveness probe: it only confirms this BridgeActor is alive
+        # and processing commands, so it MUST be independent of whether a strategy
+        # is loaded (a pod whose strategy failed to load is still a live bridge we
+        # want to be able to reach). Ack it before resolving the strategy id — the
+        # remaining actions all act on a strategy and genuinely need ``sid``.
+        if action == "ping":
+            self.log.info("BridgeActor: ping ack")
+            return
+
         trader = self.trader
         sid = self._resolve_strategy_id()
         if sid is None:
@@ -119,8 +128,6 @@ class BridgeActor(Actor):
         elif action == "flatten":
             self.log.info(f"BridgeActor: flatten -> trader.market_exit_strategy({sid})")
             trader.market_exit_strategy(sid)
-        elif action == "ping":
-            self.log.info("BridgeActor: ping ack")
         elif action == "report":
             # Local import keeps bridge_actor importable from CLI contexts that
             # don't ship pandas (the CLI never instantiates this class).
