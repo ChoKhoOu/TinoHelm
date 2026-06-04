@@ -12,6 +12,7 @@ up an NT TradingNode:
 
 from __future__ import annotations
 
+import msgspec.msgpack
 import pandas as pd
 
 from tinohelm.reporting_actor import (
@@ -19,6 +20,10 @@ from tinohelm.reporting_actor import (
     ReportingActorConfig,
     build_positions_report_payload,
 )
+
+
+def _decode(body: bytes) -> dict:
+    return msgspec.msgpack.decode(body)
 
 
 class _FakeTrader:
@@ -37,8 +42,9 @@ class _FakeTrader:
 
 def test_build_positions_report_payload_emits_csv_envelope() -> None:
     """The helper must return ``(topic, body)`` where the topic routes to
-    logging via NotifierActor's ``tinohelm.*`` rule, and the body is a dict
-    that survives msgpack encoding (i.e. plain Python types — no DataFrame).
+    logging via NotifierActor's ``tinohelm.*`` rule, and the body is msgpack
+    bytes (bytes is in NT's _EXTERNAL_PUBLISHABLE_TYPES; dict is not, so
+    dict payloads are silently dropped before reaching the Redis stream).
 
     We pin the topic name explicitly: ``tinohelm.report.positions``. Anything
     else risks landing in the trade-flow channels.
@@ -54,12 +60,13 @@ def test_build_positions_report_payload_emits_csv_envelope() -> None:
     )
 
     topic, body = build_positions_report_payload(_FakeTrader(df), strategy_id="FOO-001")
+    decoded = _decode(body)
 
     assert topic == "tinohelm.report.positions"
-    assert body["strategy_id"] == "FOO-001"
-    assert body["row_count"] == 2
-    assert "csv" in body
-    assert "strategy_id,side,quantity,realized_pnl" in body["csv"]
+    assert decoded["strategy_id"] == "FOO-001"
+    assert decoded["row_count"] == 2
+    assert "csv" in decoded
+    assert "strategy_id,side,quantity,realized_pnl" in decoded["csv"]
 
 
 class _FakePortfolio:
@@ -106,9 +113,10 @@ def test_payload_includes_account_pnl_when_portfolio_supplied() -> None:
         portfolio=portfolio,
         venues=["BYBIT"],
     )
+    decoded = _decode(body)
 
     assert topic == "tinohelm.report.positions"
-    pnl = body["account_pnl"]
+    pnl = decoded["account_pnl"]
     # Keyed by venue, then by currency code; values are stringified Money.
     assert pnl["BYBIT"]["realized"]["USDT"] == "120.50 USDT"
     assert pnl["BYBIT"]["unrealized"]["USDT"] == "-15.00 USDT"
@@ -139,11 +147,12 @@ def test_payload_degrades_when_portfolio_raises() -> None:
         portfolio=_BoomPortfolio(),
         venues=["BYBIT"],
     )
+    decoded = _decode(body)
 
     # Table survived; PnL block silently omitted.
-    assert body["row_count"] == 1
-    assert "csv" in body
-    assert "account_pnl" not in body
+    assert decoded["row_count"] == 1
+    assert "csv" in decoded
+    assert "account_pnl" not in decoded
 
 
 def test_payload_omits_account_pnl_without_portfolio() -> None:
@@ -154,7 +163,7 @@ def test_payload_omits_account_pnl_without_portfolio() -> None:
 
     df = pd.DataFrame({"strategy_id": ["FOO-001"], "side": ["LONG"]})
     _topic, body = build_positions_report_payload(_FakeTrader(df), strategy_id="FOO-001")
-    assert "account_pnl" not in body
+    assert "account_pnl" not in _decode(body)
 
 
 def test_build_positions_report_payload_handles_empty_frame() -> None:
@@ -166,10 +175,11 @@ def test_build_positions_report_payload_handles_empty_frame() -> None:
         _FakeTrader(pd.DataFrame()),
         strategy_id="GHOST-001",
     )
+    decoded = _decode(body)
 
     assert topic == "tinohelm.report.positions"
-    assert body["row_count"] == 0
-    assert body["csv"] == ""
+    assert decoded["row_count"] == 0
+    assert decoded["csv"] == ""
 
 
 def test_reporting_actor_config_defaults() -> None:
@@ -192,10 +202,10 @@ def test_reporting_actor_publishes_on_timer_event() -> None:
     df = pd.DataFrame({"strategy_id": ["FOO-001"], "side": ["LONG"]})
     fake_trader = _FakeTrader(df)
 
-    published: list[tuple[str, dict]] = []
+    published: list[tuple[str, bytes]] = []
 
     class _FakeMsgbus:
-        def publish(self, *, topic: str, msg: dict) -> None:
+        def publish(self, *, topic: str, msg: bytes) -> None:
             published.append((topic, msg))
 
     actor = ReportingActor(ReportingActorConfig(strategy_id="FOO-001"))
@@ -204,6 +214,7 @@ def test_reporting_actor_publishes_on_timer_event() -> None:
 
     assert len(published) == 1
     topic, msg = published[0]
+    decoded = _decode(msg)
     assert topic == "tinohelm.report.positions"
-    assert msg["strategy_id"] == "FOO-001"
-    assert msg["row_count"] == 1
+    assert decoded["strategy_id"] == "FOO-001"
+    assert decoded["row_count"] == 1

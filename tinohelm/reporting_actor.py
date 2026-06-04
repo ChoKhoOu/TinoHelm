@@ -18,6 +18,8 @@ import contextlib
 from datetime import timedelta
 from typing import Any
 
+import msgspec.msgpack
+
 from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.config import ActorConfig
 
@@ -113,7 +115,10 @@ def build_positions_report_payload(
         # drop the block, keep the positions table.
         with contextlib.suppress(Exception):
             body["account_pnl"] = _account_pnl(portfolio, venues)
-    return REPORT_TOPIC_POSITIONS, body
+    # Encode as bytes so NT's _EXTERNAL_PUBLISHABLE_TYPES whitelist (which
+    # includes bytes but not dict) allows this message to be written to the
+    # Redis stream. The notifier's parse_payload handles bytes → msgpack decode.
+    return REPORT_TOPIC_POSITIONS, msgspec.msgpack.encode(body)
 
 
 def _account_pnl(portfolio: Any, venues: list[Any]) -> dict[str, Any]:

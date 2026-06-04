@@ -1056,7 +1056,11 @@ def main(argv: list[str] | None = None) -> int:
     # publish_bus_message drops every message whose type wasn't registered —
     # even with a correct external_streams the notifier would stay silent.
     registered = register_streaming_types(node.kernel.msgbus)
-    logger.info(f"notifier registered {len(registered)} streaming event types")
+    # TinoHelm publishes positions/pnl reports as msgpack bytes (bytes is in
+    # NT's _EXTERNAL_PUBLISHABLE_TYPES; dict is not). Register bytes so the
+    # is_streaming_type gate passes them through to NotifierActor.
+    node.kernel.msgbus.add_streaming_type(bytes)
+    logger.info(f"notifier registered {len(registered)} streaming event types + bytes")
 
     loop = node.kernel.loop
     # Forwarder is built first with a None client so /positions can hold a

@@ -245,9 +245,12 @@ def test_report_action_publishes_positions_snapshot() -> None:
     assert len(msgbus.publishes) == 1
     topic, msg = msgbus.publishes[0]
     assert topic == "tinohelm.report.positions"
+    # body is msgpack bytes (bytes is in NT's _EXTERNAL_PUBLISHABLE_TYPES)
+    import msgspec.msgpack
+    decoded = msgspec.msgpack.decode(msg)
     # report uses str(<resolved NT StrategyId>), not the control handle.
-    assert msg["strategy_id"] == "OIMomentum-foo"
-    assert msg["row_count"] == 1
+    assert decoded["strategy_id"] == "OIMomentum-foo"
+    assert decoded["row_count"] == 1
 
 
 def test_unknown_action_is_dropped_with_warning() -> None:
