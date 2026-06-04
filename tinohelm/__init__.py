@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import msgspec.msgpack
+
 if TYPE_CHECKING:
     from nautilus_trader.common.component import MessageBus
 
@@ -58,7 +60,10 @@ def publish_message(
     payload: dict[str, str | int] = {"title": title, "text": text}
     if color is not None:
         payload["color"] = color
-    msgbus.publish(topic=CUSTOM_MESSAGE_TOPIC, msg=payload)
+    # Encode as bytes: NT's _EXTERNAL_PUBLISHABLE_TYPES includes bytes but not
+    # dict, so a plain dict would be silently dropped before reaching the Redis
+    # stream and never arrive at the notifier.
+    msgbus.publish(topic=CUSTOM_MESSAGE_TOPIC, msg=msgspec.msgpack.encode(payload))
 
 
 def control_stream_key(strategy_id: str) -> str:
