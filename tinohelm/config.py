@@ -243,7 +243,7 @@ def build_exec_engine_config(raw: dict[str, Any], *, mode: str = "live") -> Live
 
     section = raw.get("exec", {})
     return LiveExecEngineConfig(
-        reconciliation=False if mode == "sandbox" else True,
+        reconciliation=mode != "sandbox",
         open_check_interval_secs=_optional_interval(section.get("open_check_interval_secs", 10.0)),
         position_check_interval_secs=_optional_interval(
             section.get("position_check_interval_secs", 60.0),
