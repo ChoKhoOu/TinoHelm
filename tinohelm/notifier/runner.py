@@ -708,12 +708,45 @@ def _build_discord_client(
             lines.append(f"`{key}` XLEN={length}")
         await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
 
+    # on_ready fires again on every gateway reconnect; syncing the command
+    # tree each time would burn Discord's (strict) sync rate limit, so do it
+    # exactly once per process.
+    synced_once = False
+
     @client.event
     async def on_ready() -> None:
-        if guild_obj:
-            await tree.sync(guild=guild_obj)
-        else:
-            await tree.sync()
+        nonlocal synced_once
+        if not synced_once:
+            try:
+                if guild_obj:
+                    # Every command is declared globally (@tree.command with no
+                    # guild=). A guild sync only pushes commands registered to
+                    # that guild — so without copying the globals in first, the
+                    # bot would sync an EMPTY set and show no commands at all.
+                    # copy_global_to makes them appear in the guild *instantly*
+                    # instead of waiting up to ~1h for global propagation.
+                    tree.copy_global_to(guild=guild_obj)
+                    synced = await tree.sync(guild=guild_obj)
+                else:
+                    # Global sync works in every guild the bot is in, but takes
+                    # up to ~1h to propagate. Set DISCORD_GUILD_ID for the
+                    # instant, guild-scoped path above.
+                    synced = await tree.sync()
+            except discord.Forbidden:
+                logger.error(
+                    "command sync rejected (Forbidden): the bot is missing the "
+                    "'applications.commands' scope — re-invite it with BOTH "
+                    "'bot' and 'applications.commands' scopes selected.",
+                )
+                return
+            except discord.HTTPException as exc:
+                logger.error(f"command sync failed: {exc}")
+                return
+            synced_once = True
+            logger.info(
+                f"synced {len(synced)} slash command(s) "
+                f"(guild={guild_id or 'global'})",
+            )
         logger.info(
             f"discord bot ready as {client.user} "
             f"sandbox={sandbox_channel_id} live={live_channel_id} "
