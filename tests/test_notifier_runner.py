@@ -653,3 +653,258 @@ def test_notifier_actor_routes_account_event_to_logging() -> None:
     handler(json.dumps({"account_id": "BYBIT-001", "balances": []}).encode())
 
     assert sent == [33]
+
+
+# ─── standalone event-stream consumer ──────────────────────────────────────────
+#
+# These cover the announce-independent XREAD loop that owns the notifier's event
+# intake — the fix for the silent-notifier bug (external_streams froze to [] when
+# the announce stream was empty at boot, so the notifier received zero pod events).
+
+
+def test_should_forward_topic_keeps_trade_flow_and_drops_market_data() -> None:
+    """The loop reads the entry's plaintext topic and must keep trade-flow /
+    operational topics while dropping the ~99% ``data.quotes.*`` market-data
+    volume *before* paying the msgpack decode cost. A live pod funnels every
+    tick into the same stream, so a leaky filter would swamp Discord.
+    """
+
+    from tinohelm.notifier.runner import should_forward_topic
+
+    assert should_forward_topic("events.order.BINANCE")
+    assert should_forward_topic("events.position.BINANCE")
+    assert should_forward_topic("events.account.BINANCE")
+    assert should_forward_topic("events.system.DataEngine")
+    assert should_forward_topic("data.SignalCustom")
+    assert should_forward_topic("tinohelm.report.positions")
+    # Market data — the noise we must never forward.
+    assert not should_forward_topic("data.quotes.BINANCE.LABUSDT-PERP")
+    assert not should_forward_topic("data.trades.BINANCE.SOLUSDT-PERP")
+    assert not should_forward_topic("data.bars.BINANCE.DOGEUSDT-PERP")
+
+
+def test_discover_event_streams_globs_only_aggregate_stream_keys() -> None:
+    """``trader-*:stream`` must match each pod's single aggregate stream but
+    NOT the per-topic streams (``...:stream:events.*``) or the cache keys NT
+    also writes (``...:instruments:*`` / ``...:currencies:*`` / ``...:accounts:*``).
+    Mis-matching those would feed the loop garbage keys to XREAD.
+    """
+
+    import fakeredis
+
+    from tinohelm.notifier.runner import discover_event_streams
+
+    rc = fakeredis.FakeRedis(decode_responses=False)
+    # Aggregate event streams — these are what we want.
+    rc.xadd("trader-TINO-001:stream", {"topic": "events.system.X", "payload": b"\x80"})
+    rc.xadd("trader-TINO-002:stream", {"topic": "events.system.X", "payload": b"\x80"})
+    # Cache keys NT writes under the same trader prefix — must NOT match.
+    rc.xadd("trader-TINO-001:instruments:BTCUSDT-PERP.BINANCE", {"x": b"1"})
+    rc.set("trader-TINO-001:currencies:USDT", b"1")
+    rc.xadd("trader-TINO-001:accounts:BINANCE-001", {"x": b"1"})
+
+    assert discover_event_streams(rc) == [
+        "trader-TINO-001:stream",
+        "trader-TINO-002:stream",
+    ]
+
+
+def test_discover_event_streams_skips_nt_owned_keys() -> None:
+    """Keys NT already XREADs via external_streams (operator-pinned) must be
+    excluded so the standalone loop never double-delivers the same event.
+    """
+
+    import fakeredis
+
+    from tinohelm.notifier.runner import discover_event_streams
+
+    rc = fakeredis.FakeRedis(decode_responses=False)
+    rc.xadd("trader-TINO-001:stream", {"topic": "events.system.X", "payload": b"\x80"})
+    rc.xadd("trader-TINO-002:stream", {"topic": "events.system.X", "payload": b"\x80"})
+
+    out = discover_event_streams(rc, skip={"trader-TINO-001:stream"})
+    assert out == ["trader-TINO-002:stream"]
+
+
+def test_route_event_uses_resolved_topic_for_strategy_channel() -> None:
+    """Unlike the in-process actor (which only sees the subscribe *pattern*),
+    the loop has the real topic from the Redis entry. An order event for a live
+    strategy must route to the live channel via the body's ``strategy_id``.
+    """
+
+    import msgspec.msgpack
+
+    from tinohelm.notifier.runner import route_event
+
+    payload = msgspec.msgpack.encode({"strategy_id": "FOO-001", "type": "OrderFilled"})
+    env, channel_id = route_event(
+        "events.order.BINANCE",
+        payload,
+        {"FOO-001": "live"},
+        sandbox_channel_id=11,
+        live_channel_id=22,
+        logging_channel_id=33,
+    )
+    assert channel_id == 22
+    assert env.body["strategy_id"] == "FOO-001"
+
+
+def test_route_event_forces_tinohelm_namespace_to_logging() -> None:
+    """``tinohelm.*`` carries a strategy_id (a positions report belongs to one
+    strategy) but is operational chatter — it must land in logging, never the
+    strategy's trade-flow channel.
+    """
+
+    import msgspec.msgpack
+
+    from tinohelm.notifier.runner import route_event
+
+    payload = msgspec.msgpack.encode({"strategy_id": "FOO-001", "row_count": 3})
+    _env, channel_id = route_event(
+        "tinohelm.report.positions",
+        payload,
+        {"FOO-001": "live"},
+        sandbox_channel_id=11,
+        live_channel_id=22,
+        logging_channel_id=33,
+    )
+    assert channel_id == 33
+
+
+def test_forward_stream_entry_drops_market_data_without_enqueue() -> None:
+    """A ``data.quotes.*`` entry must be dropped at the topic gate — the
+    forwarder is never touched (and the payload never decoded).
+    """
+
+    import msgspec.msgpack
+
+    from tinohelm.notifier.runner import _forward_stream_entry
+
+    sent: list[int] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(channel_id)
+
+    fields = {
+        b"topic": b"data.quotes.BINANCE.LABUSDT-PERP",
+        b"payload": msgspec.msgpack.encode({"bid": "1"}),
+    }
+    forwarded = _forward_stream_entry(
+        fields,
+        _FakeForwarder(),
+        {},
+        sandbox_channel_id=11,
+        live_channel_id=22,
+        logging_channel_id=33,
+    )
+    assert forwarded is False
+    assert sent == []
+
+
+def test_forward_stream_entry_forwards_position_event() -> None:
+    """A PositionOpened entry (the exact event the operator was missing) must
+    decode and reach the strategy's channel via the shared router.
+    """
+
+    import msgspec.msgpack
+
+    from tinohelm.notifier.runner import _forward_stream_entry
+
+    sent: list[tuple[Any, int]] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append((env, channel_id))
+
+    fields = {
+        b"topic": b"events.position.BINANCE",
+        b"payload": msgspec.msgpack.encode(
+            {"strategy_id": "FOO-001", "type": "PositionOpened"},
+        ),
+    }
+    forwarded = _forward_stream_entry(
+        fields,
+        _FakeForwarder(),
+        {"FOO-001": "sandbox"},
+        sandbox_channel_id=11,
+        live_channel_id=22,
+        logging_channel_id=33,
+    )
+    assert forwarded is True
+    assert len(sent) == 1
+    env, channel_id = sent[0]
+    assert channel_id == 11  # FOO-001 is sandbox
+    assert env.body["type"] == "PositionOpened"
+
+
+def test_event_stream_loop_delivers_new_pod_events_end_to_end() -> None:
+    """The whole point, exercised against fakeredis: a pod whose stream exists
+    but was never in the announce stream still gets its events delivered.
+
+    We seed the stream with one pre-existing entry (which the loop must SKIP —
+    it starts from the tail), start the loop, write a fresh OrderFilled, and
+    assert it lands on the right channel. This is the regression for
+    'external_streams=[] → notifier silent'.
+    """
+
+    import asyncio
+
+    import fakeredis
+    import msgspec.msgpack
+
+    from tinohelm.notifier.runner import _event_stream_loop
+
+    sent: list[tuple[str, int]] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append((env.topic, channel_id))
+
+    async def _run() -> None:
+        rc = fakeredis.FakeRedis(decode_responses=False)
+        # Pre-existing backlog entry — must be skipped (loop reads from tail).
+        rc.xadd(
+            "trader-FOO-001:stream",
+            {
+                "topic": b"events.order.BINANCE",
+                "payload": msgspec.msgpack.encode(
+                    {"strategy_id": "FOO-001", "type": "OrderAccepted"},
+                ),
+            },
+        )
+        task = asyncio.create_task(
+            _event_stream_loop(
+                rc,
+                _FakeForwarder(),
+                {"FOO-001": "live"},
+                sandbox_channel_id=11,
+                live_channel_id=22,
+                logging_channel_id=33,
+                block_ms=50,
+                rediscover_interval_s=999.0,
+            ),
+        )
+        # Let discovery + tail-cursor seeding happen.
+        await asyncio.sleep(0.2)
+        # A fresh event after the notifier started watching.
+        rc.xadd(
+            "trader-FOO-001:stream",
+            {
+                "topic": b"events.order.BINANCE",
+                "payload": msgspec.msgpack.encode(
+                    {"strategy_id": "FOO-001", "type": "OrderFilled"},
+                ),
+            },
+        )
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+
+    # Exactly the post-watch OrderFilled was delivered, to the live channel.
+    # The pre-existing OrderAccepted backlog entry was skipped.
+    assert ("events.order.BINANCE", 22) in sent
+    assert len(sent) == 1

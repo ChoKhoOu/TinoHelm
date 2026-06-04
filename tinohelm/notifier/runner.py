@@ -27,8 +27,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
-import msgspec.msgpack as _msgpack
 import logging
 import os
 import signal
@@ -40,6 +38,7 @@ from datetime import time as dtime
 from typing import Any
 
 import discord
+import msgspec.msgpack as _msgpack
 import nautilus_trader
 import redis
 from nautilus_trader.common.actor import Actor
@@ -336,6 +335,238 @@ def build_external_streams(trader_ids: Iterable[str]) -> list[str]:
     """
 
     return sorted({event_stream_key(tid) for tid in trader_ids})
+
+
+# ─── standalone event-stream consumer (bypasses NT's static external_streams) ──
+#
+# NT's ``MessageBusConfig.external_streams`` is frozen at TradingNode build time
+# and the notifier derives it from the announce stream. When the announce stream
+# is empty at boot (a Redis restart wiped it while pods kept running) the list is
+# ``[]`` → NT never starts its XREAD task → the notifier receives ZERO pod events
+# and Discord goes silent on every fill/position/order. The functions below let
+# the notifier own its event intake directly, independent of announce and of NT's
+# build-time freeze.
+
+
+# Topic prefixes the notifier actually renders. A strategy pod funnels *every*
+# outbound message into its single ``trader-{id}:stream`` (stream_per_topic=false),
+# which on a live pod is ~99% ``data.quotes.*`` market-data noise. We match the
+# real topic string the Redis entry carries against this allow-list *before*
+# msgpack-decoding the payload, so the expensive decode only runs for events we'd
+# actually forward — the bot isn't swamped by tick volume.
+_FORWARDED_TOPIC_PREFIXES = (
+    "events.order.",
+    "events.position.",
+    "events.account.",
+    "events.system.",
+    "data.Signal",
+    "tinohelm.",
+)
+
+
+def should_forward_topic(topic: str) -> bool:
+    """Cheap plaintext-topic gate, run before decoding a stream entry's payload.
+
+    Mirrors :data:`NotifierActor.SUBSCRIBE_PATTERNS` but matched against the
+    *resolved* topic string the Redis entry carries — NT's in-process
+    ``subscribe`` only ever hands the handler the pattern, never the topic, so
+    this is the one place we get to filter on the real thing.
+    """
+
+    return any(topic.startswith(prefix) for prefix in _FORWARDED_TOPIC_PREFIXES)
+
+
+def route_event(
+    topic: str,
+    payload: Any,
+    registry: dict[str, str],
+    *,
+    sandbox_channel_id: int,
+    live_channel_id: int,
+    logging_channel_id: int,
+) -> tuple[Any, int]:
+    """Turn one ``(topic, payload)`` pair into ``(envelope, channel_id)``.
+
+    The single source of routing truth shared by the in-process
+    :class:`NotifierActor` and the standalone :func:`_event_stream_loop`, so an
+    event lands in the same Discord channel regardless of which path delivered
+    it. ``tinohelm.*`` is forced to the logging channel even though its body
+    carries a ``strategy_id`` — reports/summaries are operational chatter, not
+    trade flow, so they must not leak into a strategy's sandbox/live channel.
+    """
+
+    env = envelope_for(topic, payload)
+    if topic.startswith("tinohelm."):
+        strategy_id = ""
+    else:
+        strategy_id = extract_strategy_id_from_body(env.body) or ""
+    channel_id = route_channel(
+        strategy_id,
+        registry,
+        sandbox=sandbox_channel_id,
+        live=live_channel_id,
+        logging_channel_id=logging_channel_id,
+    )
+    return env, channel_id
+
+
+def discover_event_streams(redis_client: Any, *, skip: set[str] | None = None) -> list[str]:
+    """Glob ``trader-*:stream`` keys directly — decoupled from the announce stream.
+
+    The announce stream is fragile: a Redis restart can wipe it while pods keep
+    running, leaving zero trader_ids to derive streams from (the bug this whole
+    module fixes). NT writes every pod's aggregate event stream under
+    ``trader-{id}:stream`` regardless, so a ``KEYS`` glob finds live pods whether
+    or not their announce survived. The ``*`` matches the whole trader-id segment
+    and the glob anchors on the ``:stream`` suffix, so per-topic keys
+    (``...:stream:events.*``) and the instrument/currency/account caches
+    (``...:instruments:*`` etc.) are not matched. Keys in ``skip`` (those NT
+    itself XREADs via external_streams) are excluded so we never double-deliver.
+    """
+
+    skip = skip or set()
+    out: list[str] = []
+    for key in redis_client.keys("trader-*:stream"):
+        decoded = key.decode() if isinstance(key, bytes) else str(key)
+        if decoded not in skip:
+            out.append(decoded)
+    return sorted(out)
+
+
+def _stream_tail_cursor(redis_client: Any, key: str) -> str:
+    """Last entry id currently in ``key`` — the cursor to start XREAD *after*.
+
+    We deliberately skip the historical backlog (a live pod's stream holds
+    millions of ticks); the notifier only forwards events arriving after it
+    starts watching. Using a concrete last-id (rather than the ``"$"`` sentinel)
+    matters for multi-stream XREAD: ``"$"`` is re-resolved to "current tail" on
+    every call, so an entry that lands between two XREAD calls on a *different*
+    stream would be skipped. A concrete id makes each stream's cursor advance
+    monotonically with no gaps. Returns ``"0"`` for an empty stream so nothing
+    is missed if one ever shows up empty.
+    """
+
+    entries = redis_client.xrevrange(key, count=1)
+    if not entries:
+        return "0"
+    entry_id, _fields = entries[0]
+    return entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
+
+
+def _forward_stream_entry(
+    fields: dict,
+    forwarder: Any,
+    registry: dict[str, str],
+    *,
+    sandbox_channel_id: int,
+    live_channel_id: int,
+    logging_channel_id: int,
+) -> bool:
+    """Decode one Redis stream entry and forward it iff it's a topic we render.
+
+    NT writes each entry as ``{topic: <str>, payload: <msgpack bytes>}`` (see
+    ``crates/infrastructure/src/redis/msgbus.rs::decode_bus_message``). We read
+    the plaintext topic, drop anything outside the forwarded prefixes (market
+    data) *before* touching the payload, then hand the raw payload to the shared
+    router (``envelope_for`` msgpack-decodes the bytes). Returns whether the
+    entry was forwarded — handy for tests and for a coarse "events seen" log.
+    """
+
+    topic_raw = fields.get(b"topic")
+    if topic_raw is None:
+        return False
+    topic = _decode(topic_raw)
+    if not should_forward_topic(topic):
+        return False
+    env, channel_id = route_event(
+        topic,
+        fields.get(b"payload"),
+        registry,
+        sandbox_channel_id=sandbox_channel_id,
+        live_channel_id=live_channel_id,
+        logging_channel_id=logging_channel_id,
+    )
+    forwarder.enqueue(env, channel_id=channel_id)
+    return True
+
+
+async def _event_stream_loop(
+    redis_client: Any,
+    forwarder: Any,
+    registry: dict[str, str],
+    *,
+    sandbox_channel_id: int,
+    live_channel_id: int,
+    logging_channel_id: int,
+    nt_streams: Iterable[str] = (),
+    block_ms: int = 1_000,
+    rediscover_interval_s: float = 30.0,
+) -> None:
+    """Own the notifier's event intake by XREAD-ing pod streams directly.
+
+    The fix for the silent-notifier failure mode (see module note above):
+    discover pod streams by globbing ``trader-*:stream`` (independent of the
+    announce stream), read only entries arriving after we start watching, filter
+    out market-data noise by topic, and route survivors through the same
+    forwarder path as the in-process :class:`NotifierActor` — so delivery is
+    identical whether NT or this loop sourced the event.
+
+    New pods are picked up within ``rediscover_interval_s`` via a re-glob.
+    ``nt_streams`` are keys NT is already consuming via ``external_streams`` (if
+    an operator pinned any); we skip those so events aren't delivered twice.
+    """
+
+    skip = set(nt_streams)
+    cursors: dict[str, str] = {}
+    last_discover = -1.0
+    while True:
+        try:
+            now = asyncio.get_running_loop().time()
+            if last_discover < 0 or now - last_discover >= rediscover_interval_s:
+                discovered = await asyncio.to_thread(
+                    discover_event_streams,
+                    redis_client,
+                    skip=skip,
+                )
+                for key in discovered:
+                    if key not in cursors:
+                        cursors[key] = await asyncio.to_thread(
+                            _stream_tail_cursor,
+                            redis_client,
+                            key,
+                        )
+                        logger.info(f"event-stream loop now watching {key} from {cursors[key]}")
+                last_discover = now
+
+            if not cursors:
+                # No pods up yet — idle a beat, then re-glob.
+                await asyncio.sleep(block_ms / 1_000)
+                continue
+
+            # Bind the cursor snapshot as a default arg, not a closure over the
+            # loop variable (ruff B023) — the thread reads it after the next
+            # iteration may have mutated ``cursors``.
+            snapshot = dict(cursors)
+            response = await asyncio.to_thread(
+                lambda streams=snapshot: redis_client.xread(streams, block=block_ms),
+            )
+            for stream_name, batch in response or []:
+                sname = _decode(stream_name)
+                for entry_id, entry_fields in batch:
+                    cursors[sname] = _decode(entry_id)
+                    _forward_stream_entry(
+                        entry_fields,
+                        forwarder,
+                        registry,
+                        sandbox_channel_id=sandbox_channel_id,
+                        live_channel_id=live_channel_id,
+                        logging_channel_id=logging_channel_id,
+                    )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.error(f"event-stream loop error: {exc}")
+            await asyncio.sleep(1.0)
 
 
 def register_streaming_types(msgbus: Any) -> list[type]:
@@ -1036,17 +1267,18 @@ def main(argv: list[str] | None = None) -> int:
     apply_fallback_scan(redis_client, registry)
     logger.info(f"notifier startup: known strategies = {registry}")
 
-    # The notifier has no data/exec clients of its own — it only listens. To
-    # actually receive a pod's events it must (1) list that pod's NT event
-    # stream as an external stream so NT spins up its XREAD task, and (2)
-    # register the event types so they survive ``is_streaming_type`` replay
-    # gating (both done below). NT does no key globbing, so each pod needs a
-    # literal stream key, built from the trader_ids recovered from announce.
-    # Operators can still pin extra keys under [notifier].external_streams.
-    discovered = build_external_streams(load_trader_ids(redis_client))
-    extra = notifier_cfg.raw.get("notifier", {}).get("external_streams") or []
-    external_streams = sorted({*discovered, *extra})
-    logger.info(f"notifier listening to external streams: {external_streams}")
+    # Event intake is owned by our own XREAD loop (_event_stream_loop), NOT by
+    # NT's external_streams. NT freezes external_streams at build() time and we
+    # used to derive it from the announce stream — but a Redis restart can wipe
+    # announce while pods keep running, leaving external_streams=[] and the
+    # notifier silently receiving zero events. The standalone loop globs
+    # trader-*:stream directly (announce-independent) and picks up new pods on
+    # the fly. We keep ONLY operator-pinned keys on NT's side for backward
+    # compatibility; the loop skips those to avoid double delivery.
+    external_streams = sorted(notifier_cfg.raw.get("notifier", {}).get("external_streams") or [])
+    if external_streams:
+        logger.info(f"notifier: NT external_streams (operator-pinned) = {external_streams}")
+    logger.info("notifier: event intake via standalone XREAD loop (announce-independent)")
 
     config = build_notifier_node_config(notifier_cfg, external_streams=external_streams)
     node = TradingNode(config=config)
@@ -1132,10 +1364,23 @@ def main(argv: list[str] | None = None) -> int:
             logging_channel_id=logging_channel_id,
         ),
     )
+    # The real event pipeline: own XREAD loop over trader-*:stream, independent
+    # of NT's build-time-frozen external_streams and of the announce stream.
+    event_stream_task = loop.create_task(
+        _event_stream_loop(
+            redis_client,
+            forwarder,
+            registry,
+            sandbox_channel_id=sandbox_channel_id,
+            live_channel_id=live_channel_id,
+            logging_channel_id=logging_channel_id,
+            nt_streams=external_streams,
+        ),
+    )
 
     def _handle_sig(signum: int, _frame: Any) -> None:
         logger.info(f"received {signal.Signals(signum).name}")
-        for task in (discord_task, autodiscover_task, summary_task):
+        for task in (discord_task, autodiscover_task, summary_task, event_stream_task):
             if not task.done():
                 task.cancel()
         node.stop()
