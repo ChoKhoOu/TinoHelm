@@ -21,10 +21,13 @@ from pathlib import Path
 import fakeredis
 import pytest
 
+from tinohelm import event_stream_key
 from tinohelm.config import TinoStrategyFile
 from tinohelm.notifier.runner import (
     apply_fallback_scan,
+    build_external_streams,
     load_announce_history,
+    load_trader_ids,
     read_new_announces,
 )
 from tinohelm.strategy_runner import publish_announce
@@ -255,6 +258,69 @@ def test_read_new_announces_returns_only_entries_after_cursor(
     # Second call after no new writes yields empty.
     new_entries, cursor = read_new_announces(redis_client, cursor, block_ms=10)
     assert new_entries == []
+
+
+def test_load_trader_ids_recovers_distinct_traders(tmp_path: Path, redis_client) -> None:
+    """The notifier builds external_streams from announced trader_ids, so it
+    must recover the full set from announce history.
+
+    Two pods sharing one trader_id collapse to a single id (one aggregate
+    stream serves both); distinct trader_ids each surface so the notifier can
+    XREAD every pod's stream.
+    """
+
+    foo = TinoStrategyFile.load(_write_strategy_dir(tmp_path, "FOO-001", "sandbox"))
+    publish_announce(redis_client, foo)  # trader_id = TINO-001
+    publish_announce(redis_client, foo)  # same pod re-announces
+
+    assert load_trader_ids(redis_client) == {"TINO-001"}
+
+
+def test_load_trader_ids_skips_pre_versioned_announces(redis_client) -> None:
+    """A pre-``trader_id`` announce (older pod) contributes nothing rather than
+    crashing notifier startup — backward-compatible like the version fields."""
+
+    redis_client.xadd(ANNOUNCE_STREAM, {"strategy_id": "OLD-001", "mode": "sandbox"})
+    redis_client.xadd(
+        ANNOUNCE_STREAM,
+        {"strategy_id": "NEW-001", "mode": "live", "trader_id": "TINO-NEW"},
+    )
+
+    assert load_trader_ids(redis_client) == {"TINO-NEW"}
+
+
+def test_build_external_streams_emits_literal_aggregate_keys(redis_client) -> None:
+    """external_streams must be complete, de-duped, sorted NT stream keys — NT
+    does no key globbing, so a ``trader-*:stream`` pattern would never match.
+
+    The key shape is owned by :func:`tinohelm.event_stream_key`, pinned to NT's
+    ``get_stream_key`` layout (``trader-<id>:stream``).
+    """
+
+    streams = build_external_streams(["TINO-002", "TINO-001", "TINO-001"])
+
+    assert streams == [event_stream_key("TINO-001"), event_stream_key("TINO-002")]
+    assert streams == ["trader-TINO-001:stream", "trader-TINO-002:stream"]
+    assert all("*" not in s for s in streams)  # literal keys, no globs
+
+
+def test_build_external_streams_empty_when_no_pods() -> None:
+    """No announced pods → empty list, which keeps NT's streaming task off
+    (rather than spinning an XREAD against a non-existent key)."""
+
+    assert build_external_streams([]) == []
+
+
+def test_event_stream_key_matches_nt_layout() -> None:
+    """Pin the aggregate stream-key format the notifier and pod must agree on.
+
+    If this ever drifts from NT's ``RedisMessageBusDatabase`` layout, the
+    notifier silently XREADs the wrong key and receives nothing — so assert the
+    exact bytes, including the ``trader-`` prefix and ``:`` delimiter.
+    """
+
+    assert event_stream_key("TINO-001") == "trader-TINO-001:stream"
+    assert event_stream_key("TINO-001", streams_prefix="evt") == "trader-TINO-001:evt"
 
 
 def test_fallback_scan_picks_up_strategies_missing_from_registry(redis_client) -> None:

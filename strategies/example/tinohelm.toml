@@ -21,7 +21,11 @@ log_every_n = 100
 redis_url = "redis://redis:6379/0"
 encoding = "msgpack"
 streams_prefix = "stream"
-stream_per_topic = true
+# false → events funnel into one aggregate stream (trader-<id>:stream) the
+# notifier can subscribe to with a single literal key (NT external_streams does
+# no globbing). See the notifier runner's build_external_streams / the
+# oi_momentum_lowvol toml for the full rationale.
+stream_per_topic = false
 autotrim_mins = 60
 external_streams = []  # tinohelm:control:EXAMPLE-001 added automatically
 

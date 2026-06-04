@@ -12,7 +12,75 @@ from datetime import UTC
 from datetime import time as dtime
 from typing import Any
 
-from tinohelm.notifier.runner import _parse_hh_mm, strategies_for_channel
+from tinohelm.notifier.runner import (
+    _parse_hh_mm,
+    register_streaming_types,
+    strategies_for_channel,
+)
+
+
+class _MsgbusSpy:
+    """Records add_streaming_type calls without a real TradingNode/msgbus.
+
+    Mirrors NT's ``MessageBus.add_streaming_type`` / ``is_streaming_type`` pair
+    so we can assert the notifier whitelists the right types for replay.
+    """
+
+    def __init__(self) -> None:
+        self.registered: set[type] = set()
+
+    def add_streaming_type(self, type_: type) -> None:
+        self.registered.add(type_)
+
+    def is_streaming_type(self, type_: type) -> bool:
+        return type_ in self.registered
+
+
+def test_register_streaming_types_whitelists_nt_order_and_position_events() -> None:
+    """Without registration, NT's publish_bus_message drops every external
+    event (is_streaming_type → False), so the notifier stays silent even with a
+    correct external_streams. Assert the trade-flow event types get registered.
+    """
+
+    from nautilus_trader.model.events import OrderFilled, PositionOpened
+
+    spy = _MsgbusSpy()
+    registered = register_streaming_types(spy)
+
+    assert OrderFilled in spy.registered
+    assert PositionOpened in spy.registered
+    # is_streaming_type (the gate NT actually checks) now passes for them
+    assert spy.is_streaming_type(OrderFilled)
+    assert spy.is_streaming_type(PositionOpened)
+    assert OrderFilled in registered
+
+
+def test_register_streaming_types_includes_account_and_system_events() -> None:
+    """The logging channel relies on account/system events too (AccountState,
+    ComponentStateChanged); these live in NT's common.events, not model.events,
+    so the reflection must span both modules."""
+
+    from nautilus_trader.common.events import ComponentStateChanged
+    from nautilus_trader.model.events import AccountState
+
+    spy = _MsgbusSpy()
+    register_streaming_types(spy)
+
+    assert AccountState in spy.registered
+    assert ComponentStateChanged in spy.registered
+
+
+def test_register_streaming_types_is_schema_tolerant_reflection() -> None:
+    """Types come from NT's public ``__all__`` by reflection, not a hard-coded
+    list — so an NT upgrade adding/renaming an event class is picked up with no
+    code change (and no version pin). Assert we registered a plausible bulk,
+    and only actual classes (no stray non-type names)."""
+
+    spy = _MsgbusSpy()
+    registered = register_streaming_types(spy)
+
+    assert len(registered) >= 15  # NT exposes ~20+ event classes
+    assert all(isinstance(t, type) for t in registered)
 
 
 def test_parse_hh_mm_returns_utc_time_object() -> None:
@@ -474,8 +542,7 @@ def test_autodiscover_emits_drift_envelope_to_logging_channel() -> None:
     asyncio.run(_run_once())
 
     assert any(
-        env.topic == "tinohelm.protocol_mismatch" and channel_id == 33
-        for env, channel_id in sent
+        env.topic == "tinohelm.protocol_mismatch" and channel_id == 33 for env, channel_id in sent
     )
 
 
