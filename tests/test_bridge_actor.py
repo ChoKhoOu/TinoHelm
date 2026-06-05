@@ -128,7 +128,6 @@ def _bridge_actor_under_test(
     # Mirror what BridgeActor.__init__ does, sans super().__init__():
     actor._control_handle = config.strategy_id  # type: ignore[attr-defined]
     actor._strategy_id = None  # type: ignore[attr-defined]  # resolved lazily from cache
-    actor._command_topic = config.command_topic  # type: ignore[attr-defined]
     actor._pattern = f"{config.command_topic}.*"  # type: ignore[attr-defined]
     trader = trader or TraderSpy()
     cache = cache or CacheSpy()

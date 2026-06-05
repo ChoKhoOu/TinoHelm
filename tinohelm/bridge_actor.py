@@ -78,7 +78,6 @@ class BridgeActor(Controller):
         # of cache access (not yet registered).
         self._control_handle = config.strategy_id
         self._strategy_id: StrategyId | None = None
-        self._command_topic = config.command_topic
         # The wildcard pattern NT's switchboard expects.
         self._pattern = f"{config.command_topic}.*"
 
@@ -169,25 +168,21 @@ class BridgeActor(Controller):
     # ─── parsing ──────────────────────────────────────────────────────────────
 
     def _extract_action(self, message: Any) -> str | None:
-        """Pull the trailing ``.{action}`` from the message envelope.
+        """Read the ``action`` field out of the command payload.
 
         We accept three on-wire shapes (msgbus delivers what publishers wrote):
 
         * ``dict``  — primary path: CLI writes msgpack, NT's MsgSpecSerializer
                       decodes it to a plain dict before publish_bus_message
                       delivers it here (no ``type`` tag → deserialize returns
-                      obj_dict as-is).
+                      obj_dict as-is). ``action`` is read straight off the dict.
         * ``bytes`` — fallback for callers that publish raw bytes directly onto
                       the msgbus (e.g. test helpers or future custom publishers).
                       Attempted as JSON first for backwards-compat.
         * ``str``   — action name written directly, e.g. ``"pause"``.
 
-        Topic-based action extraction is also supported if the publisher uses
-        the convention ``{command_topic}.{action}`` and an empty payload — we
-        intercept it via :meth:`_on_command` then look at the most recent
-        wildcard match. NT delivers wildcard messages with the original topic
-        on ``message`` only when the publisher wraps it in a tuple, so for
-        robustness we always inspect the payload first.
+        Returns ``None`` for anything we can't parse to a known shape; the
+        caller logs and drops it.
         """
 
         if isinstance(message, dict):
