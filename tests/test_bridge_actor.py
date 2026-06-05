@@ -266,14 +266,22 @@ def test_report_action_publishes_positions_snapshot() -> None:
     This is the on-demand counterpart to ReportingActor's 30-min timer; the
     BridgeActor must drive the same helper so the snapshot lands on the
     same topic the periodic snapshot uses (``tinohelm.report.positions``),
-    tagged with the resolved NT StrategyId (not the control handle). We use an
-    empty cache here — building real ``Position`` objects for ``ReportProvider``
-    is an integration concern; the row-count/CSV encoding is covered in
-    ``test_reporting_actor``. What this test pins is the dispatch contract:
-    report → exactly one publish on the right topic with the right id.
+    tagged with the CONTROL HANDLE (``file.strategy_id``, here ``"foo"``) — NOT
+    the resolved NT StrategyId. This is the cross-process contract: the notifier
+    keys its announce registry, /positions listener and channel routing on the
+    control handle, and ReportingActor's periodic snapshot tags with the same
+    handle (config.py wires both from ``file.strategy_id``). If report tagged
+    with ``str(sid)`` instead, the notifier couldn't correlate the reply to the
+    waiting /positions future — it would land in #logging and the slash command
+    would spin until timeout. We use an empty cache here — building real
+    ``Position`` objects for ``ReportProvider`` is an integration concern; the
+    row-count/CSV encoding is covered in ``test_reporting_actor``. What this test
+    pins is the dispatch contract: report → exactly one publish on the right
+    topic tagged with the control handle.
     """
 
     msgbus = MsgbusSpy()
+    # control handle "foo"; trader resolves NT StrategyId "OIMomentum-foo".
     actor, _trader, _cache, _log = _bridge_actor_under_test("foo", msgbus=msgbus)
 
     actor._on_command(json.dumps({"action": "report"}).encode("utf-8"))
@@ -283,9 +291,11 @@ def test_report_action_publishes_positions_snapshot() -> None:
     assert topic == "tinohelm.report.positions"
     # body is msgpack bytes (bytes is in NT's _EXTERNAL_PUBLISHABLE_TYPES)
     import msgspec.msgpack
+
     decoded = msgspec.msgpack.decode(msg)
-    # report uses str(<resolved NT StrategyId>), not the control handle.
-    assert decoded["strategy_id"] == "OIMomentum-foo"
+    # report tags the body with the CONTROL HANDLE, not str(<NT StrategyId>),
+    # so the notifier's /positions listener (keyed on the handle) matches it.
+    assert decoded["strategy_id"] == "foo"
     assert decoded["row_count"] == 0
 
 
@@ -307,7 +317,10 @@ def test_resolves_from_trader_when_cache_is_empty() -> None:
     trader = TraderSpy(loaded_ids=[StrategyId("OIMomentum-foo")])
     cache = CacheSpy()  # no positions / snapshots
     actor, trader, _cache, log = _bridge_actor_under_test(
-        "foo", msgbus=msgbus, trader=trader, cache=cache,
+        "foo",
+        msgbus=msgbus,
+        trader=trader,
+        cache=cache,
     )
 
     actor._on_command(json.dumps({"action": "report"}).encode("utf-8"))

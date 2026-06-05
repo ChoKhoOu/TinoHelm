@@ -162,10 +162,23 @@ class BridgeActor(Controller):
                 venues_from_cache,
             )
 
-            self.log.info(f"BridgeActor: report -> publish snapshot for {sid}")
+            # The snapshot body is tagged with the CONTROL HANDLE, not str(sid).
+            # Unlike pause/resume/flatten — which hand sid to NT's *_from_id and
+            # genuinely need the NT StrategyId — the report body is consumed by
+            # the notifier, which keys everything (announce registry, /positions
+            # listener, channel routing) on the control handle (= file.strategy_id,
+            # config.py). ReportingActor's periodic snapshot already tags with the
+            # control handle (config.py wires ReportingActorConfig.strategy_id =
+            # file.strategy_id), so the on-demand snapshot MUST match or the
+            # notifier can't correlate the reply to the waiting /positions future
+            # (it lands in #logging and the command spins until it times out).
+            self.log.info(
+                f"BridgeActor: report -> publish snapshot for {self._control_handle} "
+                f"(strategy {sid})",
+            )
             topic, body = build_positions_report_payload(
                 positions_report_df(self.cache),
-                strategy_id=str(sid),
+                strategy_id=self._control_handle,
                 portfolio=self.portfolio,
                 venues=venues_from_cache(self.cache),
             )

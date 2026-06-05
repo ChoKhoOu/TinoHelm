@@ -107,6 +107,18 @@ def build_positions_report_payload(
 ) -> tuple[str, dict[str, Any]]:
     """Encode a positions-report ``DataFrame`` for transport.
 
+    ``strategy_id`` MUST be the TinoHelm CONTROL HANDLE (the strategy directory
+    name = ``TinoStrategyFile.strategy_id``, e.g. ``"oi_momentum_lowvol"``) —
+    NEVER ``str(<NT StrategyId>)`` (e.g. ``"OIMomentum-oi_momentum_lowvol"``).
+    This is a cross-process contract: the notifier keys its announce registry,
+    its ``/positions`` listener (``_position_listeners``) and its channel
+    routing on the control handle, so a snapshot tagged with the NT StrategyId
+    can't be correlated to a waiting ``/positions`` future — it falls through to
+    #logging and the slash command spins until it times out. Both producers of
+    this topic (``ReportingActor`` periodic timer and ``BridgeActor`` on-demand
+    ``report``) are wired from ``file.strategy_id`` in config.py for exactly this
+    reason; this invariant lives here because this is the single point both call.
+
     ``df`` is the snapshot produced by :func:`positions_report_df` (NT's
     ``ReportProvider`` output). Returns ``(topic, body)`` where ``body`` is
     plain Python types (msgpack-friendly): ``strategy_id``, ``row_count``, and
@@ -196,8 +208,7 @@ class ReportingActor(Actor):
             callback=self._on_time_event,
         )
         self.log.info(
-            f"ReportingActor scheduled every {self._interval_minutes}m "
-            f"-> {REPORT_TOPIC_POSITIONS}",
+            f"ReportingActor scheduled every {self._interval_minutes}m -> {REPORT_TOPIC_POSITIONS}",
         )
 
     def on_stop(self) -> None:
