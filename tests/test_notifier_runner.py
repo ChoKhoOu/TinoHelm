@@ -908,3 +908,217 @@ def test_event_stream_loop_delivers_new_pod_events_end_to_end() -> None:
     # The pre-existing OrderAccepted backlog entry was skipped.
     assert ("events.order.BINANCE", 22) in sent
     assert len(sent) == 1
+
+
+# ─── startup-noise gate: drop transient ComponentStateChanged events ───────────
+#
+# Every pod boot emits a ComponentStateChanged for *each* NT component
+# (DataEngine / ExecEngine / RiskEngine / Portfolio / every actor / strategy /
+# data&exec clients) as it walks PRE_INITIALIZED → READY → STARTING → RUNNING.
+# With several pods + the notifier coming up under ``make up`` that's dozens of
+# embeds slammed at the one logging channel in a second → Discord 429s the bot,
+# which then also stalls slash-command followups (the "正在响应……" hang). We keep
+# only the resting/abnormal states an operator actually cares about.
+
+
+def test_should_forward_component_state_keeps_resting_and_abnormal_states() -> None:
+    """RUNNING / STOPPED tell the operator a component settled; DEGRADED /
+    FAULTED are failures they must see. These survive the gate.
+    """
+
+    from tinohelm.notifier.runner import should_forward_component_state
+
+    assert should_forward_component_state("RUNNING")
+    assert should_forward_component_state("STOPPED")
+    assert should_forward_component_state("DEGRADED")
+    assert should_forward_component_state("FAULTED")
+
+
+def test_should_forward_component_state_drops_transient_boot_states() -> None:
+    """The transient walk-up states (PRE_INITIALIZED / READY / INITIALIZED /
+    STARTING / STOPPING / RESUMING / RESETTING / DISPOSING / DEGRADING /
+    FAULTING) are pure boot/shutdown chatter — dropping them is the bulk of the
+    429-flood fix.
+    """
+
+    from tinohelm.notifier.runner import should_forward_component_state
+
+    for transient in (
+        "PRE_INITIALIZED",
+        "READY",
+        "INITIALIZED",
+        "STARTING",
+        "STOPPING",
+        "RESUMING",
+        "RESETTING",
+        "DISPOSING",
+        "DEGRADING",
+        "FAULTING",
+        "DISPOSED",
+    ):
+        assert not should_forward_component_state(transient), transient
+
+
+def test_should_forward_component_state_unknown_state_is_kept() -> None:
+    """Schema-tolerant: a future NT state spelling we don't recognise is kept,
+    not silently dropped — we'd rather over-report a new state than hide it.
+    """
+
+    from tinohelm.notifier.runner import should_forward_component_state
+
+    assert should_forward_component_state("SOME_FUTURE_STATE")
+
+
+def test_notifier_actor_drops_transient_component_state_event() -> None:
+    """End-to-end through the in-process actor path: a STARTING
+    ComponentStateChanged must not reach the forwarder at all (it's the boot
+    noise that floods #logging), while a RUNNING one still does.
+    """
+
+    import json
+
+    from tinohelm.notifier.runner import NotifierActor, NotifierActorConfig
+
+    sent: list[int] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(channel_id)
+
+    actor = NotifierActor(
+        NotifierActorConfig(
+            sandbox_channel_id=11,
+            live_channel_id=22,
+            logging_channel_id=33,
+        ),
+        forwarder=_FakeForwarder(),
+        registry={"FOO-001": "live"},
+    )
+
+    handler = actor._make_handler("events.system.*")
+    handler(
+        json.dumps(
+            {"type": "ComponentStateChanged", "component_id": "RiskEngine", "state": "STARTING"},
+        ).encode(),
+    )
+    assert sent == []  # transient boot state dropped
+
+    handler(
+        json.dumps(
+            {"type": "ComponentStateChanged", "component_id": "RiskEngine", "state": "RUNNING"},
+        ).encode(),
+    )
+    assert sent == [33]  # resting state still forwarded to logging
+
+
+def test_forward_stream_entry_drops_transient_component_state() -> None:
+    """Same gate on the standalone XREAD path: a STARTING ComponentStateChanged
+    arriving as a msgpack stream entry is dropped before enqueue. This is the
+    path that actually carries the boot flood from strategy pods.
+    """
+
+    import msgspec.msgpack
+
+    from tinohelm.notifier.runner import _forward_stream_entry
+
+    sent: list[int] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(channel_id)
+
+    fields = {
+        b"topic": b"events.system.DataEngine",
+        b"payload": msgspec.msgpack.encode(
+            {"type": "ComponentStateChanged", "component_id": "DataEngine", "state": "READY"},
+        ),
+    }
+    forwarded = _forward_stream_entry(
+        fields,
+        _FakeForwarder(),
+        {},
+        sandbox_channel_id=11,
+        live_channel_id=22,
+        logging_channel_id=33,
+    )
+    assert forwarded is False
+    assert sent == []
+
+
+# ─── on-demand /positions reply goes to the triggering channel ─────────────────
+#
+# The periodic 30-min snapshot stays on #logging (operational chatter). But when
+# an operator runs /positions in #sandbox, the reply must surface in #sandbox —
+# routed via the future the command registers, NOT mirrored to #logging too.
+
+
+def test_enqueue_on_demand_snapshot_skips_logging_when_listener_waiting() -> None:
+    """A ``tinohelm.report.positions`` envelope that satisfies a pending
+    /positions listener is the *on-demand* reply — the command handler will
+    post it to the triggering channel itself, so enqueue must NOT also mirror
+    it to #logging (the ``channel_id`` it was handed). Otherwise every
+    /positions double-posts: once in the command channel, once in #logging.
+    """
+
+    import asyncio
+
+    from tinohelm.notifier.handlers import envelope_for
+    from tinohelm.notifier.runner import DiscordForwarder
+
+    sent: list[int] = []
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        forwarder = DiscordForwarder(loop=loop, client=None)
+
+        async def _fake_send(env, channel_id: int) -> None:
+            sent.append(channel_id)
+
+        forwarder._send = _fake_send  # type: ignore[assignment]
+
+        future = forwarder.watch_positions_report("FOO-001")
+        env = envelope_for(
+            "tinohelm.report.positions",
+            {"strategy_id": "FOO-001", "row_count": 0, "csv": ""},
+        )
+        # logging channel id handed in (the periodic route), but a listener is
+        # waiting → this is on-demand → must not mirror to logging.
+        forwarder.enqueue(env, channel_id=33)
+        await asyncio.wait_for(future, timeout=2.0)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(_run())
+    assert sent == []  # on-demand snapshot was NOT sent to logging by enqueue
+
+
+def test_enqueue_periodic_snapshot_still_reaches_logging() -> None:
+    """No listener waiting → this is the periodic 30-min report → it must still
+    reach #logging exactly as before. The on-demand skip must not regress the
+    periodic path.
+    """
+
+    import asyncio
+
+    from tinohelm.notifier.handlers import envelope_for
+    from tinohelm.notifier.runner import DiscordForwarder
+
+    sent: list[int] = []
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        forwarder = DiscordForwarder(loop=loop, client=None)
+
+        async def _fake_send(env, channel_id: int) -> None:
+            sent.append(channel_id)
+
+        forwarder._send = _fake_send  # type: ignore[assignment]
+
+        env = envelope_for(
+            "tinohelm.report.positions",
+            {"strategy_id": "FOO-001", "row_count": 0, "csv": ""},
+        )
+        forwarder.enqueue(env, channel_id=33)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(_run())
+    assert sent == [33]  # periodic snapshot still lands in logging

@@ -376,6 +376,51 @@ def should_forward_topic(topic: str) -> bool:
     return any(topic.startswith(prefix) for prefix in _FORWARDED_TOPIC_PREFIXES)
 
 
+# We forward only the ComponentState values worth a Discord message: the resting
+# states an operator checks for (RUNNING / STOPPED — "is it up?" / "did it
+# stop?") plus the abnormal ones they must not miss (DEGRADED / FAULTED).
+# Everything else is the transient PRE_INITIALIZED → READY → STARTING → RUNNING
+# walk-up (and the mirror-image shutdown walk-down) that every NT component
+# emits on every pod boot — dozens of events per ``make up`` that otherwise
+# flood the single logging channel and trip Discord's 429 rate limit (which then
+# also stalls slash-command followups, the "正在响应……" hang).
+#
+# We gate on this *deny-list* rather than the keep-list so an unrecognised future
+# state (NT enum drift) is forwarded, not silently swallowed — over-reporting a
+# new state beats hiding it. Names match NT's enum spelling
+# (nautilus_trader.core.rust.common.ComponentState). ``INITIALIZED`` is not in NT
+# 1.227.0's enum — kept as a defensive entry since it's unambiguously a transient
+# (a version that did emit it would still be denoise'd, never wrongly forwarded).
+_TRANSIENT_COMPONENT_STATES = frozenset(
+    {
+        "PRE_INITIALIZED",
+        "READY",
+        "INITIALIZED",
+        "STARTING",
+        "STOPPING",
+        "RESUMING",
+        "RESETTING",
+        "DISPOSING",
+        "DISPOSED",
+        "DEGRADING",
+        "FAULTING",
+    },
+)
+
+
+def should_forward_component_state(state: str) -> bool:
+    """Whether a ``ComponentStateChanged`` in ``state`` is worth a Discord embed.
+
+    Drops the transient boot/shutdown walk-up states (the 429-flood source);
+    keeps resting (RUNNING/STOPPED) and abnormal (DEGRADED/FAULTED) states. An
+    unrecognised state spelling is *kept* — schema-tolerant against NT enum
+    drift, since a brand-new state we can't classify is more likely meaningful
+    than noise.
+    """
+
+    return state not in _TRANSIENT_COMPONENT_STATES
+
+
 def route_event(
     topic: str,
     payload: Any,
@@ -486,8 +531,30 @@ def _forward_stream_entry(
         live_channel_id=live_channel_id,
         logging_channel_id=logging_channel_id,
     )
+    # Drop transient component-state boot/shutdown chatter (the 429-flood
+    # source). Done here, after decode, because the state lives in the body —
+    # the topic gate above only knows it's ``events.system.*``.
+    if not _component_state_passes(env.body):
+        return False
     forwarder.enqueue(env, channel_id=channel_id)
     return True
+
+
+def _component_state_passes(body: Any) -> bool:
+    """``True`` unless ``body`` is a transient ``ComponentStateChanged``.
+
+    Non-component bodies (orders, positions, account, signals, reports) pass
+    through untouched — this only filters the lifecycle walk-up/down noise.
+    Shared by the in-process actor and the standalone stream loop so both paths
+    suppress the boot flood identically.
+    """
+
+    if not isinstance(body, dict) or body.get("type") != "ComponentStateChanged":
+        return True
+    state = body.get("state")
+    if not isinstance(state, str):
+        return True
+    return should_forward_component_state(state)
 
 
 async def _event_stream_loop(
@@ -663,6 +730,11 @@ class NotifierActor(Actor):
                 # subscription pattern (best we have for display/debug) and
                 # pull the strategy_id off the body where NT puts it.
                 env = envelope_for(pattern, msg)
+                # Drop transient component-state boot/shutdown chatter before
+                # routing — the same 429-flood gate the standalone stream loop
+                # applies, so in-process and external paths behave identically.
+                if not _component_state_passes(env.body):
+                    return
                 # tinohelm.* is operational chatter (reports, summaries,
                 # drift warnings). Even if the body carries a strategy_id
                 # — the positions report does — these belong in logging,
@@ -786,10 +858,23 @@ class DiscordForwarder:
         if self._loop.is_closed():
             logger.warning("event loop closed; dropping event")
             return
-        # Snapshot envelopes also satisfy any pending /positions requests.
-        # We do this on the loop thread so future state stays single-threaded.
+        # A positions snapshot that satisfies a pending /positions request is an
+        # *on-demand* reply: the command handler posts it to the channel the
+        # operator ran the command in. So when a listener is waiting we dispatch
+        # the future and SKIP the normal send — otherwise the snapshot would
+        # double-post (once in the command channel, once on the ``channel_id``
+        # handed in, which for ``tinohelm.*`` is #logging). With no listener
+        # waiting it's the periodic 30-min report → send to #logging as before.
+        #
+        # enqueue runs on the loop thread (NT's ActorExecutor and the stream
+        # loop both forward from there), so reading ``_position_listeners``
+        # synchronously here is race-free with the deferred dispatch below.
         if getattr(env, "topic", None) == "tinohelm.report.positions":
+            sid = env.body.get("strategy_id") if isinstance(env.body, dict) else None
+            on_demand = bool(sid and self._position_listeners.get(sid))
             self._loop.call_soon_threadsafe(self._dispatch_position_listeners, env)
+            if on_demand:
+                return
         try:
             asyncio.run_coroutine_threadsafe(self._send(env, channel_id), self._loop)
         except RuntimeError:
@@ -876,8 +961,12 @@ def _build_discord_client(
         # Defer because we wait up to 120s for the snapshot reply. Discord
         # otherwise marks the interaction as failed at 3s.
         await interaction.response.defer(ephemeral=True)
-        channel_mode = _channel_mode(interaction.channel_id)
-        if channel_mode is None:
+        channel_id = interaction.channel_id
+        channel_mode = _channel_mode(channel_id)
+        if channel_mode is None or channel_id is None:
+            # _channel_mode only returns non-None for the three known channel
+            # ids, so channel_id is guaranteed non-None past this guard — the
+            # explicit check also narrows int | None → int for the enqueue below.
             await interaction.followup.send(
                 "this channel is not registered as sandbox, live, or logging",
                 ephemeral=True,
@@ -933,10 +1022,25 @@ def _build_discord_client(
                 missing.append(sid)
                 continue
             replied.append(sid)
+            # Surface the snapshot publicly in the channel the command was run
+            # in. Route it through the forwarder rather than
+            # ``interaction.followup.send`` for two reasons: (1) the defer above
+            # is ``ephemeral=True``, and a followup inherits that flag — it would
+            # stay private to the operator, not public as asked; a plain channel
+            # send is unconditionally public. (2) the forwarder owns a
+            # per-channel rate-limit semaphore, so a multi-strategy fan-out can't
+            # re-trigger the 429 storm this change exists to kill. The listener
+            # was already popped when its future resolved, so this enqueue takes
+            # the normal send path (no on-demand short-circuit) and lands in the
+            # triggering channel.
+            forwarder.enqueue(env, channel_id=channel_id)
 
-        head_lines = [f"已收到 {len(replied)}/{len(targets)} 个策略的快照（已发送到 #logging）"]
+        head_lines = [f"已收到 {len(replied)}/{len(targets)} 个策略的快照"]
         if missing:
             head_lines.append(f"超时未响应: {', '.join(f'`{s}`' for s in missing)}")
+        # Summary stays ephemeral (private to the operator) — a short receipt so
+        # the deferred "正在响应……" spinner always resolves, even when no pod
+        # replied and there are no public snapshot embeds above it.
         await interaction.followup.send("\n".join(head_lines), ephemeral=True)
 
     @tree.command(name="pause", description="Stop a strategy without exiting positions")
