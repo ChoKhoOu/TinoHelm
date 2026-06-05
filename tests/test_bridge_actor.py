@@ -8,9 +8,12 @@ once with the resolved ``StrategyId``.
 BridgeActor subclasses NT's ``Controller``, which holds the trader as
 ``self._trader`` and exposes ``stop_strategy_from_id`` etc. (each calls
 ``self._trader.{stop,start,market_exit}_strategy(sid)`` internally). The live
-``StrategyId`` is resolved from ``self.cache.strategy_ids()``. So the spies
-here are a ``TraderSpy`` (installed as ``_trader``) recording the lifecycle
-calls, and a ``CacheSpy`` (installed as ``cache``) supplying the loaded ids.
+``StrategyId`` is resolved from ``self._trader.strategy_ids()`` — the trader is
+the authoritative registry of loaded strategies (``Trader._strategies`` fills on
+``add_strategy``), whereas ``Cache.strategy_ids()`` only reflects a strategy once
+it has traded or been saved. So ``TraderSpy`` (installed as ``_trader``) both
+records the lifecycle calls AND supplies the loaded ids; ``CacheSpy`` (installed
+as ``cache``) only feeds NT's ``ReportProvider`` on the report path.
 """
 
 from __future__ import annotations
@@ -26,14 +29,27 @@ from tinohelm.bridge_actor import BridgeActor, BridgeActorConfig
 
 @dataclass
 class TraderSpy:
-    """Records the strategy-lifecycle calls the inherited Controller makes.
+    """Stand-in for NT's ``Trader`` — both the lifecycle target and the id source.
 
     The Controller's ``*_from_id`` methods call ``self._trader.stop_strategy``
     / ``start_strategy`` / ``market_exit_strategy``; this double captures them
     so a test can assert the right method ran with the resolved ``StrategyId``.
+
+    ``loaded_ids`` is what ``strategy_ids()`` returns — the BridgeActor resolves
+    the live NT StrategyId from here at command time. We mirror NT's real
+    ``Trader.strategy_ids()`` contract: a **list**, populated the instant a
+    strategy is added (independent of whether it has traded). It is NOT
+    reconstructed from the control-plane handle, which is just the directory name
+    and may not even be a valid StrategyId.
     """
 
+    loaded_ids: list[StrategyId] = field(
+        default_factory=lambda: [StrategyId("OIMomentum-foo")],
+    )
     calls: list[tuple[str, Any]] = field(default_factory=list)
+
+    def strategy_ids(self) -> list[StrategyId]:
+        return self.loaded_ids
 
     def stop_strategy(self, strategy_id: StrategyId) -> None:
         self.calls.append(("stop_strategy", strategy_id))
@@ -47,23 +63,17 @@ class TraderSpy:
 
 @dataclass
 class CacheSpy:
-    """Stand-in for NT's Cache facade.
+    """Stand-in for NT's Cache facade — the report path only.
 
-    ``loaded_ids`` is what ``cache.strategy_ids()`` returns — the BridgeActor
-    resolves the live NT StrategyId from here at command time (it does NOT
-    reconstruct it from the control-plane handle, which is just the directory
-    name and may not even be a valid StrategyId). ``positions`` /
-    ``position_snapshots`` feed NT's ``ReportProvider`` on the report path.
+    The BridgeActor does NOT resolve the live StrategyId from the cache: NT's
+    ``Cache.strategy_ids()`` only reflects a strategy once it has traded or been
+    saved, so a freshly started pod reads empty there. The trader is the id
+    source (see ``TraderSpy``). The cache here just feeds NT's ``ReportProvider``
+    on the ``report`` path via ``positions`` / ``position_snapshots``.
     """
 
-    loaded_ids: list[StrategyId] = field(
-        default_factory=lambda: [StrategyId("OIMomentum-foo")],
-    )
     _positions: list[Any] = field(default_factory=list)
     _snapshots: list[Any] = field(default_factory=list)
-
-    def strategy_ids(self) -> list[StrategyId]:
-        return self.loaded_ids
 
     def positions(self) -> list[Any]:
         return self._positions
@@ -115,9 +125,9 @@ def _bridge_actor_under_test(
 
     ``control_handle`` is the TinoHelm control-plane handle (directory name);
     it is deliberately NOT a valid StrategyId (no hyphen) to prove the actor
-    does not reconstruct the NT id from it but resolves it from the cache.
+    does not reconstruct the NT id from it but resolves it from the trader.
     ``_strategy_id`` starts ``None`` so the first command exercises the real
-    ``_resolve_strategy_id`` → ``cache.strategy_ids()`` path.
+    ``_resolve_strategy_id`` → ``trader.strategy_ids()`` path.
     """
 
     config = BridgeActorConfig(
@@ -206,8 +216,8 @@ def test_command_when_no_strategy_loaded_logs_error_and_noops() -> None:
     returns None → handler refuses to call any trader mutator.
     """
 
-    cache = CacheSpy(loaded_ids=[])
-    actor, trader, _cache, log = _bridge_actor_under_test("foo", cache=cache)
+    trader = TraderSpy(loaded_ids=[])
+    actor, trader, _cache, log = _bridge_actor_under_test("foo", trader=trader)
 
     actor._on_command(json.dumps({"action": "pause"}).encode("utf-8"))
 
@@ -240,8 +250,8 @@ def test_ping_acks_even_when_no_strategy_loaded() -> None:
     now handled before the resolve, so it acks regardless.
     """
 
-    cache = CacheSpy(loaded_ids=[])
-    actor, trader, _cache, log = _bridge_actor_under_test("foo", cache=cache)
+    trader = TraderSpy(loaded_ids=[])
+    actor, trader, _cache, log = _bridge_actor_under_test("foo", trader=trader)
 
     actor._on_command(json.dumps({"action": "ping"}).encode("utf-8"))
 
@@ -277,6 +287,35 @@ def test_report_action_publishes_positions_snapshot() -> None:
     # report uses str(<resolved NT StrategyId>), not the control handle.
     assert decoded["strategy_id"] == "OIMomentum-foo"
     assert decoded["row_count"] == 0
+
+
+def test_resolves_from_trader_when_cache_is_empty() -> None:
+    """Root-cause regression: a started-but-not-yet-traded strategy resolves fine.
+
+    The live bug: ``_resolve_strategy_id`` read ``cache.strategy_ids()``, whose
+    ``_index_strategies`` only fills once the strategy trades or is saved. A
+    freshly started pod that hadn't traded yet read empty → every
+    pause/resume/flatten/report logged "no strategy loaded" and no-op'd. The fix
+    reads ``trader.strategy_ids()`` (populated on ``add_strategy``), so an EMPTY
+    cache must NOT block the command. We pin it via ``report``: trader knows the
+    id, cache has zero positions → exactly one publish, zero error logs.
+    """
+
+    msgbus = MsgbusSpy()
+    # Trader has the strategy (as it does the moment add_strategy runs); cache is
+    # empty (no orders/positions yet) — the precise on-pod state at startup.
+    trader = TraderSpy(loaded_ids=[StrategyId("OIMomentum-foo")])
+    cache = CacheSpy()  # no positions / snapshots
+    actor, trader, _cache, log = _bridge_actor_under_test(
+        "foo", msgbus=msgbus, trader=trader, cache=cache,
+    )
+
+    actor._on_command(json.dumps({"action": "report"}).encode("utf-8"))
+
+    assert not any("no strategy loaded" in e for e in log.errors)
+    assert len(msgbus.publishes) == 1
+    topic, _msg = msgbus.publishes[0]
+    assert topic == "tinohelm.report.positions"
 
 
 def test_unknown_action_is_dropped_with_warning() -> None:

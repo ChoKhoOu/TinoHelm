@@ -73,9 +73,9 @@ class BridgeActor(Controller):
         # its own id as "{StrategyClassName}-{order_id_tag}" (config.py:build_strategy_imports),
         # which is what the Controller's *_from_id methods require. We do NOT try to
         # reconstruct that here (the control handle may not even be a valid StrategyId — it
-        # has no hyphen) — instead we resolve the live StrategyId from the cache at command
+        # has no hyphen) — instead we resolve the live StrategyId from the trader at command
         # time (this pod runs exactly one strategy). Resolved lazily so __init__ stays free
-        # of cache access (not yet registered).
+        # of trader access (not yet registered).
         self._control_handle = config.strategy_id
         self._strategy_id: StrategyId | None = None
         # The wildcard pattern NT's switchboard expects.
@@ -84,12 +84,18 @@ class BridgeActor(Controller):
     def _resolve_strategy_id(self) -> StrategyId | None:
         """Return this pod's live NT StrategyId (cached). None if no strategy is loaded.
 
-        Read from ``self.cache`` (an ``Actor`` facade NT registers on every
-        component) rather than the trader — the cache is the canonical source of
-        loaded strategy ids and keeps this independent of the trader API surface.
+        Read from ``self._trader`` (the trader ref the ``Controller`` base holds)
+        rather than the cache. ``Trader._strategies`` is populated the moment
+        ``add_strategy`` runs (trader.py), so ``trader.strategy_ids()`` reflects a
+        loaded-but-not-yet-trading strategy. ``Cache.strategy_ids()`` would NOT:
+        its ``_index_strategies`` only fills on ``trader.save()`` or once an order/
+        position exists, so a freshly started pod that hasn't traded yet reads
+        empty — which is exactly why ``report``/``pause`` etc. logged "no strategy
+        loaded". ``trader.strategy_ids()`` also returns a sorted list (cache returns
+        a set), so subscripting ``[0]`` below is safe.
         """
         if self._strategy_id is None:
-            ids = self.cache.strategy_ids()
+            ids = self._trader.strategy_ids()
             if not ids:
                 return None
             if len(ids) > 1:
