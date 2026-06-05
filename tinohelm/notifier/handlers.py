@@ -180,7 +180,9 @@ def render_embed(env: EventEnvelope, *, source_pod: str | None = None) -> discor
     elif env.topic.startswith("data.Signal"):
         description_lines.append(_fmt_signal(body))
     else:
-        description_lines.append(f"```json\n{json.dumps(_drop_noisy_keys(body), indent=2)[:1500]}\n```")
+        description_lines.append(
+            f"```json\n{json.dumps(_drop_noisy_keys(body), indent=2)[:1500]}\n```"
+        )
 
     if source_pod:
         description_lines.append(f"_pod: `{source_pod}`_")

@@ -8,9 +8,8 @@ wire shape is exercised end-to-end without a real broker.
 
 from __future__ import annotations
 
-import msgspec.msgpack
-
 import fakeredis
+import msgspec.msgpack
 import pytest
 from typer.testing import CliRunner
 

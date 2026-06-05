@@ -110,7 +110,12 @@ def test_render_embed_routes_on_event_type_not_topic() -> None:
 
 
 def test_component_embed_includes_state_emoji() -> None:
-    body = {"type": "ComponentStateChanged", "component_id": "X", "component_type": "X", "state": "RUNNING"}
+    body = {
+        "type": "ComponentStateChanged",
+        "component_id": "X",
+        "component_type": "X",
+        "state": "RUNNING",
+    }
     env = envelope_for("events.system.*", body)
     description = render_embed(env).description or ""
     # We don't lock the exact emoji here — just that one of the lifecycle
