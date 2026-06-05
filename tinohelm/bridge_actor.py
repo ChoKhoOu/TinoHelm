@@ -1,11 +1,15 @@
-"""Bridge actor: relays Discord/CLI control commands into the in-process Trader.
+"""Bridge controller: relays Discord/CLI control commands into the Trader.
 
-NT v1.226 has no cross-process Pause/Resume command. We fill that gap by
-publishing tiny JSON envelopes on a dedicated Redis topic and bridging them in
-the strategy pod via a NautilusTrader ``Actor``. The actor has direct access to
-``self.trader``, so it can call ``Trader.start_strategy`` /
-``Trader.stop_strategy`` / ``Trader.market_exit_strategy`` — which is exactly
-what NT's own in-process ``ControllerCommand`` enum does.
+NT has no cross-process Pause/Resume command. We fill that gap by publishing
+tiny JSON envelopes on a dedicated Redis topic and bridging them in the
+strategy pod via a NautilusTrader :class:`~nautilus_trader.trading.controller.
+Controller`. A plain ``Actor`` cannot do this: it exposes ``self.cache`` /
+``self.portfolio`` but NOT a trader reference — only the ``Controller`` subclass
+is constructed with one (``Controller.__init__(self, trader, config)`` stores
+``self._trader``) and exposes the ``start_strategy_from_id`` /
+``stop_strategy_from_id`` / ``market_exit_strategy_from_id`` methods we need.
+That is exactly NT's own in-process control surface, so we subclass it rather
+than reach for an attribute the base ``Actor`` never had.
 
 Topic format::
 
@@ -26,9 +30,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.config import ActorConfig
 from nautilus_trader.model.identifiers import StrategyId
+from nautilus_trader.trading.controller import Controller
 
 ACTIONS = {"pause", "resume", "flatten", "ping", "report"}
 
@@ -50,19 +54,28 @@ class BridgeActorConfig(ActorConfig, frozen=True):
     command_topic: str
 
 
-class BridgeActor(Actor):
-    """NT actor that subscribes to ``commands.tinohelm.{strategy_id}.*``."""
+class BridgeActor(Controller):
+    """NT controller that subscribes to ``commands.tinohelm.{strategy_id}.*``.
 
-    def __init__(self, config: BridgeActorConfig) -> None:
-        super().__init__(config=config)
+    A :class:`Controller` is an :class:`Actor` that NT constructs with a
+    ``trader`` ref. NT's kernel wires it from ``TradingNodeConfig.controller``
+    via ``ControllerFactory.create(config, trader)`` →
+    ``controller_cls(config=config, trader=trader)`` — hence the ``(config,
+    trader)`` signature here. We delegate strategy lifecycle to the inherited
+    ``*_from_id`` methods (which call ``self._trader`` internally) and never
+    reimplement what the base class already does.
+    """
+
+    def __init__(self, config: BridgeActorConfig, trader: Any) -> None:
+        super().__init__(trader=trader, config=config)
         # config.strategy_id is the TinoHelm CONTROL-PLANE handle (= the strategy
         # directory name, e.g. "oi_momentum_lowvol"), NOT the NT StrategyId. NT derives
         # its own id as "{StrategyClassName}-{order_id_tag}" (config.py:build_strategy_imports),
-        # which is what trader.{start,stop,market_exit}_strategy require. We do NOT try to
+        # which is what the Controller's *_from_id methods require. We do NOT try to
         # reconstruct that here (the control handle may not even be a valid StrategyId — it
-        # has no hyphen) — instead we resolve the live StrategyId from the trader at command
+        # has no hyphen) — instead we resolve the live StrategyId from the cache at command
         # time (this pod runs exactly one strategy). Resolved lazily so __init__ stays free
-        # of trader access (not yet registered).
+        # of cache access (not yet registered).
         self._control_handle = config.strategy_id
         self._strategy_id: StrategyId | None = None
         self._command_topic = config.command_topic
@@ -70,9 +83,14 @@ class BridgeActor(Actor):
         self._pattern = f"{config.command_topic}.*"
 
     def _resolve_strategy_id(self) -> StrategyId | None:
-        """Return this pod's live NT StrategyId (cached). None if no strategy is loaded."""
+        """Return this pod's live NT StrategyId (cached). None if no strategy is loaded.
+
+        Read from ``self.cache`` (an ``Actor`` facade NT registers on every
+        component) rather than the trader — the cache is the canonical source of
+        loaded strategy ids and keeps this independent of the trader API surface.
+        """
         if self._strategy_id is None:
-            ids = self.trader.strategy_ids()
+            ids = self.cache.strategy_ids()
             if not ids:
                 return None
             if len(ids) > 1:
@@ -112,33 +130,36 @@ class BridgeActor(Actor):
             self.log.info("BridgeActor: ping ack")
             return
 
-        trader = self.trader
         sid = self._resolve_strategy_id()
         if sid is None:
             self.log.error(
                 f"BridgeActor: no strategy loaded in this pod; cannot apply {action!r}",
             )
             return
+        # The Controller base owns the trader; its *_from_id methods call
+        # self._trader.{stop,start,market_exit}_strategy(sid) internally. We
+        # delegate rather than touch the trader directly.
         if action == "pause":
-            self.log.info(f"BridgeActor: pause -> trader.stop_strategy({sid})")
-            trader.stop_strategy(sid)
+            self.log.info(f"BridgeActor: pause -> stop_strategy_from_id({sid})")
+            self.stop_strategy_from_id(sid)
         elif action == "resume":
-            self.log.info(f"BridgeActor: resume -> trader.start_strategy({sid})")
-            trader.start_strategy(sid)
+            self.log.info(f"BridgeActor: resume -> start_strategy_from_id({sid})")
+            self.start_strategy_from_id(sid)
         elif action == "flatten":
-            self.log.info(f"BridgeActor: flatten -> trader.market_exit_strategy({sid})")
-            trader.market_exit_strategy(sid)
+            self.log.info(f"BridgeActor: flatten -> market_exit_strategy_from_id({sid})")
+            self.market_exit_strategy_from_id(sid)
         elif action == "report":
             # Local import keeps bridge_actor importable from CLI contexts that
             # don't ship pandas (the CLI never instantiates this class).
             from tinohelm.reporting_actor import (
                 build_positions_report_payload,
+                positions_report_df,
                 venues_from_cache,
             )
 
             self.log.info(f"BridgeActor: report -> publish snapshot for {sid}")
             topic, body = build_positions_report_payload(
-                trader,
+                positions_report_df(self.cache),
                 strategy_id=str(sid),
                 portfolio=self.portfolio,
                 venues=venues_from_cache(self.cache),

@@ -2,8 +2,15 @@
 
 We avoid spinning up a full TradingNode — that's an integration concern. Here
 we exercise the public behavior: when a control message arrives on the topic,
-the actor must call the corresponding ``Trader`` method exactly once with the
-configured ``StrategyId``.
+the controller must drive the corresponding strategy-lifecycle call exactly
+once with the resolved ``StrategyId``.
+
+BridgeActor subclasses NT's ``Controller``, which holds the trader as
+``self._trader`` and exposes ``stop_strategy_from_id`` etc. (each calls
+``self._trader.{stop,start,market_exit}_strategy(sid)`` internally). The live
+``StrategyId`` is resolved from ``self.cache.strategy_ids()``. So the spies
+here are a ``TraderSpy`` (installed as ``_trader``) recording the lifecycle
+calls, and a ``CacheSpy`` (installed as ``cache``) supplying the loaded ids.
 """
 
 from __future__ import annotations
@@ -19,22 +26,14 @@ from tinohelm.bridge_actor import BridgeActor, BridgeActorConfig
 
 @dataclass
 class TraderSpy:
-    """A test double recording every Trader method called by the actor.
+    """Records the strategy-lifecycle calls the inherited Controller makes.
 
-    ``loaded_ids`` is what ``Trader.strategy_ids()`` returns — the BridgeActor
-    resolves the live NT StrategyId from here at command time (it does NOT
-    reconstruct it from the control-plane handle, which is just the directory
-    name and may not even be a valid StrategyId).
+    The Controller's ``*_from_id`` methods call ``self._trader.stop_strategy``
+    / ``start_strategy`` / ``market_exit_strategy``; this double captures them
+    so a test can assert the right method ran with the resolved ``StrategyId``.
     """
 
     calls: list[tuple[str, Any]] = field(default_factory=list)
-    positions_df: Any = None
-    loaded_ids: list[StrategyId] = field(
-        default_factory=lambda: [StrategyId("OIMomentum-foo")],
-    )
-
-    def strategy_ids(self) -> list[StrategyId]:
-        return self.loaded_ids
 
     def stop_strategy(self, strategy_id: StrategyId) -> None:
         self.calls.append(("stop_strategy", strategy_id))
@@ -45,12 +44,32 @@ class TraderSpy:
     def market_exit_strategy(self, strategy_id: StrategyId) -> None:
         self.calls.append(("market_exit_strategy", strategy_id))
 
-    def generate_positions_report(self) -> Any:
-        # ``report`` action funnels through ReportingActor's helper, which
-        # calls this method. Returning the configured DataFrame (or None)
-        # lets the test pick the empty-vs-rows shape.
-        self.calls.append(("generate_positions_report", None))
-        return self.positions_df
+
+@dataclass
+class CacheSpy:
+    """Stand-in for NT's Cache facade.
+
+    ``loaded_ids`` is what ``cache.strategy_ids()`` returns — the BridgeActor
+    resolves the live NT StrategyId from here at command time (it does NOT
+    reconstruct it from the control-plane handle, which is just the directory
+    name and may not even be a valid StrategyId). ``positions`` /
+    ``position_snapshots`` feed NT's ``ReportProvider`` on the report path.
+    """
+
+    loaded_ids: list[StrategyId] = field(
+        default_factory=lambda: [StrategyId("OIMomentum-foo")],
+    )
+    _positions: list[Any] = field(default_factory=list)
+    _snapshots: list[Any] = field(default_factory=list)
+
+    def strategy_ids(self) -> list[StrategyId]:
+        return self.loaded_ids
+
+    def positions(self) -> list[Any]:
+        return self._positions
+
+    def position_snapshots(self) -> list[Any]:
+        return self._snapshots
 
 
 @dataclass
@@ -82,19 +101,23 @@ def _bridge_actor_under_test(
     *,
     msgbus: MsgbusSpy | None = None,
     trader: TraderSpy | None = None,
-) -> tuple[BridgeActor, TraderSpy, LogSpy]:
+    cache: CacheSpy | None = None,
+) -> tuple[BridgeActor, TraderSpy, CacheSpy, LogSpy]:
     """Create a BridgeActor wired up with spies, bypassing NT registration.
 
-    Calling ``BridgeActor(config)`` would chain into NT's ``Component.__cinit__``
-    and demand a registered ``MessageBus`` / ``Cache`` / ``Clock``. Since we're
-    only testing the command-dispatch behavior, we sidestep ``__init__`` and
-    install just the attributes ``_on_command`` actually reads.
+    Calling ``BridgeActor(config, trader)`` would chain into NT's
+    ``Component.__cinit__`` and demand a registered ``MessageBus`` / ``Cache``
+    / ``Clock``. Since we're only testing the command-dispatch behavior, we
+    sidestep ``__init__`` and install just the attributes the handler reads:
+    ``_trader`` (a plain attr the inherited ``*_from_id`` methods call) plus
+    ``cache`` / ``log`` / ``msgbus`` (NT descriptors, overridden via a patched
+    subclass).
 
     ``control_handle`` is the TinoHelm control-plane handle (directory name);
     it is deliberately NOT a valid StrategyId (no hyphen) to prove the actor
-    does not reconstruct the NT id from it but resolves it from the trader.
+    does not reconstruct the NT id from it but resolves it from the cache.
     ``_strategy_id`` starts ``None`` so the first command exercises the real
-    ``_resolve_strategy_id`` → ``trader.strategy_ids()`` path.
+    ``_resolve_strategy_id`` → ``cache.strategy_ids()`` path.
     """
 
     config = BridgeActorConfig(
@@ -104,30 +127,35 @@ def _bridge_actor_under_test(
     actor = BridgeActor.__new__(BridgeActor)
     # Mirror what BridgeActor.__init__ does, sans super().__init__():
     actor._control_handle = config.strategy_id  # type: ignore[attr-defined]
-    actor._strategy_id = None  # type: ignore[attr-defined]  # resolved lazily from trader
+    actor._strategy_id = None  # type: ignore[attr-defined]  # resolved lazily from cache
     actor._command_topic = config.command_topic  # type: ignore[attr-defined]
     actor._pattern = f"{config.command_topic}.*"  # type: ignore[attr-defined]
     trader = trader or TraderSpy()
+    cache = cache or CacheSpy()
     log = LogSpy()
-    # Patch the @property descriptors so the handler code reads our spies.
-    object.__setattr__(actor, "_test_trader", trader)
+    # Controller stores the trader as a plain ``self._trader`` attr — set it
+    # directly. cache/log/msgbus are NT descriptors, read via the spies below.
+    object.__setattr__(actor, "_trader", trader)
+    object.__setattr__(actor, "_test_cache", cache)
     object.__setattr__(actor, "_test_log", log)
     object.__setattr__(actor, "_test_msgbus", msgbus or MsgbusSpy())
     actor.__class__ = _PatchedBridgeActor  # swap in a class that returns spies
-    return actor, trader, log
+    return actor, trader, cache, log
 
 
 class _PatchedBridgeActor(BridgeActor):
-    """BridgeActor variant whose ``trader`` and ``log`` attrs read test spies.
+    """BridgeActor variant whose ``cache`` / ``log`` / ``msgbus`` read spies.
 
-    NT's base class declares ``trader``, ``log`` and ``msgbus`` as descriptors
+    NT's base class declares ``cache``, ``log`` and ``msgbus`` as descriptors
     backed by ``_register_base``. We override all three to return the test
-    fixtures so the handler can run without a real TradingNode.
+    fixtures so the handler can run without a real TradingNode. ``_trader`` is
+    a plain instance attr (set in the fixture), so the inherited Controller
+    ``*_from_id`` methods reach the TraderSpy without any override here.
     """
 
     @property  # type: ignore[override]
-    def trader(self) -> Any:
-        return self._test_trader  # type: ignore[attr-defined]
+    def cache(self) -> Any:
+        return self._test_cache  # type: ignore[attr-defined]
 
     @property  # type: ignore[override]
     def log(self) -> Any:
@@ -144,18 +172,18 @@ class _PatchedBridgeActor(BridgeActor):
 def test_pause_command_calls_stop_strategy() -> None:
     """Pause envelope → trader.stop_strategy(<NT StrategyId resolved from trader>)."""
 
-    actor, trader, _log = _bridge_actor_under_test("foo")
+    actor, trader, _cache, _log = _bridge_actor_under_test("foo")
 
     actor._on_command(json.dumps({"action": "pause"}).encode("utf-8"))
 
-    # Resolved from trader.strategy_ids(), NOT reconstructed from the "foo" handle.
+    # Resolved from cache.strategy_ids(), NOT reconstructed from the "foo" handle.
     assert trader.calls == [("stop_strategy", StrategyId("OIMomentum-foo"))]
 
 
 def test_resume_command_calls_start_strategy() -> None:
     """Resume envelope → trader.start_strategy(<NT StrategyId resolved from trader>)."""
 
-    actor, trader, _log = _bridge_actor_under_test("foo")
+    actor, trader, _cache, _log = _bridge_actor_under_test("foo")
 
     actor._on_command(json.dumps({"action": "resume"}).encode("utf-8"))
 
@@ -165,7 +193,7 @@ def test_resume_command_calls_start_strategy() -> None:
 def test_flatten_command_calls_market_exit_strategy() -> None:
     """Flatten envelope → trader.market_exit_strategy(<NT StrategyId resolved from trader>)."""
 
-    actor, trader, _log = _bridge_actor_under_test("foo")
+    actor, trader, _cache, _log = _bridge_actor_under_test("foo")
 
     actor._on_command(json.dumps({"action": "flatten", "reason": "EOD"}).encode("utf-8"))
 
@@ -179,8 +207,8 @@ def test_command_when_no_strategy_loaded_logs_error_and_noops() -> None:
     returns None → handler refuses to call any trader mutator.
     """
 
-    trader = TraderSpy(loaded_ids=[])
-    actor, _trader, log = _bridge_actor_under_test("foo", trader=trader)
+    cache = CacheSpy(loaded_ids=[])
+    actor, trader, _cache, log = _bridge_actor_under_test("foo", cache=cache)
 
     actor._on_command(json.dumps({"action": "pause"}).encode("utf-8"))
 
@@ -195,7 +223,7 @@ def test_ping_acks_without_calling_trader() -> None:
     that proves the bridge is alive without disturbing positions/strategies.
     """
 
-    actor, trader, log = _bridge_actor_under_test("foo")
+    actor, trader, _cache, log = _bridge_actor_under_test("foo")
 
     actor._on_command(json.dumps({"action": "ping"}).encode("utf-8"))
 
@@ -213,8 +241,8 @@ def test_ping_acks_even_when_no_strategy_loaded() -> None:
     now handled before the resolve, so it acks regardless.
     """
 
-    trader = TraderSpy(loaded_ids=[])
-    actor, _trader, log = _bridge_actor_under_test("foo", trader=trader)
+    cache = CacheSpy(loaded_ids=[])
+    actor, trader, _cache, log = _bridge_actor_under_test("foo", cache=cache)
 
     actor._on_command(json.dumps({"action": "ping"}).encode("utf-8"))
 
@@ -224,24 +252,23 @@ def test_ping_acks_even_when_no_strategy_loaded() -> None:
 
 
 def test_report_action_publishes_positions_snapshot() -> None:
-    """Report envelope → trader.generate_positions_report() + msgbus.publish.
+    """Report envelope → read cache via NT's ReportProvider + msgbus.publish.
 
     This is the on-demand counterpart to ReportingActor's 30-min timer; the
     BridgeActor must drive the same helper so the snapshot lands on the
-    same topic the periodic snapshot uses (``tinohelm.report.positions``).
+    same topic the periodic snapshot uses (``tinohelm.report.positions``),
+    tagged with the resolved NT StrategyId (not the control handle). We use an
+    empty cache here — building real ``Position`` objects for ``ReportProvider``
+    is an integration concern; the row-count/CSV encoding is covered in
+    ``test_reporting_actor``. What this test pins is the dispatch contract:
+    report → exactly one publish on the right topic with the right id.
     """
 
-    import pandas as pd
-
     msgbus = MsgbusSpy()
-    actor, trader, _log = _bridge_actor_under_test("foo", msgbus=msgbus)
-    trader.positions_df = pd.DataFrame(
-        {"strategy_id": ["OIMomentum-foo"], "side": ["LONG"], "quantity": [1.0]},
-    )
+    actor, _trader, _cache, _log = _bridge_actor_under_test("foo", msgbus=msgbus)
 
     actor._on_command(json.dumps({"action": "report"}).encode("utf-8"))
 
-    assert ("generate_positions_report", None) in trader.calls
     assert len(msgbus.publishes) == 1
     topic, msg = msgbus.publishes[0]
     assert topic == "tinohelm.report.positions"
@@ -250,7 +277,7 @@ def test_report_action_publishes_positions_snapshot() -> None:
     decoded = msgspec.msgpack.decode(msg)
     # report uses str(<resolved NT StrategyId>), not the control handle.
     assert decoded["strategy_id"] == "OIMomentum-foo"
-    assert decoded["row_count"] == 1
+    assert decoded["row_count"] == 0
 
 
 def test_unknown_action_is_dropped_with_warning() -> None:
@@ -264,7 +291,7 @@ def test_unknown_action_is_dropped_with_warning() -> None:
     has a paper trail. This protects us from accidental control commands.
     """
 
-    actor, trader, log = _bridge_actor_under_test("foo")
+    actor, trader, _cache, log = _bridge_actor_under_test("foo")
 
     actor._on_command(b"not-json{")
     actor._on_command(json.dumps({"action": "drop_database"}).encode("utf-8"))

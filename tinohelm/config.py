@@ -33,7 +33,10 @@ from nautilus_trader.live.config import (
     TradingNodeConfig,
 )
 from nautilus_trader.model.identifiers import InstrumentId, TraderId
-from nautilus_trader.trading.config import ImportableStrategyConfig
+from nautilus_trader.trading.config import (
+    ImportableControllerConfig,
+    ImportableStrategyConfig,
+)
 
 DEFAULT_STREAMS_PREFIX = "stream"
 DEFAULT_ENCODING = "msgpack"
@@ -305,23 +308,37 @@ def build_strategy_imports(file: TinoStrategyFile) -> list[ImportableStrategyCon
     ]
 
 
-def build_actor_imports(file: TinoStrategyFile) -> list[ImportableActorConfig]:
-    """Inject the bridge actor + (by default) the reporting actor; users may add more under ``[[actors]]``.
+def build_controller_import(file: TinoStrategyFile) -> ImportableControllerConfig:
+    """Wire the bridge controller into ``TradingNodeConfig.controller``.
 
+    The BridgeActor subclasses NT's :class:`~nautilus_trader.trading.controller.
+    Controller`, which the kernel constructs with a trader ref
+    (``system/kernel.py``: ``ControllerFactory.create(config, trader)`` →
+    ``add_actor``). That is the ONLY NT seam that hands a component a trader —
+    a plain ``[[actors]]`` entry goes through ``trader.add_actor`` and never
+    gets one. So the bridge lives here, not in :func:`build_actor_imports`.
+    """
+
+    return ImportableControllerConfig(
+        controller_path="tinohelm.bridge_actor:BridgeActor",
+        config_path="tinohelm.bridge_actor:BridgeActorConfig",
+        config={
+            "strategy_id": file.strategy_id,
+            "command_topic": file.command_topic,
+        },
+    )
+
+
+def build_actor_imports(file: TinoStrategyFile) -> list[ImportableActorConfig]:
+    """Inject (by default) the reporting actor; users may add more under ``[[actors]]``.
+
+    The bridge controller is wired separately via :func:`build_controller_import`
+    (it needs a trader ref, which only ``TradingNodeConfig.controller`` provides).
     ``[reporting] enabled = false`` skips the reporting actor — it's the only
     moving part operators commonly want off during early development.
     """
 
-    actors: list[ImportableActorConfig] = [
-        ImportableActorConfig(
-            actor_path="tinohelm.bridge_actor:BridgeActor",
-            config_path="tinohelm.bridge_actor:BridgeActorConfig",
-            config={
-                "strategy_id": file.strategy_id,
-                "command_topic": file.command_topic,
-            },
-        ),
-    ]
+    actors: list[ImportableActorConfig] = []
 
     reporting_section = file.raw.get("reporting", {})
     if reporting_section.get("enabled", True):
@@ -463,6 +480,7 @@ def build_trading_node_config(file: TinoStrategyFile) -> TradingNodeConfig:
         risk_engine=LiveRiskEngineConfig(),
         exec_engine=build_exec_engine_config(file.raw, mode=file.mode),
         actors=build_actor_imports(file),
+        controller=build_controller_import(file),
         strategies=build_strategy_imports(file),
         data_clients=build_data_clients(file),
         exec_clients=build_exec_clients(file),

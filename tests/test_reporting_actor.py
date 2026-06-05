@@ -1,13 +1,19 @@
 """Tests for the periodic ReportingActor.
 
-The actor calls ``trader.generate_positions_report()`` on a clock timer and
-forwards a snapshot to the notifier. Two pieces are testable without spinning
+The actor reads positions from ``self.cache`` (via NT's ``ReportProvider``) on
+a clock timer and forwards a snapshot to the notifier. An NT ``Actor`` exposes
+``cache`` but NOT ``trader`` (only the ``Controller`` subclass holds a trader),
+so the actor never touches a trader. Two pieces are testable without spinning
 up an NT TradingNode:
 
-  1. The pure ``build_positions_report_payload`` helper that turns a trader
-     into a CSV-encoded ``(topic, body)`` envelope tuple.
+  1. The pure ``build_positions_report_payload`` helper that turns a positions
+     ``DataFrame`` into a CSV-encoded ``(topic, body)`` envelope tuple.
   2. The actor's ``on_time_event`` glue, which we exercise with a stand-in
-     trader and publish-spy.
+     DataFrame and publish-spy.
+
+``positions_report_df(cache)`` itself is a thin one-line delegation to NT's
+``ReportProvider`` (it needs real ``Position`` objects to snapshot), so it's
+exercised by integration rather than unit-tested here.
 """
 
 from __future__ import annotations
@@ -24,20 +30,6 @@ from tinohelm.reporting_actor import (
 
 def _decode(body: bytes) -> dict:
     return msgspec.msgpack.decode(body)
-
-
-class _FakeTrader:
-    """Stand-in for nautilus_trader.trading.Trader.
-
-    Only ``generate_positions_report`` is hit by the helper; the real trader
-    has many more methods, but the helper's contract is narrow on purpose.
-    """
-
-    def __init__(self, df: pd.DataFrame) -> None:
-        self._df = df
-
-    def generate_positions_report(self) -> pd.DataFrame:
-        return self._df
 
 
 def test_build_positions_report_payload_emits_csv_envelope() -> None:
@@ -59,7 +51,7 @@ def test_build_positions_report_payload_emits_csv_envelope() -> None:
         },
     )
 
-    topic, body = build_positions_report_payload(_FakeTrader(df), strategy_id="FOO-001")
+    topic, body = build_positions_report_payload(df, strategy_id="FOO-001")
     decoded = _decode(body)
 
     assert topic == "tinohelm.report.positions"
@@ -108,7 +100,7 @@ def test_payload_includes_account_pnl_when_portfolio_supplied() -> None:
     )
 
     topic, body = build_positions_report_payload(
-        _FakeTrader(df),
+        df,
         strategy_id="FOO-001",
         portfolio=portfolio,
         venues=["BYBIT"],
@@ -142,7 +134,7 @@ def test_payload_degrades_when_portfolio_raises() -> None:
 
     df = pd.DataFrame({"strategy_id": ["FOO-001"], "side": ["LONG"], "quantity": [1.0]})
     _topic, body = build_positions_report_payload(
-        _FakeTrader(df),
+        df,
         strategy_id="FOO-001",
         portfolio=_BoomPortfolio(),
         venues=["BYBIT"],
@@ -162,7 +154,7 @@ def test_payload_omits_account_pnl_without_portfolio() -> None:
     """
 
     df = pd.DataFrame({"strategy_id": ["FOO-001"], "side": ["LONG"]})
-    _topic, body = build_positions_report_payload(_FakeTrader(df), strategy_id="FOO-001")
+    _topic, body = build_positions_report_payload(df, strategy_id="FOO-001")
     assert "account_pnl" not in _decode(body)
 
 
@@ -172,7 +164,7 @@ def test_build_positions_report_payload_handles_empty_frame() -> None:
     """
 
     topic, body = build_positions_report_payload(
-        _FakeTrader(pd.DataFrame()),
+        pd.DataFrame(),
         strategy_id="GHOST-001",
     )
     decoded = _decode(body)
@@ -195,12 +187,12 @@ def test_reporting_actor_config_defaults() -> None:
 
 def test_reporting_actor_publishes_on_timer_event() -> None:
     """When the clock fires, the actor must publish to msgbus on the
-    ``tinohelm.report.positions`` topic. We sub a fake trader + msgbus and
-    drive on_time_event directly so the test stays free of NT runtime.
+    ``tinohelm.report.positions`` topic. We hand ``_tick`` a positions
+    DataFrame + a msgbus spy directly so the test stays free of NT runtime
+    (the cache → DataFrame step is NT's ``ReportProvider``, not our glue).
     """
 
     df = pd.DataFrame({"strategy_id": ["FOO-001"], "side": ["LONG"]})
-    fake_trader = _FakeTrader(df)
 
     published: list[tuple[str, bytes]] = []
 
@@ -210,7 +202,7 @@ def test_reporting_actor_publishes_on_timer_event() -> None:
 
     actor = ReportingActor(ReportingActorConfig(strategy_id="FOO-001"))
     # Drive the pure on-tick handler with our fakes — bypass NT lifecycle.
-    actor._tick(trader=fake_trader, msgbus=_FakeMsgbus())
+    actor._tick(df=df, msgbus=_FakeMsgbus())
 
     assert len(published) == 1
     topic, msg = published[0]

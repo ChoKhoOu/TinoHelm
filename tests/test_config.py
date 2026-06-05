@@ -223,10 +223,10 @@ def test_exec_section_overrides_defaults_both_directions(tmp_path: Path) -> None
 def test_strategy_pod_includes_reporting_actor_by_default(strategy_toml: Path) -> None:
     """A live pod should ship periodic positions reports out of the box.
 
-    The ReportingActor uses NT's Trader.generate_positions_report() (cache
-    snapshot) and publishes on tinohelm.report.positions, which the notifier
-    routes to the logging channel. Operators get visibility without writing
-    any glue.
+    The ReportingActor reads NT's Cache via ReportProvider (an Actor has
+    self.cache but not self.trader) and publishes on tinohelm.report.positions,
+    which the notifier routes to the logging channel. Operators get visibility
+    without writing any glue.
     """
 
     file = TinoStrategyFile.load(strategy_toml)
@@ -238,6 +238,29 @@ def test_strategy_pod_includes_reporting_actor_by_default(strategy_toml: Path) -
         ).build_actor_imports(file)
     ]
     assert "tinohelm.reporting_actor:ReportingActor" in actors
+
+
+def test_bridge_controller_wired_via_controller_field(strategy_toml: Path) -> None:
+    """The bridge MUST ride TradingNodeConfig.controller, NOT [[actors]].
+
+    Regression for the AttributeError storm: BridgeActor subclasses NT's
+    Controller and needs a trader ref. Only the controller seam supplies one
+    (kernel: ControllerFactory.create(config, trader)); a plain [[actors]] entry
+    goes through trader.add_actor and never gets a trader, so self._trader (and
+    every *_from_id call) explodes. Pin both: bridge present on controller, and
+    absent from the actors list.
+    """
+
+    file = TinoStrategyFile.load(strategy_toml)
+    config = build_trading_node_config(file)
+
+    assert config.controller is not None
+    assert config.controller.controller_path == "tinohelm.bridge_actor:BridgeActor"
+    assert config.controller.config["strategy_id"] == "FOO-001"
+    assert config.controller.config["command_topic"] == "commands.tinohelm.FOO-001"
+
+    actor_paths = [a.actor_path for a in config.actors]
+    assert "tinohelm.bridge_actor:BridgeActor" not in actor_paths
 
 
 def test_strategy_pod_omits_reporting_actor_when_disabled(tmp_path: Path) -> None:

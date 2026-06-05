@@ -1,15 +1,21 @@
 """Periodic positions-report actor for strategy pods.
 
-NT v1.226 ships :meth:`Trader.generate_positions_report` (and its order /
-account siblings), which return ``pandas.DataFrame`` snapshots of the live
-``Cache``. This actor calls them on a clock timer and publishes the result
-on ``tinohelm.report.positions`` — picked up by the notifier's
-``tinohelm.*`` route, so the report lands in the read-only logging channel
-rather than mixing with trade-flow signals.
+NT's :class:`~nautilus_trader.analysis.reporter.ReportProvider` turns the
+live ``Cache``'s positions + snapshots into a ``pandas.DataFrame`` —
+exactly what ``Trader.generate_positions_report`` does internally
+(``trader.py``: ``ReportProvider.generate_positions_report(cache.positions(),
+cache.position_snapshots())``). An NT :class:`~nautilus_trader.common.actor.
+Actor` exposes ``self.cache`` but NOT ``self.trader`` (only the ``Controller``
+subclass holds a trader ref), so this actor reads the cache directly via
+:func:`positions_report_df` rather than reaching for a trader it doesn't have.
+It runs on a clock timer and publishes on ``tinohelm.report.positions`` —
+picked up by the notifier's ``tinohelm.*`` route, so the report lands in the
+read-only logging channel rather than mixing with trade-flow signals.
 
-The actual report-generation logic (DataFrame → ``(topic, body)`` envelope)
-lives in :func:`build_positions_report_payload` so it is testable without
-spinning up an NT runtime.
+The DataFrame → ``(topic, body)`` envelope logic lives in
+:func:`build_positions_report_payload` so it is testable without spinning up
+an NT runtime; the cache → DataFrame step is a thin delegation to NT in
+:func:`positions_report_df`.
 """
 
 from __future__ import annotations
@@ -19,7 +25,6 @@ from datetime import timedelta
 from typing import Any
 
 import msgspec.msgpack
-
 from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.config import ActorConfig
 
@@ -74,20 +79,40 @@ class ReportingActorConfig(ActorConfig, frozen=True):
     enabled: bool = True
 
 
+def positions_report_df(cache: Any) -> Any:
+    """Snapshot the cache's positions + snapshots into a ``pandas.DataFrame``.
+
+    Thin delegation to NT's :class:`~nautilus_trader.analysis.reporter.
+    ReportProvider` — the exact call ``Trader.generate_positions_report`` makes
+    internally. Lives here (rather than inline in the actor) so the cache →
+    DataFrame step stays in one place for both the periodic timer and the
+    on-demand ``report`` command. We never build the report ourselves; NT owns
+    the DataFrame schema.
+    """
+
+    from nautilus_trader.analysis.reporter import ReportProvider
+
+    return ReportProvider.generate_positions_report(
+        cache.positions(),
+        cache.position_snapshots(),
+    )
+
+
 def build_positions_report_payload(
-    trader: Any,
+    df: Any,
     *,
     strategy_id: str,
     portfolio: Any | None = None,
     venues: list[Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Snapshot the trader's open+closed positions and encode for transport.
+    """Encode a positions-report ``DataFrame`` for transport.
 
-    Returns ``(topic, body)`` where ``body`` is plain Python types
-    (msgpack-friendly): ``strategy_id``, ``row_count``, and a CSV string.
-    CSV (rather than JSON) keeps the wire small for high-row days and means
-    the operator can ``redis-cli xrange`` the stream and pipe straight to
-    ``column -t -s,``.
+    ``df`` is the snapshot produced by :func:`positions_report_df` (NT's
+    ``ReportProvider`` output). Returns ``(topic, body)`` where ``body`` is
+    plain Python types (msgpack-friendly): ``strategy_id``, ``row_count``, and
+    a CSV string. CSV (rather than JSON) keeps the wire small for high-row days
+    and means the operator can ``redis-cli xrange`` the stream and pipe
+    straight to ``column -t -s,``.
 
     When ``portfolio`` and ``venues`` are supplied, an ``account_pnl`` block is
     added: account-level realized / unrealized PnL and net exposure per venue,
@@ -96,7 +121,6 @@ def build_positions_report_payload(
     and CLI paths that only want the positions table stay backward-compatible.
     """
 
-    df = trader.generate_positions_report()
     body: dict[str, Any]
     if df is None or df.empty:
         body = {"strategy_id": strategy_id, "row_count": 0, "csv": ""}
@@ -183,10 +207,15 @@ class ReportingActor(Actor):
             self.clock.cancel_timer(self.TIMER_NAME)
 
     def _on_time_event(self, _event: Any) -> None:
-        """NT clock callback — defers to :meth:`_tick` so tests stay clean."""
+        """NT clock callback — defers to :meth:`_tick` so tests stay clean.
+
+        An :class:`Actor` exposes ``self.cache`` (and ``self.portfolio``) but
+        not ``self.trader`` — only the ``Controller`` subclass holds a trader
+        ref. We read the positions DataFrame straight from the cache.
+        """
 
         self._tick(
-            trader=self.trader,
+            df=positions_report_df(self.cache),
             msgbus=self.msgbus,
             portfolio=self.portfolio,
             venues=venues_from_cache(self.cache),
@@ -195,7 +224,7 @@ class ReportingActor(Actor):
     def _tick(
         self,
         *,
-        trader: Any,
+        df: Any,
         msgbus: Any,
         portfolio: Any | None = None,
         venues: list[Any] | None = None,
@@ -203,13 +232,14 @@ class ReportingActor(Actor):
         """Pure-ish tick handler. Drives the report build + msgbus publish.
 
         Kept separate from :meth:`_on_time_event` so unit tests can supply
-        fake collaborators without instantiating a TradingNode. ``portfolio``
-        and ``venues`` are optional so existing tests that only check the
-        positions table keep working.
+        fake collaborators without instantiating a TradingNode. ``df`` is the
+        positions snapshot (NT's ``ReportProvider`` output); ``portfolio`` and
+        ``venues`` are optional so tests that only check the positions table
+        keep working.
         """
 
         topic, body = build_positions_report_payload(
-            trader,
+            df,
             strategy_id=self._strategy_id,
             portfolio=portfolio,
             venues=venues,
