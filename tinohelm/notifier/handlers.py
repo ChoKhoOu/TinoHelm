@@ -27,6 +27,7 @@ import csv
 import io
 import json
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -93,6 +94,159 @@ def envelope_for(topic: str, raw: Any) -> EventEnvelope:
     )
 
 
+# ─── order fill-progress aggregation (IOC / partial fills) ───────────────────
+
+
+def _to_float(value: Any) -> float | None:
+    """Best-effort float of an NT serialized quantity/price (str or number).
+
+    NT serializes ``Quantity`` / ``Price`` to *strings* (``"8186.6"``) over the
+    wire — that's why we parse rather than assume numeric. Returns ``None`` on
+    anything unparseable so callers can degrade gracefully instead of crashing.
+    """
+
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class OrderProgress:
+    """Aggregated fill state for one ``client_order_id``.
+
+    Built up across the order's event stream because no single NT event carries
+    it: OrderInitialized has the total (``quantity``) but no fills, OrderFilled
+    has only ``last_qty`` (this fill), OrderCanceled is nearly empty. We stitch
+    them together so the embed can show 'filled X / total Y (Z%)' and the
+    unfilled remainder on cancel.
+    """
+
+    qty_total: float | None = None
+    qty_filled: float = 0.0
+    time_in_force: str | None = None
+    # Captured off OrderInitialized so the near-empty terminal events
+    # (OrderCanceled especially) can still show direction + type — NT strips
+    # those fields from the cancel/expire events, but the operator still wants
+    # to know "which order, which way, what kind" on the event they actually see.
+    order_side: str | None = None
+    order_type: str | None = None
+
+    @property
+    def pct(self) -> float | None:
+        if not self.qty_total:
+            return None
+        return self.qty_filled / self.qty_total * 100.0
+
+    @property
+    def remainder(self) -> float | None:
+        if self.qty_total is None:
+            return None
+        return self.qty_total - self.qty_filled
+
+
+# Terminal order events — once one of these renders, the slot can be released:
+# the order will emit no further events. (A fully-filled OrderFilled is also
+# terminal; handled explicitly in ``forget_if_terminal``.)
+_TERMINAL_ORDER_EVENTS = frozenset(
+    {"OrderCanceled", "OrderRejected", "OrderDenied", "OrderExpired"},
+)
+
+
+class OrderProgressTracker:
+    """Remembers per-order fill progress so embeds can show IOC/partial results.
+
+    Stateful by necessity (NT spreads the total and the fills across separate
+    events), but the state is small, in-memory, and disposable: a notifier
+    restart simply starts fresh — new orders get tracked, in-flight ones lose
+    their pre-restart total and fall back to showing just ``last_qty``. That's
+    an accepted trade-off (no persistence) since the alternative is a database
+    for cosmetic Discord progress lines.
+
+    Bounded by an LRU cap so a runaway order stream (or a crash between the last
+    fill and the terminal event, which would skip ``forget``) can't leak memory.
+    """
+
+    def __init__(self, max_orders: int = 2_000) -> None:
+        self._orders: OrderedDict[str, OrderProgress] = OrderedDict()
+        self._max_orders = max_orders
+
+    def observe(self, body: Any) -> None:
+        """Feed one order-event body in. Safe to call for every order event —
+        non-order bodies and bodies without a client_order_id are ignored.
+
+        Must be called for the *suppressed* mid-flight events too (especially
+        OrderInitialized — the only event carrying the total quantity), so the
+        denoise gate must run AFTER this, never before.
+        """
+
+        if not isinstance(body, dict):
+            return
+        coid = body.get("client_order_id")
+        if not coid:
+            return
+        event_type = body.get("type")
+        prog = self._orders.get(coid)
+        if prog is None:
+            prog = OrderProgress()
+            self._orders[coid] = prog
+        self._orders.move_to_end(coid)
+
+        # Capture identity fields whenever an event carries them (Initialized
+        # has all of them; fills carry side/type too). Latch — never overwrite a
+        # known value with a later event that happens to omit it.
+        if prog.order_side is None and (side := body.get("order_side")):
+            prog.order_side = str(side)
+        if prog.order_type is None and (otype := body.get("order_type")):
+            prog.order_type = str(otype)
+
+        if event_type == "OrderInitialized":
+            total = _to_float(body.get("quantity"))
+            if total is not None:
+                prog.qty_total = total
+            tif = body.get("time_in_force")
+            if tif:
+                prog.time_in_force = str(tif)
+        elif event_type == "OrderFilled":
+            last = _to_float(body.get("last_qty"))
+            if last is not None:
+                prog.qty_filled += last
+
+        # Evict oldest beyond the cap (move_to_end above keeps live orders warm).
+        while len(self._orders) > self._max_orders:
+            self._orders.popitem(last=False)
+
+    def snapshot(self, client_order_id: str) -> OrderProgress | None:
+        return self._orders.get(client_order_id)
+
+    def forget_if_terminal(self, body: Any) -> None:
+        """Release the slot once the order reaches a terminal state.
+
+        Called after the terminal event's embed has been rendered (the renderer
+        still needs the snapshot to show final progress), so the read happens
+        before the free.
+        """
+
+        if not isinstance(body, dict):
+            return
+        coid = body.get("client_order_id")
+        if not coid:
+            return
+        event_type = body.get("type")
+        terminal = event_type in _TERMINAL_ORDER_EVENTS
+        if event_type == "OrderFilled":
+            prog = self._orders.get(coid)
+            if prog and prog.remainder is not None and prog.remainder <= 0:
+                terminal = True
+        if terminal:
+            self._orders.pop(coid, None)
+
+    def size(self) -> int:
+        return len(self._orders)
+
+
 # ─── Discord embeds ──────────────────────────────────────────────────────────
 
 _COLOR_MAP = {
@@ -144,9 +298,19 @@ _COMPONENT_STATE_EMOJI = {
 _REJECTION_EVENTS = frozenset({"OrderDenied", "OrderRejected"})
 
 
-def render_embed(env: EventEnvelope, *, source_pod: str | None = None) -> discord.Embed:
+def render_embed(
+    env: EventEnvelope,
+    *,
+    source_pod: str | None = None,
+    tracker: OrderProgressTracker | None = None,
+) -> discord.Embed:
     body = env.body if isinstance(env.body, dict) else {"raw": env.body}
     event_type = _guess_event_type(env.topic, body)
+    progress = None
+    if tracker is not None and isinstance(body, dict):
+        coid = body.get("client_order_id")
+        if coid:
+            progress = tracker.snapshot(coid)
 
     title = f"[{event_type}]"
     description_lines: list[str] = []
@@ -172,7 +336,7 @@ def render_embed(env: EventEnvelope, *, source_pod: str | None = None) -> discor
         title = "[每日摘要]"
         description_lines.append(_fmt_daily_summary(body))
     elif env.topic.startswith("events.order."):
-        description_lines.append(_fmt_order(body))
+        description_lines.append(_fmt_order(body, progress=progress))
     elif env.topic.startswith("events.position."):
         description_lines.append(_fmt_position(body))
     elif env.topic.startswith("events.account."):
@@ -241,19 +405,128 @@ def _drop_noisy_keys(body: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in body.items() if k not in noisy}
 
 
-def _fmt_order(body: dict[str, Any]) -> str:
-    keys = (
-        "strategy_id",
-        "instrument_id",
-        "side",
-        "order_type",
-        "quantity",
-        "price",
-        "last_qty",
-        "last_px",
-        "status",
-    )
-    rows = [f"**{k}**: `{body[k]}`" for k in keys if k in body]
+def _order_side(body: dict[str, Any], progress: OrderProgress | None = None) -> str | None:
+    # Order events serialize the direction as ``order_side`` (NT to_dict);
+    # ``side`` is the position-event spelling. Fall back to it so a future
+    # rename or a position-shaped body still surfaces a direction. Last resort:
+    # the tracker, so a near-empty OrderCanceled still shows BUY/SELL.
+    side = body.get("order_side") or body.get("side")
+    if not side and progress:
+        side = progress.order_side
+    return str(side) if side else None
+
+
+def _order_options(body: dict[str, Any]) -> dict[str, Any]:
+    # NT nests the type-specific params (price for LIMIT, trigger_price /
+    # trigger_type for STOP_*) inside an ``options`` dict on OrderInitialized —
+    # they are NOT top-level. Return it (or {}) so callers can drill safely.
+    opts = body.get("options")
+    return opts if isinstance(opts, dict) else {}
+
+
+def _fmt_instruction(
+    body: dict[str, Any],
+    *,
+    progress: OrderProgress | None = None,
+) -> str | None:
+    """Build the 指令 line: order_type · TIF · post_only · reduce_only.
+
+    These flags live on OrderInitialized only (NT 1.227.0 to_dict). Since the
+    denoise gate suppresses OrderInitialized, the TIF would vanish from the
+    *kept* events (Filled/Canceled) — exactly the IOC-vs-GTC visibility the
+    operator asked for. So we backfill ``time_in_force`` from the tracker (it
+    captured it off the suppressed Initialized) when the event body lacks it.
+    post_only / reduce_only aren't tracked (they're on Initialized only and
+    less critical post-fill) — shown when present, omitted otherwise.
+    """
+
+    parts: list[str] = []
+    order_type = body.get("order_type") or (progress.order_type if progress else None)
+    if order_type:
+        parts.append(str(order_type))
+    tif = body.get("time_in_force") or (progress.time_in_force if progress else None)
+    if tif:
+        parts.append(str(tif))
+    if body.get("post_only"):
+        parts.append("只挂单")
+    if body.get("reduce_only"):
+        parts.append("平仓")
+    if not parts:
+        return None
+    return "**指令**: " + " · ".join(f"`{p}`" for p in parts)
+
+
+def _fmt_prices(body: dict[str, Any]) -> list[str]:
+    """Limit price + stop trigger, drilling into ``options`` where NT hides them."""
+
+    opts = _order_options(body)
+    rows: list[str] = []
+    # Limit price: top-level for filled events, options.price on Initialized.
+    price = body.get("price") or opts.get("price")
+    if price is not None:
+        rows.append(f"**限价**: `{price}`")
+    trigger = opts.get("trigger_price")
+    if trigger is not None:
+        trigger_type = opts.get("trigger_type")
+        suffix = f" ({trigger_type})" if trigger_type else ""
+        rows.append(f"**止损触发**: `{trigger}`{suffix}")
+    return rows
+
+
+def _fmt_progress(progress: OrderProgress | None, event_type: str | None) -> str | None:
+    """Render cumulative fill progress for OrderFilled / OrderCanceled.
+
+    NT's single events can't express this (Filled has only ``last_qty``, Cancel
+    is empty) — the tracker stitched it together. Shown only when we actually
+    know the total, else we'd print a misleading 'X/None'.
+
+    Gated to fill/cancel events: an OrderTriggered or other kept node with zero
+    fills would otherwise render a noisy '0 / N (0%)'. A cancel with zero fills
+    still shows (the whole order was canceled — that's information).
+    """
+
+    if progress is None or progress.qty_total is None:
+        return None
+    if event_type == "OrderCanceled":
+        pct = progress.pct
+        pct_str = f" ({pct:.1f}%)" if pct is not None else ""
+        filled = _fmt_qty(progress.qty_filled)
+        total = _fmt_qty(progress.qty_total)
+        remainder = progress.remainder
+        rem_str = _fmt_qty(remainder) if remainder is not None else "?"
+        return f"**最终成交**: `{filled}` / `{total}`{pct_str}\n**未成交(已撤)**: `{rem_str}`"
+    if event_type == "OrderFilled" and progress.qty_filled > 0:
+        pct = progress.pct
+        pct_str = f" ({pct:.1f}%)" if pct is not None else ""
+        filled = _fmt_qty(progress.qty_filled)
+        total = _fmt_qty(progress.qty_total)
+        return f"**累计成交**: `{filled}` / `{total}`{pct_str}"
+    return None
+
+
+def _fmt_qty(value: float) -> str:
+    # Trim the float so 8186.6 doesn't render as 8186.599999999999; keep it
+    # integer-clean when whole (4000.0 → 4000).
+    if value == int(value):
+        return str(int(value))
+    return f"{value:g}"
+
+
+def _fmt_order(body: dict[str, Any], *, progress: OrderProgress | None = None) -> str:
+    rows: list[str] = []
+    for k in ("strategy_id", "instrument_id"):
+        if k in body:
+            rows.append(f"**{k}**: `{body[k]}`")
+    if side := _order_side(body, progress):
+        rows.append(f"**方向**: `{side}`")
+    if instruction := _fmt_instruction(body, progress=progress):
+        rows.append(instruction)
+    rows.extend(_fmt_prices(body))
+    for k in ("quantity", "last_qty", "last_px", "status"):
+        if k in body:
+            rows.append(f"**{k}**: `{body[k]}`")
+    if progress_line := _fmt_progress(progress, body.get("type")):
+        rows.append(progress_line)
     if "client_order_id" in body:
         rows.append(f"**id**: `{body['client_order_id']}`")
     return "\n".join(rows) or f"```json\n{json.dumps(body, indent=2)[:1200]}\n```"

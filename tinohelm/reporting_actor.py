@@ -80,20 +80,32 @@ class ReportingActorConfig(ActorConfig, frozen=True):
 
 
 def positions_report_df(cache: Any) -> Any:
-    """Snapshot the cache's positions + snapshots into a ``pandas.DataFrame``.
+    """Snapshot the cache's *open* positions into a ``pandas.DataFrame``.
 
     Thin delegation to NT's :class:`~nautilus_trader.analysis.reporter.
-    ReportProvider` — the exact call ``Trader.generate_positions_report`` makes
-    internally. Lives here (rather than inline in the actor) so the cache →
+    ReportProvider`. Lives here (rather than inline in the actor) so the cache →
     DataFrame step stays in one place for both the periodic timer and the
     on-demand ``report`` command. We never build the report ourselves; NT owns
     the DataFrame schema.
+
+    We feed ``cache.positions_open()`` — NOT ``cache.positions()``. The latter
+    returns *every* position the cache ever held, including FLAT/closed ones, so
+    a "持仓快照" would list positions the strategy closed hours ago (the bug:
+    two FLAT rows with stale avg_px_open/close showing as if still held). NT's
+    ``positions_open()`` already filters to genuinely-open positions — same
+    signature, same return type, so this is a one-word fix that reuses NT's
+    own open/closed bookkeeping rather than us re-filtering FLAT rows by hand.
+
+    Realized PnL from positions closed during the day isn't lost: it's rolled
+    into the account-level 已实现 line in the report's account-PnL summary
+    (``portfolio`` block), which is the right altitude for a closed-position
+    total anyway.
     """
 
     from nautilus_trader.analysis.reporter import ReportProvider
 
     return ReportProvider.generate_positions_report(
-        cache.positions(),
+        cache.positions_open(),
         cache.position_snapshots(),
     )
 

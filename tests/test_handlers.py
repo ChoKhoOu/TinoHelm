@@ -9,7 +9,12 @@ import pytest
 
 discord = pytest.importorskip("discord")
 
-from tinohelm.notifier.handlers import envelope_for, parse_payload, render_embed  # noqa: E402
+from tinohelm.notifier.handlers import (  # noqa: E402
+    OrderProgressTracker,
+    envelope_for,
+    parse_payload,
+    render_embed,
+)
 
 
 def test_parse_msgpack_payload() -> None:
@@ -139,6 +144,312 @@ def test_render_embed_for_order_event() -> None:
     embed = render_embed(env)
     assert "OrderFilled" in embed.title
     assert "FOO-001" in (embed.description or "")
+
+
+def test_order_event_shows_buy_sell_side_from_order_side_field() -> None:
+    """NT order events serialize the direction as ``order_side`` (not ``side``
+    — that key is position-only). The old formatter read ``side``, so order
+    embeds never showed BUY/SELL at all. Verify we read ``order_side`` and
+    surface the direction.
+
+    Fields mirror NT 1.227.0's ``OrderFilled.to_dict()`` exactly.
+    """
+
+    body = msgspec.msgpack.encode(
+        {
+            "type": "OrderFilled",
+            "strategy_id": "FOO-001",
+            "instrument_id": "OPUSDT-PERP.BINANCE",
+            "order_side": "SELL",
+            "order_type": "MARKET",
+            "last_qty": "8186.6",
+            "last_px": "0.0946",
+        },
+    )
+    env = envelope_for("events.order.FOO-001", body)
+    description = render_embed(env).description or ""
+    assert "SELL" in description
+
+
+def test_order_event_shows_instruction_line_tif_postonly_reduceonly() -> None:
+    """The whole point of issue #1: an operator must be able to tell IOC from
+    GTC, and spot post_only / reduce_only, straight from the embed. These live
+    on OrderInitialized only (NT 1.227.0 — confirmed via to_dict), so the
+    instruction line renders whenever the body carries them.
+    """
+
+    body = msgspec.msgpack.encode(
+        {
+            "type": "OrderInitialized",
+            "strategy_id": "FOO-001",
+            "instrument_id": "OPUSDT-PERP.BINANCE",
+            "order_side": "SELL",
+            "order_type": "MARKET",
+            "quantity": "8186.6",
+            "time_in_force": "IOC",
+            "post_only": False,
+            "reduce_only": True,
+        },
+    )
+    env = envelope_for("events.order.FOO-001", body)
+    description = render_embed(env).description or ""
+    assert "IOC" in description
+    # reduce_only=True must be visible (it's a 平仓 order); post_only=False
+    # should NOT add noise.
+    assert "平仓" in description or "reduce" in description.lower()
+
+
+def test_order_event_shows_stop_trigger_price_from_options() -> None:
+    """Issue #2: the 止损 trigger price lives in the nested ``options`` dict on
+    OrderInitialized (``options.trigger_price``), NOT at the top level. The old
+    formatter only read top-level keys, so stop prices were invisible. Verify
+    we drill into options.
+    """
+
+    body = msgspec.msgpack.encode(
+        {
+            "type": "OrderInitialized",
+            "strategy_id": "FOO-001",
+            "instrument_id": "ETHUSDT.BINANCE",
+            "order_side": "SELL",
+            "order_type": "STOP_MARKET",
+            "quantity": "1",
+            "time_in_force": "GTC",
+            "reduce_only": True,
+            "options": {"trigger_price": "0.95", "trigger_type": "LAST_PRICE"},
+        },
+    )
+    env = envelope_for("events.order.FOO-001", body)
+    description = render_embed(env).description or ""
+    assert "0.95" in description
+
+
+def test_order_event_shows_limit_price_from_options() -> None:
+    """A LIMIT order's price lives in ``options.price`` on OrderInitialized
+    (top-level ``price`` is null there). Verify the limit price surfaces.
+    """
+
+    body = msgspec.msgpack.encode(
+        {
+            "type": "OrderInitialized",
+            "strategy_id": "FOO-001",
+            "instrument_id": "ETHUSDT.BINANCE",
+            "order_side": "BUY",
+            "order_type": "LIMIT",
+            "quantity": "1",
+            "time_in_force": "GTC",
+            "post_only": True,
+            "options": {"price": "55.00"},
+        },
+    )
+    env = envelope_for("events.order.FOO-001", body)
+    description = render_embed(env).description or ""
+    assert "55.00" in description
+    assert "GTC" in description
+
+
+# ─── OrderProgressTracker (IOC / partial-fill aggregation) ───────────────────
+
+
+def test_tracker_aggregates_fill_progress_against_initialized_total() -> None:
+    """Issue #3: NT's OrderFilled carries only ``last_qty`` (this fill), never
+    the order total or cumulative filled. To show 'filled X/Y (Z%)' the tracker
+    must remember the total from OrderInitialized and sum fills by
+    client_order_id.
+    """
+
+    tracker = OrderProgressTracker()
+    coid = "O-20260607-061503-001-oi_momentum_lowvol-2"
+
+    tracker.observe(
+        {
+            "type": "OrderInitialized",
+            "client_order_id": coid,
+            "quantity": "8186.6",
+            "time_in_force": "IOC",
+        },
+    )
+    tracker.observe(
+        {"type": "OrderFilled", "client_order_id": coid, "last_qty": "4000"},
+    )
+
+    snap = tracker.snapshot(coid)
+    assert snap is not None
+    assert snap.qty_total == 8186.6
+    assert snap.qty_filled == 4000.0
+    # a second fill accumulates
+    tracker.observe(
+        {"type": "OrderFilled", "client_order_id": coid, "last_qty": "186.6"},
+    )
+    assert tracker.snapshot(coid).qty_filled == 4186.6
+
+
+def test_fill_embed_backfills_tif_from_tracker_after_denoise() -> None:
+    """The crux of issue #1 surviving issue #4: time_in_force lives only on
+    OrderInitialized, which the denoise gate suppresses. So the *kept*
+    OrderFilled embed must backfill IOC/GTC from the tracker (which observed the
+    suppressed Initialized) — otherwise the operator still can't tell IOC from
+    GTC on the one event they actually see.
+    """
+
+    tracker = OrderProgressTracker()
+    coid = "O-tif"
+    tracker.observe(
+        {
+            "type": "OrderInitialized",
+            "client_order_id": coid,
+            "quantity": "100",
+            "time_in_force": "IOC",
+        },
+    )
+    fill = {
+        "type": "OrderFilled",
+        "strategy_id": "FOO-001",
+        "instrument_id": "OPUSDT-PERP.BINANCE",
+        "client_order_id": coid,
+        "order_side": "SELL",
+        "order_type": "MARKET",
+        "last_qty": "100",
+        "last_px": "0.1",
+    }
+    tracker.observe(fill)
+    # the fill body itself has NO time_in_force (NT doesn't put it there)
+    assert "time_in_force" not in fill
+    env = envelope_for("events.order.FOO-001", fill)
+    description = render_embed(env, tracker=tracker).description or ""
+    assert "IOC" in description  # backfilled from tracker
+
+
+def test_non_fill_kept_event_does_not_render_zero_progress() -> None:
+    """A kept node with zero fills (e.g. OrderTriggered) must NOT render a noisy
+    '0 / N (0%)' progress line — that's meaningless clutter. Only fills (with
+    qty>0) and cancels carry a progress line.
+    """
+
+    tracker = OrderProgressTracker()
+    coid = "O-trig"
+    tracker.observe(
+        {"type": "OrderInitialized", "client_order_id": coid, "quantity": "5"},
+    )
+    body = {
+        "type": "OrderTriggered",
+        "strategy_id": "FOO-001",
+        "instrument_id": "ETHUSDT.BINANCE",
+        "client_order_id": coid,
+        "order_side": "SELL",
+    }
+    env = envelope_for("events.order.FOO-001", body)
+    description = render_embed(env, tracker=tracker).description or ""
+    assert "累计成交" not in description
+    assert "0.0%" not in description
+
+
+def test_partial_fill_embed_shows_cumulative_progress() -> None:
+    """A partially-filled IOC order's OrderFilled embed must show cumulative
+    progress (filled / total + percent), not just this fill's last_qty.
+    """
+
+    tracker = OrderProgressTracker()
+    coid = "O-1"
+    tracker.observe(
+        {"type": "OrderInitialized", "client_order_id": coid, "quantity": "8186.6"},
+    )
+    body = {
+        "type": "OrderFilled",
+        "strategy_id": "FOO-001",
+        "instrument_id": "OPUSDT-PERP.BINANCE",
+        "client_order_id": coid,
+        "order_side": "SELL",
+        "order_type": "MARKET",
+        "last_qty": "4000",
+        "last_px": "0.0946",
+    }
+    tracker.observe(body)
+    env = envelope_for("events.order.FOO-001", body)
+    description = render_embed(env, tracker=tracker).description or ""
+
+    # total and cumulative both visible; percentage somewhere
+    assert "8186.6" in description
+    assert "4000" in description
+    assert "%" in description
+
+
+def test_canceled_ioc_embed_shows_unfilled_remainder() -> None:
+    """When an IOC order is canceled after a partial fill, the OrderCanceled
+    embed (which NT sends nearly empty — no quantities) must show how much
+    filled vs how much was canceled. Remainder = total − cumulative filled.
+    """
+
+    tracker = OrderProgressTracker()
+    coid = "O-2"
+    tracker.observe(
+        {
+            "type": "OrderInitialized",
+            "client_order_id": coid,
+            "quantity": "8186.6",
+            "order_side": "SELL",
+            "order_type": "MARKET",
+        },
+    )
+    tracker.observe(
+        {"type": "OrderFilled", "client_order_id": coid, "last_qty": "4000"},
+    )
+    cancel_body = {
+        "type": "OrderCanceled",
+        "strategy_id": "FOO-001",
+        "instrument_id": "OPUSDT-PERP.BINANCE",
+        "client_order_id": coid,
+    }
+    tracker.observe(cancel_body)
+    env = envelope_for("events.order.FOO-001", cancel_body)
+    description = render_embed(env, tracker=tracker).description or ""
+
+    # unfilled remainder 8186.6 - 4000 = 4186.6 must be shown
+    assert "4186.6" in description
+    assert "4000" in description
+    # direction + type backfilled from the tracker — NT's OrderCanceled carries
+    # neither, but the operator still wants 'which way, what kind' on the event.
+    assert "SELL" in description
+    assert "MARKET" in description
+
+
+def test_tracker_forgets_terminal_orders_to_bound_memory() -> None:
+    """Terminal events (Canceled/Rejected/Expired/Denied, or fully filled) must
+    let the tracker release the order's slot so a long-running notifier doesn't
+    leak one entry per order forever.
+    """
+
+    tracker = OrderProgressTracker()
+    coid = "O-3"
+    tracker.observe(
+        {"type": "OrderInitialized", "client_order_id": coid, "quantity": "10"},
+    )
+    tracker.observe(
+        {"type": "OrderFilled", "client_order_id": coid, "last_qty": "10"},
+    )
+    # fully filled -> snapshot still readable for the fill embed
+    assert tracker.snapshot(coid) is not None
+    tracker.forget_if_terminal(
+        {"type": "OrderFilled", "client_order_id": coid, "last_qty": "10"},
+    )
+    assert tracker.snapshot(coid) is None
+
+
+def test_tracker_is_bounded_under_runaway_order_flow() -> None:
+    """Defensive: even if forget is never reached (crash between fill and
+    terminal), the tracker must not grow without bound. Verify an LRU-style cap.
+    """
+
+    tracker = OrderProgressTracker(max_orders=50)
+    for i in range(200):
+        tracker.observe(
+            {"type": "OrderInitialized", "client_order_id": f"O-{i}", "quantity": "1"},
+        )
+    # never exceeds the cap
+    assert tracker.size() <= 50
+    # most-recent survive, oldest evicted
+    assert tracker.snapshot("O-199") is not None
+    assert tracker.snapshot("O-0") is None
 
 
 def test_order_denied_renders_prominently_with_reason() -> None:

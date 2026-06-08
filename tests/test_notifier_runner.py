@@ -418,6 +418,165 @@ def test_notifier_actor_routes_order_event_to_live_channel() -> None:
     assert sent == [22]
 
 
+def test_route_channel_resolves_nt_strategy_id_to_control_handle() -> None:
+    """NT native events carry the *NT StrategyId* (``{ClassName}-{handle}``) in
+    their body, but the registry is keyed by the *control handle* (the strategy
+    directory name). ``route_channel`` must reconcile the two or every live fill
+    misroutes to sandbox.
+
+    The body NT serializes is ``"OIMomentum-oi_momentum_lowvol"`` while the
+    announce-built registry key is the bare handle ``"oi_momentum_lowvol"``. A
+    direct ``registry.get`` misses → sandbox. Suffix-matching the NT id back to
+    the control handle is the fix.
+    """
+
+    from tinohelm.notifier.runner import route_channel
+
+    channel_id = route_channel(
+        "OIMomentum-oi_momentum_lowvol",
+        {"oi_momentum_lowvol": "live"},
+        sandbox=11,
+        live=22,
+        logging_channel_id=33,
+    )
+    assert channel_id == 22
+
+
+def test_route_channel_resolves_handle_containing_hyphen() -> None:
+    """A control handle with its own hyphen (``FOO-001``) means the NT id is
+    ``OIMomentum-FOO-001``. ``StrategyId.get_tag()`` (identifiers.pyx:843)
+    splits on the *last* hyphen and would wrongly yield ``001`` — which is why
+    we suffix-match against the registry's authoritative handles instead.
+    """
+
+    from tinohelm.notifier.runner import route_channel
+
+    channel_id = route_channel(
+        "OIMomentum-FOO-001",
+        {"FOO-001": "live"},
+        sandbox=11,
+        live=22,
+        logging_channel_id=33,
+    )
+    assert channel_id == 22
+
+
+def test_route_channel_idempotent_when_body_already_control_handle() -> None:
+    """When the body already carries a control handle (registry hit on the raw
+    id), routing must be unchanged — the resolution step is a no-op so we never
+    regress the paths that already pass a handle straight through.
+    """
+
+    from tinohelm.notifier.runner import route_channel
+
+    channel_id = route_channel(
+        "oi_momentum_lowvol",
+        {"oi_momentum_lowvol": "live"},
+        sandbox=11,
+        live=22,
+        logging_channel_id=33,
+    )
+    assert channel_id == 22
+
+
+def test_route_channel_unknown_strategy_falls_back_to_sandbox() -> None:
+    """An id that is neither a registry key nor a suffix match keeps the
+    existing safe default: sandbox. No new pod gets surfaced into the live
+    channel by accident.
+    """
+
+    from tinohelm.notifier.runner import route_channel
+
+    channel_id = route_channel(
+        "Ghost-never_announced",
+        {"oi_momentum_lowvol": "live"},
+        sandbox=11,
+        live=22,
+        logging_channel_id=33,
+    )
+    assert channel_id == 11
+
+
+def test_route_channel_empty_strategy_id_goes_to_logging() -> None:
+    """Empty strategy_id (unscoped topic / forced ``""`` for ``tinohelm.*``)
+    short-circuits to logging *before* any resolution — that semantics must be
+    preserved exactly.
+    """
+
+    from tinohelm.notifier.runner import route_channel
+
+    channel_id = route_channel(
+        "",
+        {"oi_momentum_lowvol": "live"},
+        sandbox=11,
+        live=22,
+        logging_channel_id=33,
+    )
+    assert channel_id == 33
+
+
+def test_route_channel_picks_most_specific_handle_on_overlap() -> None:
+    """If two registry handles could both suffix-match, the longer (most
+    specific) one wins so an ambiguous shorter handle can't shadow it.
+
+    ``Strat-a-b`` ends with both ``-b`` and ``-a-b``; the ``a-b`` handle is the
+    correct, more-specific control handle.
+    """
+
+    from tinohelm.notifier.runner import route_channel
+
+    channel_id = route_channel(
+        "Strat-a-b",
+        {"b": "sandbox", "a-b": "live"},
+        sandbox=11,
+        live=22,
+        logging_channel_id=33,
+    )
+    assert channel_id == 22
+
+
+def test_notifier_actor_routes_nt_native_order_event_to_live_channel() -> None:
+    """End-to-end through the in-process handler: an NT-native ``OrderFilled``
+    whose body strategy_id is the NT StrategyId must reach the live channel of
+    the strategy whose control handle is the registry key.
+
+    This is the real bug — live fills were landing in sandbox because the body's
+    ``OIMomentum-oi_momentum_lowvol`` missed the ``oi_momentum_lowvol`` key.
+    """
+
+    import json
+
+    from tinohelm.notifier.runner import (
+        NotifierActor,
+        NotifierActorConfig,
+    )
+
+    sent: list[int] = []
+
+    class _FakeForwarder:
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(channel_id)
+
+    actor = NotifierActor(
+        NotifierActorConfig(
+            sandbox_channel_id=11,
+            live_channel_id=22,
+            logging_channel_id=33,
+        ),
+        forwarder=_FakeForwarder(),
+        registry={"oi_momentum_lowvol": "live"},
+    )
+
+    handler = actor._make_handler("events.order.*")
+    handler(
+        json.dumps(
+            {"strategy_id": "OIMomentum-oi_momentum_lowvol", "type": "OrderFilled"},
+        ).encode(),
+    )
+
+    assert sent == [22]
+
+
 def test_detect_protocol_drift_warns_when_strategy_proto_differs() -> None:
     """A strategy pod that announces a tino_protocol_version different from
     what the notifier was built against indicates the wire format may be
@@ -1122,3 +1281,177 @@ def test_enqueue_periodic_snapshot_still_reaches_logging() -> None:
 
     asyncio.run(_run())
     assert sent == [33]  # periodic snapshot still lands in logging
+
+
+# ─── order-event denoise (issue #4) ─────────────────────────────────────────
+
+
+def test_should_forward_order_event_suppresses_transient_states() -> None:
+    """Issue #4: the mid-flight order states (Initialized/Submitted/Accepted/
+    Pending*) are the spam — a single market order emits 3-4 of them before the
+    fill. They must be suppressed so the operator sees only the meaningful
+    nodes.
+    """
+
+    from tinohelm.notifier.runner import should_forward_order_event
+
+    for transient in (
+        "OrderInitialized",
+        "OrderSubmitted",
+        "OrderAccepted",
+        "OrderPendingUpdate",
+        "OrderPendingCancel",
+        "OrderReleased",
+        "OrderEmulated",
+    ):
+        assert should_forward_order_event({"type": transient}) is False, transient
+
+
+def test_should_forward_order_event_keeps_meaningful_nodes() -> None:
+    """Fill / cancel / rejection / expiry / trigger / amend are the events worth
+    a Discord ping — each is a state the operator must not miss.
+    """
+
+    from tinohelm.notifier.runner import should_forward_order_event
+
+    for keep in (
+        "OrderFilled",
+        "OrderCanceled",
+        "OrderRejected",
+        "OrderDenied",
+        "OrderExpired",
+        "OrderUpdated",
+        "OrderTriggered",
+    ):
+        assert should_forward_order_event({"type": keep}) is True, keep
+
+
+def test_should_forward_order_event_passes_non_order_and_unknown() -> None:
+    """Non-order bodies (positions, signals, account) and unknown/future order
+    types pass through untouched — schema-tolerant against NT enum drift, same
+    posture as the component-state gate.
+    """
+
+    from tinohelm.notifier.runner import should_forward_order_event
+
+    assert should_forward_order_event({"type": "PositionOpened"}) is True
+    assert should_forward_order_event({"type": "OrderBrandNewFutureState"}) is True
+    assert should_forward_order_event({"name": "buy", "value": 1}) is True
+    assert should_forward_order_event("not-a-dict") is True
+
+
+def test_notifier_actor_suppresses_transient_order_event_but_tracks_total() -> None:
+    """The two intake paths must behave identically: an OrderInitialized is
+    suppressed from Discord (no enqueue) BUT its total quantity is still fed to
+    the tracker first — otherwise the later OrderFilled embed couldn't show
+    'filled X / total Y'.
+    """
+
+    import json
+
+    from tinohelm.notifier.runner import NotifierActor, NotifierActorConfig
+
+    sent: list[Any] = []
+
+    class _FakeForwarder:
+        def __init__(self) -> None:
+            from tinohelm.notifier.handlers import OrderProgressTracker
+
+            self.tracker = OrderProgressTracker()
+
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(env)
+
+    forwarder = _FakeForwarder()
+    actor = NotifierActor(
+        NotifierActorConfig(
+            sandbox_channel_id=11,
+            live_channel_id=22,
+            logging_channel_id=33,
+        ),
+        forwarder=forwarder,
+        registry={"FOO-001": "live"},
+    )
+
+    handler = actor._make_handler("events.order.*")
+    handler(
+        json.dumps(
+            {
+                "type": "OrderInitialized",
+                "strategy_id": "FOO-001",
+                "client_order_id": "O-1",
+                "quantity": "8186.6",
+                "time_in_force": "IOC",
+            },
+        ).encode(),
+    )
+
+    # suppressed from Discord ...
+    assert sent == []
+    # ... but the total was captured for later fill aggregation
+    snap = forwarder.tracker.snapshot("O-1")
+    assert snap is not None
+    assert snap.qty_total == 8186.6
+
+
+def test_notifier_actor_forwards_fill_with_progress() -> None:
+    """An OrderFilled is forwarded (not suppressed) and the embed reflects the
+    aggregated progress the tracker accumulated across the suppressed
+    Initialized + this fill.
+    """
+
+    import json
+
+    from tinohelm.notifier.handlers import render_embed
+    from tinohelm.notifier.runner import NotifierActor, NotifierActorConfig
+
+    sent: list[Any] = []
+
+    class _FakeForwarder:
+        def __init__(self) -> None:
+            from tinohelm.notifier.handlers import OrderProgressTracker
+
+            self.tracker = OrderProgressTracker()
+
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(env)
+
+    forwarder = _FakeForwarder()
+    actor = NotifierActor(
+        NotifierActorConfig(
+            sandbox_channel_id=11,
+            live_channel_id=22,
+            logging_channel_id=33,
+        ),
+        forwarder=forwarder,
+        registry={"FOO-001": "live"},
+    )
+
+    handler = actor._make_handler("events.order.*")
+    handler(
+        json.dumps(
+            {
+                "type": "OrderInitialized",
+                "strategy_id": "FOO-001",
+                "client_order_id": "O-1",
+                "quantity": "8186.6",
+            },
+        ).encode(),
+    )
+    handler(
+        json.dumps(
+            {
+                "type": "OrderFilled",
+                "strategy_id": "FOO-001",
+                "client_order_id": "O-1",
+                "order_side": "SELL",
+                "last_qty": "8186.6",
+                "last_px": "0.0946",
+            },
+        ).encode(),
+    )
+
+    assert len(sent) == 1  # only the fill reached Discord
+    description = render_embed(sent[0], tracker=forwarder.tracker).description or ""
+    assert "8186.6" in description
+    assert "100" in description  # 100% filled

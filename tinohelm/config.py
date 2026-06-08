@@ -9,6 +9,7 @@ fields straight to ``MessageBusConfig`` / ``CacheConfig`` / ``TradingNodeConfig`
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass
@@ -40,6 +41,14 @@ from nautilus_trader.trading.config import (
 
 DEFAULT_STREAMS_PREFIX = "stream"
 DEFAULT_ENCODING = "msgpack"
+
+_log = logging.getLogger(__name__)
+
+
+def _sandbox_persist(raw: dict[str, Any]) -> bool:
+    """Read the ``[sandbox] persist`` opt-in switch (default False = ephemeral)."""
+
+    return bool(raw.get("sandbox", {}).get("persist", False))
 
 
 @dataclass
@@ -199,19 +208,48 @@ def build_message_bus_config(
     )
 
 
-def build_cache_config(raw: dict[str, Any]) -> CacheConfig | None:
-    """Optional ``[cache]`` section. If omitted, NT runs in pure in-memory mode."""
+def build_cache_config(
+    raw: dict[str, Any],
+    *,
+    mode: str = "live",
+    sandbox_persist: bool = False,
+) -> CacheConfig | None:
+    """Optional ``[cache]`` section. If omitted, NT runs in pure in-memory mode.
+
+    **``flush_on_start`` defaults are mode-aware** (same pattern as
+    ``reconciliation`` in :func:`build_exec_engine_config`). ``flush_on_start=true``
+    makes NT skip ``load_cache()`` and actively wipe the whole Redis cache on boot
+    (``kernel.py:461`` / ``:1261``), which destroys exactly the
+    Position/Order/Account history that restart recovery replays against:
+
+    * **sandbox → ``True`` (ephemeral) UNLESS ``[sandbox] persist=true``.** The
+      in-process ``SimulatedExchange`` ``initialize_account()``s fresh from
+      ``starting_balances`` every boot, so by default a persisted cache would only
+      desync against a clean sim account — clean-slate is the coherent default.
+      But with ``[sandbox] persist=true`` the operator opts into restart recovery
+      (sandbox_recovery.py): the cache must SURVIVE so NT's ``load_cache`` reads
+      back the historical Account/Order/Position and the BridgeActor can replay the
+      last all-currency balance over the fresh sim account. So persist flips the
+      default to ``False`` (keep cache).
+    * **live/DEMO → ``False`` (persistent).** The real venue is the source of truth;
+      the cache must survive a restart for reconciliation to replay against it.
+
+    An explicit ``flush_on_start`` in ``[cache]`` always wins, so an operator can
+    still force either behaviour. The notifier pod assembles with the default
+    ``mode="live"`` (it has no exec/sim account to reset and wants its cache kept).
+    """
 
     section = raw.get("cache")
     if not section:
         return None
     redis_url = os.environ.get("REDIS_URL") or section.get("redis_url", "redis://redis:6379/0")
+    default_flush = mode == "sandbox" and not sandbox_persist
     return CacheConfig(
         database=_database_config_from_url(redis_url),
         encoding=section.get("encoding", DEFAULT_ENCODING),
         timestamps_as_iso8601=section.get("timestamps_as_iso8601", True),
         buffer_interval_ms=section.get("buffer_interval_ms", 100),
-        flush_on_start=section.get("flush_on_start", False),
+        flush_on_start=section.get("flush_on_start", default_flush),
     )
 
 
@@ -325,6 +363,12 @@ def build_controller_import(file: TinoStrategyFile) -> ImportableControllerConfi
         config={
             "strategy_id": file.strategy_id,
             "command_topic": file.command_topic,
+            # The bridge gates its sandbox restart-recovery hooks on these two
+            # fields (``mode=="sandbox" and sandbox_persist``); they only reach it
+            # through this config. live/DEMO → mode != "sandbox" → guard never
+            # fires, so the bridge's on_start/on_stop stay byte-for-byte unchanged.
+            "mode": file.mode,
+            "sandbox_persist": _sandbox_persist(file.raw),
         },
     )
 
@@ -362,6 +406,35 @@ def build_actor_imports(file: TinoStrategyFile) -> list[ImportableActorConfig]:
                 config=extra.get("params", {}),
             ),
         )
+
+    # Sandbox fill fuel (shared glue, mode-driven — see sandbox_book_feeder.py).
+    # The sim exchange has no data client; a bar-signal strategy's bar topic does
+    # not match its msgbus pattern, so without a matching feed every order is
+    # rejected "no market". Inject the shared L2-delta feeder whenever mode==sandbox.
+    # Opt out with [sandbox] fill_fuel = false for a strategy that already
+    # subscribes quotes/book (its own feed keeps the sim book alive). The feeder
+    # derives its instrument pool from the cache (load_ids), so no config needed.
+    sandbox_section = file.raw.get("sandbox", {})
+    fill_fuel = sandbox_section.get("fill_fuel", True)
+    if file.mode == "sandbox" and fill_fuel:
+        actors.append(
+            ImportableActorConfig(
+                actor_path="tinohelm.sandbox_book_feeder:SandboxBookFeeder",
+                config_path="tinohelm.sandbox_book_feeder:SandboxBookFeederConfig",
+                config={},
+            ),
+        )
+    elif file.mode == "sandbox" and _sandbox_persist(file.raw):
+        # persist=true re-hydrates open orders into the sim's matching engines
+        # (sandbox_recovery.recover_on_start), but those only FILL once the sim
+        # book moves — which is exactly what the fill-fuel feeder drives. With
+        # fill_fuel off, re-hydrated orders just sit there. Warn (not enforce).
+        _log.warning(
+            "[sandbox] persist=true but fill_fuel=false: re-hydrated open orders will "
+            "sit inert in the sim with no L2 feed to fill against. Enable fill_fuel or "
+            "ensure the strategy subscribes its own book/quotes.",
+        )
+
     return actors
 
 
@@ -417,6 +490,18 @@ def build_exec_clients(file: TinoStrategyFile) -> dict[str, Any]:
         }
 
     sandbox_section = file.raw.get("sandbox", {})
+    # Restart recovery (persist=true) replays a MULTI-currency AccountState
+    # (sandbox_recovery.build_account_balances), which NT's base.pyx rejects when
+    # the account is single-base-currency. We don't force base_currency away
+    # (respect explicit config) but warn loudly that multi-currency recovery will
+    # fail — see sandbox_recovery.py constraint 1.
+    if _sandbox_persist(file.raw) and sandbox_section.get("base_currency") is not None:
+        _log.warning(
+            "[sandbox] persist=true needs a MULTI-currency account, but base_currency=%r "
+            "is set: NT will reject the multi-currency balance replay, so restart recovery "
+            "will fail. Remove base_currency for full all-currency restore.",
+            sandbox_section.get("base_currency"),
+        )
     sandbox_clients: dict[str, Any] = {}
     for venue, payload in raw_clients.items():
         kwargs: dict[str, Any] = {
@@ -466,15 +551,28 @@ def build_trading_node_config(file: TinoStrategyFile) -> TradingNodeConfig:
         user_streams.append(extra)
 
     # NT's kernel persists Trader state to the cache on stop and reloads it on
-    # start when these flags are True (system/kernel.py:534 and :1049). Default
-    # them on so a strategy pod redeploy doesn't silently drop on_save() state
-    # or in-flight bracket-order tracking. Explicit opt-out via [recovery].
-    recovery_enabled = file.raw.get("recovery", {}).get("enabled", True)
+    # start when these flags are True (system/kernel.py:534 and :1049). The
+    # default is mode-aware (same rationale as flush_on_start in
+    # build_cache_config and reconciliation in build_exec_engine_config):
+    #   * live/DEMO → True  — a pod redeploy must not drop on_save() state or
+    #     in-flight bracket-order tracking; the real venue is the source of truth.
+    #   * sandbox   → False — the in-process sim resets its account from
+    #     starting_balances every boot, so reloading Trader state would only
+    #     desync against a clean sim. Ephemeral is the coherent sandbox default.
+    #   * sandbox + [sandbox] persist=true → True — the operator opts into restart
+    #     recovery, so Trader/strategy on_save/on_load state must survive too (the
+    #     companion to flush_on_start=False in build_cache_config).
+    # Explicit [recovery] enabled always wins, so either behaviour stays forceable.
+    persist = _sandbox_persist(file.raw)
+    recovery_enabled = file.raw.get("recovery", {}).get(
+        "enabled",
+        file.mode != "sandbox" or persist,
+    )
 
     return TradingNodeConfig(
         trader_id=TraderId(file.trader_id),
         message_bus=build_message_bus_config(file.raw, external_streams=user_streams),
-        cache=build_cache_config(file.raw),
+        cache=build_cache_config(file.raw, mode=file.mode, sandbox_persist=persist),
         logging=build_logging_config(file.raw),
         data_engine=LiveDataEngineConfig(),
         risk_engine=LiveRiskEngineConfig(),

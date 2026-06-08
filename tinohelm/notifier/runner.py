@@ -47,7 +47,7 @@ from nautilus_trader.live.node import TradingNode
 
 from tinohelm import COMMAND_TOPIC_PREFIX, control_stream_key, event_stream_key
 from tinohelm.config import TinoNotifierFile, build_notifier_node_config
-from tinohelm.notifier.handlers import envelope_for, render_embed
+from tinohelm.notifier.handlers import OrderProgressTracker, envelope_for, render_embed
 from tinohelm.strategy_runner import ANNOUNCE_STREAM, TINO_PROTOCOL_VERSION
 
 logger = logging.getLogger("tinohelm.notifier")
@@ -203,6 +203,45 @@ def validate_command_channel(
         )
 
 
+def _resolve_handle(strategy_id: str, registry: dict[str, str]) -> str:
+    """Map an event's ``strategy_id`` back to the registry's control-handle key.
+
+    TinoHelm runs two strategy_id namespaces. The registry (built from the
+    announce stream) is keyed by the *control handle* — the strategy directory
+    name, e.g. ``oi_momentum_lowvol``. But NT serializes its own *NT StrategyId*
+    onto every native event body: ``f"{ClassName}-{order_id_tag}"`` where the
+    tag is the control handle (config.py injects ``order_id_tag=handle``), e.g.
+    ``OIMomentum-oi_momentum_lowvol``. Looking that up in the registry misses,
+    so the event would mis-route to the sandbox default. This reconciles them:
+
+    1. ``strategy_id`` is already a registry key → it *is* the control handle
+       (idempotent: bodies we publish ourselves, like reports, carry the
+       handle directly).
+    2. Otherwise suffix-match against the registry, since an NT StrategyId is
+       ``f"{ClassName}-{handle}"`` → the key ``k`` matches when
+       ``strategy_id.endswith("-" + k)``. The registry holds the authoritative
+       set of handles, so this works for *any* handle, including ones that
+       themselves contain hyphens. On overlapping matches the longest (most
+       specific) key wins to avoid a shorter handle shadowing it.
+    3. No match → return ``strategy_id`` unchanged so the caller's
+       ``registry.get`` misses and falls back to sandbox as before.
+
+    We deliberately do **not** use ``StrategyId.get_tag()``
+    (identifiers.pyx:843), whose implementation is ``to_str().split("-")[-1]``:
+    it assumes the tag has no hyphen, so it truncates a hyphenated handle like
+    ``FOO-001`` down to ``001``. Suffix-matching against the known handles has
+    no such assumption.
+    """
+
+    if strategy_id in registry:
+        return strategy_id
+    best: str | None = None
+    for key in registry:
+        if strategy_id.endswith(f"-{key}") and (best is None or len(key) > len(best)):
+            best = key
+    return best if best is not None else strategy_id
+
+
 def route_channel(
     strategy_id: str,
     registry: dict[str, str],
@@ -217,6 +256,12 @@ def route_channel(
     (events.system.*, events.account.*, tinohelm.*) — those go to the
     logging channel so trade-flow channels stay clean.
 
+    NT native events (OrderFilled / PositionOpened / …) carry NT's own
+    StrategyId in their body, not the control handle the registry is keyed
+    by, so we normalize via :func:`_resolve_handle` before the lookup — this
+    is the single routing chokepoint both event paths funnel through
+    (in-process actor and standalone XREAD loop), so fixing it here fixes both.
+
     For scoped topics, defaults to ``sandbox`` when the strategy isn't
     in the registry yet or when ``mode`` isn't recognized.
 
@@ -227,7 +272,8 @@ def route_channel(
 
     if not strategy_id:
         return logging_channel_id
-    return live if registry.get(strategy_id) == "live" else sandbox
+    handle = _resolve_handle(strategy_id, registry)
+    return live if registry.get(handle) == "live" else sandbox
 
 
 def strategies_for_channel(
@@ -421,6 +467,45 @@ def should_forward_component_state(state: str) -> bool:
     return state not in _TRANSIENT_COMPONENT_STATES
 
 
+# Mid-flight order states: a single market order walks Initialized → Submitted
+# → Accepted before the fill, and amend/cancel add Pending* — 3-5 events of pure
+# plumbing per order. We suppress them so Discord shows only the meaningful
+# nodes (fill / cancel / rejection / expiry / trigger / amend). The denoise is a
+# deny-list, matched on the body's ``type`` so it behaves identically whether NT
+# (in-process) or the stream loop sourced the event.
+#
+# Names match NT's ``model.events`` order-event class names (schema-tolerant: an
+# unrecognised future type is *kept*, never silently dropped — over-reporting a
+# new event beats hiding it). The tracker must still ``observe`` these before
+# the gate runs, because OrderInitialized is the only event carrying the order
+# total — suppressing it from Discord must not hide its quantity from the
+# fill-progress aggregation.
+_TRANSIENT_ORDER_EVENTS = frozenset(
+    {
+        "OrderInitialized",
+        "OrderSubmitted",
+        "OrderAccepted",
+        "OrderPendingUpdate",
+        "OrderPendingCancel",
+        "OrderReleased",
+        "OrderEmulated",
+    },
+)
+
+
+def should_forward_order_event(body: Any) -> bool:
+    """``True`` unless ``body`` is a transient mid-flight order event.
+
+    Non-order bodies (positions, signals, account, reports) and unrecognised
+    order types pass through untouched — only the known plumbing states are
+    dropped. Mirrors the component-state gate's schema-tolerant posture.
+    """
+
+    if not isinstance(body, dict):
+        return True
+    return body.get("type") not in _TRANSIENT_ORDER_EVENTS
+
+
 def route_event(
     topic: str,
     payload: Any,
@@ -531,10 +616,19 @@ def _forward_stream_entry(
         live_channel_id=live_channel_id,
         logging_channel_id=logging_channel_id,
     )
+    # Feed the fill tracker before any gate (OrderInitialized carries the total;
+    # suppressing it from Discord must not hide its quantity from aggregation).
+    tracker = getattr(forwarder, "tracker", None)
+    if tracker is not None:
+        tracker.observe(env.body)
     # Drop transient component-state boot/shutdown chatter (the 429-flood
     # source). Done here, after decode, because the state lives in the body —
     # the topic gate above only knows it's ``events.system.*``.
     if not _component_state_passes(env.body):
+        return False
+    # Drop mid-flight order plumbing — identical deny-list to the in-process
+    # NotifierActor path so delivery matches regardless of which path sourced it.
+    if not should_forward_order_event(env.body):
         return False
     forwarder.enqueue(env, channel_id=channel_id)
     return True
@@ -730,10 +824,22 @@ class NotifierActor(Actor):
                 # subscription pattern (best we have for display/debug) and
                 # pull the strategy_id off the body where NT puts it.
                 env = envelope_for(pattern, msg)
+                # Feed every order event (including the ones we're about to
+                # suppress) to the fill tracker FIRST — OrderInitialized is the
+                # only event carrying the order total, so the denoise gate below
+                # must not hide its quantity from the progress aggregation.
+                tracker = getattr(self._forwarder, "tracker", None)
+                if tracker is not None:
+                    tracker.observe(env.body)
                 # Drop transient component-state boot/shutdown chatter before
                 # routing — the same 429-flood gate the standalone stream loop
                 # applies, so in-process and external paths behave identically.
                 if not _component_state_passes(env.body):
+                    return
+                # Drop mid-flight order plumbing (Initialized/Submitted/Accepted/
+                # Pending*) — keep only the meaningful nodes (fill/cancel/reject/
+                # expiry/trigger/amend). Same deny-list gate on both intake paths.
+                if not should_forward_order_event(env.body):
                     return
                 # tinohelm.* is operational chatter (reports, summaries,
                 # drift warnings). Even if the body carries a strategy_id
@@ -779,6 +885,11 @@ class DiscordForwarder:
         self._client = client
         self._rate_limit = rate_limit
         self._semaphores: dict[int, asyncio.Semaphore] = {}
+        # Per-order fill aggregation (IOC / partial-fill progress). Lives on the
+        # forwarder because both intake paths (the in-process NotifierActor and
+        # the standalone stream loop) funnel through ``enqueue`` here, so this is
+        # the one shared point where a single tracker sees every order event.
+        self.tracker = OrderProgressTracker()
         # Strategy id → list of futures awaiting the next ``tinohelm.report.
         # positions`` envelope from that pod. Used by the ``/positions``
         # slash command to turn the existing fire-and-forget snapshot into
@@ -892,9 +1003,15 @@ class DiscordForwarder:
                 return
         async with self._semaphore_for(channel_id):
             try:
-                await channel.send(embed=render_embed(env))
+                await channel.send(embed=render_embed(env, tracker=self.tracker))
             except discord.HTTPException as exc:
                 logger.warning(f"discord send failed: {exc}")
+        # Release the tracker slot once a terminal event has been rendered (read
+        # before free: render_embed above already consumed the snapshot). Done
+        # after send so a fully-filled/canceled order doesn't leak an entry.
+        body = env.body if isinstance(env.body, dict) else None
+        if body is not None:
+            self.tracker.forget_if_terminal(body)
 
 
 def _build_discord_client(

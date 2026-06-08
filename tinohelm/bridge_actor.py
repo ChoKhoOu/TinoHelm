@@ -28,6 +28,7 @@ periodic snapshot.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from nautilus_trader.common.config import ActorConfig
@@ -48,10 +49,21 @@ class BridgeActorConfig(ActorConfig, frozen=True):
     command_topic : str
         The base topic this actor subscribes to. The pattern subscription is
         ``{command_topic}.*``.
+    mode : str, default "live"
+        Run mode (``"live"`` | ``"sandbox"``). Only ``"sandbox"`` (with
+        ``sandbox_persist``) gates the restart-recovery hooks; everything else
+        leaves on_start/on_stop byte-for-byte unchanged.
+    sandbox_persist : bool, default False
+        Opt-in (``[sandbox] persist=true``) for sandbox restart recovery: replay
+        the last all-currency balance + re-hydrate open orders on start, and
+        snapshot the live balance on stop. Off by default so a plain sandbox pod
+        stays ephemeral.
     """
 
     strategy_id: str
     command_topic: str
+    mode: str = "live"
+    sandbox_persist: bool = False
 
 
 class BridgeActor(Controller):
@@ -80,6 +92,11 @@ class BridgeActor(Controller):
         self._strategy_id: StrategyId | None = None
         # The wildcard pattern NT's switchboard expects.
         self._pattern = f"{config.command_topic}.*"
+        # Gate for the sandbox restart-recovery hooks. Stored verbatim so the
+        # on_start/on_stop guard is a pure attribute check — when it is not
+        # (sandbox + persist) the recovery module is never even imported.
+        self._mode = config.mode
+        self._sandbox_persist = config.sandbox_persist
 
     def _resolve_strategy_id(self) -> StrategyId | None:
         """Return this pod's live NT StrategyId (cached). None if no strategy is loaded.
@@ -111,9 +128,66 @@ class BridgeActor(Controller):
         self.log.info(
             f"BridgeActor subscribed to {self._pattern} (control handle={self._control_handle})",
         )
+        # Sandbox restart recovery (opt-in). NT runs all actors' on_start before
+        # any strategy's (trader.py:255-265) and AFTER the build-time
+        # initialize_account, so this is the correct moment to replay the last
+        # all-currency balance + re-hydrate open orders into the sim — before the
+        # strategy can place its first order. live/DEMO never enters this branch,
+        # so their on_start is byte-for-byte unchanged.
+        if self._recovery_enabled():
+            from tinohelm.sandbox_recovery import (
+                DEFAULT_BALANCE_KEY_PREFIX,
+                recover_on_start,
+            )
+
+            recover_on_start(
+                trader=self._trader,
+                clock=self.clock,
+                redis=self._recovery_redis(),
+                key_prefix=DEFAULT_BALANCE_KEY_PREFIX,
+                trader_id=str(self.trader_id),
+            )
 
     def on_stop(self) -> None:
         self.msgbus.unsubscribe(topic=self._pattern, handler=self._on_command)
+        # Snapshot the live all-currency balance so the next boot can replay it
+        # over the fresh sim account (NT's initialize_account would otherwise lose
+        # it). Same opt-in guard; live/DEMO never enters this branch.
+        if self._recovery_enabled():
+            from tinohelm.sandbox_recovery import (
+                DEFAULT_BALANCE_KEY_PREFIX,
+                snapshot_on_stop,
+            )
+
+            snapshot_on_stop(
+                trader=self._trader,
+                redis=self._recovery_redis(),
+                key_prefix=DEFAULT_BALANCE_KEY_PREFIX,
+                trader_id=str(self.trader_id),
+            )
+
+    # ─── sandbox recovery wiring ────────────────────────────────────────────────
+
+    def _recovery_enabled(self) -> bool:
+        """The single gate for the recovery hooks: sandbox mode + persist opt-in."""
+
+        return self._mode == "sandbox" and self._sandbox_persist
+
+    def _recovery_redis(self) -> Any:
+        """Build a standalone Redis client for the TinoHelm-private balance key.
+
+        We use a dedicated ``redis.Redis.from_url(REDIS_URL)`` (same URL source as
+        the CLI's direct XADD and config.py's message-bus assembly), NOT NT's
+        private ``cache._database`` handle — the snapshot key lives in TinoHelm's
+        own namespace and must not depend on an NT-internal attribute. Imported
+        locally so the bridge stays importable from CLI contexts without redis
+        eagerly loaded, and only ever constructed inside the recovery guard.
+        """
+
+        import redis
+
+        url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+        return redis.Redis.from_url(url, decode_responses=False)
 
     # ─── handler ──────────────────────────────────────────────────────────────
 

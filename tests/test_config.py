@@ -94,8 +94,8 @@ def test_build_trading_node_config_injects_control_stream(strategy_toml: Path) -
     assert "BYBIT" in config.exec_clients
 
 
-def test_strategy_pod_load_and_save_state_default_on(strategy_toml: Path) -> None:
-    """Strategy pods should recover from restart by default.
+def test_live_strategy_pod_load_and_save_state_default_on(tmp_path: Path) -> None:
+    """A LIVE strategy pod should recover from restart by default.
 
     NT's kernel saves trader state to the cache when the kernel stops
     (kernel.py:1049 → _trader.save()) and reloads it on startup
@@ -104,14 +104,106 @@ def test_strategy_pod_load_and_save_state_default_on(strategy_toml: Path) -> Non
     silently disabled NT's restart-recovery — a strategy pod redeploy would
     lose its on_save() state and any in-flight bracket order tracking.
 
-    The default must be True so operators get recovery without ceremony;
-    the [recovery] TOML section is the explicit opt-out.
+    The default must be True in live/DEMO so operators get recovery without
+    ceremony (the real venue is the source of truth across restarts); the
+    [recovery] TOML section is the explicit opt-out. Sandbox flips the default
+    the other way — see test_sandbox_strategy_pod_is_ephemeral_by_default.
     """
 
-    file = TinoStrategyFile.load(strategy_toml)
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "LIVE-001"
+        trader_id = "TINO-001"
+        mode = "live"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [cache]
+        redis_url = "redis://redis:6379/0"
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "live.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
     config = build_trading_node_config(file)
     assert config.load_state is True
     assert config.save_state is True
+    # Persistent cache too: live must NOT flush on boot (recovery replays it).
+    assert config.cache is not None
+    assert config.cache.flush_on_start is False
+
+
+def test_sandbox_strategy_pod_is_ephemeral_by_default(tmp_path: Path) -> None:
+    """A sandbox pod defaults to clean-slate: no state reload, cache flushed.
+
+    The in-process ``SimulatedExchange`` ``initialize_account()``s fresh from
+    ``starting_balances`` every boot and its ``generate_*_reports`` return empty,
+    so reloading a persisted Trader/cache would only desync against a clean sim
+    account. Mode-aware defaults make ``mode=sandbox`` ephemeral with zero TOML —
+    the mirror image of the live default above (and the same pattern as
+    ``reconciliation = mode != "sandbox"``). The TOML sets no ``flush_on_start`` /
+    ``[recovery]``, so this exercises the pure mode-driven defaults.
+    """
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "SBX-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [cache]
+        redis_url = "redis://redis:6379/0"
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "sandbox.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    assert file.mode == "sandbox"
+    config = build_trading_node_config(file)
+    assert config.load_state is False
+    assert config.save_state is False
+    assert config.cache is not None
+    assert config.cache.flush_on_start is True
+
+
+def test_explicit_flush_on_start_overrides_mode_default() -> None:
+    """An explicit ``[cache] flush_on_start`` always wins over the mode default.
+
+    The mode-aware default (sandbox→True, live→False) is only the fallback when
+    the key is absent. An operator can force a sandbox to KEEP its cache
+    (flush=false) or force a live pod to wipe it (flush=true) — both directions
+    must be honoured. Tested at the ``build_cache_config`` seam where the rule lives.
+    """
+
+    from tinohelm.config import build_cache_config
+
+    raw_keep = {"cache": {"redis_url": "redis://r:6379/0", "flush_on_start": False}}
+    raw_wipe = {"cache": {"redis_url": "redis://r:6379/0", "flush_on_start": True}}
+
+    # sandbox default is True, but explicit False sticks.
+    assert build_cache_config(raw_keep, mode="sandbox").flush_on_start is False
+    # live default is False, but explicit True sticks.
+    assert build_cache_config(raw_wipe, mode="live").flush_on_start is True
+    # And the bare defaults remain mode-driven.
+    bare = {"cache": {"redis_url": "redis://r:6379/0"}}
+    assert build_cache_config(bare, mode="sandbox").flush_on_start is True
+    assert build_cache_config(bare, mode="live").flush_on_start is False
 
 
 def test_exec_engine_enables_continuous_reconciliation_in_live(
@@ -297,10 +389,99 @@ def test_strategy_pod_omits_reporting_actor_when_disabled(tmp_path: Path) -> Non
     assert "tinohelm.reporting_actor:ReportingActor" not in actors
 
 
-def test_strategy_pod_recovery_can_be_disabled_via_toml(tmp_path: Path) -> None:
-    """A user who genuinely wants a clean-slate boot — typical for the
+# ─── Sandbox fill-fuel auto-injection ───────────────────────────────────────
+#
+# The sim exchange has no data client; it only consumes whatever matches its
+# msgbus pattern data.*.{venue}.*. A bar-signal strategy's bar topic does NOT
+# match (venue token is mid-token), so without a matching feed every order is
+# rejected "no market". The SandboxBookFeeder publishes an L2 delta feed that
+# DOES match — a GENERAL sandbox-mode fix, so it rides the shared assembly layer
+# and is injected automatically whenever mode==sandbox (not declared per strategy).
+
+_BOOK_FEEDER = "tinohelm.sandbox_book_feeder:SandboxBookFeeder"
+
+
+def test_sandbox_mode_auto_injects_book_feeder(strategy_toml: Path) -> None:
+    """A sandbox pod gets the shared fill-fuel feeder with zero strategy config.
+
+    strategy_toml is mode=sandbox and declares NO [[actors]] — the feeder must
+    appear purely because the mode demands it.
+    """
+
+    from tinohelm.config import build_actor_imports
+
+    file = TinoStrategyFile.load(strategy_toml)
+    actors = [a.actor_path for a in build_actor_imports(file)]
+    assert _BOOK_FEEDER in actors
+
+
+def test_live_mode_does_not_inject_book_feeder(tmp_path: Path) -> None:
+    """Live pods route to a real venue — the sim feeder must NEVER be injected
+    (it would open a redundant live L2 delta subscription for nothing)."""
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "LIVE-001"
+        trader_id = "TINO-001"
+        mode = "live"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "live.toml"
+    path.write_text(body)
+
+    from tinohelm.config import build_actor_imports
+
+    file = TinoStrategyFile.load(path)
+    actors = [a.actor_path for a in build_actor_imports(file)]
+    assert _BOOK_FEEDER not in actors
+
+
+def test_sandbox_fill_fuel_opt_out_skips_feeder(tmp_path: Path) -> None:
+    """A strategy that already subscribes quotes/book for its signal keeps the
+    sim book alive on its own; ``[sandbox] fill_fuel = false`` opts out of the
+    injected feeder so there's no duplicate subscription."""
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "SELFFED-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [factories.data]
+        [factories.exec]
+
+        [sandbox]
+        fill_fuel = false
+        """,
+    ).strip()
+    path = tmp_path / "selffed.toml"
+    path.write_text(body)
+
+    from tinohelm.config import build_actor_imports
+
+    file = TinoStrategyFile.load(path)
+    actors = [a.actor_path for a in build_actor_imports(file)]
+    assert _BOOK_FEEDER not in actors
+
+
+def test_live_recovery_can_be_disabled_via_toml(tmp_path: Path) -> None:
+    """A LIVE operator who genuinely wants a clean-slate boot — typical for the
     first run of a new strategy, or after ``flush_on_start`` — sets
-    ``[recovery] enabled = false``. This must override the True default.
+    ``[recovery] enabled = false``. This must override the mode-driven True
+    default (in live, recovery defaults ON, so the opt-out is meaningful here).
     """
 
     body = textwrap.dedent(
@@ -308,7 +489,7 @@ def test_strategy_pod_recovery_can_be_disabled_via_toml(tmp_path: Path) -> None:
         [strategy]
         id = "FRESH-001"
         trader_id = "TINO-001"
-        mode = "sandbox"
+        mode = "live"
         class = "strategies.example.strategy:ExampleStrategy"
         config_class = "strategies.example.strategy:ExampleStrategyConfig"
 
@@ -328,6 +509,44 @@ def test_strategy_pod_recovery_can_be_disabled_via_toml(tmp_path: Path) -> None:
     config = build_trading_node_config(file)
     assert config.load_state is False
     assert config.save_state is False
+
+
+def test_sandbox_recovery_can_be_forced_on_via_toml(tmp_path: Path) -> None:
+    """Explicit ``[recovery] enabled = true`` overrides the sandbox False
+    default — the mirror of the live opt-out. Proves the mode-aware default is
+    only a default: an operator who deliberately wants a sandbox to reload
+    Trader state can still force it. ``flush_on_start`` is independently still
+    its sandbox default (True) since this TOML sets no ``[cache] flush_on_start``.
+    """
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "SBX-PERSIST-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [cache]
+        redis_url = "redis://redis:6379/0"
+
+        [recovery]
+        enabled = true
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "sbx-persist.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    config = build_trading_node_config(file)
+    assert config.load_state is True
+    assert config.save_state is True
 
 
 def test_external_streams_preserves_user_entries_and_dedupes(
@@ -796,17 +1015,20 @@ def test_demo_runs_with_reconciliation_on(tmp_path: Path) -> None:
     assert exec_cfg.reconciliation is True
 
 
-def test_demo_persists_state_when_toml_flips_ephemeral_switches(tmp_path: Path) -> None:
-    """DEMO must persist state across restarts: flush_on_start OFF, load/save ON.
+def test_demo_persists_state_with_zero_toml_ceremony(tmp_path: Path) -> None:
+    """DEMO must persist state across restarts WITH NO extra TOML.
 
-    Sandbox is ephemeral (``[cache] flush_on_start=true`` + ``[recovery]
-    enabled=false``); DEMO inverts both so the Redis cache survives a restart for
-    reconciliation to replay against, and the Trader's own state (in-flight
-    bracket tracking etc.) reloads. These are pure TOML reads —
-    ``build_cache_config`` maps ``flush_on_start`` straight through, and
-    ``[recovery].enabled`` drives ``load_state``/``save_state`` — so the switch is
-    config-only, no code. flush_on_start=true would make NT skip ``load_cache()``
-    and actively flush the cache on boot, which directly defeats recovery.
+    This is the core of the mode-aware fix. DEMO == ``mode=live``, and a live pod
+    must keep its Redis cache (flush_on_start OFF) so reconciliation can replay
+    the real account/positions/orders, and reload the Trader's own state
+    (load/save ON, in-flight bracket tracking etc.). Previously this only held if
+    the operator hand-edited ``[cache] flush_on_start=false`` + ``[recovery]
+    enabled=true`` — a static TOML that ``make deploy MODE=live`` does NOT rewrite,
+    so a strategy left at the sandbox-ephemeral values would silently drop state
+    on every DEMO restart. Now the defaults follow ``mode`` (sandbox→ephemeral,
+    live→persistent), so this TOML sets NEITHER switch and still persists —
+    proving the redeploy footgun is gone. ``flush_on_start=true`` would make NT
+    skip ``load_cache()`` and wipe the cache on boot, defeating recovery.
     """
 
     from tinohelm.config import build_cache_config, build_trading_node_config
@@ -823,10 +1045,7 @@ def test_demo_persists_state_when_toml_flips_ephemeral_switches(tmp_path: Path) 
         [strategy.params]
 
         [cache]
-        flush_on_start = false
-
-        [recovery]
-        enabled = true
+        redis_url = "redis://redis:6379/0"
 
         [factories.data]
         [factories.exec]
@@ -836,7 +1055,8 @@ def test_demo_persists_state_when_toml_flips_ephemeral_switches(tmp_path: Path) 
     path.write_text(body)
     file = TinoStrategyFile.load(path)
 
-    cache_cfg = build_cache_config(file.raw)
+    # No [cache] flush_on_start, no [recovery] — pure mode-driven persistence.
+    cache_cfg = build_cache_config(file.raw, mode=file.mode)
     assert cache_cfg is not None
     assert cache_cfg.flush_on_start is False
 
@@ -875,3 +1095,304 @@ def test_demo_data_client_coerces_environment_via_instance_upgrade(tmp_path: Pat
     assert dc.environment is BinanceEnvironment.DEMO
     assert isinstance(dc.instrument_provider, BinanceInstrumentProviderConfig)
     assert dc.instrument_provider.query_commission_rates is True
+
+
+# ─── [sandbox] persist — restart recovery opt-in ────────────────────────────
+
+
+def test_sandbox_persist_keeps_cache_and_enables_recovery(tmp_path: Path) -> None:
+    """``[sandbox] persist = true`` flips a sandbox pod from ephemeral to durable.
+
+    Two mode-aware defaults move together so the persisted cache is actually
+    usable across a restart:
+      * ``flush_on_start`` defaults False (sandbox would normally wipe → True),
+        so NT's ``load_cache`` reads back the Account/Order/Position history.
+      * ``load_state`` / ``save_state`` default True (sandbox would normally be
+        False), so the Trader/strategy on_save/on_load state survives too.
+    Neither ``[cache] flush_on_start`` nor ``[recovery] enabled`` is set here, so
+    this exercises the pure persist-driven defaults.
+    """
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "SBX-PERSIST-002"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [cache]
+        redis_url = "redis://redis:6379/0"
+
+        [sandbox]
+        persist = true
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "sbx-persist2.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    config = build_trading_node_config(file)
+    assert config.cache is not None
+    assert config.cache.flush_on_start is False  # cache kept across restart
+    assert config.load_state is True
+    assert config.save_state is True
+
+
+def test_sandbox_without_persist_stays_ephemeral(tmp_path: Path) -> None:
+    """A sandbox pod with no ``[sandbox] persist`` (or persist=false) stays
+    ephemeral — the existing default must NOT regress: cache wiped, no
+    state reload.
+    """
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "SBX-EPH-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [cache]
+        redis_url = "redis://redis:6379/0"
+
+        [sandbox]
+        persist = false
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "sbx-eph.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    config = build_trading_node_config(file)
+    assert config.cache is not None
+    assert config.cache.flush_on_start is True
+    assert config.load_state is False
+    assert config.save_state is False
+
+
+def test_build_cache_config_persist_flag_drives_flush_default() -> None:
+    """build_cache_config honours sandbox_persist at its own seam.
+
+    sandbox + persist → flush_on_start False (keep cache);
+    sandbox + no persist → True (wipe, the existing default);
+    an explicit [cache] flush_on_start still wins over both.
+    """
+
+    from tinohelm.config import build_cache_config
+
+    bare = {"cache": {"redis_url": "redis://r:6379/0"}}
+    assert build_cache_config(bare, mode="sandbox", sandbox_persist=True).flush_on_start is False
+    assert build_cache_config(bare, mode="sandbox", sandbox_persist=False).flush_on_start is True
+    # live is unaffected by the persist flag.
+    assert build_cache_config(bare, mode="live", sandbox_persist=True).flush_on_start is False
+
+    # Explicit flush_on_start beats the persist-driven default both directions.
+    forced_wipe = {"cache": {"redis_url": "redis://r:6379/0", "flush_on_start": True}}
+    assert (
+        build_cache_config(forced_wipe, mode="sandbox", sandbox_persist=True).flush_on_start is True
+    )
+
+
+def test_explicit_recovery_beats_sandbox_persist_default(tmp_path: Path) -> None:
+    """An explicit ``[recovery] enabled`` still wins over the persist default.
+
+    persist would default recovery ON, but an operator who sets
+    ``[recovery] enabled = false`` must be honoured (the persist flag is only a
+    default-flipper, never an override of explicit config).
+    """
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "SBX-PERSIST-NOREC-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [sandbox]
+        persist = true
+
+        [recovery]
+        enabled = false
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "sbx-persist-norec.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    config = build_trading_node_config(file)
+    assert config.load_state is False
+    assert config.save_state is False
+
+
+def test_controller_import_carries_mode_and_sandbox_persist(tmp_path: Path) -> None:
+    """build_controller_import must hand BridgeActor its mode + persist gate.
+
+    The BridgeActor's on_start/on_stop recovery hooks are guarded by
+    ``mode=="sandbox" and sandbox_persist``; both values reach it only through
+    its ImportableControllerConfig.config, so the assembler must populate them.
+    """
+
+    from tinohelm.config import build_controller_import
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "CTRL-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [sandbox]
+        persist = true
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "ctrl.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    controller = build_controller_import(file)
+    assert controller.config["mode"] == "sandbox"
+    assert controller.config["sandbox_persist"] is True
+    # The existing fields are still present and unchanged.
+    assert controller.config["strategy_id"] == "CTRL-001"
+    assert controller.config["command_topic"] == "commands.tinohelm.CTRL-001"
+
+
+def test_controller_import_defaults_for_live_pod(tmp_path: Path) -> None:
+    """A live pod (no [sandbox] section) carries mode=live + sandbox_persist=False
+    so the BridgeActor guard never fires — the live zero-impact contract.
+    """
+
+    from tinohelm.config import build_controller_import
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "CTRL-LIVE-001"
+        trader_id = "TINO-001"
+        mode = "live"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "ctrl-live.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    controller = build_controller_import(file)
+    assert controller.config["mode"] == "live"
+    assert controller.config["sandbox_persist"] is False
+
+
+def test_sandbox_persist_with_base_currency_warns(tmp_path: Path, caplog) -> None:
+    """persist=true + ``[sandbox] base_currency`` → warning (multi-currency needed).
+
+    All-currency restore replays a multi-currency AccountState, which NT's
+    base.pyx rejects when the account is single-base-currency. We don't force the
+    base_currency away (respect explicit config) but must warn loudly that
+    multi-currency recovery will fail.
+    """
+
+    import logging
+
+    from tinohelm.config import build_exec_clients
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "SBX-BASECCY-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [sandbox]
+        persist = true
+        base_currency = "USDT"
+
+        [exec_clients.BINANCE]
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "sbx-baseccy.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    with caplog.at_level(logging.WARNING, logger="tinohelm.config"):
+        build_exec_clients(file)
+
+    assert any("base_currency" in r.message for r in caplog.records)
+
+
+def test_sandbox_persist_without_base_currency_no_warning(tmp_path: Path, caplog) -> None:
+    """persist=true with NO base_currency (the supported multi-currency setup)
+    must NOT emit the base_currency warning.
+    """
+
+    import logging
+
+    from tinohelm.config import build_exec_clients
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "SBX-NOBASECCY-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [sandbox]
+        persist = true
+
+        [exec_clients.BINANCE]
+
+        [factories.data]
+        [factories.exec]
+        """,
+    ).strip()
+    path = tmp_path / "sbx-nobaseccy.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    with caplog.at_level(logging.WARNING, logger="tinohelm.config"):
+        build_exec_clients(file)
+
+    assert not any("base_currency" in r.message for r in caplog.records)

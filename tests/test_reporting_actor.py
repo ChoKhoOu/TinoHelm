@@ -25,11 +25,46 @@ from tinohelm.reporting_actor import (
     ReportingActor,
     ReportingActorConfig,
     build_positions_report_payload,
+    positions_report_df,
 )
 
 
 def _decode(body: bytes) -> dict:
     return msgspec.msgpack.decode(body)
+
+
+def test_positions_report_df_uses_open_positions_not_all() -> None:
+    """The 持仓快照 must list only genuinely-open positions.
+
+    Regression for the bug where closed (FLAT) positions kept showing in the
+    snapshot with stale avg_px_open/close — root cause was feeding NT's
+    ``cache.positions()`` (every position ever held) instead of
+    ``cache.positions_open()`` (open only). We reuse NT's own open/closed
+    bookkeeping rather than hand-filtering FLAT rows, so this test pins which
+    cache method we call.
+    """
+
+    calls: list[str] = []
+
+    class _SpyCache:
+        def positions(self) -> list:
+            calls.append("positions")
+            # A closed position would land here — must NOT be what we read.
+            return ["CLOSED-FLAT-POSITION"]
+
+        def positions_open(self) -> list:
+            calls.append("positions_open")
+            return []  # nothing currently open
+
+        def position_snapshots(self) -> list:
+            return []
+
+    df = positions_report_df(_SpyCache())
+
+    assert "positions_open" in calls
+    assert "positions" not in calls  # the all-positions accessor must not be used
+    # Empty open set → empty report (renders as "当前无持仓" downstream).
+    assert df.empty
 
 
 def test_build_positions_report_payload_emits_csv_envelope() -> None:
