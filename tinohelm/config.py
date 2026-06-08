@@ -51,6 +51,18 @@ def _sandbox_persist(raw: dict[str, Any]) -> bool:
     return bool(raw.get("sandbox", {}).get("persist", False))
 
 
+def _sandbox_fill_fuel_on(mode: str, raw: dict[str, Any]) -> bool:
+    """Whether the auto-injected SandboxBookFeeder runs for this pod.
+
+    Single source of truth for two coupled decisions: (1) injecting the feeder
+    actor (:func:`build_actor_imports`) and (2) filtering its high-frequency L2
+    deltas out of external Redis publication (:func:`build_trading_node_config`).
+    Both must agree — the feed and its OOM guard are one feature.
+    """
+
+    return mode == "sandbox" and bool(raw.get("sandbox", {}).get("fill_fuel", True))
+
+
 @dataclass
 class TinoStrategyFile:
     """Parsed strategy TOML — kept around so the runner can swap modes."""
@@ -183,12 +195,25 @@ def build_message_bus_config(
     raw: dict[str, Any],
     *,
     external_streams: list[str] | None = None,
+    filter_l2_book: bool = False,
 ) -> MessageBusConfig:
-    """Build :class:`MessageBusConfig` from the ``[message_bus]`` TOML section."""
+    """Build :class:`MessageBusConfig` from the ``[message_bus]`` TOML section.
+
+    ``filter_l2_book`` is set by :func:`build_trading_node_config` when the
+    sandbox fill-fuel feeder is active: it adds the high-frequency L2 order-book
+    types to ``types_filter`` so the feeder's 500ms deltas are NOT externalised
+    to Redis (no consumer reads them cross-pod — externalising every delta OOM'd
+    the box). ``types_filter`` is ``list[type]`` (TOML cannot express a Python
+    type), so this is injected here rather than read from the TOML section.
+    In-process delivery to the SimulatedExchange is unaffected (component.pyx
+    dispatches subscribers before the external-publish gate).
+    """
 
     section = raw.get("message_bus", {})
     redis_url = os.environ.get("REDIS_URL") or section.get("redis_url", "redis://redis:6379/0")
     db = _database_config_from_url(redis_url)
+
+    types_filter = _l2_book_types() if filter_l2_book else None
 
     return MessageBusConfig(
         database=db,
@@ -204,8 +229,22 @@ def build_message_bus_config(
         external_streams=external_streams
         if external_streams is not None
         else section.get("external_streams"),
-        types_filter=section.get("types_filter"),
+        types_filter=types_filter,
     )
+
+
+def _l2_book_types() -> list[type]:
+    """High-frequency order-book types to exclude from external Redis publication.
+
+    The sandbox fill-fuel feeder subscribes L2 deltas @500ms per instrument purely
+    to drive the in-process SimulatedExchange; nothing consumes them cross-pod.
+    Externalising them is pure waste that OOM'd the deployment box (mirrors
+    NautilusTrader-dev/live/run_oi_momentum_sandbox.py types_filter).
+    """
+
+    from nautilus_trader.model.data import OrderBookDelta, OrderBookDeltas
+
+    return [OrderBookDelta, OrderBookDeltas]
 
 
 def build_cache_config(
@@ -414,9 +453,7 @@ def build_actor_imports(file: TinoStrategyFile) -> list[ImportableActorConfig]:
     # Opt out with [sandbox] fill_fuel = false for a strategy that already
     # subscribes quotes/book (its own feed keeps the sim book alive). The feeder
     # derives its instrument pool from the cache (load_ids), so no config needed.
-    sandbox_section = file.raw.get("sandbox", {})
-    fill_fuel = sandbox_section.get("fill_fuel", True)
-    if file.mode == "sandbox" and fill_fuel:
+    if _sandbox_fill_fuel_on(file.mode, file.raw):
         actors.append(
             ImportableActorConfig(
                 actor_path="tinohelm.sandbox_book_feeder:SandboxBookFeeder",
@@ -571,7 +608,12 @@ def build_trading_node_config(file: TinoStrategyFile) -> TradingNodeConfig:
 
     return TradingNodeConfig(
         trader_id=TraderId(file.trader_id),
-        message_bus=build_message_bus_config(file.raw, external_streams=user_streams),
+        message_bus=build_message_bus_config(
+            file.raw,
+            external_streams=user_streams,
+            # The fill-fuel feeder's 500ms L2 deltas must not flood Redis (OOM guard).
+            filter_l2_book=_sandbox_fill_fuel_on(file.mode, file.raw),
+        ),
         cache=build_cache_config(file.raw, mode=file.mode, sandbox_persist=persist),
         logging=build_logging_config(file.raw),
         data_engine=LiveDataEngineConfig(),

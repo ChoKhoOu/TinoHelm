@@ -477,6 +477,64 @@ def test_sandbox_fill_fuel_opt_out_skips_feeder(tmp_path: Path) -> None:
     assert _BOOK_FEEDER not in actors
 
 
+def test_sandbox_fill_fuel_filters_l2_from_external_redis_stream(
+    strategy_toml: Path,
+) -> None:
+    """OOM GUARD (companion to the book feeder): when the fill-fuel feeder is
+    injected it subscribes 28 symbols' L2 deltas @500ms. Those MUST be excluded
+    from EXTERNAL Redis publication via MessageBusConfig.types_filter — nothing
+    consumes them cross-pod (no external_streams), so externalising every delta
+    OOM'd the box. types_filter is list[type] (TOML can't express it), so the
+    assembler injects it in Python whenever fill_fuel is on. In-process delivery
+    to the sim is unaffected (component.pyx dispatches subscribers before the
+    external-publish gate), so fills + parity hold."""
+
+    from nautilus_trader.model.data import (
+        OrderBookDelta,
+        OrderBookDeltas,
+    )
+
+    os.environ.setdefault("BYBIT_API_KEY", "test-key")
+    file = TinoStrategyFile.load(strategy_toml)  # mode=sandbox, fill_fuel default on
+    config = build_trading_node_config(file)
+
+    tf = config.message_bus.types_filter or []
+    assert OrderBookDelta in tf, "L2 deltas must be filtered from external Redis"
+    assert OrderBookDeltas in tf, "batched L2 deltas must be filtered too"
+
+
+def test_sandbox_fill_fuel_off_does_not_filter_l2(tmp_path: Path) -> None:
+    """Negative control: with fill_fuel off there is no injected L2 feed, so the
+    assembler must NOT silently inject the filter (a strategy feeding its own
+    book may legitimately want its deltas externalised)."""
+
+    body = textwrap.dedent(
+        """
+        [strategy]
+        id = "NOFILTER-001"
+        trader_id = "TINO-001"
+        mode = "sandbox"
+        class = "strategies.example.strategy:ExampleStrategy"
+        config_class = "strategies.example.strategy:ExampleStrategyConfig"
+
+        [strategy.params]
+
+        [factories.data]
+        [factories.exec]
+
+        [sandbox]
+        fill_fuel = false
+        """,
+    ).strip()
+    path = tmp_path / "nofilter.toml"
+    path.write_text(body)
+
+    file = TinoStrategyFile.load(path)
+    config = build_trading_node_config(file)
+
+    assert not (config.message_bus.types_filter or [])
+
+
 def test_live_recovery_can_be_disabled_via_toml(tmp_path: Path) -> None:
     """A LIVE operator who genuinely wants a clean-slate boot — typical for the
     first run of a new strategy, or after ``flush_on_start`` — sets

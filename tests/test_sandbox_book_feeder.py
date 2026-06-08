@@ -33,6 +33,15 @@ from tinohelm.sandbox_book_feeder import (
 # _subscribe_order_book). 500ms keeps the sim book fresh without flooding.
 EXPECTED_UPDATE_SPEED_MS = 500
 
+# The feeder MUST request a bounded partial-book depth (Binance partial stream
+# levels ∈ {5, 10, 20}). NT's binance/data.py:406 maps an absent/0 depth to
+# `command.depth or 1000` → the 1000-level DIFF stream whose REST snapshot weighs
+# 20 (vs the partial stream's weight 2). Re-pulled for all N instruments on every
+# WS reconnect (data.py:288 asyncio.gather), depth=1000 is what broke the IP
+# 2400-weight/min limit in production (408×429). Pin depth=20 so this never
+# regresses to the full-book diff stream again.
+EXPECTED_BOOK_DEPTH = 20
+
 
 class _LogSpy:
     def info(self, *_a: Any, **_k: Any) -> None: ...
@@ -87,6 +96,7 @@ def _feeder_under_test(
     feeder = _PatchedFeeder.__new__(_PatchedFeeder)
     # Mirror SandboxBookFeeder.__init__ sans super().__init__():
     feeder._instrument_ids = list(config.instrument_ids)  # type: ignore[attr-defined]
+    feeder._depth = config.depth  # type: ignore[attr-defined]
     feeder.delta_subs = []  # type: ignore[attr-defined]
     feeder.quote_subs = []  # type: ignore[attr-defined]
     feeder.delta_unsubs = []  # type: ignore[attr-defined]
@@ -117,6 +127,29 @@ def test_on_start_subscribes_l2_deltas_per_instrument_at_500ms() -> None:
     for _iid, kwargs in feeder.delta_subs:
         assert kwargs["book_type"] == BookType.L2_MBP
         assert kwargs["params"] == {"update_speed": EXPECTED_UPDATE_SPEED_MS}
+
+
+def test_on_start_requests_bounded_partial_book_depth() -> None:
+    """REGRESSION GUARD (production 429 incident): the feeder MUST pass an
+    explicit bounded depth ∈ {5,10,20} so NT subscribes the PARTIAL-book stream
+    (REST snapshot weight 2). Omitting depth → NT's `command.depth or 1000` picks
+    the 1000-level DIFF stream (weight 20); re-pulled for every instrument on each
+    WS reconnect (data.py:288) it broke the IP 2400-weight/min limit. Pin it."""
+
+    ids = [
+        InstrumentId.from_str("BTCUSDT-PERP.BINANCE"),
+        InstrumentId.from_str("ETHUSDT-PERP.BINANCE"),
+    ]
+    feeder = _feeder_under_test(ids)
+
+    feeder.on_start()
+
+    for _iid, kwargs in feeder.delta_subs:
+        assert kwargs["depth"] == EXPECTED_BOOK_DEPTH, (
+            "feeder must pin a bounded partial-book depth; an absent/0 depth "
+            "falls back to NT's full-book 1000-level diff stream (weight 20)"
+        )
+        assert 0 < kwargs["depth"] <= 20, "depth must select the partial stream (≤20)"
 
 
 def test_on_start_derives_universe_from_cache_when_unconfigured() -> None:
