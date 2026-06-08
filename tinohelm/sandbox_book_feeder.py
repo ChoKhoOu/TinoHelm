@@ -70,7 +70,10 @@ class SandboxBookFeederConfig(ActorConfig, frozen=True):
     duplicated into this actor's params.
     """
 
-    instrument_ids: list[InstrumentId] = []
+    # msgspec Struct field, not a shared mutable class attr — msgspec gives each
+    # instance its own list, so RUF012 is a false positive here (NT's own
+    # NautilusKernelConfig declares list fields the same way: system/config.py).
+    instrument_ids: list[InstrumentId] = []  # noqa: RUF012
 
 
 class SandboxBookFeeder(Actor):

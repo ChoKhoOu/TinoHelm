@@ -58,7 +58,7 @@ async def _probe() -> None:
             try:
                 ch = await client.fetch_channel(int(cid))
                 _flush(f"OK channel {name}={cid} resolved to '{ch.name}' in guild {ch.guild.id}")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _flush(f"FAIL channel {name}={cid}: {type(exc).__name__}: {exc}")
         await client.close()
 
@@ -68,7 +68,7 @@ async def _probe() -> None:
         _flush("FAIL: client.start() did not finish within 15s — likely no network to discord.com")
     except discord.LoginFailure as exc:
         _flush(f"FAIL LOGIN: {exc} — token wrong, revoked, or wrapped in quotes in .env")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _flush(f"FAIL UNEXPECTED: {type(exc).__name__}: {exc}")
         traceback.print_exc()
 
