@@ -79,33 +79,26 @@ def ping(strategy_id: str = typer.Option(..., "--strategy-id", "-s")) -> None:
     _publish_command(strategy_id, "ping")
 
 
-@app.command()
-def positions(
-    strategy_id: str | None = typer.Option(None, "--strategy-id", "-s"),
-) -> None:
-    """Trigger an on-demand positions snapshot.
+def _fan_out_command(action: str, strategy_id: str | None) -> None:
+    """Publish ``action`` to one strategy (``-s``) or fan out to all announced.
 
-    Without ``-s``, fan out to every strategy that ever announced itself —
-    each pod publishes its own ``tinohelm.report.positions`` envelope and
-    the notifier renders them into #logging. The CLI itself doesn't wait
-    for the response (no event loop here); operators see the result in
-    Discord. For a synchronous wait use the ``/positions`` slash command.
+    Shared by the fire-and-forget report commands (positions / fills / orders).
+    The CLI doesn't wait for the reply (no event loop here) — each pod publishes
+    its own ``tinohelm.report.*`` envelope and the notifier renders it into
+    #logging. For a synchronous wait use the matching slash command.
+
+    Fan-out reads the announce stream (not ``tinohelm:control:*`` keys, which are
+    merely a side-effect of past commands — a never-controlled strategy has none).
+    ``xrevrange(..., count=1000)`` reads the *newest* 1000 entries (XRANGE reads
+    oldest-first; on a months-old stream that would silently drop a strategy whose
+    announce sits past the head). 1000 entries — one per pod boot — comfortably
+    covers any realistic active fleet while keeping the read bounded.
     """
 
     if strategy_id:
-        _publish_command(strategy_id, "report")
+        _publish_command(strategy_id, action)
         return
 
-    # Fan out via the announce stream. We deliberately don't reach into
-    # ``tinohelm:control:*`` keys (which the notifier uses as a fallback)
-    # because those are merely a side-effect of past commands — a strategy
-    # that's never been controlled won't have one.
-    #
-    # ``xrevrange(..., count=1000)`` reads the *newest* 1000 entries (XRANGE
-    # reads oldest-first; on a months-old stream that would silently drop
-    # any strategy whose announce sits past the 1000-entry head). 1000
-    # entries comfortably covers any realistic active fleet — one entry
-    # per pod boot — while keeping the read bounded.
     from tinohelm.strategy_runner import ANNOUNCE_STREAM
 
     seen: dict[str, None] = {}
@@ -121,7 +114,49 @@ def positions(
         return
 
     for sid in seen:
-        _publish_command(sid, "report")
+        _publish_command(sid, action)
+
+
+@app.command()
+def positions(
+    strategy_id: str | None = typer.Option(None, "--strategy-id", "-s"),
+) -> None:
+    """Trigger an on-demand positions snapshot (→ ``tinohelm.report.positions``).
+
+    Without ``-s``, fans out to every announced strategy. The CLI doesn't wait;
+    operators see the result in Discord. For a synchronous wait use the
+    ``/positions`` slash command.
+    """
+
+    _fan_out_command("report", strategy_id)
+
+
+@app.command()
+def fills(
+    strategy_id: str | None = typer.Option(None, "--strategy-id", "-s"),
+) -> None:
+    """Trigger an on-demand fill history (→ ``tinohelm.report.fills``).
+
+    One row per individual fill (price / qty / fee / time), rendered into
+    #logging. Fire-and-forget like ``positions``; ``/fills`` is the slash-command
+    counterpart that waits for the reply.
+    """
+
+    _fan_out_command("fills", strategy_id)
+
+
+@app.command()
+def orders(
+    strategy_id: str | None = typer.Option(None, "--strategy-id", "-s"),
+) -> None:
+    """Trigger an on-demand order history (→ ``tinohelm.report.orders``).
+
+    One row per order (status / filled / avg price), rendered into #logging.
+    Fire-and-forget like ``positions``; ``/orders`` is the slash-command
+    counterpart that waits for the reply.
+    """
+
+    _fan_out_command("orders", strategy_id)
 
 
 @app.command()

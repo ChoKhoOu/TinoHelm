@@ -48,6 +48,11 @@ from nautilus_trader.live.node import TradingNode
 from tinohelm import COMMAND_TOPIC_PREFIX, control_stream_key, event_stream_key
 from tinohelm.config import TinoNotifierFile, build_notifier_node_config
 from tinohelm.notifier.handlers import OrderProgressTracker, envelope_for, render_embed
+from tinohelm.reporting_actor import (
+    REPORT_TOPIC_FILLS,
+    REPORT_TOPIC_ORDERS,
+    REPORT_TOPIC_POSITIONS,
+)
 from tinohelm.strategy_runner import ANNOUNCE_STREAM, TINO_PROTOCOL_VERSION
 
 logger = logging.getLogger("tinohelm.notifier")
@@ -506,6 +511,71 @@ def should_forward_order_event(body: Any) -> bool:
     return body.get("type") not in _TRANSIENT_ORDER_EVENTS
 
 
+def should_forward_fill(body: Any, tracker: Any) -> bool:
+    """Fill-aggregation gate: suppress every partial fill but the completing one.
+
+    A market order swept against a thin book emits a dozen ``OrderFilled``
+    partials at drifting prices — the operator asked to see ONE aggregated line
+    (direction / instrument / 共 N 笔 / VWAP) instead of a dozen embeds. The
+    tracker (fed by ``observe`` *before* this gate on both intake paths) has
+    accumulated the running total, so we forward only the fill that brings
+    cumulative quantity up to the order total; the earlier partials are dropped.
+
+    Degrades safely in three ways, all returning ``True`` (forward):
+      * non-OrderFilled bodies — not our concern;
+      * no tracker / no client_order_id — can't aggregate;
+      * unknown order total (notifier restarted mid-order, lost the
+        OrderInitialized that carried ``quantity``) — ``is_complete`` is True
+        for a None total, so we forward every fill rather than swallow them.
+
+    AccountState and PositionChanged are silenced separately (they're not
+    OrderFilled, so they pass this gate untouched and are dropped by their own
+    deny-lists / the account gate).
+    """
+
+    if not isinstance(body, dict) or body.get("type") != "OrderFilled":
+        return True
+    if tracker is None:
+        return True
+    coid = body.get("client_order_id")
+    if not coid:
+        return True
+    progress = tracker.snapshot(coid)
+    if progress is None:
+        return True
+    return progress.is_complete
+
+
+# Event types we never forward to Discord, matched on the body's ``type``:
+#
+#   * PositionChanged — every partial fill mutates the position, emitting one
+#     PositionChanged per partial: dozens per order, pure churn between the
+#     PositionOpened and PositionClosed endpoints the operator actually wants.
+#   * AccountState — fires on every balance/margin delta (each fill, each
+#     lock/unlock): a constant balance-ticker the operator asked to silence.
+#     The PnL summary lives in the /positions and /pnl snapshots instead.
+#
+# Schema-tolerant deny-list (matched by name, unknown types pass through), so an
+# NT upgrade adding an event type surfaces it rather than silently dropping it.
+# Account / position *endpoints* (PositionOpened / PositionClosed) are NOT here
+# — only the high-frequency churn types.
+_SILENCED_EVENT_TYPES = frozenset({"PositionChanged", "AccountState"})
+
+
+def should_forward_event_type(body: Any) -> bool:
+    """``True`` unless ``body``'s ``type`` is in the silenced deny-list.
+
+    The churn-suppression gate for PositionChanged / AccountState (the two
+    flood sources the operator asked to silence). Non-dict bodies and untyped
+    payloads pass through — only the named noisy types are dropped. Applied on
+    both intake paths so behaviour is identical regardless of source.
+    """
+
+    if not isinstance(body, dict):
+        return True
+    return body.get("type") not in _SILENCED_EVENT_TYPES
+
+
 def route_event(
     topic: str,
     payload: Any,
@@ -629,6 +699,14 @@ def _forward_stream_entry(
     # Drop mid-flight order plumbing — identical deny-list to the in-process
     # NotifierActor path so delivery matches regardless of which path sourced it.
     if not should_forward_order_event(env.body):
+        return False
+    # Silence PositionChanged / AccountState churn (operator asked to stop the
+    # per-partial position mutations and the balance-ticker).
+    if not should_forward_event_type(env.body):
+        return False
+    # Fill aggregation: suppress every partial OrderFilled but the completing
+    # one, which renders the aggregated 共 N 笔 / VWAP summary.
+    if not should_forward_fill(env.body, tracker):
         return False
     forwarder.enqueue(env, channel_id=channel_id)
     return True
@@ -841,6 +919,15 @@ class NotifierActor(Actor):
                 # expiry/trigger/amend). Same deny-list gate on both intake paths.
                 if not should_forward_order_event(env.body):
                     return
+                # Silence PositionChanged / AccountState churn — same gate the
+                # standalone stream loop applies, so both paths behave alike.
+                if not should_forward_event_type(env.body):
+                    return
+                # Fill aggregation: suppress partial fills, emit only the
+                # completing OrderFilled (renders 共 N 笔 / VWAP). tracker was fed
+                # above, before this gate, so its running total is current.
+                if not should_forward_fill(env.body, tracker):
+                    return
                 # tinohelm.* is operational chatter (reports, summaries,
                 # drift warnings). Even if the body carries a strategy_id
                 # — the positions report does — these belong in logging,
@@ -864,6 +951,16 @@ class NotifierActor(Actor):
 
 
 # ─── discord forwarder + slash commands ──────────────────────────────────────
+
+
+# Report topics produced on-demand by a /command (request/response). The
+# forwarder short-circuits these to the triggering channel when a listener is
+# waiting. The positions topic is dual-mode (also the periodic 30-min timer);
+# fills/orders are on-demand only. Imported from reporting_actor so the topic
+# strings stay single-sourced (one rename updates both producer and consumer).
+_ON_DEMAND_REPORT_TOPICS = frozenset(
+    {REPORT_TOPIC_POSITIONS, REPORT_TOPIC_FILLS, REPORT_TOPIC_ORDERS},
+)
 
 
 class DiscordForwarder:
@@ -890,12 +987,15 @@ class DiscordForwarder:
         # the standalone stream loop) funnel through ``enqueue`` here, so this is
         # the one shared point where a single tracker sees every order event.
         self.tracker = OrderProgressTracker()
-        # Strategy id → list of futures awaiting the next ``tinohelm.report.
-        # positions`` envelope from that pod. Used by the ``/positions``
-        # slash command to turn the existing fire-and-forget snapshot into
-        # a request/response. Multiple operators may run /positions at the
-        # same time — we keep a list so each gets satisfied.
-        self._position_listeners: dict[str, list[asyncio.Future]] = {}
+        # (report_topic, strategy_id) → list of futures awaiting the next report
+        # envelope of that topic from that pod. Turns the fire-and-forget
+        # snapshots into request/response for the on-demand slash commands
+        # (/positions, /pnl → tinohelm.report.positions; /fills →
+        # tinohelm.report.fills; /orders → tinohelm.report.orders). Keyed by
+        # topic too so a pending /fills isn't resolved by a /positions reply
+        # that happens to arrive first. Multiple operators may run the same
+        # command concurrently — we keep a list so each future gets satisfied.
+        self._report_listeners: dict[tuple[str, str], list[asyncio.Future]] = {}
 
     def attach_client(self, client: discord.Client) -> None:
         """Late-bind the discord client.
@@ -914,28 +1014,35 @@ class DiscordForwarder:
             self._semaphores[channel_id] = sem
         return sem
 
-    def watch_positions_report(self, strategy_id: str) -> asyncio.Future:
-        """Return a future that resolves the next time this pod's snapshot
-        passes through :meth:`enqueue`.
+    def watch_report(self, topic: str, strategy_id: str) -> asyncio.Future:
+        """Return a future resolving the next time a ``topic`` report for this
+        pod passes through :meth:`enqueue`.
 
         Must be called from the asyncio thread because we attach the future
         to ``self._loop``. Each future is single-use; after it resolves the
-        caller should drop it.
+        caller should drop it. ``topic`` is the full report topic
+        (``tinohelm.report.positions`` / ``.fills`` / ``.orders``) so a /fills
+        wait isn't satisfied by a /positions reply.
         """
 
         future: asyncio.Future = self._loop.create_future()
-        self._position_listeners.setdefault(strategy_id, []).append(future)
+        self._report_listeners.setdefault((topic, strategy_id), []).append(future)
         return future
 
-    def drop_position_listener(self, strategy_id: str, future: asyncio.Future) -> None:
-        """Remove ``future`` from the wait list — used by ``/positions`` after
-        a timeout so the cancelled future doesn't sit in
-        ``_position_listeners`` forever if the pod never replies again.
+    def drop_report_listener(
+        self,
+        topic: str,
+        strategy_id: str,
+        future: asyncio.Future,
+    ) -> None:
+        """Remove ``future`` from the wait list — used by the slash commands
+        after a timeout so a dead pod's listener slot doesn't leak.
 
         Must be called from the loop thread.
         """
 
-        listeners = self._position_listeners.get(strategy_id)
+        key = (topic, strategy_id)
+        listeners = self._report_listeners.get(key)
         if not listeners:
             return
         try:
@@ -943,20 +1050,21 @@ class DiscordForwarder:
         except ValueError:
             return
         if not listeners:
-            self._position_listeners.pop(strategy_id, None)
+            self._report_listeners.pop(key, None)
 
-    def _dispatch_position_listeners(self, env) -> None:
+    def _dispatch_report_listeners(self, env) -> None:
         # Called from the loop thread (we hop over via call_soon_threadsafe
         # in :meth:`enqueue`). Pulling the whole list avoids an awkward
-        # mid-iteration mutation if the listener fires another /positions
+        # mid-iteration mutation if the listener fires another command
         # synchronously inside its callback.
         body = env.body if isinstance(env.body, dict) else None
         if not body:
             return
         sid = body.get("strategy_id")
-        if not sid:
+        topic = getattr(env, "topic", None)
+        if not sid or not topic:
             return
-        for fut in self._position_listeners.pop(sid, []):
+        for fut in self._report_listeners.pop((topic, sid), []):
             if not fut.done():
                 fut.set_result(env)
 
@@ -969,21 +1077,23 @@ class DiscordForwarder:
         if self._loop.is_closed():
             logger.warning("event loop closed; dropping event")
             return
-        # A positions snapshot that satisfies a pending /positions request is an
+        # A report envelope that satisfies a pending slash-command request is an
         # *on-demand* reply: the command handler posts it to the channel the
         # operator ran the command in. So when a listener is waiting we dispatch
-        # the future and SKIP the normal send — otherwise the snapshot would
+        # the future and SKIP the normal send — otherwise the report would
         # double-post (once in the command channel, once on the ``channel_id``
         # handed in, which for ``tinohelm.*`` is #logging). With no listener
-        # waiting it's the periodic 30-min report → send to #logging as before.
+        # waiting it's the periodic 30-min positions snapshot → send to #logging
+        # as before (history reports are only ever produced on-demand).
         #
         # enqueue runs on the loop thread (NT's ActorExecutor and the stream
-        # loop both forward from there), so reading ``_position_listeners``
+        # loop both forward from there), so reading ``_report_listeners``
         # synchronously here is race-free with the deferred dispatch below.
-        if getattr(env, "topic", None) == "tinohelm.report.positions":
+        topic = getattr(env, "topic", None)
+        if topic in _ON_DEMAND_REPORT_TOPICS:
             sid = env.body.get("strategy_id") if isinstance(env.body, dict) else None
-            on_demand = bool(sid and self._position_listeners.get(sid))
-            self._loop.call_soon_threadsafe(self._dispatch_position_listeners, env)
+            on_demand = bool(sid and self._report_listeners.get((topic, sid)))
+            self._loop.call_soon_threadsafe(self._dispatch_report_listeners, env)
             if on_demand:
                 return
         try:
@@ -1071,12 +1181,26 @@ def _build_discord_client(
         topic = await asyncio.to_thread(_publish, strategy, action, reason)
         await interaction.response.send_message(f"sent `{topic}`", ephemeral=True)
 
-    async def _positions(
+    async def _request_report(
         interaction: discord.Interaction,
         strategy: str | None,
+        *,
+        action: str,
+        report_topic: str,
+        noun: str,
     ) -> None:
-        # Defer because we wait up to 120s for the snapshot reply. Discord
-        # otherwise marks the interaction as failed at 3s.
+        """Shared request/response flow for /positions, /pnl, /fills, /orders.
+
+        Publishes ``action`` to each target pod's control stream and waits (up
+        to 120s) for that pod's ``report_topic`` reply, then posts each reply
+        publicly in the triggering channel. ``noun`` is the 中文 word used in
+        the receipt line ("快照" / "成交记录" / "订单记录"). Keying the wait on
+        ``report_topic`` (not just strategy) means a /fills wait can't be
+        satisfied by a /positions reply that happens to land first.
+        """
+
+        # Defer because we wait up to 120s for the reply. Discord otherwise
+        # marks the interaction as failed at 3s.
         await interaction.response.defer(ephemeral=True)
         channel_id = interaction.channel_id
         channel_mode = _channel_mode(channel_id)
@@ -1108,11 +1232,11 @@ def _build_discord_client(
 
         # Subscribe before publish — otherwise a fast pod could reply before
         # the future is registered and we'd miss it.
-        futures = {sid: forwarder.watch_positions_report(sid) for sid in targets}
+        futures = {sid: forwarder.watch_report(report_topic, sid) for sid in targets}
         # Fan-out the publishes in parallel: each ``_publish`` is a Redis
         # XADD round-trip, and N targets sequentially would mean the slowest
         # pod gets N*RTT into its 120s budget instead of 1*RTT.
-        await asyncio.gather(*(asyncio.to_thread(_publish, sid, "report") for sid in targets))
+        await asyncio.gather(*(asyncio.to_thread(_publish, sid, action) for sid in targets))
 
         try:
             done = await asyncio.wait_for(
@@ -1126,11 +1250,11 @@ def _build_discord_client(
             ]
             # Cancel + un-register so a permanently-dead pod's listener slot
             # doesn't leak. Live envelopes that arrive later for the same
-            # sid will still resolve fresh /positions calls.
+            # sid will still resolve fresh calls.
             for sid, fut in futures.items():
                 if not fut.done():
                     fut.cancel()
-                forwarder.drop_position_listener(sid, fut)
+                forwarder.drop_report_listener(report_topic, sid, fut)
 
         replied: list[str] = []
         missing: list[str] = []
@@ -1139,7 +1263,7 @@ def _build_discord_client(
                 missing.append(sid)
                 continue
             replied.append(sid)
-            # Surface the snapshot publicly in the channel the command was run
+            # Surface the report publicly in the channel the command was run
             # in. Route it through the forwarder rather than
             # ``interaction.followup.send`` for two reasons: (1) the defer above
             # is ``ephemeral=True``, and a followup inherits that flag — it would
@@ -1152,13 +1276,25 @@ def _build_discord_client(
             # triggering channel.
             forwarder.enqueue(env, channel_id=channel_id)
 
-        head_lines = [f"已收到 {len(replied)}/{len(targets)} 个策略的快照"]
+        head_lines = [f"已收到 {len(replied)}/{len(targets)} 个策略的{noun}"]
         if missing:
             head_lines.append(f"超时未响应: {', '.join(f'`{s}`' for s in missing)}")
         # Summary stays ephemeral (private to the operator) — a short receipt so
         # the deferred "正在响应……" spinner always resolves, even when no pod
-        # replied and there are no public snapshot embeds above it.
+        # replied and there are no public report embeds above it.
         await interaction.followup.send("\n".join(head_lines), ephemeral=True)
+
+    async def _positions(
+        interaction: discord.Interaction,
+        strategy: str | None,
+    ) -> None:
+        await _request_report(
+            interaction,
+            strategy,
+            action="report",
+            report_topic=REPORT_TOPIC_POSITIONS,
+            noun="快照",
+        )
 
     @tree.command(name="pause", description="Stop a strategy without exiting positions")
     @discord.app_commands.describe(strategy="Strategy ID, e.g. FOO-001")
@@ -1209,6 +1345,44 @@ def _build_discord_client(
         # is the money-focused entry point to the same on-demand snapshot —
         # operators see the per-venue PnL summary under the positions table.
         await _positions(interaction, strategy)
+
+    @tree.command(
+        name="fills",
+        description="Fill history — one row per individual fill (price / qty / fee / time)",
+    )
+    @discord.app_commands.describe(
+        strategy="Strategy ID; omit to fan-out to every visible strategy"
+    )
+    async def fills_cmd(
+        interaction: discord.Interaction,
+        strategy: str | None = None,
+    ) -> None:
+        await _request_report(
+            interaction,
+            strategy,
+            action="fills",
+            report_topic=REPORT_TOPIC_FILLS,
+            noun="成交记录",
+        )
+
+    @tree.command(
+        name="orders",
+        description="Order history — one row per order (status / filled / avg price)",
+    )
+    @discord.app_commands.describe(
+        strategy="Strategy ID; omit to fan-out to every visible strategy"
+    )
+    async def orders_cmd(
+        interaction: discord.Interaction,
+        strategy: str | None = None,
+    ) -> None:
+        await _request_report(
+            interaction,
+            strategy,
+            action="orders",
+            report_topic=REPORT_TOPIC_ORDERS,
+            noun="订单记录",
+        )
 
     @tree.command(name="status", description="List known TinoHelm streams in Redis")
     async def status_cmd(interaction: discord.Interaction) -> None:

@@ -29,6 +29,12 @@ from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.config import ActorConfig
 
 REPORT_TOPIC_POSITIONS = "tinohelm.report.positions"
+# On-demand history reports (/fills, /orders). Separate topics so the notifier
+# routes/renders each with its own column set, but they share the same
+# CSV-over-msgpack-bytes envelope shape as the positions report — one transport
+# contract, three report kinds.
+REPORT_TOPIC_FILLS = "tinohelm.report.fills"
+REPORT_TOPIC_ORDERS = "tinohelm.report.orders"
 
 
 def venues_from_cache(cache: Any) -> list[Any]:
@@ -167,6 +173,69 @@ def build_positions_report_payload(
     # includes bytes but not dict) allows this message to be written to the
     # Redis stream. The notifier's parse_payload handles bytes → msgpack decode.
     return REPORT_TOPIC_POSITIONS, msgspec.msgpack.encode(body)
+
+
+def fills_report_df(cache: Any) -> Any:
+    """Per-fill report (one row per OrderFilled) from the cache's orders.
+
+    Thin delegation to NT's :meth:`ReportProvider.generate_fills_report`, which
+    walks each order's event stream and emits a row per fill — exactly the
+    成交记录 the operator asked for. We feed ``cache.orders()`` (the full set,
+    open + closed) so the history includes orders that already completed; NT
+    filters to orders with fills internally. We never build the report
+    ourselves — NT owns the DataFrame schema.
+    """
+
+    from nautilus_trader.analysis.reporter import ReportProvider
+
+    return ReportProvider.generate_fills_report(cache.orders())
+
+
+def orders_report_df(cache: Any) -> Any:
+    """Orders report (one row per order) from the cache's orders.
+
+    Thin delegation to NT's :meth:`ReportProvider.generate_orders_report` over
+    ``cache.orders()`` (open + closed), so the operator sees every order with
+    its status / filled_qty / avg_px — the 订单历史 counterpart to the fills
+    report. NT owns the schema; we only transport + render it.
+    """
+
+    from nautilus_trader.analysis.reporter import ReportProvider
+
+    return ReportProvider.generate_orders_report(cache.orders())
+
+
+def build_report_payload(
+    df: Any,
+    *,
+    topic: str,
+    strategy_id: str,
+) -> tuple[str, bytes]:
+    """Encode a generic NT report ``DataFrame`` for transport on ``topic``.
+
+    The shared envelope shape behind /fills and /orders, mirroring
+    :func:`build_positions_report_payload`'s wire contract: a msgpack ``bytes``
+    body of ``{"strategy_id", "row_count", "csv"}``. ``strategy_id`` MUST be the
+    TinoHelm CONTROL HANDLE (see :func:`build_positions_report_payload` for the
+    cross-process reason — the notifier keys its /fills /orders listeners on the
+    handle, identically to /positions).
+
+    NT's ``set_index`` puts ``client_order_id`` (orders) / ``position_id``
+    (positions) in the index, so we ``reset_index()`` before ``to_csv`` to keep
+    that identifier column in the wire CSV — otherwise the notifier table would
+    silently lose it. Encoded as bytes for NT's ``_EXTERNAL_PUBLISHABLE_TYPES``
+    whitelist (bytes yes, dict no), same as the positions report.
+    """
+
+    if df is None or df.empty:
+        body: dict[str, Any] = {"strategy_id": strategy_id, "row_count": 0, "csv": ""}
+    else:
+        body = {
+            "strategy_id": strategy_id,
+            "row_count": len(df),
+            "csv": df.reset_index().to_csv(index=False),
+        }
+    return topic, msgspec.msgpack.encode(body)
 
 
 def _account_pnl(portfolio: Any, venues: list[Any]) -> dict[str, Any]:

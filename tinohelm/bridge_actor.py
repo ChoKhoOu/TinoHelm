@@ -15,7 +15,8 @@ Topic format::
 
     commands.tinohelm.{strategy_id}.{action}
 
-Supported actions: ``pause``, ``resume``, ``flatten``, ``ping``, ``report``.
+Supported actions: ``pause``, ``resume``, ``flatten``, ``ping``, ``report``,
+``fills``, ``orders``.
 
 ``report`` is the on-demand counterpart to :class:`tinohelm.reporting_actor.
 ReportingActor`'s 30-min timer — when the operator runs ``/positions``
@@ -23,6 +24,12 @@ ReportingActor`'s 30-min timer — when the operator runs ``/positions``
 this pod's control stream and we synthesize a fresh ``tinohelm.report.
 positions`` envelope that flows back through the same channel as the
 periodic snapshot.
+
+``fills`` / ``orders`` are the history counterparts (/fills, /orders): same
+request/response shape as ``report`` but synthesizing a ``tinohelm.report.
+fills`` / ``tinohelm.report.orders`` envelope from NT's ``ReportProvider``
+(per-fill and per-order DataFrames over ``cache.orders()``). We never build the
+report ourselves — NT owns the schema.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from nautilus_trader.common.config import ActorConfig
 from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.trading.controller import Controller
 
-ACTIONS = {"pause", "resume", "flatten", "ping", "report"}
+ACTIONS = {"pause", "resume", "flatten", "ping", "report", "fills", "orders"}
 
 
 class BridgeActorConfig(ActorConfig, frozen=True):
@@ -228,35 +235,72 @@ class BridgeActor(Controller):
             self.log.info(f"BridgeActor: flatten -> market_exit_strategy_from_id({sid})")
             self.market_exit_strategy_from_id(sid)
         elif action == "report":
-            # Local import keeps bridge_actor importable from CLI contexts that
-            # don't ship pandas (the CLI never instantiates this class).
-            from tinohelm.reporting_actor import (
-                build_positions_report_payload,
-                positions_report_df,
-                venues_from_cache,
-            )
+            self._publish_positions_report(sid)
+        elif action in ("fills", "orders"):
+            self._publish_history_report(action, sid)
 
-            # The snapshot body is tagged with the CONTROL HANDLE, not str(sid).
-            # Unlike pause/resume/flatten — which hand sid to NT's *_from_id and
-            # genuinely need the NT StrategyId — the report body is consumed by
-            # the notifier, which keys everything (announce registry, /positions
-            # listener, channel routing) on the control handle (= file.strategy_id,
-            # config.py). ReportingActor's periodic snapshot already tags with the
-            # control handle (config.py wires ReportingActorConfig.strategy_id =
-            # file.strategy_id), so the on-demand snapshot MUST match or the
-            # notifier can't correlate the reply to the waiting /positions future
-            # (it lands in #logging and the command spins until it times out).
-            self.log.info(
-                f"BridgeActor: report -> publish snapshot for {self._control_handle} "
-                f"(strategy {sid})",
-            )
-            topic, body = build_positions_report_payload(
-                positions_report_df(self.cache),
-                strategy_id=self._control_handle,
-                portfolio=self.portfolio,
-                venues=venues_from_cache(self.cache),
-            )
-            self.msgbus.publish(topic=topic, msg=body)
+    def _publish_positions_report(self, sid: StrategyId) -> None:
+        """Synthesize + publish the on-demand positions snapshot (/positions, /pnl)."""
+
+        # Local import keeps bridge_actor importable from CLI contexts that
+        # don't ship pandas (the CLI never instantiates this class).
+        from tinohelm.reporting_actor import (
+            build_positions_report_payload,
+            positions_report_df,
+            venues_from_cache,
+        )
+
+        # The snapshot body is tagged with the CONTROL HANDLE, not str(sid).
+        # Unlike pause/resume/flatten — which hand sid to NT's *_from_id and
+        # genuinely need the NT StrategyId — the report body is consumed by
+        # the notifier, which keys everything (announce registry, /positions
+        # listener, channel routing) on the control handle (= file.strategy_id,
+        # config.py). ReportingActor's periodic snapshot already tags with the
+        # control handle (config.py wires ReportingActorConfig.strategy_id =
+        # file.strategy_id), so the on-demand snapshot MUST match or the
+        # notifier can't correlate the reply to the waiting /positions future
+        # (it lands in #logging and the command spins until it times out).
+        self.log.info(
+            f"BridgeActor: report -> publish snapshot for {self._control_handle} (strategy {sid})",
+        )
+        topic, body = build_positions_report_payload(
+            positions_report_df(self.cache),
+            strategy_id=self._control_handle,
+            portfolio=self.portfolio,
+            venues=venues_from_cache(self.cache),
+        )
+        self.msgbus.publish(topic=topic, msg=body)
+
+    def _publish_history_report(self, kind: str, sid: StrategyId) -> None:
+        """Synthesize + publish an on-demand history report (/fills or /orders).
+
+        Same request/response contract as ``report``: the body is tagged with
+        the CONTROL HANDLE so the notifier can correlate it to the waiting
+        ``/fills`` / ``/orders`` future. The DataFrame comes straight from NT's
+        ``ReportProvider`` (over ``cache.orders()``) — we own only the transport.
+        """
+
+        from tinohelm.reporting_actor import (
+            REPORT_TOPIC_FILLS,
+            REPORT_TOPIC_ORDERS,
+            build_report_payload,
+            fills_report_df,
+            orders_report_df,
+        )
+
+        if kind == "fills":
+            df, topic = fills_report_df(self.cache), REPORT_TOPIC_FILLS
+        else:
+            df, topic = orders_report_df(self.cache), REPORT_TOPIC_ORDERS
+        self.log.info(
+            f"BridgeActor: {kind} -> publish history for {self._control_handle} (strategy {sid})",
+        )
+        out_topic, body = build_report_payload(
+            df,
+            topic=topic,
+            strategy_id=self._control_handle,
+        )
+        self.msgbus.publish(topic=out_topic, msg=body)
 
     # ─── parsing ──────────────────────────────────────────────────────────────
 

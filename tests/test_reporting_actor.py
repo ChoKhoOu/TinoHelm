@@ -96,6 +96,70 @@ def test_build_positions_report_payload_emits_csv_envelope() -> None:
     assert "strategy_id,side,quantity,realized_pnl" in decoded["csv"]
 
 
+def test_build_report_payload_keeps_index_column_in_csv() -> None:
+    """The generic history-report encoder (/fills, /orders) must reset_index()
+    before to_csv — NT's ReportProvider puts client_order_id (orders/fills) in
+    the DataFrame *index*, so a naive to_csv would drop it and the notifier
+    table would lose the id column. We pin that the index lands in the CSV.
+    """
+
+    from tinohelm.reporting_actor import REPORT_TOPIC_FILLS, build_report_payload
+
+    df = pd.DataFrame(
+        {"order_side": ["BUY", "SELL"], "last_qty": [1.0, 2.0]},
+        index=pd.Index(["O-1", "O-2"], name="client_order_id"),
+    )
+
+    topic, body = build_report_payload(df, topic=REPORT_TOPIC_FILLS, strategy_id="foo")
+    decoded = _decode(body)
+
+    assert topic == "tinohelm.report.fills"
+    assert decoded["strategy_id"] == "foo"
+    assert decoded["row_count"] == 2
+    # reset_index() kept client_order_id as the leading CSV column.
+    assert decoded["csv"].splitlines()[0].startswith("client_order_id,")
+    assert "O-1" in decoded["csv"]
+
+
+def test_build_report_payload_handles_empty_frame() -> None:
+    """No fills/orders yet → row_count 0, empty csv, no crash (the notifier
+    renders '暂无记录'). Mirrors the positions report's empty-frame contract."""
+
+    from tinohelm.reporting_actor import REPORT_TOPIC_ORDERS, build_report_payload
+
+    topic, body = build_report_payload(
+        pd.DataFrame(),
+        topic=REPORT_TOPIC_ORDERS,
+        strategy_id="foo",
+    )
+    decoded = _decode(body)
+
+    assert topic == "tinohelm.report.orders"
+    assert decoded["row_count"] == 0
+    assert decoded["csv"] == ""
+
+
+def test_fills_and_orders_report_df_delegate_to_nt_over_full_order_set() -> None:
+    """fills_report_df / orders_report_df must read cache.orders() (the FULL set,
+    open + closed) so history includes completed orders, and delegate the
+    DataFrame build to NT's ReportProvider — we never build the report ourselves.
+    """
+
+    from tinohelm.reporting_actor import fills_report_df, orders_report_df
+
+    calls: list[str] = []
+
+    class _SpyCache:
+        def orders(self) -> list:
+            calls.append("orders")
+            return []  # empty → NT returns an empty DataFrame, no real Orders needed
+
+    assert fills_report_df(_SpyCache()).empty
+    assert orders_report_df(_SpyCache()).empty
+    # Both read the full order set, never positions_open / orders_open.
+    assert calls == ["orders", "orders"]
+
+
 class _FakePortfolio:
     """Stand-in for NT's Portfolio — returns per-currency PnL dicts.
 

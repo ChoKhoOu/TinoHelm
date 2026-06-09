@@ -126,6 +126,47 @@ def test_cli_positions_without_strategy_when_no_announces(
     assert "no strategies known" in result.output
 
 
+def test_cli_fills_targets_one_pod(fake_redis: fakeredis.FakeRedis) -> None:
+    """`tinohelm fills -s FOO-001` writes a single ``fills`` command envelope —
+    the CLI counterpart to the ``/fills`` slash command."""
+
+    result = runner.invoke(cli_mod.app, ["fills", "--strategy-id", "FOO-001"])
+
+    assert result.exit_code == 0, result.output
+    entry = _entries(fake_redis, control_stream_key("FOO-001"))[0]
+    payload = msgspec.msgpack.decode(entry[b"payload"])
+    assert payload["action"] == "fills"
+    assert entry[b"topic"] == b"commands.tinohelm.FOO-001.fills"
+
+
+def test_cli_orders_targets_one_pod(fake_redis: fakeredis.FakeRedis) -> None:
+    """`tinohelm orders -s FOO-001` writes a single ``orders`` command envelope."""
+
+    result = runner.invoke(cli_mod.app, ["orders", "--strategy-id", "FOO-001"])
+
+    assert result.exit_code == 0, result.output
+    entry = _entries(fake_redis, control_stream_key("FOO-001"))[0]
+    payload = msgspec.msgpack.decode(entry[b"payload"])
+    assert payload["action"] == "orders"
+    assert entry[b"topic"] == b"commands.tinohelm.FOO-001.orders"
+
+
+def test_cli_fills_fans_out_without_strategy(fake_redis: fakeredis.FakeRedis) -> None:
+    """Without ``-s``, /fills fan-out writes one ``fills`` envelope per announced
+    strategy — shares the same fan-out path as positions."""
+
+    from tinohelm.strategy_runner import ANNOUNCE_STREAM
+
+    fake_redis.xadd(ANNOUNCE_STREAM, {"strategy_id": "FOO-001", "mode": "live"})
+    fake_redis.xadd(ANNOUNCE_STREAM, {"strategy_id": "BAR-002", "mode": "sandbox"})
+
+    result = runner.invoke(cli_mod.app, ["fills"])
+
+    assert result.exit_code == 0, result.output
+    assert len(_entries(fake_redis, control_stream_key("FOO-001"))) == 1
+    assert len(_entries(fake_redis, control_stream_key("BAR-002"))) == 1
+
+
 def test_flatten_carries_reason_when_provided(fake_redis: fakeredis.FakeRedis) -> None:
     """`tinohelm flatten --reason "EOD"` must surface ``reason`` in payload.
 

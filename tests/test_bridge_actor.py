@@ -76,12 +76,18 @@ class CacheSpy:
 
     _positions: list[Any] = field(default_factory=list)
     _snapshots: list[Any] = field(default_factory=list)
+    _orders: list[Any] = field(default_factory=list)
 
     def positions_open(self) -> list[Any]:
         return self._positions
 
     def position_snapshots(self) -> list[Any]:
         return self._snapshots
+
+    def orders(self) -> list[Any]:
+        # /fills and /orders read the full order set (open + closed) so history
+        # includes completed orders; NT's ReportProvider filters internally.
+        return self._orders
 
 
 @dataclass
@@ -333,6 +339,49 @@ def test_report_action_publishes_positions_snapshot() -> None:
     decoded = msgspec.msgpack.decode(msg)
     # report tags the body with the CONTROL HANDLE, not str(<NT StrategyId>),
     # so the notifier's /positions listener (keyed on the handle) matches it.
+    assert decoded["strategy_id"] == "foo"
+    assert decoded["row_count"] == 0
+
+
+def test_fills_action_publishes_fills_report() -> None:
+    """/fills → NT's generate_fills_report over cache.orders() + one publish on
+    ``tinohelm.report.fills``, tagged with the CONTROL HANDLE (same cross-process
+    contract as /positions — the notifier keys its /fills listener on the handle).
+    Empty cache → row_count 0; the row/CSV encoding itself is covered in
+    test_reporting_actor. What this pins is the dispatch contract.
+    """
+
+    msgbus = MsgbusSpy()
+    actor, _trader, _cache, _log = _bridge_actor_under_test("foo", msgbus=msgbus)
+
+    actor._on_command(json.dumps({"action": "fills"}).encode("utf-8"))
+
+    assert len(msgbus.publishes) == 1
+    topic, msg = msgbus.publishes[0]
+    assert topic == "tinohelm.report.fills"
+    import msgspec.msgpack
+
+    decoded = msgspec.msgpack.decode(msg)
+    assert decoded["strategy_id"] == "foo"
+    assert decoded["row_count"] == 0
+
+
+def test_orders_action_publishes_orders_report() -> None:
+    """/orders → NT's generate_orders_report over cache.orders() + one publish on
+    ``tinohelm.report.orders``, tagged with the control handle. Mirror of the
+    /fills dispatch contract."""
+
+    msgbus = MsgbusSpy()
+    actor, _trader, _cache, _log = _bridge_actor_under_test("foo", msgbus=msgbus)
+
+    actor._on_command(json.dumps({"action": "orders"}).encode("utf-8"))
+
+    assert len(msgbus.publishes) == 1
+    topic, msg = msgbus.publishes[0]
+    assert topic == "tinohelm.report.orders"
+    import msgspec.msgpack
+
+    decoded = msgspec.msgpack.decode(msg)
     assert decoded["strategy_id"] == "foo"
     assert decoded["row_count"] == 0
 

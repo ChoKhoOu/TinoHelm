@@ -133,6 +133,13 @@ class OrderProgress:
     # to know "which order, which way, what kind" on the event they actually see.
     order_side: str | None = None
     order_type: str | None = None
+    # Fill-count + notional accumulated across the order's OrderFilled stream so
+    # the *single* embed we emit on completion can show "共 N 笔" and a true
+    # volume-weighted average price (VWAP) instead of just the last fill's price.
+    # A market order routed against a thin book fills in a dozen partials at
+    # drifting prices — the operator wants the blended price, not the last tick.
+    fill_count: int = 0
+    notional: float = 0.0
 
     @property
     def pct(self) -> float | None:
@@ -145,6 +152,34 @@ class OrderProgress:
         if self.qty_total is None:
             return None
         return self.qty_total - self.qty_filled
+
+    @property
+    def vwap(self) -> float | None:
+        """Volume-weighted average fill price, or ``None`` before any fill.
+
+        ``notional / qty_filled`` — the blended price across every partial.
+        Returns ``None`` when nothing filled yet (avoids a divide-by-zero and
+        lets the renderer fall back to the event's own ``last_px``).
+        """
+
+        if not self.qty_filled:
+            return None
+        return self.notional / self.qty_filled
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether cumulative fills have reached the order total.
+
+        Used by the fill-aggregation denoise gate to suppress every partial
+        OrderFilled and emit only the final one (which renders the full
+        '共 N 笔 / VWAP' summary). ``qty_total is None`` (notifier restarted
+        mid-order, lost the Initialized total) is treated as 'complete' so the
+        gate degrades to forwarding every fill rather than swallowing them.
+        """
+
+        if self.qty_total is None:
+            return True
+        return self.qty_filled >= self.qty_total - 1e-9
 
 
 # Terminal order events — once one of these renders, the slot can be released:
@@ -213,6 +248,10 @@ class OrderProgressTracker:
             last = _to_float(body.get("last_qty"))
             if last is not None:
                 prog.qty_filled += last
+                prog.fill_count += 1
+                last_px = _to_float(body.get("last_px"))
+                if last_px is not None:
+                    prog.notional += last * last_px
 
         # Evict oldest beyond the cap (move_to_end above keeps live orders warm).
         while len(self._orders) > self._max_orders:
@@ -270,8 +309,58 @@ _COLOR_MAP = {
     "ComponentStateChanged": 0x7F8C8D,
 }
 
-# Emoji per NT lifecycle state — picked so green/red are reserved for the
-# stable resting states (RUNNING / STOPPED) and amber for transitions.
+# 中文标题 per NT event type. The operator reads these as Discord embed titles;
+# NT's English class names (OrderFilled / PositionClosed / …) mean nothing to a
+# non-NT operator, so we translate the *title* while leaving genuinely-ambiguous
+# upstream strings (reasons, ids) verbatim. Schema-tolerant: an unmapped event
+# type falls back to ``[<type>]`` rather than crashing, so an NT upgrade that
+# adds an event still renders — just in English until we add its row here.
+_TITLE_ZH = {
+    "OrderFilled": "订单成交",
+    "OrderCanceled": "订单撤销",
+    "OrderExpired": "订单过期",
+    "OrderModified": "订单修改",
+    "OrderTriggered": "订单触发",
+    "OrderUpdated": "订单更新",
+    "PositionOpened": "持仓开启",
+    "PositionChanged": "持仓变动",
+    "PositionClosed": "持仓平仓",
+    "AccountState": "账户状态",
+    "Signal": "信号",
+}
+
+
+# Direction strings → 中文. Orders use BUY/SELL; positions use LONG/SHORT/FLAT.
+# One map covers both so order and position embeds read consistently. Unknown
+# values pass through verbatim (schema-tolerant against NT enum drift).
+_SIDE_ZH = {
+    "BUY": "买入",
+    "SELL": "卖出",
+    "LONG": "做多",
+    "SHORT": "做空",
+    "FLAT": "已平",
+}
+
+
+def _side_zh(side: Any) -> str:
+    return _SIDE_ZH.get(str(side), str(side))
+
+
+def _title_for(event_type: str) -> str:
+    return f"[{_TITLE_ZH.get(event_type, event_type)}]"
+
+
+def _fmt_px(value: float) -> str:
+    """Format a price for display, keeping precision across magnitudes.
+
+    Prices span orders of magnitude (0.0617 for RONIN, 66.36 for SOL); ``%g``'s
+    default 6 significant figures would truncate the small ones. ``.8g`` keeps
+    8 sig-figs and still trims trailing zeros (66.36 stays 66.36, not 66.360000).
+    """
+
+    return f"{value:.8g}"
+
+
 _COMPONENT_STATE_EMOJI = {
     "PRE_INITIALIZED": "⚪",
     "READY": "⚪",
@@ -312,7 +401,7 @@ def render_embed(
         if coid:
             progress = tracker.snapshot(coid)
 
-    title = f"[{event_type}]"
+    title = _title_for(event_type)
     description_lines: list[str] = []
 
     # Route on event_type first (the body's own self-description), then fall
@@ -332,6 +421,12 @@ def render_embed(
     elif env.topic == "tinohelm.report.positions":
         title = "[持仓快照]"
         description_lines.append(_fmt_positions_report(body))
+    elif env.topic == "tinohelm.report.fills":
+        title = "[成交记录]"
+        description_lines.append(_fmt_fills_report(body))
+    elif env.topic == "tinohelm.report.orders":
+        title = "[订单记录]"
+        description_lines.append(_fmt_orders_report(body))
     elif env.topic == "tinohelm.daily_summary":
         title = "[每日摘要]"
         description_lines.append(_fmt_daily_summary(body))
@@ -483,6 +578,10 @@ def _fmt_progress(progress: OrderProgress | None, event_type: str | None) -> str
     Gated to fill/cancel events: an OrderTriggered or other kept node with zero
     fills would otherwise render a noisy '0 / N (0%)'. A cancel with zero fills
     still shows (the whole order was canceled — that's information).
+
+    On a completed OrderFilled we also append '共 N 笔' — the fill count the
+    operator asked for, so a market order that swept the book in a dozen
+    partials reads as one aggregated line instead of a dozen separate embeds.
     """
 
     if progress is None or progress.qty_total is None:
@@ -500,7 +599,8 @@ def _fmt_progress(progress: OrderProgress | None, event_type: str | None) -> str
         pct_str = f" ({pct:.1f}%)" if pct is not None else ""
         filled = _fmt_qty(progress.qty_filled)
         total = _fmt_qty(progress.qty_total)
-        return f"**累计成交**: `{filled}` / `{total}`{pct_str}"
+        count_str = f" · 共 {progress.fill_count} 笔" if progress.fill_count > 1 else ""
+        return f"**成交**: `{filled}` / `{total}`{pct_str}{count_str}"
     return None
 
 
@@ -513,22 +613,42 @@ def _fmt_qty(value: float) -> str:
 
 
 def _fmt_order(body: dict[str, Any], *, progress: OrderProgress | None = None) -> str:
+    """Render an order event in 中文.
+
+    For a completed/aggregated OrderFilled the price line shows the VWAP across
+    all partials (``progress.vwap``) rather than the single ``last_px`` of the
+    final fill — the blended price is what the operator actually paid. We still
+    fall back to the body's ``last_px`` when no progress is tracked (notifier
+    restarted mid-order) so the line never goes blank.
+    """
+
     rows: list[str] = []
-    for k in ("strategy_id", "instrument_id"):
-        if k in body:
-            rows.append(f"**{k}**: `{body[k]}`")
+    if sid := body.get("strategy_id"):
+        rows.append(f"**策略**: `{sid}`")
+    if inst := body.get("instrument_id"):
+        rows.append(f"**标的**: `{inst}`")
     if side := _order_side(body, progress):
-        rows.append(f"**方向**: `{side}`")
+        rows.append(f"**方向**: `{_side_zh(side)}`")
     if instruction := _fmt_instruction(body, progress=progress):
         rows.append(instruction)
     rows.extend(_fmt_prices(body))
-    for k in ("quantity", "last_qty", "last_px", "status"):
-        if k in body:
-            rows.append(f"**{k}**: `{body[k]}`")
-    if progress_line := _fmt_progress(progress, body.get("type")):
+
+    event_type = body.get("type")
+    # Aggregated fill price: prefer VWAP (blended across partials), else the
+    # single fill's last_px. Only shown for fills — a cancel/expire body carries
+    # no meaningful price of its own.
+    if event_type == "OrderFilled":
+        vwap = progress.vwap if progress else None
+        if vwap is not None:
+            rows.append(f"**成交均价**: `{_fmt_px(vwap)}`")
+        elif (last_px := _to_float(body.get("last_px"))) is not None:
+            rows.append(f"**成交价**: `{_fmt_px(last_px)}`")
+    if status := body.get("status"):
+        rows.append(f"**状态**: `{status}`")
+    if progress_line := _fmt_progress(progress, event_type):
         rows.append(progress_line)
-    if "client_order_id" in body:
-        rows.append(f"**id**: `{body['client_order_id']}`")
+    if coid := body.get("client_order_id"):
+        rows.append(f"**订单号**: `{coid}`")
     return "\n".join(rows) or f"```json\n{json.dumps(body, indent=2)[:1200]}\n```"
 
 
@@ -551,17 +671,30 @@ def _fmt_rejection(body: dict[str, Any]) -> str:
 
 
 def _fmt_position(body: dict[str, Any]) -> str:
-    keys = (
-        "strategy_id",
-        "instrument_id",
-        "side",
-        "quantity",
-        "avg_px_open",
-        "avg_px_close",
-        "realized_pnl",
-        "unrealized_pnl",
-    )
-    rows = [f"**{k}**: `{body[k]}`" for k in keys if k in body]
+    """Render a position event (Opened/Closed) in 中文.
+
+    PositionChanged is denoise'd upstream (the mid-flight churn the operator
+    asked to silence), so this renders only the meaningful endpoints: a fresh
+    open and a final close. ``side`` is translated (做多/做空/已平); prices and
+    PnL keep their NT-serialized values verbatim.
+    """
+
+    label_zh = {
+        "strategy_id": "策略",
+        "instrument_id": "标的",
+        "side": "方向",
+        "quantity": "数量",
+        "avg_px_open": "开仓均价",
+        "avg_px_close": "平仓均价",
+        "realized_pnl": "已实现",
+        "unrealized_pnl": "浮动盈亏",
+    }
+    rows: list[str] = []
+    for key, zh in label_zh.items():
+        if key not in body:
+            continue
+        value = _side_zh(body[key]) if key == "side" else body[key]
+        rows.append(f"**{zh}**: `{value}`")
     return "\n".join(rows) or f"```json\n{json.dumps(body, indent=2)[:1200]}\n```"
 
 
@@ -676,6 +809,111 @@ def _fmt_positions_report(body: dict[str, Any]) -> str:
     table = _markdown_table(headers, body_rows)
     tail = f"\n_…还有 {len(data_rows) - _POSITIONS_TABLE_MAX_ROWS} 条未显示_" if truncated else ""
     return f"{header}\n```\n{table}\n```{tail}{pnl_block}"
+
+
+def _fmt_csv_report(
+    body: dict[str, Any],
+    *,
+    head_noun: str,
+    columns_zh: OrderedDict[str, str],
+    side_cols: tuple[str, ...] = (),
+) -> str:
+    """Render a generic CSV report (fills / orders) as a 中文 Markdown table.
+
+    Shares the wire format of the positions report (``build_report_payload``):
+    ``{"strategy_id", "row_count", "csv"}``. ``columns_zh`` maps the NT CSV
+    column names → 中文 headers in display order; only those present in the CSV
+    render (NT's column set is stable, but we drop unknowns rather than break
+    the table). ``side_cols`` lists columns whose BUY/SELL/LONG/SHORT values get
+    translated via :func:`_side_zh`.
+
+    Capped at :data:`_POSITIONS_TABLE_MAX_ROWS` rows with a "…还有 N 条" tail,
+    same as the positions table — a fill history can run to hundreds of rows and
+    a code block stops being scannable long before Discord's 4096-char limit.
+    """
+
+    strategy_id = body.get("strategy_id", "?")
+    row_count = body.get("row_count", 0)
+    csv_text = body.get("csv", "") or ""
+
+    header = f"**策略**: `{strategy_id}` · **{head_noun}**: `{row_count}` 条"
+    if not csv_text or row_count == 0:
+        return f"{header}\n_暂无记录_"
+
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    if not rows:
+        return f"{header}\n_无法解析数据_"
+
+    columns = rows[0]
+    data_rows = rows[1:]
+    indices = [(zh, columns.index(c), c) for c, zh in columns_zh.items() if c in columns]
+    if not indices:
+        return f"{header}\n_(列名不识别，原始 CSV 见 stream)_"
+
+    headers = [zh for zh, _, _ in indices]
+
+    def _cell(row: list[str], col_idx: int, col_name: str) -> str:
+        value = row[col_idx] if col_idx < len(row) else ""
+        return _side_zh(value) if col_name in side_cols else value
+
+    truncated = len(data_rows) > _POSITIONS_TABLE_MAX_ROWS
+    shown = data_rows[:_POSITIONS_TABLE_MAX_ROWS]
+    body_rows = [[_cell(r, i, c) for _, i, c in indices] for r in shown]
+
+    table = _markdown_table(headers, body_rows)
+    tail = f"\n_…还有 {len(data_rows) - _POSITIONS_TABLE_MAX_ROWS} 条未显示_" if truncated else ""
+    return f"{header}\n```\n{table}\n```{tail}"
+
+
+def _fmt_fills_report(body: dict[str, Any]) -> str:
+    """Render ``tinohelm.report.fills`` (NT ``generate_fills_report``) in 中文.
+
+    One row per individual fill: 标的 / 方向 / 成交量 / 成交价 / 手续费 / 时间.
+    Columns match NT 1.227.0's fills-report schema (verified via to_dict).
+    """
+
+    columns = OrderedDict(
+        [
+            ("instrument_id", "标的"),
+            ("order_side", "方向"),
+            ("last_qty", "成交量"),
+            ("last_px", "成交价"),
+            ("commission", "手续费"),
+            ("ts_event", "时间"),
+        ],
+    )
+    return _fmt_csv_report(
+        body,
+        head_noun="成交",
+        columns_zh=columns,
+        side_cols=("order_side",),
+    )
+
+
+def _fmt_orders_report(body: dict[str, Any]) -> str:
+    """Render ``tinohelm.report.orders`` (NT ``generate_orders_report``) in 中文.
+
+    One row per order: 标的 / 方向 / 类型 / 数量 / 已成交 / 均价 / 状态.
+    Columns match NT 1.227.0's orders-report schema (verified via to_dict).
+    """
+
+    columns = OrderedDict(
+        [
+            ("instrument_id", "标的"),
+            ("side", "方向"),
+            ("type", "类型"),
+            ("quantity", "数量"),
+            ("filled_qty", "已成交"),
+            ("avg_px", "均价"),
+            ("status", "状态"),
+        ],
+    )
+    return _fmt_csv_report(
+        body,
+        head_noun="订单",
+        columns_zh=columns,
+        side_cols=("side",),
+    )
 
 
 def _fmt_account_pnl(account_pnl: Any) -> str:

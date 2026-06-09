@@ -138,10 +138,10 @@ def test_strategies_for_channel_logging_returns_everything() -> None:
 
 
 def test_forwarder_watch_positions_resolves_on_matching_envelope() -> None:
-    """``/positions`` registers a future via :meth:`watch_positions_report`;
-    the next ``tinohelm.report.positions`` envelope passing through enqueue
-    must satisfy it. We exercise the loop-thread dispatch path so we know
-    the futures wire up correctly across the NT-handler / asyncio boundary.
+    """``/positions`` registers a future via :meth:`watch_report`; the next
+    ``tinohelm.report.positions`` envelope passing through enqueue must satisfy
+    it. We exercise the loop-thread dispatch path so we know the futures wire up
+    correctly across the NT-handler / asyncio boundary.
     """
 
     import asyncio
@@ -152,7 +152,7 @@ def test_forwarder_watch_positions_resolves_on_matching_envelope() -> None:
     async def _run() -> Any:
         loop = asyncio.get_running_loop()
         forwarder = DiscordForwarder(loop=loop, client=None)
-        future = forwarder.watch_positions_report("FOO-001")
+        future = forwarder.watch_report("tinohelm.report.positions", "FOO-001")
 
         env = envelope_for(
             "tinohelm.report.positions",
@@ -166,10 +166,10 @@ def test_forwarder_watch_positions_resolves_on_matching_envelope() -> None:
 
 
 def test_forwarder_drop_position_listener_clears_dead_pod_slot() -> None:
-    """``/positions`` cancels its future on timeout and calls
-    ``drop_position_listener``; the forwarder's internal list must shed
-    the entry so a pod that's permanently gone doesn't accumulate
-    cancelled futures forever.
+    """A slash command cancels its future on timeout and calls
+    ``drop_report_listener``; the forwarder's internal list must shed the entry
+    so a pod that's permanently gone doesn't accumulate cancelled futures
+    forever.
     """
 
     import asyncio
@@ -179,16 +179,17 @@ def test_forwarder_drop_position_listener_clears_dead_pod_slot() -> None:
     async def _run() -> dict:
         loop = asyncio.get_running_loop()
         forwarder = DiscordForwarder(loop=loop, client=None)
-        future = forwarder.watch_positions_report("FOO-001")
-        # /positions timeout path: cancel + drop.
+        topic = "tinohelm.report.positions"
+        future = forwarder.watch_report(topic, "FOO-001")
+        # timeout path: cancel + drop.
         future.cancel()
-        forwarder.drop_position_listener("FOO-001", future)
+        forwarder.drop_report_listener(topic, "FOO-001", future)
         # Reach in for the test — this is the only place we want to inspect
         # the leak directly. Public surface is just the methods above.
-        return forwarder._position_listeners
+        return forwarder._report_listeners
 
     listeners = asyncio.run(_run())
-    assert "FOO-001" not in listeners
+    assert ("tinohelm.report.positions", "FOO-001") not in listeners
 
 
 def test_forwarder_watch_positions_ignores_other_strategies() -> None:
@@ -202,7 +203,7 @@ def test_forwarder_watch_positions_ignores_other_strategies() -> None:
     async def _run() -> bool:
         loop = asyncio.get_running_loop()
         forwarder = DiscordForwarder(loop=loop, client=None)
-        future = forwarder.watch_positions_report("FOO-001")
+        future = forwarder.watch_report("tinohelm.report.positions", "FOO-001")
 
         env = envelope_for(
             "tinohelm.report.positions",
@@ -1235,7 +1236,7 @@ def test_enqueue_on_demand_snapshot_skips_logging_when_listener_waiting() -> Non
 
         forwarder._send = _fake_send  # type: ignore[assignment]
 
-        future = forwarder.watch_positions_report("FOO-001")
+        future = forwarder.watch_report("tinohelm.report.positions", "FOO-001")
         env = envelope_for(
             "tinohelm.report.positions",
             {"strategy_id": "FOO-001", "row_count": 0, "csv": ""},
@@ -1455,3 +1456,220 @@ def test_notifier_actor_forwards_fill_with_progress() -> None:
     description = render_embed(sent[0], tracker=forwarder.tracker).description or ""
     assert "8186.6" in description
     assert "100" in description  # 100% filled
+
+
+# ─── churn-suppression gate: PositionChanged / AccountState ──────────────────
+
+
+def test_should_forward_event_type_silences_position_changed_and_account_state() -> None:
+    """The operator asked to stop two flood sources: PositionChanged (one per
+    partial fill — dozens per order, pure churn between Opened and Closed) and
+    AccountState (a balance-ticker firing on every margin delta). Both must be
+    dropped by the silence gate.
+    """
+
+    from tinohelm.notifier.runner import should_forward_event_type
+
+    assert should_forward_event_type({"type": "PositionChanged"}) is False
+    assert should_forward_event_type({"type": "AccountState"}) is False
+
+
+def test_should_forward_event_type_keeps_position_endpoints() -> None:
+    """Only the high-frequency churn is silenced — the meaningful position
+    endpoints (Opened/Closed) and order events still pass through.
+    """
+
+    from tinohelm.notifier.runner import should_forward_event_type
+
+    for keep in ("PositionOpened", "PositionClosed", "OrderFilled", "Signal"):
+        assert should_forward_event_type({"type": keep}) is True, keep
+
+
+def test_should_forward_event_type_passes_non_dict_and_unknown() -> None:
+    """Schema-tolerant: non-dict bodies and unknown future types pass through,
+    same posture as the order/component gates.
+    """
+
+    from tinohelm.notifier.runner import should_forward_event_type
+
+    assert should_forward_event_type("not-a-dict") is True
+    assert should_forward_event_type({"type": "SomeFutureEvent"}) is True
+    assert should_forward_event_type({"no": "type"}) is True
+
+
+# ─── fill-aggregation gate: suppress partials, emit only the completing fill ──
+
+
+def test_should_forward_fill_suppresses_partials_emits_completing_fill() -> None:
+    """A market order sweeping a thin book emits many partial OrderFilled events.
+    The operator asked for ONE aggregated line, so the gate suppresses every
+    partial and forwards only the fill that completes the order total.
+    """
+
+    from tinohelm.notifier.handlers import OrderProgressTracker
+    from tinohelm.notifier.runner import should_forward_fill
+
+    tracker = OrderProgressTracker()
+    coid = "O-1"
+    tracker.observe(
+        {"type": "OrderInitialized", "client_order_id": coid, "quantity": "100"},
+    )
+
+    # First partial: 40/100 — suppressed.
+    partial = {"type": "OrderFilled", "client_order_id": coid, "last_qty": "40", "last_px": "1.0"}
+    tracker.observe(partial)
+    assert should_forward_fill(partial, tracker) is False
+
+    # Second partial: 90/100 — still suppressed.
+    partial2 = {"type": "OrderFilled", "client_order_id": coid, "last_qty": "50", "last_px": "1.1"}
+    tracker.observe(partial2)
+    assert should_forward_fill(partial2, tracker) is False
+
+    # Completing fill: 100/100 — forwarded.
+    final = {"type": "OrderFilled", "client_order_id": coid, "last_qty": "10", "last_px": "1.2"}
+    tracker.observe(final)
+    assert should_forward_fill(final, tracker) is True
+
+
+def test_should_forward_fill_degrades_when_total_unknown() -> None:
+    """If the notifier restarted mid-order it never saw the OrderInitialized that
+    carried the total, so it can't aggregate — forward every fill rather than
+    swallow them silently.
+    """
+
+    from tinohelm.notifier.handlers import OrderProgressTracker
+    from tinohelm.notifier.runner import should_forward_fill
+
+    tracker = OrderProgressTracker()
+    coid = "O-orphan"
+    # No OrderInitialized observed → qty_total stays None.
+    fill = {"type": "OrderFilled", "client_order_id": coid, "last_qty": "40", "last_px": "1.0"}
+    tracker.observe(fill)
+    assert should_forward_fill(fill, tracker) is True
+
+
+def test_should_forward_fill_passes_non_fill_and_untracked() -> None:
+    """Non-OrderFilled bodies, missing tracker, and orders with no client_order_id
+    all pass through — the gate only ever suppresses *tracked, incomplete* fills.
+    """
+
+    from tinohelm.notifier.handlers import OrderProgressTracker
+    from tinohelm.notifier.runner import should_forward_fill
+
+    tracker = OrderProgressTracker()
+    assert should_forward_fill({"type": "PositionOpened"}, tracker) is True
+    assert should_forward_fill({"type": "OrderFilled", "last_qty": "1"}, None) is True
+    assert should_forward_fill({"type": "OrderFilled"}, tracker) is True  # no coid
+
+
+def test_fill_embed_shows_vwap_and_fill_count() -> None:
+    """The aggregated completing-fill embed shows a volume-weighted average price
+    (blended across all partials) and '共 N 笔' — not the last partial's price.
+    """
+
+    from tinohelm.notifier.handlers import OrderProgressTracker, envelope_for, render_embed
+
+    tracker = OrderProgressTracker()
+    coid = "O-1"
+    tracker.observe(
+        {
+            "type": "OrderInitialized",
+            "client_order_id": coid,
+            "quantity": "100",
+            "order_side": "SELL",
+            "order_type": "MARKET",
+        },
+    )
+    # Two partials at different prices: VWAP = (40*1.0 + 60*2.0)/100 = 1.6
+    tracker.observe(
+        {"type": "OrderFilled", "client_order_id": coid, "last_qty": "40", "last_px": "1.0"},
+    )
+    final = {
+        "type": "OrderFilled",
+        "strategy_id": "FOO-001",
+        "instrument_id": "OPUSDT-PERP.BINANCE",
+        "client_order_id": coid,
+        "order_side": "SELL",
+        "last_qty": "60",
+        "last_px": "2.0",
+    }
+    tracker.observe(final)
+    env = envelope_for("events.order.FOO-001", final)
+    description = render_embed(env, tracker=tracker).description or ""
+
+    assert "1.6" in description  # VWAP, not the last fill's 2.0
+    assert "共 2 笔" in description
+    assert "卖出" in description  # direction translated to 中文
+
+
+def test_notifier_actor_aggregates_partial_fills_into_one_embed() -> None:
+    """End-to-end through the in-process actor: a multi-partial market order
+    emits exactly ONE Discord embed (the completing fill), and PositionChanged
+    churn in between is silenced.
+    """
+
+    import json
+
+    from tinohelm.notifier.runner import NotifierActor, NotifierActorConfig
+
+    sent: list[Any] = []
+
+    class _FakeForwarder:
+        def __init__(self) -> None:
+            from tinohelm.notifier.handlers import OrderProgressTracker
+
+            self.tracker = OrderProgressTracker()
+
+        def enqueue(self, env, *, channel_id: int) -> None:
+            sent.append(env)
+
+    forwarder = _FakeForwarder()
+    actor = NotifierActor(
+        NotifierActorConfig(sandbox_channel_id=11, live_channel_id=22, logging_channel_id=33),
+        forwarder=forwarder,
+        registry={"FOO-001": "live"},
+    )
+    handler = actor._make_handler("events.order.*")
+
+    def _emit(body: dict[str, Any]) -> None:
+        handler(json.dumps(body).encode())
+
+    _emit(
+        {
+            "type": "OrderInitialized",
+            "strategy_id": "FOO-001",
+            "client_order_id": "O-1",
+            "quantity": "100",
+        }
+    )
+    _emit(
+        {
+            "type": "OrderFilled",
+            "strategy_id": "FOO-001",
+            "client_order_id": "O-1",
+            "last_qty": "40",
+            "last_px": "1.0",
+        }
+    )
+    # PositionChanged churn between partials — must be silenced.
+    _emit(
+        {
+            "type": "PositionChanged",
+            "strategy_id": "FOO-001",
+            "instrument_id": "OPUSDT-PERP.BINANCE",
+        }
+    )
+    _emit(
+        {
+            "type": "OrderFilled",
+            "strategy_id": "FOO-001",
+            "client_order_id": "O-1",
+            "last_qty": "60",
+            "last_px": "2.0",
+        }
+    )
+
+    # Only the completing fill reached Discord — both the partial and the
+    # PositionChanged churn were suppressed.
+    assert len(sent) == 1
+    assert sent[0].body.get("last_qty") == "60"

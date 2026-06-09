@@ -142,7 +142,9 @@ def test_render_embed_for_order_event() -> None:
     )
     env = envelope_for("events.order.FOO-001", body)
     embed = render_embed(env)
-    assert "OrderFilled" in embed.title
+    # Title is now translated to 中文 (operator-facing); the English NT class
+    # name is intentionally replaced. See handlers._TITLE_ZH.
+    assert "订单成交" in embed.title
     assert "FOO-001" in (embed.description or "")
 
 
@@ -150,7 +152,7 @@ def test_order_event_shows_buy_sell_side_from_order_side_field() -> None:
     """NT order events serialize the direction as ``order_side`` (not ``side``
     — that key is position-only). The old formatter read ``side``, so order
     embeds never showed BUY/SELL at all. Verify we read ``order_side`` and
-    surface the direction.
+    surface the direction, now translated to 中文 (卖出).
 
     Fields mirror NT 1.227.0's ``OrderFilled.to_dict()`` exactly.
     """
@@ -168,7 +170,7 @@ def test_order_event_shows_buy_sell_side_from_order_side_field() -> None:
     )
     env = envelope_for("events.order.FOO-001", body)
     description = render_embed(env).description or ""
-    assert "SELL" in description
+    assert "卖出" in description
 
 
 def test_order_event_shows_instruction_line_tif_postonly_reduceonly() -> None:
@@ -409,7 +411,8 @@ def test_canceled_ioc_embed_shows_unfilled_remainder() -> None:
     assert "4000" in description
     # direction + type backfilled from the tracker — NT's OrderCanceled carries
     # neither, but the operator still wants 'which way, what kind' on the event.
-    assert "SELL" in description
+    # Direction is now translated to 中文 (卖出); order type stays verbatim.
+    assert "卖出" in description
     assert "MARKET" in description
 
 
@@ -656,3 +659,80 @@ def test_daily_summary_renders_with_chinese_labels() -> None:
     assert "3" in description
     assert "27" in description
     assert '"positions_open"' not in description
+
+
+# ─── /fills /orders report rendering (中文 tables) ───────────────────────────
+
+
+def test_fills_report_renders_chinese_table() -> None:
+    """tinohelm.report.fills → a 中文 Markdown table with translated direction.
+
+    Columns mirror NT 1.227.0's generate_fills_report schema; the renderer
+    picks the operator-facing subset (标的/方向/成交量/成交价/手续费/时间) and
+    translates order_side BUY/SELL → 买入/卖出.
+    """
+
+    csv_text = (
+        "client_order_id,instrument_id,order_side,last_qty,last_px,commission,ts_event\n"
+        "O-1,RONINUSDT-PERP.BINANCE,SELL,1697.1,0.0618,0.01 USDT,2026-06-09 05:30:00\n"
+    )
+    body = msgspec.msgpack.encode(
+        {"strategy_id": "oi_momentum_lowvol", "row_count": 1, "csv": csv_text},
+    )
+    env = envelope_for("tinohelm.report.fills", body)
+    embed = render_embed(env)
+
+    assert "成交记录" in embed.title
+    description = embed.description or ""
+    assert "标的" in description
+    assert "方向" in description
+    assert "卖出" in description  # SELL translated
+    assert "RONINUSDT-PERP.BINANCE" in description
+    assert "oi_momentum_lowvol" in description
+
+
+def test_orders_report_renders_chinese_table() -> None:
+    """tinohelm.report.orders → 中文 table: 标的/方向/类型/数量/已成交/均价/状态."""
+
+    csv_text = (
+        "client_order_id,instrument_id,side,type,quantity,filled_qty,avg_px,status\n"
+        "O-1,SOLUSDT-PERP.BINANCE,BUY,LIMIT,209.99,209.99,66.36,FILLED\n"
+    )
+    body = msgspec.msgpack.encode(
+        {"strategy_id": "oi_momentum_lowvol", "row_count": 1, "csv": csv_text},
+    )
+    env = envelope_for("tinohelm.report.orders", body)
+    embed = render_embed(env)
+
+    assert "订单记录" in embed.title
+    description = embed.description or ""
+    assert "类型" in description
+    assert "买入" in description  # BUY translated
+    assert "FILLED" in description
+
+
+def test_fills_report_empty_shows_no_records() -> None:
+    """Zero rows → '暂无记录', never a malformed empty table."""
+
+    body = msgspec.msgpack.encode(
+        {"strategy_id": "foo", "row_count": 0, "csv": ""},
+    )
+    env = envelope_for("tinohelm.report.fills", body)
+    description = render_embed(env).description or ""
+    assert "暂无记录" in description
+
+
+def test_fills_report_truncates_long_history() -> None:
+    """A long fill history is capped with a '…还有 N 条' tail so the code block
+    stays scannable (same cap as the positions table)."""
+
+    header = "client_order_id,instrument_id,order_side,last_qty,last_px,commission,ts_event"
+    rows = [f"O-{i},RONINUSDT-PERP.BINANCE,SELL,100,0.06,0.01 USDT,2026-06-09" for i in range(20)]
+    csv_text = "\n".join([header, *rows]) + "\n"
+    body = msgspec.msgpack.encode(
+        {"strategy_id": "foo", "row_count": 20, "csv": csv_text},
+    )
+    env = envelope_for("tinohelm.report.fills", body)
+    description = render_embed(env).description or ""
+    assert "还有" in description
+    assert "未显示" in description
