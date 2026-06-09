@@ -244,14 +244,18 @@ def test_exec_engine_disables_reconciliation_in_sandbox(
     strategy_toml: Path,
     monkeypatch,
 ) -> None:
-    """A SANDBOX pod must DISABLE startup reconciliation (mode-aware override).
+    """A SANDBOX pod must DISABLE ALL reconciliation — startup AND continuous.
 
     The SandboxExecutionClient runs an in-process simulated exchange that returns
-    EMPTY mass-status reports — startup reconciliation against it produces spurious
-    position-discrepancy noise and reconciles nothing of value. So whenever
-    ``mode == "sandbox"`` build_exec_engine_config forces ``reconciliation=False``
-    (NT's own sandbox examples do the same). The polling intervals / snapshot
-    defaults are unchanged — only the reconciliation gate flips by mode.
+    EMPTY mass-status / position-status reports — there is no real venue state to
+    reconcile against. ``reconciliation=False`` alone is NOT enough: NT's
+    continuous reconciliation loop is launched whenever a polling interval is set
+    (its launch gate ignores ``reconciliation`` — see build_exec_engine_config
+    docstring, NT ``live/execution_engine.py:382-391`` pinned 1.227.0). Left at
+    10s/60s the loop runs against the empty sim venue, declares a spurious
+    position discrepancy, and flattens the live sim position via an inferred
+    ``-EXTERNAL`` fill seconds after it opens. So sandbox must also null BOTH
+    intervals so the loop is never created.
     """
 
     monkeypatch.setenv("TINO_MODE", "sandbox")  # fixture toml is already sandbox; pin it
@@ -260,16 +264,24 @@ def test_exec_engine_disables_reconciliation_in_sandbox(
     config = build_trading_node_config(file)
     exec_cfg = config.exec_engine
     assert exec_cfg is not None
-    assert exec_cfg.reconciliation is False  # sandbox override
-    # Everything else stays at TinoHelm's defaults regardless of mode.
-    assert exec_cfg.open_check_interval_secs == 10.0
-    assert exec_cfg.position_check_interval_secs == 60.0
+    assert exec_cfg.reconciliation is False  # sandbox override: startup pass off
+    # Continuous polling loop must NOT start in sandbox — both intervals nulled
+    # so NT's launch gate (live/execution_engine.py:382-391) stays false.
+    assert exec_cfg.open_check_interval_secs is None
+    assert exec_cfg.position_check_interval_secs is None
     assert exec_cfg.snapshot_orders is False
     assert exec_cfg.snapshot_positions is False
 
 
 def test_exec_section_overrides_defaults_both_directions(tmp_path: Path) -> None:
     """The ``[exec]`` TOML section tunes every exposed flag, both ways.
+
+    Exercised in ``mode="live"`` ON PURPOSE: sandbox now nulls both intervals
+    unconditionally (the continuous-reconciliation loop must never start against
+    the empty sim venue — see ``test_exec_engine_disables_reconciliation_in_sandbox``),
+    so a sandbox toml could not prove the ``"none"`` override actually takes
+    effect (the assertion would pass vacuously). Live is where the operator's
+    interval override is honoured, so that is where we pin it.
 
     Two independent overrides exercised here:
 
@@ -279,12 +291,14 @@ def test_exec_section_overrides_defaults_both_directions(tmp_path: Path) -> None
       a full order/position history in Redis, accepting the unbounded growth.
     """
 
+    from tinohelm.config import build_exec_engine_config
+
     body = textwrap.dedent(
         """
         [strategy]
         id = "AUDIT-001"
         trader_id = "TINO-001"
-        mode = "sandbox"
+        mode = "live"
         class = "strategies.example.strategy:ExampleStrategy"
         config_class = "strategies.example.strategy:ExampleStrategyConfig"
 
@@ -304,8 +318,8 @@ def test_exec_section_overrides_defaults_both_directions(tmp_path: Path) -> None
     path.write_text(body)
 
     file = TinoStrategyFile.load(path)
-    config = build_trading_node_config(file)
-    exec_cfg = config.exec_engine
+    assert file.mode == "live"
+    exec_cfg = build_exec_engine_config(file.raw, mode=file.mode)
     assert exec_cfg.open_check_interval_secs is None
     assert exec_cfg.position_check_interval_secs is None
     assert exec_cfg.snapshot_orders is True

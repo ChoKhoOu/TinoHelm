@@ -315,21 +315,41 @@ def build_exec_engine_config(raw: dict[str, Any], *, mode: str = "live") -> Live
       recovery, so they stay opt-in: set ``snapshot_* = true`` under ``[exec]``
       on a strategy whose operator wants the full history.
 
-    **Sandbox mode forces ``reconciliation=False`` (mode-aware, not a user
-    knob).** The ``SandboxExecutionClient`` runs an in-process simulated
-    exchange that returns EMPTY mass-status reports — startup reconciliation
-    against it produces spurious position-discrepancy noise and no value (there
-    is no real venue state to reconcile). NT's own sandbox examples disable it,
-    so we do too whenever ``mode == "sandbox"``. Live mode keeps NT's default
-    (reconciliation ON), so this is a safe default with no operator footgun.
+    **Sandbox mode forces ALL reconciliation OFF (mode-aware, not a user
+    knob) — both the startup pass AND the continuous polling loop.** The
+    ``SandboxExecutionClient`` runs an in-process simulated exchange that
+    returns EMPTY mass-status / position-status reports — there is no real venue
+    state to reconcile against. Disabling ``reconciliation`` alone is NOT enough:
+    in NT (``live/execution_engine.py:382-391``, pinned 1.227.0) the continuous
+    reconciliation loop is started whenever ANY of ``open_check_interval_secs`` /
+    ``position_check_interval_secs`` / ``inflight_check`` is set — its launch
+    gate does NOT consult ``reconciliation`` (that flag only gates the *startup*
+    pass, ``:610-631``). So with intervals left at 10s/60s the loop still runs,
+    periodically calls ``_check_positions_consistency`` (``:799``), sees the sim
+    venue report EMPTY while the cache holds an open position (``:1052-1071``),
+    declares a spurious "venue has no position report" discrepancy, and generates
+    an inferred ``position_id=...-EXTERNAL`` OrderFilled that FLATTENS the live
+    sim position seconds after it opens — the strategy can never hold a position.
+    Therefore sandbox must also null BOTH intervals so the loop is never created.
+    Live/DEMO keep NT's continuous polling (drift safety net), so this is a safe
+    default with no operator footgun.
     """
 
     section = raw.get("exec", {})
+    is_sandbox = mode == "sandbox"
     return LiveExecEngineConfig(
-        reconciliation=mode != "sandbox",
-        open_check_interval_secs=_optional_interval(section.get("open_check_interval_secs", 10.0)),
-        position_check_interval_secs=_optional_interval(
-            section.get("position_check_interval_secs", 60.0),
+        reconciliation=not is_sandbox,
+        # Sandbox: null both intervals so the continuous reconciliation loop is
+        # never started (see docstring — its launch gate ignores `reconciliation`).
+        open_check_interval_secs=(
+            None
+            if is_sandbox
+            else _optional_interval(section.get("open_check_interval_secs", 10.0))
+        ),
+        position_check_interval_secs=(
+            None
+            if is_sandbox
+            else _optional_interval(section.get("position_check_interval_secs", 60.0))
         ),
         snapshot_orders=section.get("snapshot_orders", False),
         snapshot_positions=section.get("snapshot_positions", False),
